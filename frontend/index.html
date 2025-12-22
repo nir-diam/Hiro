@@ -1,0 +1,383 @@
+
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hiro Candidate Management</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Heebo:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <script type="importmap">
+{
+  "imports": {
+    "react": "https://aistudiocdn.com/react@^19.2.0",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.2.0/",
+    "react/": "https://aistudiocdn.com/react@^19.2.0/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.27.0",
+    "react-router-dom": "https://aistudiocdn.com/react-router-dom@^6.25.1",
+    "@playwright/test": "https://aistudiocdn.com/@playwright/test@^1.56.1",
+    "react-dom": "https://esm.sh/react-dom@^19.2.3"
+  }
+}
+</script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Heebo', sans-serif;
+        }
+        :root {
+            /* Font Size Variables */
+            font-size: 16px;
+
+            /* Neutral Colors (Light Mode) */
+            --color-bg-default: 248 250 252; /* slate-50 */
+            --color-bg-subtle: 241 245 249; /* slate-100 */
+            --color-bg-card: 255 255 255;   /* white */
+            --color-bg-input: 255 255 255;  /* white */
+            --color-bg-hover: 241 245 249;  /* slate-100 */
+            --color-bg-active: 226 232 240; /* slate-200 */
+
+            --color-text-default: 30 41 59;    /* slate-800 */
+            --color-text-muted: 71 85 105;     /* slate-600 */
+            --color-text-subtle: 100 116 139;  /* slate-500 */
+            --color-text-inverted: 255 255 255;/* white */
+
+            --color-border-default: 226 232 240; /* slate-200 */
+            --color-border-subtle: 241 245 249;  /* slate-100 */
+
+            /* Default Theme: Hiro Purple */
+            --color-primary-50: 250 245 255;
+            --color-primary-100: 243 232 255;
+            --color-primary-200: 233 213 255;
+            --color-primary-300: 216 180 254;
+            --color-primary-400: 192 132 252;
+            --color-primary-500: 168 85 247;
+            --color-primary-600: 147 51 234;
+            --color-primary-700: 126 34 206;
+            --color-primary-800: 107 33 168;
+            --color-primary-900: 88 28 135;
+
+            /* Secondary Theme: Slate Blue */
+            --color-secondary-50: 248 250 252;
+            --color-secondary-100: 241 245 249;
+            --color-secondary-200: 226 232 240;
+            --color-secondary-300: 203 213 225;
+            --color-secondary-400: 148 163 184;
+            --color-secondary-500: 100 116 139;
+            --color-secondary-600: 71 85 105;
+            --color-secondary-700: 51 65 85;
+            --color-secondary-800: 30 41 59;
+            --color-secondary-900: 15 23 42;
+
+            --color-accent-50: 236 253 245;
+            --color-accent-100: 209 250 229;
+            --color-accent-200: 167 243 208;
+            --color-accent-300: 110 231 183;
+            --color-accent-400: 52 211 153;
+            --color-accent-500: 16 185 129;
+            --color-accent-600: 5 150 105;
+            --color-accent-700: 4 120 87;
+            --color-accent-800: 6 95 70;
+            --color-accent-900: 6 78 59;
+
+            /* Standard Palette for Dashboards/Status (RGB values for --chart-color injection) */
+            /* These are available for use but not forced on every element unless explicitly requested */
+            --color-red-200: 254 202 202; --color-red-500: 239 68 68;
+            --color-orange-200: 254 215 170; --color-orange-500: 249 115 22;
+            --color-amber-200: 253 230 138; --color-amber-500: 245 158 11;
+            --color-green-200: 187 247 208; --color-green-500: 34 197 94;
+            --color-emerald-200: 167 243 208; --color-emerald-500: 16 185 129;
+            --color-teal-200: 153 246 228; --color-teal-500: 20 184 166;
+            --color-cyan-200: 165 243 252; --color-cyan-500: 6 182 212;
+            --color-blue-200: 191 219 254; --color-blue-500: 59 130 246;
+            --color-indigo-200: 199 210 254; --color-indigo-500: 99 102 241;
+            --color-purple-200: 233 213 255; --color-purple-500: 168 85 247;
+            --color-pink-200: 251 207 232; --color-pink-500: 236 72 153;
+            --color-slate-200: 226 232 240; --color-slate-500: 100 116 139;
+        }
+        
+        /* Standard Dark Mode (Slate / Blue-ish) */
+        [data-mode="dark"] {
+            --color-bg-default: 15 23 42;    /* slate-900 */
+            --color-bg-subtle: 30 41 59;     /* slate-800 */
+            --color-bg-card: 30 41 59;       /* slate-800 */
+            --color-bg-input: 51 65 85;      /* slate-700 */
+            --color-bg-hover: 51 65 85;      /* slate-700 */
+            --color-bg-active: 71 85 105;    /* slate-600 */
+
+            --color-text-default: 248 250 252; /* slate-50 */
+            --color-text-muted: 148 163 184;   /* slate-400 */
+            --color-text-subtle: 100 116 139;  /* slate-500 */
+            --color-text-inverted: 15 23 42;    /* slate-900 */
+
+            --color-border-default: 51 65 85; /* slate-700 */
+            --color-border-subtle: 71 85 105; /* slate-600 */
+        }
+
+        /* Neutral Gray Dark Mode (True Gray) */
+        [data-mode="dark-gray"] {
+            --color-bg-default: 23 23 23;    /* neutral-900 */
+            --color-bg-subtle: 38 38 38;     /* neutral-800 */
+            --color-bg-card: 38 38 38;       /* neutral-800 */
+            --color-bg-input: 64 64 64;      /* neutral-700 */
+            --color-bg-hover: 64 64 64;      /* neutral-700 */
+            --color-bg-active: 82 82 82;     /* neutral-600 */
+
+            --color-text-default: 245 245 245; /* neutral-100 */
+            --color-text-muted: 163 163 163;   /* neutral-400 */
+            --color-text-subtle: 115 115 115;  /* neutral-500 */
+            --color-text-inverted: 23 23 23;   /* neutral-900 */
+
+            --color-border-default: 64 64 64; /* neutral-700 */
+            --color-border-subtle: 82 82 82;  /* neutral-600 */
+        }
+
+        /* OLED Black Dark Mode (Pure Black) */
+        [data-mode="dark-black"] {
+            --color-bg-default: 0 0 0;       /* black */
+            --color-bg-subtle: 18 18 18;     /* very dark gray */
+            --color-bg-card: 18 18 18;       /* very dark gray */
+            --color-bg-input: 32 32 32;      /* dark gray */
+            --color-bg-hover: 32 32 32;      /* dark gray */
+            --color-bg-active: 48 48 48;     /* gray */
+
+            --color-text-default: 255 255 255; /* white */
+            --color-text-muted: 160 160 160;   /* gray */
+            --color-text-subtle: 110 110 110;  /* darker gray */
+            --color-text-inverted: 0 0 0;      /* black */
+
+            --color-border-default: 48 48 48; /* gray border */
+            --color-border-subtle: 64 64 64;  /* gray border */
+        }
+
+        [data-theme="blue"] {
+            --color-primary-50: 239 246 255;
+            --color-primary-100: 219 234 254;
+            --color-primary-200: 191 219 254;
+            --color-primary-300: 147 197 253;
+            --color-primary-400: 96 165 250;
+            --color-primary-500: 59 130 246;
+            --color-primary-600: 37 99 235;
+            --color-primary-700: 29 78 216;
+            --color-primary-800: 30 64 175;
+            --color-primary-900: 30 58 138;
+
+            --color-secondary-50: 240 253 250;
+            --color-secondary-100: 204 251 241;
+            --color-secondary-200: 167 243 208;
+            --color-secondary-300: 107 231 204;
+            --color-secondary-400: 45 212 191;
+            --color-secondary-500: 20 184 166;
+            --color-secondary-600: 13 148 136;
+            --color-secondary-700: 15 118 110;
+            --color-secondary-800: 19 94 86;
+            --color-secondary-900: 20 78 70;
+        }
+
+        [data-theme="red"] {
+            --color-primary-50: 254 242 242;
+            --color-primary-100: 254 226 226;
+            --color-primary-200: 254 202 202;
+            --color-primary-300: 252 165 165;
+            --color-primary-400: 248 113 113;
+            --color-primary-500: 239 68 68;
+            --color-primary-600: 220 38 38;
+            --color-primary-700: 185 28 28;
+            --color-primary-800: 153 27 27;
+            --color-primary-900: 127 29 29;
+        }
+
+        [data-theme="green"] {
+            --color-primary-50: 240 253 244;
+            --color-primary-100: 220 252 231;
+            --color-primary-200: 187 247 208;
+            --color-primary-300: 134 239 172;
+            --color-primary-400: 74 222 128;
+            --color-primary-500: 34 197 94;
+            --color-primary-600: 22 163 74;
+            --color-primary-700: 21 128 61;
+            --color-primary-800: 22 101 52;
+            --color-primary-900: 20 83 45;
+        }
+
+        [data-theme="slate"] {
+            --color-primary-50: 248 250 252;
+            --color-primary-100: 241 245 249;
+            --color-primary-200: 226 232 240;
+            --color-primary-300: 203 213 225;
+            --color-primary-400: 148 163 184;
+            --color-primary-500: 100 116 139;
+            --color-primary-600: 71 85 105;
+            --color-primary-700: 51 65 85;
+            --color-primary-800: 30 41 59;
+            --color-primary-900: 15 23 42;
+        }
+        
+        [data-theme="orange"] {
+            --color-primary-50: 255 247 237;
+            --color-primary-100: 255 237 213;
+            --color-primary-200: 254 215 170;
+            --color-primary-300: 253 186 116;
+            --color-primary-400: 251 146 60;
+            --color-primary-500: 249 115 22;
+            --color-primary-600: 234 88 12;
+            --color-primary-700: 194 65 12;
+            --color-primary-800: 154 52 18;
+            --color-primary-900: 124 45 18;
+        }
+
+        [data-theme="teal"] {
+            --color-primary-50: 240 253 250;
+            --color-primary-100: 204 251 241;
+            --color-primary-200: 153 246 228;
+            --color-primary-300: 94 234 212;
+            --color-primary-400: 45 212 191;
+            --color-primary-500: 20 184 166;
+            --color-primary-600: 13 148 136;
+            --color-primary-700: 15 118 110;
+            --color-primary-800: 19 94 86;
+            --color-primary-900: 20 78 70;
+        }
+
+        [data-theme="rose"] {
+            --color-primary-50: 255 241 242;
+            --color-primary-100: 255 228 230;
+            --color-primary-200: 254 205 211;
+            --color-primary-300: 253 164 175;
+            --color-primary-400: 251 113 133;
+            --color-primary-500: 244 63 94;
+            --color-primary-600: 225 29 72;
+            --color-primary-700: 190 18 60;
+            --color-primary-800: 159 18 57;
+            --color-primary-900: 136 19 55;
+        }
+
+        [data-theme="indigo"] {
+            --color-primary-50: 238 242 255;
+            --color-primary-100: 224 231 255;
+            --color-primary-200: 199 210 254;
+            --color-primary-300: 165 180 252;
+            --color-primary-400: 129 140 248;
+            --color-primary-500: 99 102 241;
+            --color-primary-600: 79 70 229;
+            --color-primary-700: 67 56 202;
+            --color-primary-800: 55 48 163;
+            --color-primary-900: 49 46 129;
+        }
+
+        [data-theme="amber"] {
+            --color-primary-50: 255 251 235;
+            --color-primary-100: 254 243 199;
+            --color-primary-200: 253 230 138;
+            --color-primary-300: 252 211 77;
+            --color-primary-400: 251 191 36;
+            --color-primary-500: 245 158 11;
+            --color-primary-600: 217 119 6;
+            --color-primary-700: 180 83 9;
+            --color-primary-800: 146 64 14;
+            --color-primary-900: 120 53 15;
+        }
+        
+        [data-font-size="sm"] { font-size: 14px; }
+        [data-font-size="base"] { font-size: 16px; }
+        [data-font-size="lg"] { font-size: 18px; }
+
+        [data-density="compact"] .compact-py-1 { padding-top: 0.25rem; padding-bottom: 0.25rem; }
+        [data-density="compact"] .compact-py-2 { padding-top: 0.5rem; padding-bottom: 0.5rem; }
+        [data-density="compact"] .compact-h-12 { height: 3rem; }
+        [data-density="compact"] .compact-p-2 { padding: 0.5rem; }
+        [data-density="compact"] .compact-px-3 { padding-left: 0.75rem; padding-right: 0.75rem; }
+
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            pointer-events: all;
+            width: 20px;
+            height: 20px;
+            background-color: rgb(var(--color-bg-card));
+            border-radius: 50%;
+            border: 4px solid rgb(var(--color-primary-500));
+            cursor: pointer;
+            margin-top: -8px;
+        }
+        input[type=range]::-moz-range-thumb {
+            pointer-events: all;
+            width: 12px;
+            height: 12px;
+            background-color: rgb(var(--color-bg-card));
+            border-radius: 50%;
+            border: 4px solid rgb(var(--color-primary-500));
+            cursor: pointer;
+        }
+        input[type=range].range-secondary::-webkit-slider-thumb {
+            border-color: rgb(var(--color-secondary-600));
+        }
+        input[type=range].range-secondary::-moz-range-thumb {
+            border-color: rgb(var(--color-secondary-600));
+        }
+    </style>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              'primary': {
+                50: 'rgb(var(--color-primary-50) / <alpha-value>)',
+                100: 'rgb(var(--color-primary-100) / <alpha-value>)',
+                200: 'rgb(var(--color-primary-200) / <alpha-value>)',
+                300: 'rgb(var(--color-primary-300) / <alpha-value>)',
+                400: 'rgb(var(--color-primary-400) / <alpha-value>)',
+                500: 'rgb(var(--color-primary-500) / <alpha-value>)',
+                600: 'rgb(var(--color-primary-600) / <alpha-value>)',
+                700: 'rgb(var(--color-primary-700) / <alpha-value>)',
+                800: 'rgb(var(--color-primary-800) / <alpha-value>)',
+                900: 'rgb(var(--color-primary-900) / <alpha-value>)',
+              },
+              'secondary': {
+                50: 'rgb(var(--color-secondary-50) / <alpha-value>)',
+                100: 'rgb(var(--color-secondary-100) / <alpha-value>)',
+                200: 'rgb(var(--color-secondary-200) / <alpha-value>)',
+                300: 'rgb(var(--color-secondary-300) / <alpha-value>)',
+                400: 'rgb(var(--color-secondary-400) / <alpha-value>)',
+                500: 'rgb(var(--color-secondary-500) / <alpha-value>)',
+                600: 'rgb(var(--color-secondary-600) / <alpha-value>)',
+                700: 'rgb(var(--color-secondary-700) / <alpha-value>)',
+                800: 'rgb(var(--color-secondary-800) / <alpha-value>)',
+                900: 'rgb(var(--color-secondary-900) / <alpha-value>)',
+              },
+              'accent': {
+                50: 'rgb(var(--color-accent-50) / <alpha-value>)',
+                100: 'rgb(var(--color-accent-100) / <alpha-value>)',
+                200: 'rgb(var(--color-accent-200) / <alpha-value>)',
+                300: 'rgb(var(--color-accent-300) / <alpha-value>)',
+                400: 'rgb(var(--color-accent-400) / <alpha-value>)',
+                500: 'rgb(var(--color-accent-500) / <alpha-value>)',
+                600: 'rgb(var(--color-accent-600) / <alpha-value>)',
+                700: 'rgb(var(--color-accent-700) / <alpha-value>)',
+                800: 'rgb(var(--color-accent-800) / <alpha-value>)',
+                900: 'rgb(var(--color-accent-900) / <alpha-value>)',
+              },
+              'bg-default': 'rgb(var(--color-bg-default) / <alpha-value>)',
+              'bg-subtle': 'rgb(var(--color-bg-subtle) / <alpha-value>)',
+              'bg-card': 'rgb(var(--color-bg-card) / <alpha-value>)',
+              'bg-input': 'rgb(var(--color-bg-input) / <alpha-value>)',
+              'bg-hover': 'rgb(var(--color-bg-hover) / <alpha-value>)',
+              'bg-active': 'rgb(var(--color-bg-active) / <alpha-value>)',
+              'text-default': 'rgb(var(--color-text-default) / <alpha-value>)',
+              'text-muted': 'rgb(var(--color-text-muted) / <alpha-value>)',
+              'text-subtle': 'rgb(var(--color-text-subtle) / <alpha-value>)',
+              'text-inverted': 'rgb(var(--color-text-inverted) / <alpha-value>)',
+              'border-default': 'rgb(var(--color-border-default) / <alpha-value>)',
+              'border-subtle': 'rgb(var(--color-border-subtle) / <alpha-value>)',
+            }
+          }
+        }
+      }
+    </script>
+<link rel="stylesheet" href="/index.css">
+</head>
+<body class="bg-bg-default text-text-default">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+</body>
+</html>

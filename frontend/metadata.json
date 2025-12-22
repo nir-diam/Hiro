@@ -1,0 +1,7 @@
+{
+  "name": "Hiro Candidate Management",
+  "description": "A modern, intuitive dashboard for managing job candidates. This application provides a clean, reorganized layout for viewing and editing candidate information, including personal details, skills, and resume data.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
