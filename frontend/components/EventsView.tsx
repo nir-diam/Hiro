@@ -1,6 +1,12 @@
+
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, CalendarIcon, LinkIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ClockIcon, Cog6ToothIcon } from './Icons';
+import { 
+    PlusIcon, ClockIcon, UserIcon, PencilIcon, SparklesIcon, TrashIcon, 
+    CalendarIcon, TableCellsIcon, Squares2X2Icon, ChatBubbleBottomCenterTextIcon,
+    LinkIcon, Cog6ToothIcon, EllipsisVerticalIcon
+} from './Icons';
 import EventFormModal from './EventFormModal';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface HistoryEntry {
@@ -8,6 +14,7 @@ interface HistoryEntry {
   timestamp: string;
   summary: string;
 }
+
 export type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
 export type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 export interface Event {
@@ -22,7 +29,7 @@ export interface Event {
   history?: HistoryEntry[];
 }
 
-// Mock Data
+// --- MOCK DATA ---
 export const initialEventsData: Event[] = [
   { id: 1, type: 'ראיון', title: 'ראיון טכני עם גדעון שפירא', date: '2025-08-15T10:00:00', coordinator: 'דנה כהן', status: 'עתידי', linkedTo: { type: 'מועמד', name: 'גדעון שפירא' }, description: 'ראיון למשרת מפתח Fullstack ב-Wix. לבדוק ניסיון ב-React ו-Node.js.', history: [{ user: 'דנה כהן', timestamp: '2025-08-14T10:00:00', summary: 'יצר את האירוע' }] },
   { id: 2, type: 'פגישה', title: 'פגישת סיכום שבוע עם צוות הגיוס', date: '2025-08-14T16:30:00', coordinator: 'אביב לוי', status: 'הושלם', linkedTo: { type: 'צוות', name: 'גיוס טכנולוגי' }, description: 'סקירת מועמדים פתוחים, תכנון משימות לשבוע הבא.', history: [{ user: 'אביב לוי', timestamp: '2025-08-14T16:00:00', summary: 'יצר את האירוע' }] },
@@ -61,17 +68,6 @@ function formatRelativeTime(dateString: string) {
     return new Date(dateString).toLocaleDateString('he-IL');
 }
 
-const allColumns = [
-    { id: 'type', header: 'סוג אירוע' },
-    { id: 'title', header: 'תיאור' },
-    { id: 'date', header: 'תאריך ושעה' },
-    { id: 'coordinator', header: 'נוצר ע"י' },
-    { id: 'status', header: 'סטטוס' },
-    { id: 'linkedTo', header: 'קישור' },
-];
-
-const defaultVisibleColumns = allColumns.map(c => c.id);
-
 const eventTypeOptions = ['הכל', 'פגישה', 'ראיון', 'תזכורת', 'משימת מערכת'];
 const coordinatorOptions = ['הכל', 'דנה כהן', 'אביב לוי', 'יעל שחר', 'אני', 'מערכת'];
 
@@ -81,6 +77,7 @@ interface EventsViewProps {
 }
 
 const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
+    const { t } = useLanguage();
     const [filters, setFilters] = useState({
         eventType: 'הכל',
         coordinator: 'הכל',
@@ -95,12 +92,31 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
     const [historyVisibleEventId, setHistoryVisibleEventId] = useState<number | null>(null);
     const menuRef = useRef<HTMLDivElement>(null);
     
+    // Column configuration using translations
+    const allColumns = useMemo(() => [
+        { id: 'type', header: t('events_view.col_type') },
+        { id: 'title', header: t('events_view.col_title') },
+        { id: 'date', header: t('events_view.col_date') },
+        { id: 'coordinator', header: t('events_view.col_coordinator') },
+        { id: 'status', header: t('events_view.col_status') },
+        { id: 'linkedTo', header: t('events_view.col_linkedTo') },
+    ], [t]);
+    
+    const defaultVisibleColumns = useMemo(() => allColumns.map(c => c.id), [allColumns]);
     const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
+
+    // Update visible columns if language changes
+    useEffect(() => {
+        setVisibleColumns(prev => {
+             // Keep IDs, just re-render to update labels via allColumns which is a dependency
+             return prev; 
+        });
+    }, [t]);
 
     const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -114,6 +130,33 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
         if (!sortConfig || sortConfig.key !== key) return null;
         return <span className="text-text-subtle">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
     };
+    
+    const getIconForEventType = (type: string, user: string) => {
+        if (user === 'Hiro AI') return <SparklesIcon className="w-5 h-5" />;
+        switch (type) {
+            case 'candidate_status':
+            case 'candidate_add':
+                return <UserIcon className="w-5 h-5" />;
+            case 'job_edit':
+                return <PencilIcon className="w-5 h-5" />;
+            case 'note':
+                return <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />;
+            case 'system':
+            default:
+                return <ClockIcon className="w-5 h-5" />;
+        }
+    };
+
+    const getEventColor = (type: string) => {
+        switch (type) {
+            case 'candidate_status': return 'bg-blue-100 text-blue-600 border-blue-200';
+            case 'job_edit': return 'bg-orange-100 text-orange-600 border-orange-200';
+            case 'note': return 'bg-yellow-100 text-yellow-600 border-yellow-200';
+            case 'system': return 'bg-gray-100 text-gray-600 border-gray-200';
+            default: return 'bg-primary-100 text-primary-600 border-primary-200';
+        }
+    };
+
 
     const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
@@ -257,24 +300,28 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
                 <div className="p-4 bg-bg-subtle rounded-xl border border-border-default w-full">
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 items-end">
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">סוג אירוע</label>
-                            <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm">{eventTypeOptions.map(opt => <option key={opt}>{opt}</option>)}</select>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_type')}</label>
+                            <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
+                                {eventTypeOptions.map(opt => <option key={opt}>{opt}</option>)}
+                            </select>
                         </div>
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">רכז</label>
-                            <select name="coordinator" value={filters.coordinator} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm">{coordinatorOptions.map(opt => <option key={opt}>{opt}</option>)}</select>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_recruiter')}</label>
+                            <select name="coordinator" value={filters.coordinator} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
+                                {coordinatorOptions.map(opt => <option key={opt}>{opt}</option>)}
+                            </select>
                         </div>
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">מתאריך</label>
-                            <input type="date" name="fromDate" value={filters.fromDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm" />
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_from')}</label>
+                            <input type="date" name="fromDate" value={filters.fromDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none" />
                         </div>
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">עד תאריך</label>
-                            <input type="date" name="toDate" value={filters.toDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm" />
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_to')}</label>
+                            <input type="date" name="toDate" value={filters.toDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none" />
                         </div>
                         <button onClick={handleCreateEvent} className="w-full bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm flex items-center justify-center gap-2">
                             <PlusIcon className="w-5 h-5"/>
-                            <span>צור אירוע</span>
+                            <span>{t('events_view.create_event')}</span>
                         </button>
                     </div>
                 </div>
@@ -282,8 +329,8 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
             
             <div className="flex items-center justify-end gap-2 mb-4">
                 <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
-                    <button onClick={() => setViewMode('table')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
-                    <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                    <button onClick={() => setViewMode('table')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`} title={t('job_events.view_timeline')}><TableCellsIcon className="w-5 h-5"/></button>
+                    <button onClick={() => setViewMode('grid')} className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`} title={t('job_events.view_cards')}><Squares2X2Icon className="w-5 h-5"/></button>
                 </div>
             </div>
             
@@ -303,13 +350,13 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
                                         </th>
                                     );
                                 })}
-                                <th className="p-4 text-center">פעולות</th>
+                                <th className="p-4 text-center">{t('clients.col_actions')}</th>
                                 <th className="p-4 sticky left-0 bg-bg-subtle w-16">
                                      <div className="relative" ref={settingsRef}>
-                                        <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title="התאם עמודות" className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
+                                        <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
                                         {isSettingsOpen && (
                                         <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                            <p className="font-bold text-text-default mb-2 text-sm">הצג עמודות</p>
+                                            <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                             <div className="space-y-2 max-h-60 overflow-y-auto">{allColumns.map(c => (<label key={c.id} className="flex items-center gap-2 text-sm font-normal text-text-default"><input type="checkbox" checked={visibleColumns.includes(c.id)} onChange={() => handleColumnToggle(c.id)} className="w-4 h-4 text-primary-600" />{c.header}</label>))}</div>
                                         </div>
                                         )}
@@ -335,7 +382,7 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
                                 {expandedRowId === event.id && (
                                     <tr className="bg-primary-50/20"><td colSpan={visibleColumns.length + 2} className="px-8 py-4 text-sm text-text-muted">
                                         <p><span className="font-bold">תיאור מלא:</span> {event.description || "אין תיאור זמין."}</p>
-                                        <div className="mt-4"><button onClick={(e) => { e.stopPropagation(); setHistoryVisibleEventId(prev => prev === event.id ? null : event.id); }} className="flex items-center gap-2 text-xs font-semibold hover:text-primary-600"><ClockIcon className="w-4 h-4" /><span>היסטוריית שינויים</span></button>
+                                        <div className="mt-4"><button onClick={(e) => { e.stopPropagation(); setHistoryVisibleEventId(prev => prev === event.id ? null : event.id); }} className="flex items-center gap-2 text-xs font-semibold hover:text-primary-600"><ClockIcon className="w-4 h-4" /><span>{t('job_events.history_title')}</span></button>
                                             {historyVisibleEventId === event.id && (<div className="mt-2 pt-2 border-t space-y-2 text-xs text-text-subtle">{event.history?.map((entry, index) => (<p key={index} className="flex items-start gap-2"><span className="font-semibold text-text-muted">{entry.user}:</span><span>{entry.summary}</span><span className="flex-shrink-0">&bull; {formatRelativeTime(entry.timestamp)}</span></p>)) || <p>אין היסטוריית שינויים.</p>}</div>)}
                                         </div>
                                     </td></tr>
@@ -372,8 +419,8 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
             ) : (
                 <div className="text-center py-16 flex flex-col items-center">
                     <CalendarIcon className="w-16 h-16 text-text-subtle mb-4"/>
-                    <h3 className="text-xl font-bold text-text-default">אין אירועים להצגה</h3>
-                    <p className="mt-2 text-text-muted">נסה לשנות את תנאי החיפוש.</p>
+                    <h3 className="text-xl font-bold text-text-default">{t('job_events.no_events')}</h3>
+                    <p className="mt-2 text-text-muted">{t('job_events.try_filters')}</p>
                 </div>
             )}
             </main>

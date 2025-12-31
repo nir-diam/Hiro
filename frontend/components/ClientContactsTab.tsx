@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { PlusIcon, PencilIcon, TrashIcon, UserGroupIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon, PhoneIcon, EnvelopeIcon, WhatsappIcon, ChatBubbleBottomCenterTextIcon } from './Icons';
 import Drawer from './Drawer';
 import { MessageModalConfig } from '../hooks/useUIState';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface Contact {
@@ -20,21 +21,10 @@ interface Contact {
 }
 
 // --- MOCK DATA ---
-// FIX: Export mockContacts to be used in other components like ContactProfileView.
 export const mockContacts: Contact[] = [
     { id: 1, name: 'ישראל ישראלי', phone: '054-1234567', mobilePhone: '050-1112222', email: 'israel@getter.co.il', role: 'מנהל גיוס', linkedin: 'https://linkedin.com/in/israel', username: '', isActive: true, notes: 'איש קשר ראשי לכל המשרות הטכנולוגיות.' },
     { id: 2, name: 'דנה כהן', phone: '052-7654321', mobilePhone: '050-3334444', email: 'dana@getter.co.il', role: 'רכזת גיוס', linkedin: 'https://linkedin.com/in/dana', username: '', isActive: true, notes: 'לתאם מולה ראיונות טכניים.' },
     { id: 3, name: 'אבי לוי', phone: '050-9876543', mobilePhone: '050-5556666', email: 'avi@getter.co.il', role: 'מנהל תיק לקוח', linkedin: 'https://linkedin.com/in/avi', username: '', isActive: false, notes: 'לא פעיל כרגע.' },
-];
-
-const allColumns = [
-    { id: 'name', header: 'שם מלא' },
-    { id: 'role', header: 'תפקיד' },
-    { id: 'actions', header: 'פעולות' },
-    { id: 'phone', header: 'טלפון' },
-    { id: 'mobilePhone', header: 'טלפון נייד' },
-    { id: 'email', header: 'דוא"ל' },
-    { id: 'isActive', header: 'סטטוס' },
 ];
 
 const defaultVisibleColumns = ['name', 'role', 'actions', 'phone', 'email', 'isActive'];
@@ -88,6 +78,7 @@ interface ClientContactsTabProps {
 
 
 const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenMessageModal }) => {
+    const { t } = useLanguage();
     const [contacts, setContacts] = useState(mockContacts);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
@@ -101,6 +92,17 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
+
+    const allColumns = useMemo(() => [
+        { id: 'name', header: t('contacts.col_name') },
+        { id: 'role', header: t('contacts.col_role') },
+        { id: 'actions', header: t('contacts.col_actions') },
+        { id: 'phone', header: t('contacts.col_phone') },
+        { id: 'mobilePhone', header: t('contacts.col_mobile') },
+        { id: 'email', header: t('contacts.col_email') },
+        { id: 'isActive', header: t('contacts.col_status') },
+    ], [t]);
+
 
     const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -190,7 +192,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     const renderCell = (contact: Contact, columnId: string) => {
         switch(columnId) {
             case 'name': return <Link to={`/clients/${clientId}/contacts/${contact.id}`} onClick={e => e.stopPropagation()} className="font-semibold text-primary-700 hover:underline">{contact.name}</Link>;
-            case 'isActive': return <label onClick={e => e.stopPropagation()} className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={contact.isActive} onChange={(e) => handleStatusToggle(e, contact.id)} className="sr-only peer" /><div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-primary-300 peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div></label>;
+            case 'isActive': return <label onClick={e => e.stopPropagation()} className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={contact.isActive} onChange={(e) => handleStatusToggle(e, contact.id)} className="sr-only peer" /><div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-primary-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div></label>;
             case 'actions': return (
                 <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <a href={`tel:${contact.mobilePhone || contact.phone}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>
@@ -207,11 +209,11 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         <div className="bg-bg-card p-6 rounded-lg border border-border-default">
             <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
             <div className="flex justify-between items-center mb-4">
-                <h2 className="text-xl font-bold">אנשי קשר</h2>
+                <h2 className="text-xl font-bold">{t('clients.tabs_contacts')}</h2>
                 <div className="flex items-center gap-2">
                      <button onClick={handleAdd} className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                         <PlusIcon className="w-5 h-5"/>
-                        <span>הוסף</span>
+                        <span>{t('contacts.add_new')}</span>
                     </button>
                     <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
                         <button onClick={() => setViewMode('table')} title="תצוגת טבלה" className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
@@ -281,7 +283,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
             ) : (
                 <div className="text-center py-10 bg-bg-subtle rounded-lg border border-dashed border-border-default">
                     <UserGroupIcon className="w-12 h-12 text-text-subtle mx-auto mb-3" />
-                    <p className="text-text-muted font-semibold">אין אנשי קשר להצגה</p>
+                    <p className="text-text-muted font-semibold">{t('contacts.no_contacts')}</p>
                 </div>
             )}
 

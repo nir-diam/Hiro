@@ -20,7 +20,6 @@ const CustomizeViewsPopover: React.FC<CustomizeViewsPopoverProps> = ({ isOpen, o
     const [localViews, setLocalViews] = useState(views);
     const dragItem = useRef<number | null>(null);
     const dragOverItem = useRef<number | null>(null);
-    const [dragging, setDragging] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
@@ -32,25 +31,30 @@ const CustomizeViewsPopover: React.FC<CustomizeViewsPopoverProps> = ({ isOpen, o
 
     const handleDragStart = (e: React.DragEvent<HTMLLIElement>, index: number) => {
         dragItem.current = index;
-        setDragging(true);
         e.dataTransfer.effectAllowed = 'move';
+        // Optional: Set drag image or styling here
     };
 
     const handleDragEnter = (index: number) => {
         dragOverItem.current = index;
-        const newViews = [...localViews];
-        if (dragItem.current !== null) {
-            const dragItemContent = newViews.splice(dragItem.current, 1)[0];
-            newViews.splice(dragOverItem.current, 0, dragItemContent);
-            dragItem.current = dragOverItem.current;
+        
+        if (dragItem.current !== null && dragItem.current !== index) {
+            const newViews = [...localViews];
+            const draggedItemContent = newViews[dragItem.current];
+            
+            // Remove the item from its original position
+            newViews.splice(dragItem.current, 1);
+            // Insert it at the new position
+            newViews.splice(index, 0, draggedItemContent);
+            
             setLocalViews(newViews);
+            dragItem.current = index; // Update the current drag index to the new position
         }
     };
 
     const handleDragEnd = () => {
         dragItem.current = null;
         dragOverItem.current = null;
-        setDragging(false);
     };
     
     const handleVisibilityChange = (id: string) => {
@@ -78,20 +82,21 @@ const CustomizeViewsPopover: React.FC<CustomizeViewsPopoverProps> = ({ isOpen, o
                 <button onClick={onClose} className="p-1 rounded-full text-text-muted hover:bg-bg-hover"><XMarkIcon className="w-5 h-5" /></button>
             </header>
             <main className="p-2 overflow-y-auto">
-                <p className="text-xs text-text-muted mb-2 px-2">בחר אילו תצוגות להציג ושנה את סדרן.</p>
-                <ul onDragEnd={handleDragEnd}>
+                <p className="text-xs text-text-muted mb-2 px-2">בחר אילו תצוגות להציג וגרור כדי לשנות את סדרן.</p>
+                <ul>
                     {localViews.map((view, index) => (
                          <li 
                             key={view.id}
                             draggable
                             onDragStart={(e) => handleDragStart(e, index)}
                             onDragEnter={() => handleDragEnter(index)}
-                            onDragOver={(e) => e.preventDefault()}
-                            className={`flex items-center justify-between p-2 rounded-lg mb-1 transition-shadow cursor-move ${dragItem.current === index && dragging ? 'shadow-lg bg-primary-50' : 'bg-bg-subtle/50'}`}
+                            onDragOver={(e) => e.preventDefault()} // Critical for allowing drop
+                            onDragEnd={handleDragEnd}
+                            className="flex items-center justify-between p-2 rounded-lg mb-1 transition-all cursor-move bg-bg-subtle/50 hover:bg-bg-subtle"
                         >
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 w-full">
                                 <button className="cursor-grab text-text-subtle p-1"><Bars2Icon className="w-5 h-5"/></button>
-                                <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer">
+                                <label className="flex items-center gap-2 text-sm font-semibold cursor-pointer flex-grow select-none">
                                     <input
                                         type="checkbox"
                                         checked={view.visible}

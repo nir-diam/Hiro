@@ -1,13 +1,13 @@
+
 import React from 'react';
 import { BugAntIcon, ArrowUturnLeftIcon } from './Icons';
 
 const FallbackUI: React.FC = () => {
     const handleGoHome = () => {
-        // Navigate to the home page (candidate list).
+        // Navigate to the dashboard.
         // Since this component is outside the router context,
         // a hard navigation is the simplest and most reliable way.
-        // FIX: Set hash and then reload to avoid a race condition and ensure navigation.
-        window.location.hash = '/candidates';
+        window.location.hash = '/dashboard';
         window.location.reload();
     };
 
@@ -25,7 +25,7 @@ const FallbackUI: React.FC = () => {
                     className="flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-3 px-8 rounded-xl hover:bg-primary-700 transition-transform transform hover:scale-105 shadow-lg shadow-primary-500/30"
                 >
                     <ArrowUturnLeftIcon className="w-5 h-5" />
-                    <span>חזרה למסך הבית</span>
+                    <span>חזרה לדשבורד</span>
                 </button>
             </div>
         </div>

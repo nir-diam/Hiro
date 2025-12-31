@@ -1,22 +1,51 @@
-const mongoose = require('mongoose');
+const { DataTypes } = require('sequelize');
 const bcrypt = require('bcryptjs');
+const { sequelize } = require('../config/db');
 
-const userSchema = new mongoose.Schema(
+const User = sequelize.define(
+  'User',
   {
-    email: { type: String, required: true, unique: true, lowercase: true },
-    password: { type: String, required: true },
-    name: { type: String },
+    id: {
+      type: DataTypes.UUID,
+      primaryKey: true,
+      defaultValue: DataTypes.UUIDV4,
+    },
+    email: { type: DataTypes.STRING, allowNull: false, unique: true },
+    password: { type: DataTypes.STRING, allowNull: false },
+    name: DataTypes.STRING,
+    role: {
+      type: DataTypes.ENUM('admin', 'recruiter', 'coordinator', 'manager', 'guest', 'candidate'),
+      defaultValue: 'recruiter',
+    },
+    isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
+    phone: DataTypes.STRING,
+    extension: DataTypes.STRING,
+    dataScope: {
+      type: DataTypes.JSONB,
+      defaultValue: { candidates: 'own', jobs: 'own' },
+    },
+    permissions: {
+      // Map of permission key -> boolean
+      type: DataTypes.JSONB,
+      defaultValue: {},
+    },
   },
-  { timestamps: true },
+  {
+    tableName: 'users',
+    hooks: {
+      beforeCreate: async (user) => {
+        if (user.password) {
+          user.password = await bcrypt.hash(user.password, 10);
+        }
+      },
+      beforeUpdate: async (user) => {
+        if (user.changed('password')) {
+          user.password = await bcrypt.hash(user.password, 10);
+        }
+      },
+    },
+  },
 );
-
-userSchema.pre('save', async function hashPassword(next) {
-  if (!this.isModified('password')) return next();
-  this.password = await bcrypt.hash(this.password, 10);
-  return next();
-});
-
-const User = mongoose.model('User', userSchema);
 
 module.exports = User;
 

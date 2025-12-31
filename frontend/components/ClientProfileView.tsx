@@ -19,16 +19,9 @@ import ClientEventsTab from './ClientEventsTab';
 import ClientDocumentsTab from './ClientDocumentsTab';
 import AccordionSection from './AccordionSection';
 import { MessageModalConfig } from '../hooks/useUIState';
+import { useLanguage } from '../context/LanguageContext';
 
 type Tab = 'details' | 'contacts' | 'jobs' | 'events' | 'documents';
-
-const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
-    { id: 'details', label: 'פרטי לקוח', icon: <BuildingOffice2Icon className="w-5 h-5" /> },
-    { id: 'contacts', label: 'אנשי קשר', icon: <UserGroupIcon className="w-5 h-5" /> },
-    { id: 'jobs', label: 'משרות', icon: <BriefcaseIcon className="w-5 h-5" /> },
-    { id: 'events', label: 'אירועים', icon: <CalendarDaysIcon className="w-5 h-5" /> },
-    { id: 'documents', label: 'מסמכים', icon: <DocumentTextIcon className="w-5 h-5" /> },
-];
 
 
 const StatCard: React.FC<{ title: string; value: string; icon: React.ReactElement; colorClass: { bg: string; text: string; } }> = ({ title, value, icon, colorClass }) => (
@@ -52,6 +45,7 @@ const InfoItem: React.FC<{ label: string, children: React.ReactNode }> = ({ labe
 
 
 const ClientInsightsDashboard: React.FC = () => {
+    const { t } = useLanguage();
     // Mock data for insights
     const insights = {
         openJobs: 12,
@@ -71,25 +65,25 @@ const ClientInsightsDashboard: React.FC = () => {
         <div className="space-y-6">
             {/* Stat Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                <StatCard title="משרות פתוחות" value={insights.openJobs.toString()} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
-                <StatCard title="משרות מוקפאות" value={insights.frozenJobs.toString()} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
-                <StatCard title="משרות סגורות" value={insights.closedJobs.toString()} icon={<CheckBadgeIcon />} colorClass={{ bg: 'bg-green-100', text: 'text-green-600' }} />
-                <StatCard title="אורך חיי משרה" value={insights.avgJobLifespan} icon={<ClockIcon />} colorClass={{ bg: 'bg-secondary-100', text: 'text-secondary-600' }} />
+                <StatCard title={t('client_profile.stat_open_jobs')} value={insights.openJobs.toString()} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
+                <StatCard title={t('client_profile.stat_frozen_jobs')} value={insights.frozenJobs.toString()} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
+                <StatCard title={t('client_profile.stat_closed_jobs')} value={insights.closedJobs.toString()} icon={<CheckBadgeIcon />} colorClass={{ bg: 'bg-green-100', text: 'text-green-600' }} />
+                <StatCard title={t('client_profile.stat_lifespan')} value={insights.avgJobLifespan} icon={<ClockIcon />} colorClass={{ bg: 'bg-secondary-100', text: 'text-secondary-600' }} />
             </div>
 
             {/* Detailed Insights */}
-            <AccordionSection title="פעילות גיוס" icon={<UserGroupIcon className="w-5 h-5"/>} defaultOpen>
+            <AccordionSection title={t('client_profile.section_insights')} icon={<UserGroupIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
-                    <InfoItem label="כמות הפניות (השבוע)">{insights.submissions.week}</InfoItem>
-                    <InfoItem label="כמות הפניות (החודש)">{insights.submissions.month}</InfoItem>
-                    <InfoItem label="כמות הפניות (השנה)">{insights.submissions.year}</InfoItem>
-                    <InfoItem label="סה״כ מועמדים שהתקבלו">{insights.hiredCount}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_week')}>{insights.submissions.week}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_month')}>{insights.submissions.month}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_year')}>{insights.submissions.year}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_hired')}>{insights.hiredCount}</InfoItem>
                 </dl>
             </AccordionSection>
 
-            <AccordionSection title="מדדי קשר" icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
+            <AccordionSection title={t('client_profile.section_relationship')} icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
-                    <InfoItem label="ימים מתחילת ההתקשרות">{insights.daysSinceStart}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_days_start')}>{insights.daysSinceStart}</InfoItem>
                 </dl>
             </AccordionSection>
         </div>
@@ -101,10 +95,19 @@ interface ClientProfileViewProps {
 }
 
 const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal }) => {
+    const { t } = useLanguage();
     const { clientId } = useParams<{ clientId: string }>();
     const [activeTab, setActiveTab] = useState<Tab>('details');
 
     const client = clientsData.find(c => c.id === Number(clientId));
+
+    const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
+        { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
+        { id: 'contacts', label: t('client_profile.tab_contacts'), icon: <UserGroupIcon className="w-5 h-5" /> },
+        { id: 'jobs', label: t('client_profile.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
+        { id: 'events', label: t('client_profile.tab_events'), icon: <CalendarDaysIcon className="w-5 h-5" /> },
+        { id: 'documents', label: t('client_profile.tab_documents'), icon: <DocumentTextIcon className="w-5 h-5" /> },
+    ];
 
     if (!client) {
         return <div className="text-center p-8">לקוח לא נמצא.</div>;

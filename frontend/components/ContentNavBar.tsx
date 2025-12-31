@@ -1,23 +1,25 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { ClipboardDocumentCheckIcon, PencilIcon, SparklesIcon, WalletIcon, CalendarDaysIcon, LanguageIcon, AcademicCapIcon, TagIcon, ChatBubbleOvalLeftEllipsisIcon, BriefcaseIcon } from './Icons';
-
-const sections = [
-    { id: 'summary', title: 'תקציר', icon: <ClipboardDocumentCheckIcon className="w-5 h-5"/> },
-    { id: 'personal-details', title: 'פרטים אישיים', icon: <PencilIcon className="w-5 h-5"/> },
-    { id: 'work-experience', title: 'ניסיון תעסוקתי', icon: <BriefcaseIcon className="w-5 h-5"/> },
-    { id: 'preferences', title: 'העדפות ואילוצים', icon: <SparklesIcon className="w-5 h-5"/> },
-    { id: 'salary', title: 'ציפיות שכר', icon: <WalletIcon className="w-5 h-5"/> },
-    { id: 'birth-date', title: 'תאריך לידה', icon: <CalendarDaysIcon className="w-5 h-5"/> },
-    { id: 'languages', title: 'שליטה בשפות', icon: <LanguageIcon className="w-5 h-5"/> },
-    { id: 'education', title: 'השכלה', icon: <AcademicCapIcon className="w-5 h-5"/> },
-    { id: 'skills', title: 'מיומנויות', icon: <TagIcon className="w-5 h-5"/> },
-    { id: 'notes', title: 'הערות', icon: <ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/> },
-];
+import { useLanguage } from '../context/LanguageContext';
 
 const ContentNavBar: React.FC = () => {
+    const { t } = useLanguage();
     const [activeSection, setActiveSection] = useState('summary');
     const navRef = useRef<HTMLDivElement>(null);
+
+    const sections = [
+        { id: 'summary', title: t('section.summary'), icon: <ClipboardDocumentCheckIcon className="w-5 h-5"/> },
+        { id: 'personal-details', title: t('section.personal_details'), icon: <PencilIcon className="w-5 h-5"/> },
+        { id: 'work-experience', title: t('section.work_experience'), icon: <BriefcaseIcon className="w-5 h-5"/> },
+        { id: 'preferences', title: t('section.preferences'), icon: <SparklesIcon className="w-5 h-5"/> },
+        { id: 'salary', title: t('section.salary'), icon: <WalletIcon className="w-5 h-5"/> },
+        { id: 'birth-date', title: t('section.birth_date'), icon: <CalendarDaysIcon className="w-5 h-5"/> },
+        { id: 'languages', title: t('section.languages'), icon: <LanguageIcon className="w-5 h-5"/> },
+        { id: 'education', title: t('section.education'), icon: <AcademicCapIcon className="w-5 h-5"/> },
+        { id: 'skills', title: t('section.skills'), icon: <TagIcon className="w-5 h-5"/> },
+        { id: 'notes', title: t('section.notes'), icon: <ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/> },
+    ];
 
     useEffect(() => {
         const scrollContainer = document.getElementById('main-scroll-container');
@@ -39,7 +41,7 @@ const ContentNavBar: React.FC = () => {
 
         scrollContainer.addEventListener('scroll', handleScroll);
         return () => scrollContainer.removeEventListener('scroll', handleScroll);
-    }, []);
+    }, [sections]);
 
     useEffect(() => {
         if (navRef.current) {

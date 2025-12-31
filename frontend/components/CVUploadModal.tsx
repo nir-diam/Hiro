@@ -154,10 +154,10 @@ const CVUploadModal: React.FC<CVUploadModalProps> = ({ isOpen, onClose, onUpload
         e.preventDefault();
         setIsDragging(false);
         const file = e.dataTransfer.files[0];
-        if (file && (file.type === 'application/pdf' || file.type === 'text/plain' || file.name.endsWith('.docx'))) {
+        if (file && (file.type === 'application/pdf' || file.type === 'text/plain')) {
             processFile(file);
         } else {
-            setError("קובץ לא נתמך. נא להעלות PDF, DOCX או TXT.");
+            setError("קובץ לא נתמך. נא להעלות PDF או TXT.");
         }
     };
 
@@ -208,11 +208,11 @@ const CVUploadModal: React.FC<CVUploadModalProps> = ({ isOpen, onClose, onUpload
                                     type="file" 
                                     className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                                     onChange={handleFileSelect}
-                                    accept=".pdf,.docx,.doc,.txt"
+                                    accept=".pdf,.txt"
                                 />
                                 <ArrowUpTrayIcon className={`w-10 h-10 mx-auto mb-4 ${isDragging ? 'text-primary-600' : 'text-text-subtle'}`} />
                                 <p className="text-sm font-bold text-text-default">לחץ להעלאה או גרור קובץ לכאן</p>
-                                <p className="text-xs text-text-muted mt-1">PDF, DOCX, TXT (עד 5MB)</p>
+                                <p className="text-xs text-text-muted mt-1">PDF, TXT (עד 5MB)</p>
                             </div>
 
                             {error && (

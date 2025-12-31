@@ -93,32 +93,32 @@ const PublicCandidateProfile: React.FC = () => {
                 </div>
             </div>
 
-            {/* Hero Section */}
-            <div className="relative bg-gradient-to-b from-primary-600 to-primary-800 pb-24 pt-12 sm:pt-20 px-4">
+            {/* Hero Section - Compact on Mobile */}
+            <div className="relative bg-gradient-to-b from-primary-600 to-primary-800 pb-16 pt-8 sm:pb-24 sm:pt-20 px-4">
                 <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/cubes.png')] opacity-10"></div>
-                <div className="max-w-5xl mx-auto text-center relative z-10">
-                     <div className="relative inline-block">
+                <div className="max-w-5xl mx-auto text-center relative z-10 flex flex-col sm:block items-center">
+                     <div className="relative inline-block mb-3 sm:mb-0">
                         <img 
                             src={candidateData.avatar} 
                             alt={candidateData.name} 
-                            className="w-32 h-32 sm:w-40 sm:h-40 rounded-full border-4 border-white shadow-xl object-cover"
+                            className="w-24 h-24 sm:w-40 sm:h-40 rounded-full border-4 border-white shadow-xl object-cover"
                         />
                         {candidateData.verified && (
-                            <div className="absolute bottom-2 right-2 bg-white rounded-full p-1.5 shadow-md" title="פרופיל מאומת">
-                                <CheckCircleIcon className="w-6 h-6 text-blue-500" />
+                            <div className="absolute bottom-1 right-1 sm:bottom-2 sm:right-2 bg-white rounded-full p-1 sm:p-1.5 shadow-md" title="פרופיל מאומת">
+                                <CheckCircleIcon className="w-4 h-4 sm:w-6 sm:h-6 text-blue-500" />
                             </div>
                         )}
                     </div>
-                    <h1 className="text-3xl sm:text-4xl font-extrabold text-white mt-4 mb-2">{candidateData.name}</h1>
-                    <p className="text-xl text-primary-100 font-medium mb-6">{candidateData.title}</p>
+                    <h1 className="text-2xl sm:text-4xl font-extrabold text-white mt-2 sm:mt-4 mb-1 sm:mb-2">{candidateData.name}</h1>
+                    <p className="text-lg sm:text-xl text-primary-100 font-medium mb-4 sm:mb-6">{candidateData.title}</p>
                     
-                    <div className="flex flex-wrap justify-center gap-3 text-sm text-white/90 font-medium">
+                    <div className="flex flex-wrap justify-center gap-2 sm:gap-3 text-xs sm:text-sm text-white/90 font-medium">
                         <div className="flex items-center gap-1.5 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm">
-                            <MapPinIcon className="w-4 h-4" />
+                            <MapPinIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                             {candidateData.location}
                         </div>
                         <div className="flex items-center gap-1.5 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm">
-                            <BriefcaseIcon className="w-4 h-4" />
+                            <BriefcaseIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                             זמינות מיידית
                         </div>
                     </div>
@@ -126,7 +126,7 @@ const PublicCandidateProfile: React.FC = () => {
             </div>
 
             {/* Main Content Container */}
-            <main className="max-w-5xl mx-auto px-4 sm:px-6 -mt-16 pb-16 relative z-10">
+            <main className="max-w-5xl mx-auto px-4 sm:px-6 -mt-12 sm:-mt-16 pb-16 relative z-10">
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     
                     {/* Left Sidebar (Desktop) / Top (Mobile) */}

@@ -36,30 +36,6 @@ interface ClientData {
 }
 
 // --- MOCK DATA FOR EDITING ---
-const mockClientData: ClientData = {
-    id: 1,
-    clientName: 'מימד אנושי',
-    name: 'מימד אנושי',
-    creationDate: '2022-05-12',
-    smsSource: 'humand',
-    authorizedIps: '',
-    verifiedPhones: '0527372555',
-    cvQuotaTotal: 150000,
-    tagsQuotaTotal: 200,
-    jobsQuotaTotal: 200,
-    coordinatorsQuotaTotal: 9,
-    contactsQuotaTotal: 5,
-    smsBackup: 0, smsMonthly: 500,
-    questionnaireBackup: 0, questionnaireMonthly: 100,
-    emailBackup: 0, emailMonthly: 10000,
-    hiroAiMonthly: 710,
-    modules: {
-        ai_parsing: true,
-        manager_portal: false,
-        hiro_ai: true
-    }
-};
-
 const FormInput: React.FC<{ label: string; name: string; value: string | number; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; type?: string; placeholder?: string; required?: boolean; }> = ({ label, name, value, onChange, type = 'text', placeholder, required = false }) => (
     <div>
         <label className="block text-sm font-semibold text-text-muted mb-1.5">{label} {required && <span className="text-red-500">*</span>}</label>
@@ -89,6 +65,9 @@ const AdminClientFormView: React.FC = () => {
     const { clientId } = useParams<{ clientId: string }>();
     const navigate = useNavigate();
     const isEditing = !!clientId;
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     
     // Initialize with default values
     const [formData, setFormData] = useState<ClientData>({
@@ -113,9 +92,44 @@ const AdminClientFormView: React.FC = () => {
 
     useEffect(() => {
         if (isEditing) {
-            setFormData(mockClientData);
+            const load = async () => {
+                setLoading(true);
+                setError(null);
+                try {
+                    const res = await fetch(`${apiBase}/api/clients/${clientId}`);
+                    if (!res.ok) throw new Error('Failed to load client');
+                    const data = await res.json();
+                    setFormData(prev => ({
+                        ...prev,
+                        id: data.id,
+                        clientName: data.name || '',
+                        name: data.name || '',
+                        creationDate: data.creationDate ? data.creationDate.split('T')[0] : prev.creationDate,
+                        authorizedIps: '',
+                        verifiedPhones: data.phone || '',
+                        cvQuotaTotal: data.cvQuotaTotal ?? prev.cvQuotaTotal,
+                        tagsQuotaTotal: data.tagsQuotaTotal ?? prev.tagsQuotaTotal,
+                        jobsQuotaTotal: data.jobsTotal ?? prev.jobsQuotaTotal,
+                        coordinatorsQuotaTotal: data.coordinatorsTotal ?? prev.coordinatorsQuotaTotal,
+                        contactsQuotaTotal: data.contactsQuotaTotal ?? prev.contactsQuotaTotal,
+                        smsBackup: data.smsBackup ?? prev.smsBackup,
+                        smsMonthly: data.smsMonthly ?? prev.smsMonthly,
+                        questionnaireBackup: data.questionnaireBackup ?? prev.questionnaireBackup,
+                        questionnaireMonthly: data.questionnaireMonthly ?? prev.questionnaireMonthly,
+                        emailBackup: data.emailBackup ?? prev.emailBackup,
+                        emailMonthly: data.emailMonthly ?? prev.emailMonthly,
+                        hiroAiMonthly: data.hiroAiMonthly ?? prev.hiroAiMonthly,
+                        modules: { ...prev.modules, manager_portal: data.contactIsActive ?? prev.modules.manager_portal },
+                    }));
+                } catch (err: any) {
+                    setError(err.message || 'Load failed');
+                } finally {
+                    setLoading(false);
+                }
+            };
+            load();
         }
-    }, [clientId, isEditing]);
+    }, [clientId, isEditing, apiBase]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value, type } = e.target;
@@ -132,15 +146,54 @@ const AdminClientFormView: React.FC = () => {
         }));
     };
 
-    // Changed from form submit to regular click handler to prevent Accordion bugs
-    const handleSave = () => {
-        console.log("Saving client data:", formData);
-        navigate('/admin');
+    const handleSave = async () => {
+        setLoading(true);
+        setError(null);
+        const payload = {
+            name: formData.clientName || formData.name,
+            creationDate: formData.creationDate,
+            contactPerson: formData.name,
+            phone: formData.verifiedPhones,
+            status: formData.modules.manager_portal ? 'פעיל' : 'לא פעיל',
+            contactIsActive: formData.modules.manager_portal,
+            jobsTotal: formData.jobsQuotaTotal,
+            coordinatorsTotal: formData.coordinatorsQuotaTotal,
+            jobsUsed: formData.jobsQuotaTotal - 0,
+            coordinatorsUsed: formData.coordinatorsQuotaTotal - 0,
+            cvQuotaTotal: formData.cvQuotaTotal,
+            tagsQuotaTotal: formData.tagsQuotaTotal,
+            contactsQuotaTotal: formData.contactsQuotaTotal,
+            smsBackup: formData.smsBackup,
+            smsMonthly: formData.smsMonthly,
+            questionnaireBackup: formData.questionnaireBackup,
+            questionnaireMonthly: formData.questionnaireMonthly,
+            emailBackup: formData.emailBackup,
+            emailMonthly: formData.emailMonthly,
+            hiroAiMonthly: formData.hiroAiMonthly,
+        };
+        try {
+            const res = await fetch(`${apiBase}/api/clients${isEditing ? `/${clientId}` : ''}`, {
+                method: isEditing ? 'PUT' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.message || 'Save failed');
+            }
+            navigate('/admin/clients');
+        } catch (err: any) {
+            setError(err.message || 'Save failed');
+        } finally {
+            setLoading(false);
+        }
     };
 
     return (
         <div className="space-y-6 max-w-4xl mx-auto pb-10">
             <h1 className="text-2xl font-bold text-text-default">{isEditing ? `עריכת לקוח: ${formData.clientName}` : 'יצירת לקוח חדש'}</h1>
+            {error && <p className="text-red-600 text-sm">{error}</p>}
+            {loading && <p className="text-text-muted text-sm">טוען...</p>}
             
             {/* 1. General Details */}
             <AccordionSection title="פרטי חברה" icon={<BuildingOffice2Icon className="w-5 h-5"/>} defaultOpen>

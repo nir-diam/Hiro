@@ -1,10 +1,11 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PencilIcon, ArrowDownTrayIcon, TrashIcon, ChevronDownIcon, ArrowUpTrayIcon, PinIcon, PaperClipIcon, EyeIcon, CodeBracketIcon, EnvelopeIcon } from './Icons';
 import OriginalResume from './OriginalResume';
 import IndustryExperienceSummary from './IndustryExperienceSummary';
 import IndustryExperienceModal from './IndustryExperienceModal';
 import { MessageModalConfig } from '../hooks/useUIState';
+import { useLanguage } from '../context/LanguageContext';
 
 const TopTab: React.FC<{ title: string; isActive: boolean; onClick: () => void }> = ({ title, isActive, onClick }) => (
     <button 
@@ -116,6 +117,7 @@ JobMaster 2025
 
 
 const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageModal, className = "h-full" }) => {
+  const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'resume' | 'email'>('resume');
   const [tagsHighlighted, setTagsHighlighted] = useState(true);
   const [resumeViewMode, setResumeViewMode] = useState<'parsed' | 'original'>('parsed');
@@ -123,7 +125,12 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
   const [emailViewMode, setEmailViewMode] = useState<'formatted' | 'original'>('formatted');
   const [isIndustryModalOpen, setIsIndustryModalOpen] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
-  const [copyButtonText, setCopyButtonText] = useState('העתק קו"ח');
+  const [copyButtonText, setCopyButtonText] = useState(t('resume.copy_cv'));
+
+  // Update copyButtonText when language changes
+  useEffect(() => {
+    setCopyButtonText(t('resume.copy_cv'));
+  }, [t]);
 
   const ActionButton: React.FC<{ title: string; children: React.ReactNode; onClick?: () => void; isActive?: boolean }> = ({ title, children, onClick, isActive = false }) => (
     <button
@@ -158,12 +165,12 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
     ].join('\n\n');
     
     navigator.clipboard.writeText(textToCopy).then(() => {
-        setCopyButtonText('הועתק!');
-        setTimeout(() => setCopyButtonText('העתק קו"ח'), 2000);
+        setCopyButtonText('הועתק!'); // Could be translated too if needed temporarily
+        setTimeout(() => setCopyButtonText(t('resume.copy_cv')), 2000);
     }).catch(err => {
         console.error('Failed to copy resume: ', err);
         setCopyButtonText('שגיאה');
-        setTimeout(() => setCopyButtonText('העתק קו"ח'), 2000);
+        setTimeout(() => setCopyButtonText(t('resume.copy_cv')), 2000);
     });
   };
 
@@ -193,8 +200,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
       <div className={`bg-bg-card rounded-2xl shadow-sm flex flex-col border border-border-default ${className}`}>
           <div className="flex items-center justify-between pt-4 px-4 bg-bg-subtle/30 rounded-t-2xl">
                <div className="flex items-end space-x-1 w-full border-b border-border-default">
-                  <TopTab title="הודעות דוא''ל" isActive={activeTab === 'email'} onClick={() => { setActiveTab('email'); setResumeContentMode('resume'); }} />
-                  <TopTab title="קורות חיים" isActive={activeTab === 'resume'} onClick={() => { setActiveTab('resume'); setResumeContentMode('resume'); }} />
+                  <TopTab title={t('resume.tab_emails')} isActive={activeTab === 'email'} onClick={() => { setActiveTab('email'); setResumeContentMode('resume'); }} />
+                  <TopTab title={t('resume.tab_cv')} isActive={activeTab === 'resume'} onClick={() => { setActiveTab('resume'); setResumeContentMode('resume'); }} />
                   <button 
                     onClick={() => setResumeContentMode('summary')} 
                     className={`py-3 px-5 font-bold text-sm transition-all duration-200 ease-in-out transform rounded-t-lg border-t-2 border-x-2
@@ -203,7 +210,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                         : 'text-text-muted hover:text-primary-600 bg-bg-subtle border-transparent hover:bg-bg-hover'
                     }`}
                 >
-                    ניסיון בתעשיות
+                    {t('resume.tab_industries')}
                 </button>
               </div>
           </div>
@@ -214,14 +221,14 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                   <div className="flex justify-between items-center p-3 border-b border-border-default bg-bg-subtle/10">
                       <div className="text-sm text-text-muted font-medium flex items-center gap-2">
                          <EnvelopeIcon className="w-4 h-4"/>
-                         הודעה נכנסת (1)
+                         {t('resume.email_incoming')} (1)
                       </div>
                       <button 
                         onClick={handleToggleEmailView}
                         className="flex items-center gap-2 text-xs font-bold text-primary-700 bg-primary-50 border border-primary-200 px-3 py-1.5 rounded-md hover:bg-primary-100 transition-colors shadow-sm"
                       >
                           {emailViewMode === 'formatted' ? <CodeBracketIcon className="w-4 h-4"/> : <EyeIcon className="w-4 h-4"/>}
-                          <span>{emailViewMode === 'formatted' ? 'הצג טקסט מקורי' : 'הצג תצוגה מעוצבת'}</span>
+                          <span>{emailViewMode === 'formatted' ? t('resume.view_text') : t('resume.view_formatted')}</span>
                       </button>
                   </div>
               )}
@@ -238,7 +245,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                                 : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
                             }`}
                         >
-                            {resumeViewMode === 'parsed' ? 'הצג קובץ מקורי' : 'הצג קובץ מועמד'}
+                            {resumeViewMode === 'parsed' ? t('resume.view_original') : t('resume.view_parsed')}
                         </button>
                         <button
                             onClick={handleCopyResume}
@@ -255,22 +262,22 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                               : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
                           }`}
                         >
-                          <span>הדגשת תגיות</span>
+                          <span>{t('resume.highlight_tags')}</span>
                         </button>
                     </div>
 
                     <div className="flex items-center gap-1">
-                        <ActionButton title="הורדת קובץ"><ArrowDownTrayIcon className="w-5 h-5"/></ActionButton>
-                        <ActionButton title="העלאת קובץ"><ArrowUpTrayIcon className="w-5 h-5"/></ActionButton>
+                        <ActionButton title={t('resume.download')}><ArrowDownTrayIcon className="w-5 h-5"/></ActionButton>
+                        <ActionButton title={t('resume.upload')}><ArrowUpTrayIcon className="w-5 h-5"/></ActionButton>
                         <ActionButton 
-                            title={isPinned ? "בטל נעיצה" : "נעץ קורות חיים"}
+                            title={isPinned ? t('resume.unpin') : t('resume.pin')}
                             onClick={() => setIsPinned(!isPinned)}
                             isActive={isPinned}
                         >
                             <PinIcon className="w-5 h-5"/>
                         </ActionButton>
-                        <ActionButton title="עריכה"><PencilIcon className="w-5 h-5"/></ActionButton>
-                        <ActionButton title="מחיקה"><TrashIcon className="w-5 h-5"/></ActionButton>
+                        <ActionButton title={t('resume.edit')}><PencilIcon className="w-5 h-5"/></ActionButton>
+                        <ActionButton title={t('resume.delete')}><TrashIcon className="w-5 h-5"/></ActionButton>
                     </div>
                 </div>
               )}
@@ -289,12 +296,12 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                                     </div>
                                     
                                     <div>
-                                        <h3 className="font-bold text-lg text-primary-700 mb-2 border-r-4 border-primary-500 pr-3">תקציר</h3>
+                                        <h3 className="font-bold text-lg text-primary-700 mb-2 border-r-4 border-primary-500 pr-3">{t('section.summary')}</h3>
                                         <div className="bg-bg-subtle/30 p-4 rounded-lg" dangerouslySetInnerHTML={{ __html: highlightedSummary }} />
                                     </div>
 
                                     <div>
-                                      <h3 className="font-bold text-lg text-primary-700 mb-4 border-r-4 border-primary-500 pr-3">ניסיון תעסוקתי</h3>
+                                      <h3 className="font-bold text-lg text-primary-700 mb-4 border-r-4 border-primary-500 pr-3">{t('section.work_experience')}</h3>
                                       <ul className="space-y-6">
                                           {finalResumeData.experience.map((item, index) => (
                                               <li key={index} className="relative pr-4 border-r border-border-default/50">

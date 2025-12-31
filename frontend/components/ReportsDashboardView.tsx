@@ -9,6 +9,7 @@ import {
 } from './Icons';
 import { KPICard, SimpleBarChart, Sparkline, HeatmapCell, DeltaChart } from './ReportsComponents';
 import CustomizeViewsPopover, { ViewConfig } from './CustomizeViewsPopover';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- MOCK DATA ---
 const recruiters = ['דנה', 'אביב', 'יעל', 'מיכל', 'גיא'];
@@ -99,13 +100,13 @@ const chartDataMap: Record<string, { label: string; value: number; color?: strin
 };
 
 const comparisonData = [
-    { id: 'hires', metric: 'התקבלו לעבודה (השמות)', current: 15, previous: 12, change: 25, data: [8, 9, 11, 10, 12, 14, 15] },
-    { id: 'cv_ingestions', metric: 'קליטות קו"ח', current: 450, previous: 410, change: 9.7, data: [380, 390, 400, 420, 410, 430, 450] },
-    { id: 'referrals', metric: 'הפניות ללקוחות', current: 84, previous: 92, change: -8.7, data: [80, 85, 90, 95, 92, 88, 84] },
-    { id: 'open_jobs', metric: 'משרות פתוחות', current: 8, previous: 5, change: 60, data: [3, 4, 4, 5, 6, 5, 8] },
-    { id: 'screenings', metric: 'סינונים שבוצעו', current: 120, previous: 100, change: 20, data: [10, 20, 50, 80, 90, 110, 120] },
-    { id: 'time_to_hire', metric: 'זמן ממוצע לגיוס', current: 34, previous: 36, change: -5.5, data: [40, 38, 38, 37, 36, 35, 34] },
-    { id: 'portal_submissions', metric: 'הגשות מדפי פרסום', current: 250, previous: 200, change: 25, data: [180, 190, 200, 220, 230, 240, 250] },
+    { id: 'hires', metric: 'metric.hires', current: 15, previous: 12, change: 25, data: [8, 9, 11, 10, 12, 14, 15] },
+    { id: 'cv_ingestions', metric: 'metric.cv_ingestions', current: 450, previous: 410, change: 9.7, data: [380, 390, 400, 420, 410, 430, 450] },
+    { id: 'referrals', metric: 'metric.referrals', current: 84, previous: 92, change: -8.7, data: [80, 85, 90, 95, 92, 88, 84] },
+    { id: 'open_jobs', metric: 'metric.open_jobs', current: 8, previous: 5, change: 60, data: [3, 4, 4, 5, 6, 5, 8] },
+    { id: 'screenings', metric: 'metric.screenings', current: 120, previous: 100, change: 20, data: [10, 20, 50, 80, 90, 110, 120] },
+    { id: 'time_to_hire', metric: 'metric.time_to_hire', current: 34, previous: 36, change: -5.5, data: [40, 38, 38, 37, 36, 35, 34] },
+    { id: 'portal_submissions', metric: 'metric.portal_submissions', current: 250, previous: 200, change: 25, data: [180, 190, 200, 220, 230, 240, 250] },
 ];
 
 const deltaData = [
@@ -171,6 +172,7 @@ const recruitersHeatmap = recruiters.map(name => ({
 // --- TABS CONTENT ---
 
 const TrendsTab: React.FC = () => {
+    const { t } = useLanguage();
     const [selectedMetric, setSelectedMetric] = useState<string>('hires');
     const [metricsConfig, setMetricsConfig] = useState<ViewConfig[]>(availableMetrics);
     const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
@@ -209,15 +211,15 @@ const TrendsTab: React.FC = () => {
 
 
     const kpiRenderData: Record<string, any> = {
-        'hires': { title: "התקבלו לעבודה", value: "42", trend: 12, trendLabel: "מול חודש שעבר", icon: <CheckCircleIcon className="w-6 h-6 text-white" />, colorClass: "bg-green-500" },
-        'cv_ingestions': { title: "קליטות קו\"ח", value: "1,340", trend: 5, trendLabel: "עליה מתונה", icon: <DocumentTextIcon className="w-6 h-6 text-white" />, colorClass: "bg-indigo-500" },
-        'referrals': { title: "הפניות ללקוח", value: "245", trend: 8, trendLabel: "עליה בפעילות", icon: <PaperAirplaneIcon className="w-6 h-6 text-white" />, colorClass: "bg-blue-500" },
-        'screenings': { title: "סינונים שבוצעו", value: "480", trend: 15, trendLabel: "עלייה בפריון", icon: <FunnelIcon className="w-6 h-6 text-white" />, colorClass: "bg-teal-500" },
-        'open_jobs': { title: "משרות פתוחות", value: "28", trend: 0, trendLabel: "ללא שינוי", icon: <BriefcaseIcon className="w-6 h-6 text-white" />, colorClass: "bg-orange-500" },
-        'time_to_hire': { title: "זמן ממוצע לגיוס", value: "34 ימים", trend: -5, trendLabel: "שיפור", icon: <ClockIcon className="w-6 h-6 text-white" />, colorClass: "bg-gray-500" },
-        'portal_submissions': { title: "הגשות מפורטל", value: "125", trend: 22, trendLabel: "קמפיין מוצלח", icon: <EyeIcon className="w-6 h-6 text-white" />, colorClass: "bg-pink-500" },
-        'communications': { title: "תקשורת יוצאת", value: "2.3k", trend: 10, trendLabel: "מיילים ו-SMS", icon: <EnvelopeIcon className="w-6 h-6 text-white" />, colorClass: "bg-cyan-500" },
-        'passed_screening': { title: "עברו סינון", value: "160", trend: 12, trendLabel: "יחס המרה טוב", icon: <CheckCircleIcon className="w-6 h-6 text-white" />, colorClass: "bg-emerald-500" },
+        'hires': { title: t('metric.hires'), value: "42", trend: 12, trendLabel: t('reports.col_previous'), icon: <CheckCircleIcon className="w-6 h-6 text-white" />, colorClass: "bg-green-500" },
+        'cv_ingestions': { title: t('metric.cv_ingestions'), value: "1,340", trend: 5, trendLabel: t('reports.col_previous'), icon: <DocumentTextIcon className="w-6 h-6 text-white" />, colorClass: "bg-indigo-500" },
+        'referrals': { title: t('metric.referrals'), value: "245", trend: 8, trendLabel: t('reports.col_previous'), icon: <PaperAirplaneIcon className="w-6 h-6 text-white" />, colorClass: "bg-blue-500" },
+        'screenings': { title: t('metric.screenings'), value: "480", trend: 15, trendLabel: t('reports.col_previous'), icon: <FunnelIcon className="w-6 h-6 text-white" />, colorClass: "bg-teal-500" },
+        'open_jobs': { title: t('metric.open_jobs'), value: "28", trend: 0, trendLabel: t('reports.col_previous'), icon: <BriefcaseIcon className="w-6 h-6 text-white" />, colorClass: "bg-orange-500" },
+        'time_to_hire': { title: t('metric.time_to_hire'), value: "34", trend: -5, trendLabel: t('reports.col_previous'), icon: <ClockIcon className="w-6 h-6 text-white" />, colorClass: "bg-gray-500" },
+        'portal_submissions': { title: t('metric.portal_submissions'), value: "125", trend: 22, trendLabel: t('reports.col_previous'), icon: <EyeIcon className="w-6 h-6 text-white" />, colorClass: "bg-pink-500" },
+        'communications': { title: t('metric.communications'), value: "2.3k", trend: 10, trendLabel: t('reports.col_previous'), icon: <EnvelopeIcon className="w-6 h-6 text-white" />, colorClass: "bg-cyan-500" },
+        'passed_screening': { title: t('metric.passed_screening'), value: "160", trend: 12, trendLabel: t('reports.col_previous'), icon: <CheckCircleIcon className="w-6 h-6 text-white" />, colorClass: "bg-emerald-500" },
     };
 
     const chartData = chartDataMap[selectedMetric] || [];
@@ -234,7 +236,7 @@ const TrendsTab: React.FC = () => {
                         className="flex items-center gap-2 text-sm font-semibold text-text-muted hover:text-primary-600 bg-bg-subtle px-3 py-1.5 rounded-lg transition-colors"
                     >
                         <Cog6ToothIcon className="w-4 h-4" />
-                        <span>התאם מדדים</span>
+                        <span>{t('reports.customize_metrics')}</span>
                     </button>
                     {isCustomizeOpen && (
                         <div ref={customizePopoverRef} className="z-20">
@@ -276,11 +278,11 @@ const TrendsTab: React.FC = () => {
             <div className="bg-bg-card rounded-xl border border-border-default p-6 shadow-sm">
                 <div className="flex justify-between items-center mb-6">
                     <h3 className="text-lg font-bold text-text-default">
-                        מגמת {activeTitle} (חצי שנתית)
+                        {t('reports.tab_trends')}: {activeTitle}
                     </h3>
                     <select className="bg-bg-input border border-border-default rounded-md text-sm p-1 cursor-pointer">
-                        <option>פילוח חודשי</option>
-                        <option>פילוח רבעוני</option>
+                        <option>{t('reports.chart_monthly')}</option>
+                        <option>{t('reports.chart_quarterly')}</option>
                     </select>
                 </div>
                 <SimpleBarChart data={chartData} height={280} colorTheme={activeColorTheme} />
@@ -290,6 +292,7 @@ const TrendsTab: React.FC = () => {
 };
 
 const ComparisonTab: React.FC = () => {
+    const { t } = useLanguage();
     const [metricsConfig, setMetricsConfig] = useState<ViewConfig[]>(availableMetrics);
     const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
     const customizeBtnRef = useRef<HTMLButtonElement>(null);
@@ -332,7 +335,7 @@ const ComparisonTab: React.FC = () => {
                 <div className="bg-blue-50 border-r-4 border-blue-500 p-4 rounded-lg text-blue-900 text-sm flex items-start gap-3 flex-1 mr-6">
                     <ArrowPathIcon className="w-5 h-5 shrink-0 mt-0.5" />
                     <div>
-                        <strong>תובנה אוטומטית:</strong> נרשמה עלייה של 25% בכמות ההשמות ביחס לתקופה המקבילה אשתקד, אך ירידה קלה ביחס ההמרה מראיון לקבלה.
+                        {t('reports.insight_banner')}
                     </div>
                 </div>
 
@@ -343,7 +346,7 @@ const ComparisonTab: React.FC = () => {
                         className="flex items-center gap-2 text-sm font-semibold text-text-muted hover:text-primary-600 bg-bg-subtle px-3 py-1.5 rounded-lg transition-colors"
                     >
                         <Cog6ToothIcon className="w-4 h-4" />
-                        <span>התאם מדדים</span>
+                        <span>{t('reports.customize_metrics')}</span>
                     </button>
                     {isCustomizeOpen && (
                         <div ref={customizePopoverRef} className="z-20">
@@ -366,17 +369,17 @@ const ComparisonTab: React.FC = () => {
                         <table className="w-full text-sm text-right min-w-[600px]">
                             <thead className="bg-bg-subtle text-text-muted font-semibold">
                                 <tr>
-                                    <th className="p-4 whitespace-nowrap">מדד</th>
-                                    <th className="p-4 whitespace-nowrap">תקופה נוכחית</th>
-                                    <th className="p-4 whitespace-nowrap">תקופה קודמת</th>
-                                    <th className="p-4 whitespace-nowrap">שינוי</th>
-                                    <th className="p-4 whitespace-nowrap">מגמה</th>
+                                    <th className="p-4 whitespace-nowrap">{t('reports.col_metric')}</th>
+                                    <th className="p-4 whitespace-nowrap">{t('reports.col_current')}</th>
+                                    <th className="p-4 whitespace-nowrap">{t('reports.col_previous')}</th>
+                                    <th className="p-4 whitespace-nowrap">{t('reports.col_change')}</th>
+                                    <th className="p-4 whitespace-nowrap">{t('reports.col_trend')}</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-default">
                                 {filteredData.map((row, idx) => (
                                     <tr key={idx} className="hover:bg-bg-hover/50">
-                                        <td className="p-4 font-medium text-text-default">{row.metric}</td>
+                                        <td className="p-4 font-medium text-text-default">{t(row.metric)}</td>
                                         <td className="p-4 font-bold">{row.current}</td>
                                         <td className="p-4 text-text-muted">{row.previous}</td>
                                         <td className={`p-4 font-bold ${row.change > 0 ? 'text-green-600' : 'text-red-600'}`}>
@@ -392,15 +395,15 @@ const ComparisonTab: React.FC = () => {
                     </div>
                     {filteredData.length === 0 && (
                          <div className="p-8 text-center text-text-muted">
-                            לא נבחרו מדדים להצגה. לחץ על "התאם מדדים" כדי להוסיף.
+                            {t('reports.no_data')}
                         </div>
                     )}
                 </div>
 
                 {/* Delta Chart */}
                 <div className="bg-bg-card rounded-xl border border-border-default p-6">
-                    <h3 className="font-bold text-text-default mb-4 text-center">פער יעדים לפי רכז (Delta)</h3>
-                    <p className="text-xs text-text-muted text-center mb-6">הפרש בין גיוסים בפועל ליעד החודשי</p>
+                    <h3 className="font-bold text-text-default mb-4 text-center">{t('reports.delta_title')}</h3>
+                    <p className="text-xs text-text-muted text-center mb-6">{t('reports.delta_subtitle')}</p>
                     <DeltaChart data={deltaData} />
                 </div>
             </div>
@@ -409,6 +412,7 @@ const ComparisonTab: React.FC = () => {
 };
 
 const RecruitersTab: React.FC = () => {
+    const { t } = useLanguage();
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     const [viewConfig, setViewConfig] = useState<ViewConfig[]>(recruiterViewOptions);
     const [isCustomizeOpen, setIsCustomizeOpen] = useState(false);
@@ -489,10 +493,10 @@ const RecruitersTab: React.FC = () => {
                 <div className="hidden md:block absolute top-1/2 left-10 right-10 h-0.5 bg-border-default -z-10 transform -translate-y-1/2"></div>
                 
                 {[
-                    { label: 'סה"כ קו"ח נכנסים', value: totals.cvs, icon: <DocumentTextIcon className="w-5 h-5" />, color: 'bg-indigo-100 text-indigo-600' },
-                    { label: 'סה"כ סינון ראשוני', value: totals.screened, icon: <FunnelIcon className="w-5 h-5" />, color: 'bg-blue-100 text-blue-600' },
-                    { label: 'עברו סינון', value: totals.interviews, icon: <UserGroupIcon className="w-5 h-5" />, color: 'bg-purple-100 text-purple-600' },
-                    { label: 'סה"כ השמות', value: totals.hired, icon: <CheckCircleIcon className="w-5 h-5" />, color: 'bg-green-100 text-green-600' }
+                    { label: t('metric.cv_ingestions'), value: totals.cvs, icon: <DocumentTextIcon className="w-5 h-5" />, color: 'bg-indigo-100 text-indigo-600' },
+                    { label: t('metric.screenings_done'), value: totals.screened, icon: <FunnelIcon className="w-5 h-5" />, color: 'bg-blue-100 text-blue-600' },
+                    { label: t('metric.passed_screening'), value: totals.interviews, icon: <UserGroupIcon className="w-5 h-5" />, color: 'bg-purple-100 text-purple-600' },
+                    { label: t('metric.hires'), value: totals.hired, icon: <CheckCircleIcon className="w-5 h-5" />, color: 'bg-green-100 text-green-600' }
                 ].map((step, idx) => (
                     <div key={idx} className="flex-1 w-full md:w-auto flex flex-col items-center bg-bg-card p-2 z-10 relative">
                          <div className={`w-12 h-12 rounded-full flex items-center justify-center mb-2 ${step.color}`}>
@@ -516,7 +520,7 @@ const RecruitersTab: React.FC = () => {
     return (
         <div className="space-y-6 animate-fade-in">
              <div className="flex justify-between items-center">
-                <h3 className="text-lg font-bold text-text-default">ביצועי רכזים</h3>
+                <h3 className="text-lg font-bold text-text-default">{t('reports.recruiters_performance')}</h3>
                 <div className="relative">
                     <button 
                         ref={customizeBtnRef}
@@ -524,7 +528,7 @@ const RecruitersTab: React.FC = () => {
                         className="flex items-center gap-2 text-sm font-semibold text-text-muted hover:text-primary-600 bg-bg-subtle px-3 py-1.5 rounded-lg transition-colors"
                     >
                         <Cog6ToothIcon className="w-4 h-4" />
-                        <span>התאם עמודות</span>
+                        <span>{t('reports.customize_metrics')}</span>
                     </button>
                     {isCustomizeOpen && (
                         <div ref={customizePopoverRef} className="z-20">
@@ -549,11 +553,11 @@ const RecruitersTab: React.FC = () => {
                         <thead className="bg-bg-subtle text-text-muted font-semibold border-b border-border-default">
                             <tr>
                                 <th className="p-4 text-right min-w-[140px] cursor-pointer hover:bg-bg-hover transition-colors sticky right-0 bg-bg-subtle z-10 border-l border-border-default/50" onClick={() => requestSort('name')}>
-                                    <div className="flex items-center">שם הרכז/ת {getSortIndicator('name')}</div>
+                                    <div className="flex items-center">{t('reports.col_recruiter')} {getSortIndicator('name')}</div>
                                 </th>
                                 {viewConfig.filter(col => col.visible).map(col => (
                                     <th key={col.id} className="p-4 cursor-pointer hover:bg-bg-hover transition-colors whitespace-nowrap" onClick={() => requestSort(col.id)}>
-                                        {col.name} {getSortIndicator(col.id)}
+                                        {t(`metric.${col.id}`) || col.name} {getSortIndicator(col.id)}
                                     </th>
                                 ))}
                             </tr>
@@ -582,6 +586,7 @@ const RecruitersTab: React.FC = () => {
 
 // --- MAIN VIEW ---
 const ReportsDashboardView: React.FC = () => {
+    const { t } = useLanguage();
     const [activeTab, setActiveTab] = useState<'trends' | 'comparison' | 'recruiters'>('trends');
     const [dateRange, setDateRange] = useState('last_30_days');
     const [selectedRecruiter, setSelectedRecruiter] = useState('all');
@@ -593,8 +598,8 @@ const ReportsDashboardView: React.FC = () => {
             {/* Header & Global Filters */}
             <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div>
-                    <h1 className="text-2xl font-extrabold text-text-default">דוח ביצועים וגיוס</h1>
-                    <p className="text-text-muted text-sm">תמונת מצב עדכנית על תהליכי הגיוס בחברה</p>
+                    <h1 className="text-2xl font-extrabold text-text-default">{t('reports.title')}</h1>
+                    <p className="text-text-muted text-sm">{t('reports.subtitle')}</p>
                 </div>
                 
                 <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 w-full md:w-auto">
@@ -606,7 +611,7 @@ const ReportsDashboardView: React.FC = () => {
                             onChange={(e) => setSelectedRecruiter(e.target.value)}
                             className="bg-transparent text-sm font-semibold outline-none text-text-default cursor-pointer min-w-[100px] w-full sm:w-auto"
                         >
-                            <option value="all">כל הרכזים</option>
+                            <option value="all">{t('reports.filter_recruiter')}</option>
                             {recruiters.map(r => <option key={r} value={r}>{r}</option>)}
                         </select>
                     </div>
@@ -620,20 +625,20 @@ const ReportsDashboardView: React.FC = () => {
                                 onChange={(e) => setDateRange(e.target.value)} 
                                 className="bg-transparent text-sm font-semibold pl-2 pr-9 py-1.5 outline-none text-text-default cursor-pointer w-full sm:w-auto"
                             >
-                                <option value="last_7_days">7 ימים אחרונים</option>
-                                <option value="last_30_days">30 ימים אחרונים</option>
-                                <option value="this_month">החודש הנוכחי</option>
-                                <option value="last_month">חודש שעבר</option>
-                                <option value="this_quarter">רבעון נוכחי</option>
-                                <option value="this_year">מתחילת השנה</option>
-                                <option value="custom">טווח תאריכים מותאם אישית...</option>
+                                <option value="last_7_days">{t('reports.filter_date_7days')}</option>
+                                <option value="last_30_days">{t('reports.filter_date_30days')}</option>
+                                <option value="this_month">{t('reports.filter_date_this_month')}</option>
+                                <option value="last_month">{t('reports.filter_date_last_month')}</option>
+                                <option value="this_quarter">{t('reports.filter_date_quarter')}</option>
+                                <option value="this_year">{t('reports.filter_date_year')}</option>
+                                <option value="custom">{t('reports.filter_date_custom')}</option>
                             </select>
                         </div>
                         <div className="w-px h-5 bg-border-default hidden sm:block"></div>
                         <button className="text-sm font-semibold text-primary-600 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2 justify-center w-full sm:w-auto mt-2 sm:mt-0">
                             <ArrowDownTrayIcon className="w-4 h-4" />
-                            <span className="sm:hidden">ייצוא</span>
-                            <span className="hidden sm:inline">ייצוא</span>
+                            <span className="sm:hidden">{t('reports.export')}</span>
+                            <span className="hidden sm:inline">{t('reports.export')}</span>
                         </button>
                     </div>
                 </div>
@@ -643,9 +648,9 @@ const ReportsDashboardView: React.FC = () => {
             <div className="border-b border-border-default overflow-x-auto">
                 <nav className="flex gap-6 min-w-max">
                     {[
-                        { id: 'trends', label: 'מגמות וביצועים', icon: <ChartBarIcon className="w-5 h-5"/> },
-                        { id: 'comparison', label: 'השוואת תקופות', icon: <ArrowPathIcon className="w-5 h-5"/> },
-                        { id: 'recruiters', label: 'השוואת רכזים', icon: <UserGroupIcon className="w-5 h-5"/> },
+                        { id: 'trends', label: t('reports.tab_trends'), icon: <ChartBarIcon className="w-5 h-5"/> },
+                        { id: 'comparison', label: t('reports.tab_comparison'), icon: <ArrowPathIcon className="w-5 h-5"/> },
+                        { id: 'recruiters', label: t('reports.tab_recruiters'), icon: <UserGroupIcon className="w-5 h-5"/> },
                     ].map(tab => (
                         <button
                             key={tab.id}

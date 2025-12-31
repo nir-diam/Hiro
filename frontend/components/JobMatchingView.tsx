@@ -378,6 +378,20 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
     return (
         <div className="bg-transparent rounded-2xl h-full flex flex-col">
+            {/* Header Section with Close Button */}
+            <div className="flex justify-between items-center mb-4 px-1">
+                <h2 className="text-xl font-bold text-text-default">
+                    התאמת משרות עבור <span className="text-primary-600">{candidateName}</span>
+                </h2>
+                <button 
+                    onClick={onBack}
+                    className="p-2 rounded-full bg-bg-card border border-border-default hover:bg-bg-hover text-text-muted transition-colors shadow-sm"
+                    title="סגור חלונית התאמות"
+                >
+                    <XMarkIcon className="w-5 h-5" />
+                </button>
+            </div>
+
             <style>{`
                 @keyframes fadeIn {
                     from { opacity: 0; transform: scale(0.95); }
@@ -387,6 +401,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
                     animation: fadeIn 0.3s ease-out forwards;
                 }
             `}</style>
+            
             {/* Main Content */}
             <main className="flex-1 overflow-y-auto space-y-4">
                 {/* View Controls */}

@@ -1,8 +1,15 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { PlusIcon, MagnifyingGlassIcon, BuildingOffice2Icon, PencilIcon, TrashIcon, Cog6ToothIcon, ChevronDownIcon, ArrowPathIcon, TableCellsIcon, Squares2X2Icon, XMarkIcon, UserGroupIcon, PhoneIcon, EnvelopeIcon, WhatsappIcon, ChatBubbleBottomCenterTextIcon } from './Icons';
+import { 
+    PlusIcon, MagnifyingGlassIcon, BuildingOffice2Icon, PencilIcon, TrashIcon, 
+    Cog6ToothIcon, ChevronDownIcon, ArrowPathIcon, TableCellsIcon, Squares2X2Icon, 
+    XMarkIcon, UserGroupIcon, PhoneIcon, EnvelopeIcon, WhatsappIcon, ChatBubbleBottomCenterTextIcon,
+    FunnelIcon, ChevronUpIcon
+} from './Icons';
 import { MessageModalConfig } from '../hooks/useUIState';
+import LocationSelector, { LocationItem } from './LocationSelector';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 type ClientStatus = 'פעיל' | 'לא פעיל' | 'בהקפאה';
@@ -74,42 +81,18 @@ const allContactsData: ContactWithClient[] = clientsData.flatMap((client, i) => 
     return contactsForClient;
 });
 
-const allClientColumns = [
-    { id: 'name', header: 'שם לקוח' },
-    { id: 'contactPerson', header: 'איש קשר ראשי' },
-    { id: 'openJobs', header: 'משרות פתוחות' },
-    { id: 'status', header: 'סטטוס' },
-    { id: 'accountManager', header: 'מנהל תיק' },
-    { id: 'city', header: 'עיר' },
-    { id: 'region', header: 'אזור' },
-    { id: 'industry', header: 'תעשייה' },
-    { id: 'field', header: 'תחום' },
-];
-const defaultVisibleClientColumns = ['name', 'contactPerson', 'openJobs', 'status', 'accountManager', 'city'];
-
-const allContactColumns = [
-    { id: 'name', header: 'שם איש קשר' },
-    { id: 'clientName', header: 'לקוח' },
-    { id: 'role', header: 'תפקיד' },
-    { id: 'email', header: 'דוא"ל' },
-    { id: 'phone', header: 'טלפון' },
-    { id: 'isActive', header: 'סטטוס' },
-];
-const defaultVisibleContactColumns = allContactColumns.map(c => c.id);
-
+// Columns and styles
 const statusStyles: { [key in ClientStatus]: { text: string; bg: string; } } = {
   'פעיל': { text: 'text-green-800', bg: 'bg-green-100' },
   'בהקפאה': { text: 'text-amber-800', bg: 'bg-amber-100' },
   'לא פעיל': { text: 'text-gray-700', bg: 'bg-gray-200' },
 };
 
-type Location = { type: 'region' | 'city'; value: string };
-
 const initialClientFilters = {
     searchTerm: '',
     status: '',
     accountManager: '',
-    locations: [] as Location[],
+    locations: [] as LocationItem[],
     industry: '',
     field: '',
     contactStatus: '',
@@ -144,89 +127,7 @@ const FilterSelect: React.FC<{label?: string, name: string; value: string; onCha
     </div>
 );
 
-const allRegions = ['צפון', 'דרום', 'מרכז', 'שרון', 'ירושלים והסביבה', 'יהודה ושומרון'];
-const allCities = ['תל אביב-יפו', 'ירושלים', 'חיפה', 'באר שבע', 'ראשון לציון', 'פתח תקווה', 'נתניה', 'אשדוד', 'חולון', 'רמת גן'];
-
-const LocationPopover: React.FC<{
-    selectedLocations: Location[];
-    onApply: (locations: Location[]) => void;
-    onClose: () => void;
-}> = ({ selectedLocations, onApply, onClose }) => {
-    const popoverRef = useRef<HTMLDivElement>(null);
-    const [activeTab, setActiveTab] = useState<'cities' | 'regions'>('cities');
-    const [internalSelection, setInternalSelection] = useState<Location[]>(selectedLocations);
-    const [citySearch, setCitySearch] = useState('');
-
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
-                onClose();
-            }
-        };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [onClose]);
-
-    const handleToggle = (item: Location) => {
-        setInternalSelection(prev => 
-            prev.some(loc => loc.type === item.type && loc.value === item.value)
-                ? prev.filter(loc => !(loc.type === item.type && loc.value === item.value))
-                : [...prev, item]
-        );
-    };
-
-    const filteredCities = allCities.filter(city => city.toLowerCase().includes(citySearch.toLowerCase()));
-
-    return (
-        <div ref={popoverRef} className="absolute top-full right-0 mt-2 bg-bg-card border border-border-default rounded-lg shadow-lg z-20 w-96">
-            <div className="flex border-b border-border-default">
-                <button onClick={() => setActiveTab('cities')} className={`flex-1 p-3 font-semibold text-sm ${activeTab === 'cities' ? 'text-primary-600 border-b-2 border-primary-600' : 'text-text-muted'}`}>ערים</button>
-                <button onClick={() => setActiveTab('regions')} className={`flex-1 p-3 font-semibold text-sm ${activeTab === 'regions' ? 'text-primary-600 border-b-2 border-primary-600' : 'text-text-muted'}`}>אזורים</button>
-            </div>
-            <div className="p-2 space-y-2">
-                {internalSelection.length > 0 && (
-                    <div className="flex flex-wrap gap-2 p-2 bg-bg-subtle rounded-md">
-                        {internalSelection.map(loc => (
-                             <span key={`${loc.type}-${loc.value}`} className="flex items-center bg-primary-100 text-primary-800 text-sm font-medium pl-3 pr-2 py-1 rounded-full">
-                                {loc.value}
-                                <button onClick={() => handleToggle(loc)} className="mr-1.5 text-primary-500 hover:text-primary-700">
-                                    <XMarkIcon className="h-4 w-4" />
-                                </button>
-                            </span>
-                        ))}
-                    </div>
-                )}
-                {activeTab === 'cities' && (
-                    <div className="p-2">
-                        <input type="text" value={citySearch} onChange={(e) => setCitySearch(e.target.value)} placeholder="חפש עיר..." className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                        <div className="max-h-40 overflow-y-auto mt-2 space-y-1">
-                            {filteredCities.map(city => (
-                                <label key={city} className="flex items-center gap-3 p-2 rounded-md hover:bg-bg-hover cursor-pointer">
-                                  <input type="checkbox" checked={internalSelection.some(loc => loc.type === 'city' && loc.value === city)} onChange={() => handleToggle({type: 'city', value: city})} className="w-4 h-4 text-primary-600 rounded" />
-                                  <span className="text-sm">{city}</span>
-                                </label>
-                            ))}
-                        </div>
-                    </div>
-                )}
-                {activeTab === 'regions' && (
-                    <div className="p-2 space-y-2 max-h-48 overflow-y-auto">
-                        {allRegions.map(region => (
-                            <label key={region} className="flex items-center gap-3 p-2 rounded-md hover:bg-bg-hover cursor-pointer">
-                                <input type="checkbox" checked={internalSelection.some(loc => loc.type === 'region' && loc.value === region)} onChange={() => handleToggle({type: 'region', value: region})} className="w-4 h-4 text-primary-600 rounded" />
-                                <span className="text-sm">{region}</span>
-                            </label>
-                        ))}
-                    </div>
-                )}
-            </div>
-            <div className="flex justify-between items-center p-2 border-t border-border-default">
-                <button onClick={() => setInternalSelection([])} className="text-sm font-semibold text-text-muted hover:text-primary-600">נקה הכל</button>
-                <button onClick={() => onApply(internalSelection)} className="bg-primary-600 text-white font-semibold py-1.5 px-4 rounded-md">החל</button>
-            </div>
-        </div>
-    );
-};
+// --- SUB COMPONENTS ---
 
 const ClientCard: React.FC<{ client: Client; onNavigate: () => void; }> = ({ client, onNavigate }) => (
     <div onClick={onNavigate} className="bg-bg-card rounded-lg border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-md transition-shadow">
@@ -268,7 +169,7 @@ const TabButton: React.FC<{ title: string; icon: React.ReactNode; isActive: bool
         onClick={onClick}
         className={`flex items-center gap-2 py-3 px-5 font-semibold transition-colors shrink-0 ${isActive ? 'border-b-2 border-primary-500 text-primary-600' : 'text-text-muted hover:text-text-default'}`}
     >
-        {React.cloneElement(icon as React.ReactElement<{ className: string }>, { className: 'w-5 h-5' })}
+        {React.cloneElement(icon as React.ReactElement<{ className?: string }>, { className: 'w-5 h-5' })}
         <span>{title}</span>
     </button>
 );
@@ -278,15 +179,40 @@ interface ClientsListViewProps {
 }
 
 const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) => {
+    const { t } = useLanguage();
     const navigate = useNavigate();
     const [clients] = useState<Client[]>(clientsData);
     const [activeTab, setActiveTab] = useState<'clients' | 'contacts'>('clients');
+
+    // Columns definitions using translation
+    const allClientColumns = useMemo(() => [
+        { id: 'name', header: t('clients.col_name') },
+        { id: 'contactPerson', header: t('clients.col_contact_person') },
+        { id: 'openJobs', header: t('clients.col_open_jobs') },
+        { id: 'status', header: t('clients.col_status') },
+        { id: 'accountManager', header: t('clients.col_account_manager') },
+        { id: 'city', header: t('clients.col_city') },
+        { id: 'region', header: t('clients.col_region') },
+        { id: 'industry', header: t('clients.col_industry') },
+        { id: 'field', header: t('clients.col_field') },
+    ], [t]);
+
+    const allContactColumns = useMemo(() => [
+        { id: 'name', header: t('contacts.col_name') },
+        { id: 'clientName', header: t('clients.col_name') }, // Reusing client name label for clarity
+        { id: 'role', header: t('contacts.col_role') },
+        { id: 'email', header: t('contacts.col_email') },
+        { id: 'phone', header: t('contacts.col_phone') },
+        { id: 'isActive', header: t('contacts.col_status') },
+    ], [t]);
+
+    const defaultVisibleClientColumns = useMemo(() => ['name', 'contactPerson', 'openJobs', 'status', 'accountManager', 'city'], []);
+    const defaultVisibleContactColumns = useMemo(() => ['name', 'role', 'clientName', 'phone', 'email', 'isActive'], []);
 
     // State for clients tab
     const [clientFilters, setClientFilters] = useState(initialClientFilters);
     const [isClientAdvancedFilterOpen, setIsClientAdvancedFilterOpen] = useState(false);
     const [clientViewMode, setClientViewMode] = useState<'table' | 'grid'>('table');
-    const [isLocationPopoverOpen, setIsLocationPopoverOpen] = useState(false);
     const [visibleClientColumns, setVisibleClientColumns] = useState<string[]>(defaultVisibleClientColumns);
     const [isClientSettingsOpen, setIsClientSettingsOpen] = useState(false);
     const clientSettingsRef = useRef<HTMLDivElement>(null);
@@ -296,7 +222,6 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
     
     // State for contacts tab
     const [contactFilters, setContactFilters] = useState(initialContactFilters);
-    const [isContactAdvancedFilterOpen, setIsContactAdvancedFilterOpen] = useState(false);
     const [contactViewMode, setContactViewMode] = useState<'table' | 'grid'>('table');
     const [visibleContactColumns, setVisibleContactColumns] = useState<string[]>(defaultVisibleContactColumns);
     const [isContactSettingsOpen, setIsContactSettingsOpen] = useState(false);
@@ -415,7 +340,7 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
             const matchesSearch = !search || contact.name.toLowerCase().includes(search) || contact.clientName.toLowerCase().includes(search) || contact.email.toLowerCase().includes(search);
             const matchesClient = !contactFilters.clientName || contact.clientName === contactFilters.clientName;
             const matchesRole = !contactFilters.role || contact.role.toLowerCase().includes(contactFilters.role.toLowerCase());
-            const matchesStatus = !contactFilters.status || (contactFilters.status === 'פעיל' && contact.isActive) || (contactFilters.status === 'לא פעיל' && !contact.isActive);
+            const matchesStatus = !contactFilters.status || (contactFilters.status === 'active' && contact.isActive) || (contactFilters.status === 'inactive' && !contact.isActive);
 
             return matchesSearch && matchesClient && matchesRole && matchesStatus;
         });
@@ -526,21 +451,21 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
             <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; } .animate-slide-up { animation: slide-up 0.3s ease-out forwards; } @keyframes slide-up { from { opacity: 0; transform: translateY(100%); } to { opacity: 1; transform: translateY(0); } } `}</style>
             <header className="flex flex-col md:flex-row items-center justify-between gap-2 mb-4">
                 <div>
-                    <h1 className="text-2xl font-bold text-text-default">ניהול לקוחות</h1>
+                    <h1 className="text-2xl font-bold text-text-default">{t('clients.title')}</h1>
                     <p className="text-sm text-text-muted">
-                        {activeTab === 'clients' ? `נמצאו ${sortedAndFilteredClients.length} לקוחות` : `נמצאו ${sortedAndFilteredContacts.length} אנשי קשר`}
+                        {activeTab === 'clients' ? t('clients.total_clients', {count: sortedAndFilteredClients.length}) : t('clients.total_contacts', {count: sortedAndFilteredContacts.length})}
                     </p>
                 </div>
                 <button onClick={() => navigate('/clients/new')} className="w-full md:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                     <PlusIcon className="w-5 h-5"/>
-                    <span>{activeTab === 'clients' ? 'לקוח חדש' : 'איש קשר חדש'}</span>
+                    <span>{activeTab === 'clients' ? t('clients.new_client_btn') : t('clients.new_contact_btn')}</span>
                 </button>
             </header>
             
             <div className="border-b border-border-default mb-4">
                 <nav className="flex items-center -mb-px gap-4">
-                    <TabButton title="לקוחות" icon={<BuildingOffice2Icon />} isActive={activeTab === 'clients'} onClick={() => setActiveTab('clients')} />
-                    <TabButton title="אנשי קשר" icon={<UserGroupIcon />} isActive={activeTab === 'contacts'} onClick={() => setActiveTab('contacts')} />
+                    <TabButton title={t('clients.tabs_clients')} icon={<BuildingOffice2Icon />} isActive={activeTab === 'clients'} onClick={() => setActiveTab('clients')} />
+                    <TabButton title={t('clients.tabs_contacts')} icon={<UserGroupIcon />} isActive={activeTab === 'contacts'} onClick={() => setActiveTab('contacts')} />
                 </nav>
             </div>
 
@@ -551,12 +476,12 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
                         <div className="flex flex-wrap items-end gap-3">
                             <div className="relative flex-grow min-w-[15rem] flex-shrink-0">
                                 <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                <input type="text" placeholder="שם, טלפון או דוא״ל..." name="searchTerm" value={clientFilters.searchTerm} onChange={handleClientFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm" />
+                                <input type="text" placeholder={t('clients.search_placeholder_clients')} name="searchTerm" value={clientFilters.searchTerm} onChange={handleClientFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm" />
                             </div>
-                            <FilterSelect placeholder="סטטוס" name="status" value={clientFilters.status} onChange={handleClientFilterChange} options={filterOptions.statuses} className="flex-grow min-w-[8rem] flex-shrink-0" />
-                            <FilterSelect placeholder="מנהל תיק" name="accountManager" value={clientFilters.accountManager} onChange={handleClientFilterChange} options={filterOptions.accountManagers} className="flex-grow min-w-[8rem] flex-shrink-0" />
+                            <FilterSelect placeholder={t('clients.filter_status')} name="status" value={clientFilters.status} onChange={handleClientFilterChange} options={filterOptions.statuses} className="flex-grow min-w-[8rem] flex-shrink-0" />
+                            <FilterSelect placeholder={t('clients.filter_account_manager')} name="accountManager" value={clientFilters.accountManager} onChange={handleClientFilterChange} options={filterOptions.accountManagers} className="flex-grow min-w-[8rem] flex-shrink-0" />
                             <button onClick={() => setIsClientAdvancedFilterOpen(!isClientAdvancedFilterOpen)} className="text-sm font-semibold text-primary-600 bg-primary-100/70 py-2.5 px-4 rounded-lg hover:bg-primary-200 transition flex items-center gap-1">
-                                <span>מתקדם</span>
+                                <span>{t('clients.filter_advanced')}</span>
                                 <ChevronDownIcon className={`w-4 h-4 transition-transform ${isClientAdvancedFilterOpen ? 'rotate-180' : ''}`} />
                             </button>
                         </div>
@@ -565,48 +490,40 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
                              <div className="pt-4 mt-3 border-t border-border-default space-y-4">
                                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
                                     <div className="relative">
-                                        <label className="block text-xs font-semibold text-text-muted mb-1">מיקום</label>
-                                        <button onClick={() => setIsLocationPopoverOpen(!isLocationPopoverOpen)} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm flex justify-between items-center text-right">
-                                            <span>{clientFilters.locations.length > 0 ? `(${clientFilters.locations.length}) נבחרו` : 'בחר ערים או אזורים'}</span>
-                                            <ChevronDownIcon className="w-4 h-4 text-text-subtle" />
-                                        </button>
-                                        {isLocationPopoverOpen && (
-                                            <LocationPopover
-                                                selectedLocations={clientFilters.locations}
-                                                onApply={(newLocations) => {
-                                                    setClientFilters(prev => ({ ...prev, locations: newLocations }));
-                                                    setIsLocationPopoverOpen(false);
-                                                }}
-                                                onClose={() => setIsLocationPopoverOpen(false)}
-                                            />
-                                        )}
+                                        <label className="block text-xs font-semibold text-text-muted mb-1">{t('clients.filter_location')}</label>
+                                        <LocationSelector 
+                                            selectedLocations={clientFilters.locations}
+                                            onChange={(newLocations) => setClientFilters(prev => ({ ...prev, locations: newLocations }))}
+                                            placeholder={t('clients.filter_location_placeholder')}
+                                            className="w-full"
+                                        />
                                     </div>
-                                    <FilterSelect label="תעשייה" name="industry" value={clientFilters.industry} onChange={handleClientFilterChange} options={filterOptions.industries} placeholder="הכל" />
-                                    <FilterSelect label="תחום" name="field" value={clientFilters.field} onChange={handleClientFilterChange} options={filterOptions.fields} placeholder="הכל" />
-                                    <FilterSelect label="סטטוס איש קשר" name="contactStatus" value={clientFilters.contactStatus} onChange={handleClientFilterChange} options={['פעיל', 'לא פעיל']} placeholder="הכל" />
-                                    <FilterInput label="מזהה לקוח" name="clientId" value={clientFilters.clientId} onChange={handleClientFilterChange} />
-                                    <FilterSelect label="רכז גיוס" name="recruitingCoordinator" value={clientFilters.recruitingCoordinator} onChange={handleClientFilterChange} options={filterOptions.recruitingCoordinators} placeholder="הכל" />
-                                    <FilterInput label="מתאריך יצירה" name="creationDateFrom" value={clientFilters.creationDateFrom} onChange={handleClientFilterChange} type="date" />
-                                    <FilterInput label="עד תאריך יצירה" name="creationDateTo" value={clientFilters.creationDateTo} onChange={handleClientFilterChange} type="date" />
+                                    <FilterSelect label={t('clients.filter_industry')} name="industry" value={clientFilters.industry} onChange={handleClientFilterChange} options={filterOptions.industries} placeholder={t('filter.status_all')} />
+                                    <FilterSelect label={t('clients.filter_field')} name="field" value={clientFilters.field} onChange={handleClientFilterChange} options={filterOptions.fields} placeholder={t('filter.status_all')} />
+                                    <FilterSelect label={t('clients.filter_contact_status')} name="contactStatus" value={clientFilters.contactStatus} onChange={handleClientFilterChange} options={['פעיל', 'לא פעיל']} placeholder={t('filter.status_all')} />
+                                    <FilterInput label={t('clients.filter_client_id')} name="clientId" value={clientFilters.clientId} onChange={handleClientFilterChange} />
+                                    <FilterSelect label={t('clients.filter_recruiter')} name="recruitingCoordinator" value={clientFilters.recruitingCoordinator} onChange={handleClientFilterChange} options={filterOptions.recruitingCoordinators} placeholder={t('filter.status_all')} />
+                                    <FilterInput label={t('clients.filter_creation_date_from')} name="creationDateFrom" value={clientFilters.creationDateFrom} onChange={handleClientFilterChange} type="date" />
+                                    <FilterInput label={t('clients.filter_creation_date_to')} name="creationDateTo" value={clientFilters.creationDateTo} onChange={handleClientFilterChange} type="date" />
                                 </div>
                                 <div className="flex justify-end pt-2">
-                                    <button onClick={handleResetClientFilters} className="text-sm font-semibold text-text-muted hover:text-primary-600 flex items-center gap-1.5"><ArrowPathIcon className="w-4 h-4" /> איפוס</button>
+                                    <button onClick={handleResetClientFilters} className="text-sm font-semibold text-text-muted hover:text-primary-600 flex items-center gap-1.5"><ArrowPathIcon className="w-4 h-4" /> {t('clients.reset_filters')}</button>
                                 </div>
                             </div>
                         )}
                     </div>
                     <div className="flex justify-between items-center mb-4">
-                        <span className="text-sm font-semibold text-text-muted">{sortedAndFilteredClients.length} לקוחות</span>
+                        <span className="text-sm font-semibold text-text-muted">{t('clients.total_clients', {count: sortedAndFilteredClients.length})}</span>
                         <div className="flex items-center gap-2">
                             <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
-                                <button onClick={() => setClientViewMode('table')} title="תצוגת טבלה" className={`p-1.5 rounded-md ${clientViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
-                                <button onClick={() => setClientViewMode('grid')} title="תצוגת רשת" className={`p-1.5 rounded-md ${clientViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                                <button onClick={() => setClientViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${clientViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                                <button onClick={() => setClientViewMode('grid')} title={t('candidates.view_grid')} className={`p-1.5 rounded-md ${clientViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
                             </div>
                             <div className="relative" ref={clientSettingsRef}>
-                                <button onClick={() => setIsClientSettingsOpen(!isClientSettingsOpen)} title="התאם עמודות" className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
+                                <button onClick={() => setIsClientSettingsOpen(!isClientSettingsOpen)} title={t('candidates.customize_columns')} className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
                                 {isClientSettingsOpen && (
                                 <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                    <p className="font-bold text-text-default mb-2 text-sm">הצג עמודות</p>
+                                    <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                     <div className="space-y-2 max-h-60 overflow-y-auto">
                                     {allClientColumns.map(column => (
                                         <label key={column.id} className="flex items-center gap-2 text-sm font-normal text-text-default capitalize cursor-pointer">
@@ -636,7 +553,7 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
                                                         </th>
                                                     );
                                                 })}
-                                                <th className="p-4">פעולות</th>
+                                                <th className="p-4">{t('clients.col_actions')}</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-border-subtle">
@@ -666,7 +583,7 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
                         ) : (
                             <div className="text-center py-10 bg-bg-subtle rounded-lg border border-dashed border-border-default">
                                 <BuildingOffice2Icon className="w-12 h-12 text-text-subtle mx-auto mb-3" />
-                                <p className="text-text-muted font-semibold">לא נמצאו לקוחות</p>
+                                <p className="text-text-muted font-semibold">{t('clients.no_clients')}</p>
                             </div>
                         )}
                     </main>
@@ -681,25 +598,25 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
                                 <label className="block text-xs font-semibold text-text-muted mb-1">חיפוש חופשי</label>
                                 <div className="relative">
                                     <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                    <input type="text" placeholder="שם, לקוח, דוא״ל..." name="searchTerm" value={contactFilters.searchTerm} onChange={handleContactFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm" />
+                                    <input type="text" placeholder={t('clients.search_placeholder_contacts')} name="searchTerm" value={contactFilters.searchTerm} onChange={handleContactFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm" />
                                 </div>
                             </div>
-                             <FilterSelect label="לקוח" name="clientName" value={contactFilters.clientName} onChange={handleContactFilterChange} options={filterOptions.contactClients} placeholder="כל הלקוחות" />
-                             <FilterSelect label="סטטוס" name="status" value={contactFilters.status} onChange={handleContactFilterChange} options={['פעיל', 'לא פעיל']} placeholder="הכל" />
+                             <FilterSelect label={t('clients.col_name')} name="clientName" value={contactFilters.clientName} onChange={handleContactFilterChange} options={filterOptions.contactClients} placeholder={t('filter.status_all')} />
+                             <FilterSelect label={t('clients.filter_status')} name="status" value={contactFilters.status} onChange={handleContactFilterChange} options={['active', 'inactive']} placeholder={t('filter.status_all')} />
                         </div>
                     </div>
                      <div className="flex justify-between items-center mb-4">
-                        <span className="text-sm font-semibold text-text-muted">{sortedAndFilteredContacts.length} אנשי קשר</span>
+                        <span className="text-sm font-semibold text-text-muted">{t('clients.total_contacts', {count: sortedAndFilteredContacts.length})}</span>
                         <div className="flex items-center gap-2">
                             <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
-                                <button onClick={() => setContactViewMode('table')} title="תצוגת טבלה" className={`p-1.5 rounded-md ${contactViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
-                                <button onClick={() => setContactViewMode('grid')} title="תצוגת רשת" className={`p-1.5 rounded-md ${contactViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                                <button onClick={() => setContactViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${contactViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                                <button onClick={() => setContactViewMode('grid')} title={t('candidates.view_grid')} className={`p-1.5 rounded-md ${contactViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
                             </div>
                             <div className="relative" ref={contactSettingsRef}>
-                                <button onClick={() => setIsContactSettingsOpen(!isContactSettingsOpen)} title="התאם עמודות" className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
+                                <button onClick={() => setIsContactSettingsOpen(!isContactSettingsOpen)} title={t('candidates.customize_columns')} className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
                                 {isContactSettingsOpen && (
                                 <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                    <p className="font-bold text-text-default mb-2 text-sm">הצג עמודות</p>
+                                    <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                     <div className="space-y-2 max-h-60 overflow-y-auto">
                                     {allContactColumns.map(column => (
                                         <label key={column.id} className="flex items-center gap-2 text-sm font-normal text-text-default capitalize cursor-pointer">
@@ -755,12 +672,12 @@ const ClientsListView: React.FC<ClientsListViewProps> = ({ openMessageModal }) =
                     <div className="w-full max-w-xl mx-auto pointer-events-auto">
                         <div className="bg-bg-card rounded-xl shadow-2xl border border-border-default px-4 py-2 animate-slide-up flex items-center justify-between">
                             <div className="flex items-center gap-4">
-                                <span className="text-sm font-bold">{selectedContactIds.size} נבחרו</span>
-                                <button onClick={() => setSelectedContactIds(new Set())} className="text-sm font-semibold text-primary-600 hover:underline">נקה בחירה</button>
+                                <span className="text-sm font-bold">{t('contacts.selected_count', {count: selectedContactIds.size})}</span>
+                                <button onClick={() => setSelectedContactIds(new Set())} className="text-sm font-semibold text-primary-600 hover:underline">{t('contacts.clear_selection')}</button>
                             </div>
                             <div className="flex items-center gap-2 font-semibold text-sm">
-                                <button onClick={() => console.log("Bulk SMS:", selectedContactIds)} className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">שלח SMS</button>
-                                <button onClick={() => console.log("Bulk Email:", selectedContactIds)} className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">שלח מייל</button>
+                                <button onClick={() => console.log("Bulk SMS:", selectedContactIds)} className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('contacts.bulk_sms')}</button>
+                                <button onClick={() => console.log("Bulk Email:", selectedContactIds)} className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('contacts.bulk_email')}</button>
                             </div>
                         </div>
                     </div>

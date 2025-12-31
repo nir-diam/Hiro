@@ -14,6 +14,7 @@ import { useSavedSearches } from '../context/SavedSearchesContext';
 import PurchaseCandidateModal from './PurchaseCandidateModal';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- HELPER FOR ANONYMIZATION ---
 const anonymizeCandidate = (candidate: any, isPurchased: boolean) => {
@@ -48,6 +49,7 @@ const PoolCandidateCard: React.FC<{
     selectionMode?: boolean;
     isPurchased: boolean;
 }> = ({ candidate, onViewProfile, isFavorite, onToggleFavorite, isSelected, onSelect, selectionMode, isPurchased }) => {
+    const { t } = useLanguage();
     
     const displayCandidate = anonymizeCandidate(candidate, isPurchased);
 
@@ -106,8 +108,8 @@ const PoolCandidateCard: React.FC<{
             {/* Experience Section (The Theme-Aware Bar) */}
             <div className="w-full mb-4 text-right">
                 <div className="flex justify-between text-xs font-bold text-text-default mb-2">
-                    <span>ניסיון בתעשיות</span>
-                    <span>סה"כ {totalYears} שנים</span>
+                    <span>{t('pool.card_experience')}</span>
+                    <span>{t('pool.card_total_years', {years: totalYears})}</span>
                 </div>
                 {/* Progress Bar */}
                 <div className="w-full h-2.5 bg-bg-subtle rounded-full overflow-hidden flex mb-2">
@@ -132,7 +134,7 @@ const PoolCandidateCard: React.FC<{
             {/* Highlights / Education / Specific Tags */}
             <div className="w-full text-right mb-6 space-y-2">
                 <div className="flex items-center justify-between text-xs text-text-default bg-bg-subtle p-2 rounded-lg border border-border-subtle">
-                    <span className="font-bold">דגשים</span>
+                    <span className="font-bold">{t('pool.card_highlights')}</span>
                 </div>
                 <div className="flex flex-wrap gap-2 justify-center mt-2">
                      {/* Standard Highlights */}
@@ -144,12 +146,12 @@ const PoolCandidateCard: React.FC<{
                      
                      {/* English Level Badge */}
                      <span className="bg-bg-card border border-border-default text-text-default px-3 py-1 rounded-full text-xs flex items-center gap-1 shadow-sm">
-                        <LanguageIcon className="w-3 h-3 text-primary-500" /> אנגלית ברמה גבוהה
+                        <LanguageIcon className="w-3 h-3 text-primary-500" /> {t('profile.english_native')}
                      </span>
                      
                      {/* Degree Badge */}
                      <span className="bg-bg-card border border-border-default text-text-default px-3 py-1 rounded-full text-xs flex items-center gap-1 shadow-sm">
-                        <AcademicCapIcon className="w-3 h-3 text-primary-500" /> תואר אקדמי
+                        <AcademicCapIcon className="w-3 h-3 text-primary-500" /> {t('profile.degree')}
                      </span>
                 </div>
             </div>
@@ -158,7 +160,7 @@ const PoolCandidateCard: React.FC<{
 
             {/* Bottom Details */}
             <div className="w-full flex justify-between items-center text-xs text-text-muted mb-4 px-2 pt-4 border-t border-border-subtle">
-                <span className="font-medium">היקף משרה</span>
+                <span className="font-medium">{t('pool.card_job_scope')}</span>
                 <span className="font-bold text-text-default">{candidate.jobScopes[0]}</span>
             </div>
 
@@ -168,7 +170,7 @@ const PoolCandidateCard: React.FC<{
                 className="w-full py-2.5 rounded-xl transition-all border-2 border-primary-600 text-primary-600 font-bold hover:bg-primary-50 active:scale-95 flex items-center justify-center gap-2"
             >
                 <EyeIcon className="w-5 h-5" />
-                <span>צפייה בפרופיל</span>
+                <span>{t('pool.card_view_profile')}</span>
             </button>
         </div>
     );
@@ -522,6 +524,7 @@ const LocationPopover: React.FC<{
 };
 
 const CandidatePoolView: React.FC = () => {
+    const { t } = useLanguage();
     const navigate = useNavigate();
     const { savedSearches, addSearch, deleteSearch } = useSavedSearches();
     const [searchParamsFromUrl] = useSearchParams();
@@ -772,7 +775,7 @@ const CandidatePoolView: React.FC = () => {
 
     const handleShowResults = () => {
         setIsAdvancedSearchOpen(false);
-        setFeedbackMessage(`נמצאו ${filteredCandidates.length} מועמדים תואמים`);
+        setFeedbackMessage(t('pool.found_count', { count: filteredCandidates.length }));
         // Optional: Scroll to top of results if needed
         const mainContainer = document.querySelector('main');
         if (mainContainer) mainContainer.scrollTop = 0;
@@ -851,7 +854,7 @@ const CandidatePoolView: React.FC = () => {
                      <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                     <input 
                         type="text" 
-                        placeholder="חיפוש מועמד לפי שם, תפקיד או כישורים..." 
+                        placeholder={t('pool.search_placeholder')} 
                         value={searchTerm} 
                         onChange={e => setSearchTerm(e.target.value)} 
                         className="w-full bg-bg-input border border-border-default rounded-xl py-3 pl-3 pr-12 text-base focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
@@ -864,13 +867,13 @@ const CandidatePoolView: React.FC = () => {
                         <button
                             onClick={() => setIsSavedSearchesOpen(!isSavedSearchesOpen)}
                             className={`p-3 border rounded-xl transition-colors ${isSavedSearchesOpen ? 'bg-primary-100 border-primary-300 text-primary-700' : 'bg-bg-subtle border-border-default text-text-muted hover:text-primary-600 hover:border-primary-300'}`}
-                            title="חיפושים שמורים"
+                            title={t('pool.filter_saved')}
                         >
                             <ClockIcon className="w-5 h-5" />
                         </button>
                         {isSavedSearchesOpen && (
                             <div className="absolute top-full left-0 mt-2 w-72 bg-bg-card rounded-xl shadow-xl border border-border-default z-30 p-2">
-                                <h4 className="text-xs font-bold text-text-muted px-2 py-1 border-b border-border-default mb-1">חיפושים שמורים</h4>
+                                <h4 className="text-xs font-bold text-text-muted px-2 py-1 border-b border-border-default mb-1">{t('pool.filter_saved')}</h4>
                                 {savedSearches.length === 0 ? (
                                     <div className="p-2 text-sm text-text-subtle text-center">אין חיפושים שמורים</div>
                                 ) : (
@@ -899,12 +902,12 @@ const CandidatePoolView: React.FC = () => {
                     <button 
                         onClick={() => setShowFavoritesOnly(!showFavoritesOnly)}
                         className={`p-3 rounded-xl border-2 transition-all ${showFavoritesOnly ? 'border-primary-500 bg-primary-50 text-primary-700' : 'bg-bg-subtle border-border-default text-text-muted hover:border-primary-300 hover:text-primary-600'}`}
-                        title="המועדפים שלי"
+                        title={t('pool.filter_favorites')}
                     >
                         {showFavoritesOnly ? <BookmarkIconSolid className="w-5 h-5" /> : <BookmarkIcon className="w-5 h-5" />}
                     </button>
 
-                    <button onClick={toggleSelectionMode} className={`p-3 rounded-xl border-2 transition-all ${selectionMode ? 'border-primary-500 bg-primary-50 text-primary-700' : 'bg-bg-subtle border-border-default text-text-muted hover:border-primary-300 hover:text-primary-600'}`} title="בחירה מרובה">
+                    <button onClick={toggleSelectionMode} className={`p-3 rounded-xl border-2 transition-all ${selectionMode ? 'border-primary-500 bg-primary-50 text-primary-700' : 'bg-bg-subtle border-border-default text-text-muted hover:border-primary-300 hover:text-primary-600'}`} title={t('pool.filter_multi')}>
                          <CheckCircleIcon className="w-5 h-5" />
                     </button>
                     
@@ -918,7 +921,7 @@ const CandidatePoolView: React.FC = () => {
                         }`}
                     >
                         <BuildingOffice2Icon className="w-5 h-5" />
-                        <span className="hidden sm:inline">רקע תעסוקתי</span>
+                        <span className="hidden sm:inline">{t('pool.filter_employment')}</span>
                     </button>
                      {isCompanyFilterOpen && (
                         <CompanyFilterPopover
@@ -933,13 +936,13 @@ const CandidatePoolView: React.FC = () => {
                         className={`flex items-center gap-2 font-semibold py-3 px-4 rounded-xl border-2 transition-all ${isAdvancedSearchOpen ? 'bg-primary-600 text-white border-primary-600' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`}
                     >
                         <AdjustmentsHorizontalIcon className="w-5 h-5" />
-                        <span className="hidden sm:inline">סינון</span>
+                        <span className="hidden sm:inline">{t('pool.filter_advanced')}</span>
                         <ChevronDownIcon className={`w-4 h-4 transition-transform ${isAdvancedSearchOpen ? 'rotate-180' : ''}`}/>
                     </button>
 
                      <div className="flex items-center bg-bg-subtle p-1.5 rounded-xl border border-border-default">
-                        <button onClick={() => setViewMode('grid')} title="תצוגת רשת" className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
-                        <button onClick={() => setViewMode('list')} title="תצוגת רשימה" className={`p-2 rounded-lg transition-colors ${viewMode === 'list' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                        <button onClick={() => setViewMode('grid')} title={t('pool.view_grid')} className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                        <button onClick={() => setViewMode('list')} title={t('pool.view_list')} className={`p-2 rounded-lg transition-colors ${viewMode === 'list' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
                     </div>
                 </div>
             </header>
@@ -950,7 +953,7 @@ const CandidatePoolView: React.FC = () => {
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
                         {/* Row 1 */}
                         <div className="lg:col-span-2">
-                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">תגיות וכישורים</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.tags_skills')}</label>
                             <div className="w-full bg-bg-input border border-border-default rounded-xl p-2 flex items-center flex-wrap gap-2 min-h-[46px] focus-within:ring-2 focus-within:ring-primary-500 transition-shadow">
                                 {searchParams.mainFieldTags.map((tag, index) => (
                                     <span key={index} className="flex items-center bg-primary-100 text-primary-800 text-sm font-medium pl-3 pr-2 py-1 rounded-full animate-fade-in">
@@ -963,16 +966,16 @@ const CandidatePoolView: React.FC = () => {
                                     value={mainFieldInput} 
                                     onChange={(e) => setMainFieldInput(e.target.value)} 
                                     onKeyDown={handleMainFieldKeyDown} 
-                                    placeholder="הקלד תגית ולחץ Enter..." 
+                                    placeholder={t('filter.tags_placeholder')}
                                     className="flex-grow bg-transparent outline-none text-sm min-w-[120px]" 
                                 />
                             </div>
                         </div>
                         <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">מיקום</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.location')}</label>
                              <div className="relative">
                                 <button onClick={() => setIsLocationPopoverOpen(!isLocationPopoverOpen)} className="w-full bg-bg-input border border-border-default rounded-xl py-3 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors">
-                                    <span className="truncate">{searchParams.locations.length > 0 ? `${searchParams.locations.length} מיקומים נבחרו` : 'בחר אזור או עיר'}</span>
+                                    <span className="truncate">{searchParams.locations.length > 0 ? `${searchParams.locations.length} מיקומים נבחרו` : t('filter.location_placeholder')}</span>
                                     <ChevronDownIcon className="w-4 h-4 text-text-subtle" />
                                 </button>
                                  {isLocationPopoverOpen && (
@@ -985,17 +988,17 @@ const CandidatePoolView: React.FC = () => {
                             </div>
                         </div>
                          <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">סטטוס</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.status')}</label>
                             <select className="w-full bg-bg-input border border-border-default rounded-xl py-3 px-3 text-sm focus:ring-primary-500 focus:border-primary-500">
-                                <option>הכל</option>
-                                <option>פעיל</option>
-                                <option>לא פעיל</option>
+                                <option>{t('filter.status_all')}</option>
+                                <option>{t('filter.status_active')}</option>
+                                <option>{t('filter.status_inactive')}</option>
                             </select>
                         </div>
-
+                        
                         {/* Row 2 */}
                          <div className="lg:col-span-2">
-                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">היקף משרה</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.job_scope')}</label>
                             <div className="flex flex-wrap gap-2">
                                 {jobScopeOptions.map(scope => (
                                     <button
@@ -1013,12 +1016,12 @@ const CandidatePoolView: React.FC = () => {
                             </div>
                         </div>
                         <div>
-                             <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">תחום עניין / תפקיד</label>
+                             <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.interest_role')}</label>
                              <button 
                                 onClick={() => setIsJobFieldSelectorOpen(true)}
                                 className="w-full bg-bg-input border border-border-default rounded-xl py-3 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors"
                             >
-                                <span className="truncate">{searchParams.interestRole || 'בחר תחום או תפקיד...'}</span>
+                                <span className="truncate">{searchParams.interestRole || t('filter.interest_role_placeholder')}</span>
                                 <BriefcaseIcon className="w-4 h-4 text-text-subtle" />
                             </button>
                         </div>
@@ -1041,20 +1044,20 @@ const CandidatePoolView: React.FC = () => {
 
                         {/* Row 3 */}
                         <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">השכלה</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.education')}</label>
                              <button 
                                 onClick={() => setSearchParams(p => ({ ...p, hasDegree: !p.hasDegree }))} 
                                 className={`w-full flex items-center justify-between px-4 py-3 rounded-xl border-2 transition-all ${searchParams.hasDegree ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-sm' : 'bg-bg-input border-border-default text-text-muted hover:border-primary-300'}`}
                             >
-                                <span className="font-semibold text-sm">בעל תואר אקדמי</span>
+                                <span className="font-semibold text-sm">{t('filter.has_degree')}</span>
                                 {searchParams.hasDegree ? <CheckCircleIcon className="w-5 h-5" /> : <AcademicCapIcon className="w-5 h-5 opacity-50"/>}
                             </button>
                         </div>
                         <div className="lg:col-span-2">
-                             <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">שפות</label>
+                             <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.languages')}</label>
                              <div className="flex gap-2">
                                 <select value={currentLanguage} onChange={(e) => setCurrentLanguage(e.target.value)} className="flex-1 bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm"><option>עברית</option><option>אנגלית</option><option>רוסית</option></select>
-                                <select value={currentLevel} onChange={(e) => setCurrentLevel(e.target.value)} className="flex-1 bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm"><option>רמת שפת אם</option><option>רמה גבוהה</option></select>
+                                <select value={currentLevel} onChange={(e) => setCurrentLevel(e.target.value)} className="flex-1 bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm"><option>שפת אם</option><option>רמה גבוהה</option></select>
                                 <button onClick={handleAddLanguage} className="bg-primary-100 text-primary-700 p-2 rounded-xl hover:bg-primary-200 transition"><PlusIcon className="w-5 h-5"/></button>
                              </div>
                              <div className="flex flex-wrap gap-2 mt-2 min-h-[28px]">
@@ -1071,15 +1074,15 @@ const CandidatePoolView: React.FC = () => {
                     <div className="mt-6 pt-4 border-t border-border-default flex justify-between items-center">
                         <div className="flex items-center gap-2">
                             <button onClick={() => {setSearchParams(prev => ({...prev, mainFieldTags: [], locations: [], interestRole: '', industryExperience: '', hasDegree: false, jobScopes: jobScopeOptions})); setLanguageFilters([]); setMainFieldInput('');}} className="text-sm font-semibold text-text-muted hover:text-red-500 transition-colors">
-                                נקה הכל
+                                {t('candidates.reset_all')}
                             </button>
                             <button onClick={handleOpenSaveModal} className="flex items-center gap-1 text-sm font-semibold text-primary-600 hover:text-primary-800 bg-primary-50 px-3 py-2 rounded-lg hover:bg-primary-100 transition">
                                 <BookmarkIcon className="w-4 h-4"/>
-                                <span>שמור חיפוש</span>
+                                <span>{t('candidates.save_search')}</span>
                             </button>
                         </div>
                         <button onClick={handleShowResults} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">
-                            הצג תוצאות
+                            {t('candidates.show_results')}
                         </button>
                     </div>
                  </div>
@@ -1139,15 +1142,15 @@ const CandidatePoolView: React.FC = () => {
             {selectedIds.size > 0 && (
                 <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-40">
                     <div className="bg-bg-card text-text-default rounded-full shadow-2xl border border-border-default px-6 py-3 flex items-center gap-6 animate-slide-up">
-                        <span className="font-bold text-primary-600">{selectedIds.size} נבחרו</span>
+                        <span className="font-bold text-primary-600">{t('pool.selected_count', {count: selectedIds.size})}</span>
                         <div className="h-6 w-px bg-border-default"></div>
                         <button className="font-semibold hover:text-primary-600 transition-colors flex items-center gap-2">
-                            <FolderIcon className="w-5 h-5"/> הוסף למאגר שלי
+                            <FolderIcon className="w-5 h-5"/> {t('pool.add_to_my_pool')}
                         </button>
                         <button className="font-semibold hover:text-primary-600 transition-colors flex items-center gap-2">
-                            <EnvelopeIcon className="w-5 h-5"/> שלח הודעה
+                            <EnvelopeIcon className="w-5 h-5"/> {t('pool.send_message')}
                         </button>
-                        <button onClick={() => setSelectedIds(new Set())} className="p-1 bg-bg-subtle rounded-full hover:bg-bg-hover ml-2">
+                        <button onClick={() => setSelectedIds(new Set())} className="p-1 bg-bg-subtle rounded-full hover:bg-bg-hover ml-2" title={t('pool.clear_selection')}>
                             <XMarkIcon className="w-4 h-4 text-text-muted"/>
                         </button>
                     </div>
@@ -1158,18 +1161,18 @@ const CandidatePoolView: React.FC = () => {
             {isSaveModalOpen && (
                 <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-center justify-center p-4" onClick={() => setIsSaveModalOpen(false)}>
                     <div className="bg-bg-card rounded-xl shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
-                        <h3 className="text-lg font-bold mb-4">שמור חיפוש</h3>
+                        <h3 className="text-lg font-bold mb-4">{t('pool.save_search_title')}</h3>
                         <input
                             type="text"
                             value={searchNameToSave}
                             onChange={e => setSearchNameToSave(e.target.value)}
-                            placeholder="תן שם לחיפוש (לדוגמה: מפתחי ריאקט בתל אביב)"
+                            placeholder={t('pool.save_search_placeholder')}
                             className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5 mb-4 focus:ring-primary-500 focus:border-primary-500"
                             autoFocus
                         />
                         <div className="flex justify-end gap-2">
-                            <button onClick={() => setIsSaveModalOpen(false)} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover">ביטול</button>
-                            <button onClick={handleSaveSearch} className="bg-primary-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-700">שמור</button>
+                            <button onClick={() => setIsSaveModalOpen(false)} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover">{t('pool.cancel')}</button>
+                            <button onClick={handleSaveSearch} className="bg-primary-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-700">{t('pool.save')}</button>
                         </div>
                     </div>
                 </div>

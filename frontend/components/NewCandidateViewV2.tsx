@@ -16,6 +16,7 @@ import {
 } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import CVUploadModal from './CVUploadModal';
+import { useLanguage } from '../context/LanguageContext';
 
 type CreationMode = 'choice' | 'ai_input' | 'ai_result' | 'manual';
 
@@ -86,6 +87,7 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
 const NewCandidateViewV2: React.FC = () => {
     const navigate = useNavigate();
     const location = useLocation();
+    const { t } = useLanguage();
     const [creationMode, setCreationMode] = useState<CreationMode>('choice');
     const [formData, setFormData] = useState<any>(initialCandidateState);
     const [resumeData, setResumeData] = useState<any>(initialResumeState);
@@ -298,8 +300,8 @@ const NewCandidateViewV2: React.FC = () => {
 
     const ChoiceScreen = () => (
         <div className="flex flex-col items-center justify-center min-h-[60vh] py-12 animate-fade-in">
-            <h2 className="text-3xl font-black text-text-default mb-2">איך תרצו להוסיף את המועמד?</h2>
-            <p className="text-text-muted mb-12">בחרו את הדרך הנוחה לכם ביותר כרגע</p>
+            <h2 className="text-3xl font-black text-text-default mb-2">{t('new_candidate.title')}</h2>
+            <p className="text-text-muted mb-12">{t('new_candidate.subtitle')}</p>
             
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl px-4">
                 {/* AI Option */}
@@ -310,9 +312,9 @@ const NewCandidateViewV2: React.FC = () => {
                     <div className="w-20 h-20 bg-primary-100 text-primary-600 rounded-2xl flex items-center justify-center mb-6 group-hover:rotate-6 transition-transform">
                         <SparklesIcon className="w-10 h-10" />
                     </div>
-                    <h3 className="text-xl font-bold text-text-default mb-3">עיבוד AI אוטומטי</h3>
+                    <h3 className="text-xl font-bold text-text-default mb-3">{t('new_candidate.card_ai_title')}</h3>
                     <p className="text-sm text-text-muted leading-relaxed">
-                        העלו קובץ או הדביקו טקסט והמערכת תנתח את הניסיון, הכישורים ותבנה את הפרופיל עבורכם.
+                        {t('new_candidate.card_ai_desc')}
                     </p>
                 </button>
 
@@ -324,9 +326,9 @@ const NewCandidateViewV2: React.FC = () => {
                     <div className="w-20 h-20 bg-bg-subtle text-text-muted rounded-2xl flex items-center justify-center mb-6 group-hover:-rotate-6 transition-transform">
                         <UserPlusIcon className="w-10 h-10" />
                     </div>
-                    <h3 className="text-xl font-bold text-text-default mb-3">הקמה ידנית מהירה</h3>
+                    <h3 className="text-xl font-bold text-text-default mb-3">{t('new_candidate.card_manual_title')}</h3>
                     <p className="text-sm text-text-muted leading-relaxed">
-                        מתאים כשאין קובץ זמין. פתחו כרטיס ריק להזנה מהירה של שם, טלפון ותגיות.
+                        {t('new_candidate.card_manual_desc')}
                     </p>
                 </button>
             </div>
@@ -337,7 +339,7 @@ const NewCandidateViewV2: React.FC = () => {
         <div className="max-w-3xl mx-auto space-y-8 animate-fade-in py-8">
             <button onClick={() => setCreationMode('choice')} className="text-sm font-bold text-text-muted hover:text-primary-600 flex items-center gap-1 transition-colors">
                 <ArrowLeftIcon className="w-4 h-4 transform rotate-180" />
-                חזרה לבחירה
+                {t('new_candidate.back_to_choice')}
             </button>
 
             <div className="bg-bg-card rounded-3xl shadow-xl border border-border-default p-8 relative overflow-hidden">
@@ -348,18 +350,18 @@ const NewCandidateViewV2: React.FC = () => {
                              <div className="absolute inset-0 border-4 border-primary-600 rounded-full border-t-transparent animate-spin"></div>
                              <SparklesIcon className="absolute inset-0 m-auto w-10 h-10 text-primary-600 animate-pulse" />
                         </div>
-                        <h3 className="text-xl font-bold mb-2">מנתח נתונים...</h3>
+                        <h3 className="text-xl font-bold mb-2">{t('new_candidate.analyzing')}</h3>
                         <p className="text-primary-600 font-medium text-lg">{loadingMessage}</p>
                     </div>
                 )}
 
                 <div className="mb-10">
-                    <h3 className="text-2xl font-black text-text-default mb-4">ניתוח קורות חיים</h3>
+                    <h3 className="text-2xl font-black text-text-default mb-4">{t('new_candidate.ai_parsing_title')}</h3>
                     <textarea
                         value={pastedResumeText}
                         onChange={(e) => setPastedResumeText(e.target.value)}
                         rows={6}
-                        placeholder="הדבקת טקסט חופשי כאן..."
+                        placeholder={t('new_candidate.ai_parsing_placeholder')}
                         className="w-full bg-bg-input border border-border-default rounded-2xl p-4 text-sm focus:ring-2 focus:ring-primary-500 transition-all resize-none"
                     />
                     <button
@@ -367,23 +369,23 @@ const NewCandidateViewV2: React.FC = () => {
                         disabled={!pastedResumeText.trim()}
                         className="mt-4 w-full sm:w-auto bg-primary-600 text-white font-bold py-3 px-8 rounded-xl hover:bg-primary-700 transition disabled:opacity-50"
                     >
-                        נתח טקסט
+                        {t('new_candidate.btn_analyze_text')}
                     </button>
                 </div>
 
                 <div className="flex items-center gap-4 my-8">
                     <div className="h-px bg-border-default flex-grow"></div>
-                    <span className="text-xs font-bold text-text-subtle uppercase">או העלאת קובץ</span>
+                    <span className="text-xs font-bold text-text-subtle uppercase">{t('new_candidate.or_upload')}</span>
                     <div className="h-px bg-border-default flex-grow"></div>
                 </div>
 
                 <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-border-default border-dashed rounded-3xl bg-bg-subtle/30 cursor-pointer hover:bg-bg-subtle hover:border-primary-400 transition-all">
                     <div className="flex flex-col items-center justify-center pt-5 pb-6">
                         <ArrowUpTrayIcon className="w-10 h-10 mb-4 text-primary-500" />
-                        <p className="mb-1 text-lg font-bold text-text-default">לחץ לבחירה או גרור לכאן</p>
-                        <p className="text-sm text-text-muted">PDF, DOCX, TXT</p>
+                        <p className="mb-1 text-lg font-bold text-text-default">{t('new_candidate.dropzone_text')}</p>
+                        <p className="text-sm text-text-muted">PDF, TXT</p>
                     </div>
-                    <input type="file" className="hidden" onChange={handleFileChange} />
+                    <input type="file" className="hidden" onChange={handleFileChange} accept=".pdf,.txt" />
                 </label>
             </div>
         </div>
@@ -397,18 +399,18 @@ const NewCandidateViewV2: React.FC = () => {
                         <CheckCircleIcon className="w-8 h-8" />
                     </div>
                     <div>
-                        <h3 className="text-lg font-bold text-green-800">הניתוח הושלם בהצלחה!</h3>
-                        <p className="text-sm text-green-700">חילצנו עבורך: {parsedSummary?.join(', ')}</p>
+                        <h3 className="text-lg font-bold text-green-800">{t('new_candidate.success_title')}</h3>
+                        <p className="text-sm text-green-700">{t('new_candidate.success_extracted', { items: parsedSummary?.join(', ') })}</p>
                     </div>
                 </div>
-                <button onClick={() => setCreationMode('ai_input')} className="text-sm font-bold text-green-800 hover:underline">נסה קובץ אחר</button>
+                <button onClick={() => setCreationMode('ai_input')} className="text-sm font-bold text-green-800 hover:underline">{t('new_candidate.try_another')}</button>
             </div>
 
             <div className="bg-bg-card rounded-3xl border border-border-default shadow-sm p-4 flex items-center justify-between">
-                <h2 className="text-xl font-bold text-text-default px-4">סקירת פרופיל המועמד</h2>
+                <h2 className="text-xl font-bold text-text-default px-4">{t('new_candidate.review_profile')}</h2>
                 <div className="flex gap-3">
-                    <button onClick={() => setCreationMode('choice')} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">ביטול</button>
-                    <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">שמור מועמד</button>
+                    <button onClick={() => setCreationMode('choice')} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
+                    <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">{t('new_candidate.btn_save')}</button>
                 </div>
             </div>
 
@@ -435,11 +437,11 @@ const NewCandidateViewV2: React.FC = () => {
             <div className="bg-bg-card rounded-3xl border border-border-default shadow-sm p-4 flex items-center justify-between">
                 <div className="flex items-center gap-4">
                     <button onClick={() => setCreationMode('choice')} className="p-2 rounded-full hover:bg-bg-hover"><ArrowLeftIcon className="w-5 h-5 transform rotate-180" /></button>
-                    <h2 className="text-xl font-bold text-text-default">הקמה ידנית של מועמד</h2>
+                    <h2 className="text-xl font-bold text-text-default">{t('new_candidate.manual_title')}</h2>
                 </div>
                 <div className="flex gap-3">
-                    <button onClick={() => setCreationMode('choice')} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">ביטול</button>
-                    <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">שמור מועמד</button>
+                    <button onClick={() => setCreationMode('choice')} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
+                    <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">{t('new_candidate.btn_save')}</button>
                 </div>
             </div>
 
@@ -458,8 +460,8 @@ const NewCandidateViewV2: React.FC = () => {
                 <MainContent formData={formData} onFormChange={setFormData} />
                 <div className="bg-bg-subtle/50 rounded-3xl border-2 border-dashed border-border-default flex flex-col items-center justify-center p-12 text-center">
                     <DocumentTextIcon className="w-16 h-16 text-text-subtle mb-4" />
-                    <h3 className="text-lg font-bold text-text-default">אין קובץ קורות חיים</h3>
-                    <p className="text-sm text-text-muted max-w-xs mt-2">ניתן להעלות קובץ בכל שלב בטאב "מסמכים" או להדביק טקסט לעריכה ידנית.</p>
+                    <h3 className="text-lg font-bold text-text-default">{t('new_candidate.no_cv_title')}</h3>
+                    <p className="text-sm text-text-muted max-w-xs mt-2">{t('new_candidate.no_cv_desc')}</p>
                 </div>
             </div>
         </div>

@@ -1,6 +1,7 @@
 
 import React, { useState, useMemo, useRef } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, PencilIcon, TrashIcon, SparklesIcon, WhatsappIcon, EnvelopeIcon, ChatBubbleBottomCenterTextIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface Template {
@@ -33,6 +34,7 @@ const TemplateForm: React.FC<{
     onSave: (template: Partial<Template>) => void;
     onCancel: () => void;
 }> = ({ template, onSave, onCancel }) => {
+    const { t } = useLanguage();
     const [formData, setFormData] = useState<Partial<Template>>(
         template || { name: '', subject: '', content: '', channels: ['whatsapp'] }
     );
@@ -74,16 +76,16 @@ const TemplateForm: React.FC<{
 
     return (
         <form onSubmit={handleSubmit} className="space-y-6">
-            <h2 className="text-xl font-bold text-text-default">{template?.id ? 'עריכת תבנית' : 'יצירת תבנית חדשה'}</h2>
+            <h2 className="text-xl font-bold text-text-default">{template?.id ? t('templates.edit_title') : t('templates.create_title')}</h2>
             
             <div className="bg-bg-card border border-border-default rounded-lg p-6 space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
                     <div>
-                        <label className="block text-sm font-semibold text-text-muted mb-1.5">שם התבנית*</label>
+                        <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('templates.field_name')}*</label>
                         <input name="name" value={formData.name} onChange={handleChange} required className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5" />
                     </div>
                     <div className="flex items-center gap-4">
-                        <label className="text-sm font-semibold text-text-muted">ערוצים:</label>
+                        <label className="text-sm font-semibold text-text-muted">{t('templates.channels')}</label>
                         <div className="flex items-center gap-3">
                              {([['email', <EnvelopeIcon />], ['sms', <ChatBubbleBottomCenterTextIcon />], ['whatsapp', <WhatsappIcon />]] as const).map(([channel, icon]) => (
                                 <button type="button" key={channel} onClick={() => handleChannelChange(channel as 'email' | 'sms' | 'whatsapp')} className={`p-2 rounded-lg border-2 transition ${formData.channels?.includes(channel) ? 'bg-primary-50 border-primary-500 text-primary-600' : 'bg-bg-subtle border-transparent text-text-muted hover:border-border-default'}`}>
@@ -94,18 +96,18 @@ const TemplateForm: React.FC<{
                     </div>
                 </div>
                  <div>
-                    <label className="block text-sm font-semibold text-text-muted mb-1.5">נושא הודעה*</label>
+                    <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('templates.field_subject')}*</label>
                     <input name="subject" value={formData.subject} onChange={handleChange} required className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5" />
                 </div>
                  <div>
-                    <label className="block text-sm font-semibold text-text-muted mb-1.5">תוכן ההודעה*</label>
+                    <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('templates.field_content')}*</label>
                     <textarea ref={contentRef} name="content" value={formData.content} onChange={handleChange} required rows={8} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"></textarea>
                     <div className="text-xs text-text-subtle text-left mt-1">{formData.content?.length || 0} / 5000</div>
                 </div>
             </div>
             
             <div className="bg-bg-card border border-border-default rounded-lg p-6">
-                <h3 className="text-base font-bold text-text-default mb-3">פרמטרים (לחץ להוספה לתוכן)</h3>
+                <h3 className="text-base font-bold text-text-default mb-3">{t('templates.params_title')}</h3>
                 <div className="flex flex-wrap gap-2">
                     {parameters.map(param => (
                         <button key={param.value} type="button" onClick={() => handleInsertParam(param.value)} className="bg-bg-subtle text-text-default text-xs font-semibold px-3 py-1.5 rounded-full hover:bg-primary-100 hover:text-primary-800 transition">
@@ -116,14 +118,15 @@ const TemplateForm: React.FC<{
             </div>
 
             <div className="flex justify-end gap-3">
-                <button type="button" onClick={onCancel} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover">ביטול</button>
-                <button type="submit" className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700">שמירה</button>
+                <button type="button" onClick={onCancel} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover">{t('client_form.cancel')}</button>
+                <button type="submit" className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700">{t('client_form.save')}</button>
             </div>
         </form>
     );
 };
 
 const MessageTemplatesView: React.FC = () => {
+    const { t } = useLanguage();
     const [view, setView] = useState<'list' | 'form'>('list');
     const [activeTab, setActiveTab] = useState<'saved' | 'system'>('saved');
     const [templates, setTemplates] = useState<Template[]>(templatesData);
@@ -180,21 +183,21 @@ const MessageTemplatesView: React.FC = () => {
                          <div>
                             <div className="border-b border-border-default">
                                 <nav className="flex items-center -mb-px">
-                                    <button onClick={() => setActiveTab('saved')} className={`py-3 px-6 font-bold text-base transition-all duration-300 ease-in-out border-b-4 ${activeTab === 'saved' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}>תבניות שמורות</button>
-                                    <button onClick={() => setActiveTab('system')} className={`py-3 px-6 font-bold text-base transition-all duration-300 ease-in-out border-b-4 ${activeTab === 'system' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}>תבניות מערכת</button>
+                                    <button onClick={() => setActiveTab('saved')} className={`py-3 px-6 font-bold text-base transition-all duration-300 ease-in-out border-b-4 ${activeTab === 'saved' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}>{t('templates.tab_saved')}</button>
+                                    <button onClick={() => setActiveTab('system')} className={`py-3 px-6 font-bold text-base transition-all duration-300 ease-in-out border-b-4 ${activeTab === 'system' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}>{t('templates.tab_system')}</button>
                                 </nav>
                             </div>
                         </div>
                         <button onClick={handleCreate} className="w-full md:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                             <PlusIcon className="w-5 h-5"/>
-                            <span>הודעה חדשה</span>
+                            <span>{t('templates.new_template')}</span>
                         </button>
                     </header>
 
                     <div className="p-3 bg-bg-subtle rounded-xl border border-border-default mb-4">
                         <div className="relative">
                             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                            <input type="text" placeholder="חיפוש לפי שם או תוכן..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm" />
+                            <input type="text" placeholder={t('templates.search_placeholder')} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm" />
                         </div>
                     </div>
                     
@@ -203,11 +206,11 @@ const MessageTemplatesView: React.FC = () => {
                             <table className="w-full text-sm text-right min-w-[800px]">
                                 <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                                     <tr>
-                                        <th className="p-4">שם התבנית</th>
-                                        <th className="p-4">תוכן ההודעה</th>
-                                        <th className="p-4">עדכון אחרון</th>
-                                        <th className="p-4">עודכן ע"י</th>
-                                        <th className="p-4">פעולות</th>
+                                        <th className="p-4">{t('templates.col_name')}</th>
+                                        <th className="p-4">{t('templates.col_content')}</th>
+                                        <th className="p-4">{t('templates.col_last_updated')}</th>
+                                        <th className="p-4">{t('templates.col_updated_by')}</th>
+                                        <th className="p-4">{t('templates.col_actions')}</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">

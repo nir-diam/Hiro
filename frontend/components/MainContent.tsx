@@ -2,11 +2,11 @@
 import React, { useId, useState } from 'react';
 import AccordionSection from './AccordionSection';
 import ContentNavBar from './ContentNavBar';
-// FIX: Added XMarkIcon to the import list.
 import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, SparklesIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon } from './Icons';
 import WorkExperienceSection from './WorkExperienceSection';
 import { TagInput } from './TagInput';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import { useLanguage } from '../context/LanguageContext';
 
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; required?: boolean; type?: string; icon?: React.ReactNode }> = ({ label, name, value, onChange, required, type = "text", icon }) => {
     const id = useId();
@@ -70,6 +70,7 @@ const getLevelText = (level: number): string => {
 };
 
 const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInternalTagsChange, viewMode = 'recruiter' }) => {
+    const { t } = useLanguage();
     const summaryId = useId();
     const recruiterNotesId = useId();
     const candidateNotesId = useId();
@@ -194,28 +195,28 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
             
             {viewMode === 'recruiter' && (
                 <div id="summary">
-                    <AccordionSection title="תקציר" icon={<ClipboardDocumentCheckIcon className="w-5 h-5"/>} defaultOpen>
-                        <label htmlFor={summaryId} className="sr-only">תקציר</label>
+                    <AccordionSection title={t('section.summary')} icon={<ClipboardDocumentCheckIcon className="w-5 h-5"/>} defaultOpen>
+                        <label htmlFor={summaryId} className="sr-only">{t('section.summary')}</label>
                         <textarea 
                             id={summaryId}
                             className="w-full h-32 bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
-                            placeholder="כתוב כאן את סיכום הראיון..."
+                            placeholder={t('section.summary_placeholder')}
                         ></textarea>
                     </AccordionSection>
                 </div>
             )}
 
             <div id="personal-details">
-                <AccordionSection title="פרטים אישיים" icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.personal_details')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                        <FormInput label="שם מלא" name="fullName" value={formData.fullName} onChange={handleInputChange} required />
-                        {viewMode === 'recruiter' && <FormSelect label="סטטוס המועמד" name="status" value={formData.status} onChange={handleInputChange}><option>חדש</option><option>עבר בדיקה ראשונית</option></FormSelect>}
-                        <FormInput label="טלפון" name="phone" value={formData.phone} onChange={handleInputChange} required />
-                        <FormInput label="דוא''ל" name="email" value={formData.email} onChange={handleInputChange} type="email" icon={<EnvelopeIcon className="w-4 h-4" />}/>
-                        <FormInput label="כתובת" name="address" value={formData.address} onChange={handleInputChange} required icon={<MapPinIcon className="w-4 h-4" />} />
-                        <FormInput label="תעודת זהות" name="idNumber" value={formData.idNumber} onChange={handleInputChange} />
+                        <FormInput label={t('form.full_name')} name="fullName" value={formData.fullName} onChange={handleInputChange} required />
+                        {viewMode === 'recruiter' && <FormSelect label={t('form.status')} name="status" value={formData.status} onChange={handleInputChange}><option>חדש</option><option>עבר בדיקה ראשונית</option></FormSelect>}
+                        <FormInput label={t('form.phone')} name="phone" value={formData.phone} onChange={handleInputChange} required />
+                        <FormInput label={t('form.email')} name="email" value={formData.email} onChange={handleInputChange} type="email" icon={<EnvelopeIcon className="w-4 h-4" />}/>
+                        <FormInput label={t('form.address')} name="address" value={formData.address} onChange={handleInputChange} required icon={<MapPinIcon className="w-4 h-4" />} />
+                        <FormInput label={t('form.id_number')} name="idNumber" value={formData.idNumber} onChange={handleInputChange} />
                         
-                        <FormSelect label="מצב משפחתי" name="maritalStatus" value={formData.maritalStatus} onChange={handleInputChange}>
+                        <FormSelect label={t('form.marital_status')} name="maritalStatus" value={formData.maritalStatus} onChange={handleInputChange}>
                             <option value="-">-</option>
                             <option value="רווק/ה">רווק/ה</option>
                             <option value="נשוי/אה">נשוי/אה</option>
@@ -224,12 +225,12 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
                             <option value="ידוע/ה בציבור">ידוע/ה בציבור</option>
                         </FormSelect>
                         
-                        <FormSelect label="מין" name="gender" value={formData.gender} onChange={handleInputChange}>
+                        <FormSelect label={t('form.gender')} name="gender" value={formData.gender} onChange={handleInputChange}>
                             <option>זכר</option>
                             <option>נקבה</option>
                         </FormSelect>
                         
-                        <FormSelect label="רישיון נהיגה" name="drivingLicense" value={formData.drivingLicense} onChange={handleInputChange}>
+                        <FormSelect label={t('form.driving_license')} name="drivingLicense" value={formData.drivingLicense} onChange={handleInputChange}>
                             <option value="-">ללא</option>
                             <option value="A">A (אופנוע)</option>
                             <option value="A1">A1</option>
@@ -243,7 +244,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
                             <option value="1">1 (טרקטור)</option>
                         </FormSelect>
                         
-                         <FormSelect label="ניידות" name="mobility" value={formData.mobility} onChange={handleInputChange}>
+                         <FormSelect label={t('form.mobility')} name="mobility" value={formData.mobility} onChange={handleInputChange}>
                             <option value="-">-</option>
                             <option value="כן">כן</option>
                             <option value="לא">לא</option>
@@ -254,7 +255,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
             </div>
 
             <div id="work-experience">
-                <AccordionSection title="ניסיון תעסוקתי" icon={<BriefcaseIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.work_experience')} icon={<BriefcaseIcon className="w-5 h-5"/>} defaultOpen>
                     <WorkExperienceSection 
                         experience={formData.workExperience || []}
                         onExperienceChange={handleWorkExperienceChange}
@@ -263,20 +264,18 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
             </div>
 
             <div id="preferences">
-                <AccordionSection title="העדפות ותחומי עניין" icon={<SparklesIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.preferences')} icon={<SparklesIcon className="w-5 h-5"/>} defaultOpen>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <FormSelect label="סוג תעסוקה רצוי" name="employmentType" value={formData.employmentType} onChange={handleInputChange}><option>שכיר</option></FormSelect>
-                        <FormSelect label="היקף המשרה" name="jobScope" value={formData.jobScope} onChange={handleInputChange}><option>מלאה</option></FormSelect>
-                        <FormSelect label="זמינות להתחלה" name="availability" value={formData.availability} onChange={handleInputChange}><option>מיידי (עד חודש)</option></FormSelect>
-                        <FormSelect label="נכונות לעבודה פיזית" name="physicalWork" value={formData.physicalWork} onChange={handleInputChange}><option>כן/לא/פיזית מתונה</option></FormSelect>
+                        <FormSelect label={t('form.employment_type')} name="employmentType" value={formData.employmentType} onChange={handleInputChange}><option>שכיר</option></FormSelect>
+                        <FormSelect label={t('form.job_scope')} name="jobScope" value={formData.jobScope} onChange={handleInputChange}><option>מלאה</option></FormSelect>
+                        <FormSelect label={t('form.availability')} name="availability" value={formData.availability} onChange={handleInputChange}><option>מיידי (עד חודש)</option></FormSelect>
+                        <FormSelect label={t('form.physical_work')} name="physicalWork" value={formData.physicalWork} onChange={handleInputChange}><option>כן/לא/פיזית מתונה</option></FormSelect>
                     </div>
                 </AccordionSection>
             </div>
             
-            {/* "Internal Tags" Section Removed from here based on user request */}
-
             <div id="salary">
-                <AccordionSection title="ציפיות שכר" icon={<WalletIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.salary')} icon={<WalletIcon className="w-5 h-5"/>} defaultOpen>
                      <div className="p-4 space-y-4">
                         <div className="flex justify-center items-center text-lg font-bold space-x-4">
                             {formData.salaryMin === formData.salaryMax ? (
@@ -326,18 +325,18 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
             </div>
 
             <div id="birth-date">
-                <AccordionSection title="תאריך לידה" icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.birth_date')} icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <FormSelect label="שנה" name="birthYear" value={formData.birthYear} onChange={handleInputChange}><option>1989</option></FormSelect>
-                        <FormSelect label="חודש" name="birthMonth" value={formData.birthMonth} onChange={handleInputChange}><option>יוני</option></FormSelect>
-                        <FormSelect label="יום" name="birthDay" value={formData.birthDay} onChange={handleInputChange}><option>15</option></FormSelect>
-                        <FormInput label="גיל" name="age" value={formData.age} onChange={handleInputChange} />
+                        <FormSelect label={t('form.birth_year')} name="birthYear" value={formData.birthYear} onChange={handleInputChange}><option>1989</option></FormSelect>
+                        <FormSelect label={t('form.birth_month')} name="birthMonth" value={formData.birthMonth} onChange={handleInputChange}><option>יוני</option></FormSelect>
+                        <FormSelect label={t('form.birth_day')} name="birthDay" value={formData.birthDay} onChange={handleInputChange}><option>15</option></FormSelect>
+                        <FormInput label={t('form.age')} name="age" value={formData.age} onChange={handleInputChange} />
                     </div>
                 </AccordionSection>
             </div>
             
             <div id="languages">
-                <AccordionSection title="שליטה בשפות" icon={<LanguageIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.languages')} icon={<LanguageIcon className="w-5 h-5"/>} defaultOpen>
                      <div className="space-y-4">
                         {formData.languages?.map((lang: any) => (
                             <div key={lang.id} className="flex items-center gap-4">
@@ -351,17 +350,17 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
                         ))}
                         <div className="flex items-end gap-2 pt-4 border-t border-border-default">
                              <div className="flex-grow">
-                                <label className="block text-sm font-semibold text-text-muted mb-1">הוספת שפה</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1">{t('form.add_language')}</label>
                                 <input type="text" placeholder="לדוגמה: ספרדית" value={newLanguageName} onChange={e => setNewLanguageName(e.target.value)} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"/>
                             </div>
-                            <button onClick={handleAddLanguage} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">הוספה</button>
+                            <button onClick={handleAddLanguage} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">{t('form.add')}</button>
                         </div>
                      </div>
                 </AccordionSection>
             </div>
             
             <div id="education">
-                <AccordionSection title="השכלה" icon={<AcademicCapIcon className="w-5 h-5"/>} defaultOpen>
+                <AccordionSection title={t('section.education')} icon={<AcademicCapIcon className="w-5 h-5"/>} defaultOpen>
                      <div className="space-y-3">
                         {formData.education?.map((edu: any) => (
                             <div key={edu.id} className="flex items-center justify-between p-2 rounded-lg hover:bg-bg-subtle/50 group">
@@ -388,28 +387,28 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
                         ))}
                         <div className="flex items-end gap-2 pt-4 border-t border-border-default">
                             <div className="flex-grow">
-                                <label className="block text-sm font-semibold text-text-muted mb-1">הוספת השכלה</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1">{t('form.add_education')}</label>
                                 <input type="text" value={newEducation} onChange={e => setNewEducation(e.target.value)} placeholder="לדוגמה: תואר שני במנהל עסקים, אוניברסיטת בן גוריון" className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5" />
                             </div>
-                            <button onClick={handleAddEducation} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">הוספה</button>
+                            <button onClick={handleAddEducation} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">{t('form.add')}</button>
                         </div>
                      </div>
                 </AccordionSection>
             </div>
 
             <div id="skills">
-                <AccordionSection title="מיומנויות" icon={<TagIcon className="w-5 h-5"/>} defaultOpen>
-                    <p className="font-semibold text-text-default mb-2">מיומנויות רכות</p>
+                <AccordionSection title={t('section.skills')} icon={<TagIcon className="w-5 h-5"/>} defaultOpen>
+                    <p className="font-semibold text-text-default mb-2">{t('form.soft_skills')}</p>
                     <div className="flex flex-wrap gap-2 mb-4">
                         {formData.softSkills?.map((skill: string) => <Tag key={skill} onRemove={() => handleRemoveSoftSkill(skill)}>{skill}</Tag>)}
                     </div>
                      <div className="flex items-center gap-2">
                         <input type="text" placeholder="הוסף מיומנות רכה..." value={newSoftSkill} onChange={(e) => setNewSoftSkill(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddSoftSkill()} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"/>
-                        <button onClick={handleAddSoftSkill} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">הוספה</button>
+                        <button onClick={handleAddSoftSkill} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">{t('form.add')}</button>
                     </div>
                     
                      <hr className="my-6 border-border-default" />
-                     <p className="font-semibold text-text-default mb-2">מיומנויות טכניות</p>
+                     <p className="font-semibold text-text-default mb-2">{t('form.tech_skills')}</p>
                     <div className="space-y-4">
                         {formData.techSkills?.map((skill: any) => (
                             <div key={skill.id} className="flex items-center gap-4">
@@ -424,10 +423,10 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
                     </div>
                     <div className="flex items-end gap-2 pt-4 mt-4 border-t border-border-default">
                         <div className="flex-grow">
-                            <label className="block text-sm font-semibold text-text-muted mb-1">הוספת מיומנות</label>
+                            <label className="block text-sm font-semibold text-text-muted mb-1">{t('form.add_skill')}</label>
                             <input type="text" placeholder="לדוגמה: Figma" value={newTechSkill.name} onChange={e => setNewTechSkill(prev => ({ ...prev, name: e.target.value }))} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"/>
                         </div>
-                        <button onClick={handleAddTechSkill} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">הוספה</button>
+                        <button onClick={handleAddTechSkill} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">{t('form.add')}</button>
                     </div>
                 </AccordionSection>
             </div>
@@ -435,7 +434,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
             <div id="notes" className="space-y-6">
                 {viewMode === 'recruiter' && formData.candidateNotes && (
                     <div id="candidate-notes-view">
-                        <AccordionSection title="הערות מהמועמד" icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
+                        <AccordionSection title={t('section.candidate_notes')} icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
                             <blockquote className="bg-bg-subtle p-3 border-r-4 border-primary-300 text-text-muted italic">
                                {formData.candidateNotes}
                             </blockquote>
@@ -445,15 +444,15 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
 
                 {viewMode === 'recruiter' && (
                     <div id="recruiter-notes">
-                        <AccordionSection title="הערות פנימיות (לרכז/ת)" icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
-                            <label htmlFor={recruiterNotesId} className="sr-only">הערות פנימיות</label>
+                        <AccordionSection title={t('section.recruiter_notes')} icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
+                            <label htmlFor={recruiterNotesId} className="sr-only">{t('section.recruiter_notes')}</label>
                             <textarea 
                                 id={recruiterNotesId}
                                 name="recruiterNotes"
                                 value={formData.recruiterNotes}
                                 onChange={handleInputChange}
                                 className="w-full h-24 bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
-                                placeholder="הזן הערות פנימיות כאן..."
+                                placeholder={t('section.recruiter_notes_placeholder')}
                             ></textarea>
                         </AccordionSection>
                     </div>
@@ -462,15 +461,15 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
 
              {viewMode === 'candidate' && (
                 <div id="candidate-notes-edit">
-                    <AccordionSection title="הערות (יוצגו לצוות הגיוס)" icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
-                        <label htmlFor={candidateNotesId} className="sr-only">הערות לצוות הגיוס</label>
+                    <AccordionSection title={t('section.candidate_notes')} icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
+                        <label htmlFor={candidateNotesId} className="sr-only">{t('section.candidate_notes')}</label>
                         <textarea 
                             id={candidateNotesId}
                             name="candidateNotes"
                             value={formData.candidateNotes}
                             onChange={handleInputChange}
                             className="w-full h-24 bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
-                            placeholder="הוסף כאן הערות, דגשים או בקשות שיוצגו לצוות הגיוס..."
+                            placeholder={t('section.candidate_notes_placeholder')}
                         ></textarea>
                     </AccordionSection>
                 </div>
@@ -479,8 +478,8 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
 
             {viewMode === 'recruiter' && (
                 <div className="flex justify-end space-x-3 pt-4">
-                    <button className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition">מחיקת מועמד</button>
-                    <button className="bg-primary-500 text-white font-semibold py-2 px-6 rounded-lg hover:bg-primary-600 transition shadow-sm">שמירה</button>
+                    <button className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition">{t('form.delete_candidate')}</button>
+                    <button className="bg-primary-500 text-white font-semibold py-2 px-6 rounded-lg hover:bg-primary-600 transition shadow-sm">{t('form.save')}</button>
                 </div>
             )}
         </div>

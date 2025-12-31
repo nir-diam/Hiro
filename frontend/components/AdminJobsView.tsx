@@ -1,7 +1,6 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { jobsData } from './JobsView';
 import { MagnifyingGlassIcon, CheckCircleIcon, XMarkIcon } from './Icons';
 
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה' | 'ממתין לאישור';
@@ -14,49 +13,53 @@ const statusStyles: { [key in JobStatus]: { text: string; bg: string; } } = {
   'ממתין לאישור': { text: 'text-orange-800', bg: 'bg-orange-100' },
 };
 
-// Extend mock data for admin view only
-const extendedJobsData = [
-    { ...jobsData[0] },
-    { ...jobsData[1] },
-    // Add a pending external job
-    { 
-        id: 999, 
-        title: 'מנהל/ת משרד', 
-        client: 'סטארטאפ חיצוני', 
-        field: 'אדמיניסטרציה', 
-        role: 'מנהל משרד', 
-        priority: 'רגילה', 
-        clientType: 'Startup', 
-        city: 'תל אביב', 
-        region: 'מרכז', 
-        gender: 'לא משנה', 
-        mobility: false, 
-        licenseType: 'אין', 
-        postingCode: 'EXT999', 
-        validityDays: 30, 
-        recruitingCoordinator: 'מערכת', 
-        accountManager: 'מערכת', 
-        salaryMin: 9000, 
-        salaryMax: 11000, 
-        ageMin: 20, 
-        ageMax: 99, 
-        openPositions: 1, 
-        status: 'ממתין לאישור' as JobStatus, 
-        associatedCandidates: 0, 
-        openDate: '2025-11-16', 
-        recruiter: 'חיצוני', 
-        location: 'תל אביב', 
-        jobType: 'משרה מלאה', 
-        description: 'ניהול אדמיניסטרטיבי שוטף...', 
-        requirements: [] 
-    }
-];
+type JobItem = {
+    id: string;
+    title: string;
+    client?: string;
+    status?: JobStatus;
+    associatedCandidates?: number;
+    openDate?: string;
+    recruiter?: string;
+};
 
 const AdminJobsView: React.FC = () => {
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const navigate = useNavigate();
     const [searchTerm, setSearchTerm] = useState('');
     const [filterStatus, setFilterStatus] = useState<'all' | 'pending'>('all');
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+    const [jobs, setJobs] = useState<JobItem[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        const load = async () => {
+            setLoading(true);
+            setError(null);
+            try {
+                const res = await fetch(`${apiBase}/api/jobs`);
+                if (!res.ok) throw new Error('טעינת משרות נכשלה');
+                const data = await res.json();
+                // Normalize fields
+                const mapped: JobItem[] = data.map((j: any) => ({
+                    id: j.id,
+                    title: j.title || 'ללא כותרת',
+                    client: j.client || j.clientName || '',
+                    status: (j.status || 'פתוחה') as JobStatus,
+                    associatedCandidates: j.associatedCandidates || 0,
+                    openDate: j.createdAt || j.openDate,
+                    recruiter: j.recruiter || j.accountManager || '',
+                }));
+                setJobs(mapped);
+            } catch (e: any) {
+                setError(e.message || 'שגיאה בטעינה');
+            } finally {
+                setLoading(false);
+            }
+        };
+        load();
+    }, [apiBase]);
 
     const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -72,11 +75,14 @@ const AdminJobsView: React.FC = () => {
     };
 
     const sortedAndFilteredJobs = useMemo(() => {
-        let filtered = extendedJobsData.filter(job => 
-            (job.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            job.client.toLowerCase().includes(searchTerm.toLowerCase())) &&
-            (filterStatus === 'all' || (filterStatus === 'pending' && job.status === 'ממתין לאישור'))
-        );
+        let filtered = jobs.filter(job => {
+            const client = job.client || '';
+            return (
+                (job.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                client.toLowerCase().includes(searchTerm.toLowerCase())) &&
+                (filterStatus === 'all' || (filterStatus === 'pending' && job.status === 'ממתין לאישור'))
+            );
+        });
         
         if (sortConfig) {
             filtered.sort((a, b) => {
@@ -89,6 +95,14 @@ const AdminJobsView: React.FC = () => {
         }
         return filtered;
     }, [searchTerm, sortConfig, filterStatus]);
+
+    if (loading) {
+        return <div className="p-6 text-text-muted">טוען משרות...</div>;
+    }
+
+    if (error) {
+        return <div className="p-6 text-red-600">{error}</div>;
+    }
 
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm p-6">
@@ -109,9 +123,9 @@ const AdminJobsView: React.FC = () => {
                         className={`px-4 py-1.5 text-sm font-semibold rounded-md transition flex items-center gap-2 ${filterStatus === 'pending' ? 'bg-bg-card shadow text-orange-700' : 'text-text-muted hover:text-text-default'}`}
                     >
                         ממתינות לאישור
-                        {extendedJobsData.filter(j => j.status === 'ממתין לאישור').length > 0 && (
+                        {jobs.filter(j => j.status === 'ממתין לאישור').length > 0 && (
                             <span className="bg-orange-500 text-white text-xs px-1.5 rounded-full">
-                                {extendedJobsData.filter(j => j.status === 'ממתין לאישור').length}
+                                {jobs.filter(j => j.status === 'ממתין לאישור').length}
                             </span>
                         )}
                     </button>

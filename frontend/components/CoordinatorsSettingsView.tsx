@@ -1,6 +1,8 @@
+
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, Cog6ToothIcon, DocumentTextIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface Coordinator {
@@ -30,6 +32,7 @@ export const coordinatorsData: Coordinator[] = [
 ];
 
 const CoordinatorsSettingsView: React.FC = () => {
+    const { t } = useLanguage();
     const navigate = useNavigate();
     const [coordinators] = useState<Coordinator[]>(coordinatorsData);
     const [searchTerm, setSearchTerm] = useState('');
@@ -87,12 +90,12 @@ const CoordinatorsSettingsView: React.FC = () => {
             {/* Header */}
             <header className="flex flex-col md:flex-row items-center justify-between gap-2 mb-4">
                 <div>
-                    <h1 className="text-2xl font-bold text-text-default">רכזים</h1>
-                    <p className="text-sm text-text-muted">ניהול כל הרכזים במערכת</p>
+                    <h1 className="text-2xl font-bold text-text-default">{t('coordinators.title')}</h1>
+                    <p className="text-sm text-text-muted">{t('coordinators.subtitle')}</p>
                 </div>
                 <button className="w-full md:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                     <PlusIcon className="w-5 h-5"/>
-                    <span>הוסף רכז חדש</span>
+                    <span>{t('coordinators.add_new')}</span>
                 </button>
             </header>
 
@@ -102,7 +105,7 @@ const CoordinatorsSettingsView: React.FC = () => {
                     <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                     <input 
                         type="text" 
-                        placeholder="שם משתמש, טלפון או דוא''ל" 
+                        placeholder={t('coordinators.search_placeholder')}
                         value={searchTerm} 
                         onChange={e => setSearchTerm(e.target.value)} 
                         className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition" 
@@ -114,9 +117,9 @@ const CoordinatorsSettingsView: React.FC = () => {
                         onChange={e => setStatusFilter(e.target.value as any)} 
                         className="appearance-none w-full bg-bg-input border border-border-default rounded-lg py-2 pl-8 pr-3 text-sm font-medium text-text-default focus:outline-none focus:ring-2 focus:ring-primary-500 transition"
                     >
-                        <option value="all">סטטוס: הכל</option>
-                        <option value="active">פעיל</option>
-                        <option value="inactive">לא פעיל</option>
+                        <option value="all">{t('coordinators.filter_status_all')}</option>
+                        <option value="active">{t('coordinators.filter_active')}</option>
+                        <option value="inactive">{t('coordinators.filter_inactive')}</option>
                     </select>
                     <ChevronDownIcon className="w-4 h-4 text-text-subtle absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"/>
                 </div>
@@ -132,20 +135,20 @@ const CoordinatorsSettingsView: React.FC = () => {
                     <table className="w-full text-sm text-right min-w-[1200px]">
                         <thead className="text-xs text-text-muted uppercase bg-bg-subtle/80 sticky top-0">
                             <tr>
-                                <th className="p-4">שם המשתמש</th>
-                                <th className="p-4">טלפון</th>
-                                <th className="p-4">שלוחה</th>
-                                <th className="p-4">דוא"ל</th>
-                                <th className="p-4">שם שולח</th>
+                                <th className="p-4">{t('coordinators.col_username')}</th>
+                                <th className="p-4">{t('coordinators.col_phone')}</th>
+                                <th className="p-4">{t('coordinators.col_extension')}</th>
+                                <th className="p-4">{t('coordinators.col_email')}</th>
+                                <th className="p-4">{t('coordinators.col_sender')}</th>
                                 <th className="p-4 cursor-pointer" onClick={() => requestSort('creationDate')}>
-                                    תאריך יצירה{getSortIndicator('creationDate')}
+                                    {t('coordinators.col_creation_date')}{getSortIndicator('creationDate')}
                                 </th>
                                 <th className="p-4 cursor-pointer" onClick={() => requestSort('lastLogin')}>
-                                    התחברות אחרונה{getSortIndicator('lastLogin')}
+                                    {t('coordinators.col_last_login')}{getSortIndicator('lastLogin')}
                                 </th>
-                                <th className="p-4">פעיל</th>
-                                <th className="p-4">אימות מייל</th>
-                                <th className="p-4">אימות דומיין</th>
+                                <th className="p-4">{t('coordinators.col_active')}</th>
+                                <th className="p-4">{t('coordinators.col_email_verified')}</th>
+                                <th className="p-4">{t('coordinators.col_domain_verified')}</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
@@ -169,8 +172,8 @@ const CoordinatorsSettingsView: React.FC = () => {
             </main>
             {/* Footer */}
             <footer className="flex-shrink-0 pt-3 text-sm text-text-muted font-semibold flex justify-between items-center">
-                <p>{sortedAndFilteredCoordinators.length} שורות</p>
-                <p>סה"כ {coordinators.length} רכזים מתוכם {activeCoordinatorsCount} פעילים</p>
+                <p>{t('coordinators.summary_rows', {count: sortedAndFilteredCoordinators.length})}</p>
+                <p>{t('coordinators.summary_total', {total: coordinators.length, active: activeCoordinatorsCount})}</p>
             </footer>
         </div>
     );

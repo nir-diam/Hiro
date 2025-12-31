@@ -1,3 +1,4 @@
+
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { EnvelopeIcon, LockClosedIcon, HiroLogotype } from './Icons';
@@ -5,12 +6,38 @@ import { EnvelopeIcon, LockClosedIcon, HiroLogotype } from './Icons';
 const CandidateLoginView: React.FC = () => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const navigate = useNavigate();
 
-    const handleLogin = (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
-        // Mock login action: immediately navigate to the profile
-        navigate('/candidate-portal/profile');
+        setError(null);
+        setLoading(true);
+        try {
+            const res = await fetch(`${apiBase}/api/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password, role: 'candidate' }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.message || 'Login failed');
+            }
+            const data = await res.json();
+            if (!data.token) throw new Error('Missing token from server');
+            localStorage.setItem('token', data.token);
+            if (data.user) {
+                localStorage.setItem('herouser', JSON.stringify(data.user));
+                localStorage.setItem('user', JSON.stringify(data.user)); // for existing consumers
+            }
+            navigate('/candidate-portal/profile');
+        } catch (err: any) {
+            setError(err.message || 'Login failed');
+        } finally {
+            setLoading(false);
+        }
     };
 
     return (
@@ -53,10 +80,28 @@ const CandidateLoginView: React.FC = () => {
                             </div>
                         </div>
 
-                        <button type="submit" className="w-full bg-primary-600 text-white font-bold py-3 rounded-lg hover:bg-primary-700 transition-transform transform hover:scale-105 shadow-lg shadow-primary-500/40">
-                            התחברות
+                        {error && (
+                            <p className="text-sm text-red-600 text-center">{error}</p>
+                        )}
+
+                        <button 
+                            type="submit" 
+                            disabled={loading}
+                            className="w-full bg-primary-600 text-white font-bold py-3 rounded-lg hover:bg-primary-700 transition-transform transform hover:scale-105 shadow-lg shadow-primary-500/40 disabled:opacity-70 disabled:cursor-not-allowed"
+                        >
+                            {loading ? 'מתחבר...' : 'התחברות'}
                         </button>
                     </form>
+                    
+                    <div className="mt-6 pt-6 border-t border-border-default text-center">
+                        <p className="text-sm text-text-muted">אין לך חשבון?</p>
+                        <button 
+                            onClick={() => navigate('/candidate-portal/register')}
+                            className="mt-2 text-primary-600 font-bold hover:underline"
+                        >
+                            הרשמה / יצירת פרופיל
+                        </button>
+                    </div>
                 </div>
             </div>
         </div>

@@ -1,5 +1,6 @@
 
 import React from 'react';
+import { useLanguage } from '../context/LanguageContext';
 
 interface CandidateNavProps {
     activeView: string;
@@ -20,15 +21,17 @@ const NavButton: React.FC<{ title: string; isActive: boolean; onClick: () => voi
 );
 
 const CandidateNav: React.FC<CandidateNavProps> = ({ activeView, setActiveView }) => {
+  const { t } = useLanguage();
+  
   return (
     <>
         <style>{`.no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }`}</style>
         <nav className="flex items-center gap-1 p-1.5 bg-bg-card border border-border-default rounded-full shadow-xl overflow-x-auto max-w-[calc(100vw-2rem)] md:max-w-fit mx-auto no-scrollbar">
-            <NavButton title="פרטי המועמד" isActive={activeView === 'details'} onClick={() => setActiveView('details')} />
-            <NavButton title="התעניינות במשרות" isActive={activeView === 'jobs'} onClick={() => setActiveView('jobs')} />
-            <NavButton title="הפניות" isActive={activeView === 'referrals'} onClick={() => setActiveView('referrals')} />
-            <NavButton title="אירועים" isActive={activeView === 'events'} onClick={() => setActiveView('events')} />
-            <NavButton title="מסמכים" isActive={activeView === 'documents'} onClick={() => setActiveView('documents')} />
+            <NavButton title={t('candidate_nav.details')} isActive={activeView === 'details'} onClick={() => setActiveView('details')} />
+            <NavButton title={t('candidate_nav.jobs')} isActive={activeView === 'jobs'} onClick={() => setActiveView('jobs')} />
+            <NavButton title={t('candidate_nav.referrals')} isActive={activeView === 'referrals'} onClick={() => setActiveView('referrals')} />
+            <NavButton title={t('candidate_nav.events')} isActive={activeView === 'events'} onClick={() => setActiveView('events')} />
+            <NavButton title={t('candidate_nav.documents')} isActive={activeView === 'documents'} onClick={() => setActiveView('documents')} />
         </nav>
     </>
   );

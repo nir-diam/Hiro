@@ -1,6 +1,8 @@
+
 import React, { useState } from 'react';
 import AccordionSection from './AccordionSection';
 import { InformationCircleIcon, TrashIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface Source {
@@ -42,6 +44,7 @@ const newSourceInitialState = {
 };
 
 const RecruitmentSourcesSettingsView: React.FC = () => {
+    const { t } = useLanguage();
     const [sources, setSources] = useState<Source[]>(initialSourcesData);
     const [newSource, setNewSource] = useState(newSourceInitialState);
 
@@ -82,11 +85,11 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                 <td className="p-2">
                     <div className="flex items-center justify-center gap-2">
                         {isNew ? (
-                            <button onClick={handleAddNewSource} className="text-sm font-semibold text-primary-600 bg-primary-100 py-1.5 px-4 rounded-md hover:bg-primary-200">הוסף</button>
+                            <button onClick={handleAddNewSource} className="text-sm font-semibold text-primary-600 bg-primary-100 py-1.5 px-4 rounded-md hover:bg-primary-200">{t('sources.add')}</button>
                         ) : (
                             <>
-                                <button className="text-xs font-semibold text-text-default border border-border-default bg-bg-card py-1 px-3 rounded-md hover:bg-bg-hover">שמירה</button>
-                                <button className="text-xs font-semibold text-text-muted hover:text-text-default">ביטול</button>
+                                <button className="text-xs font-semibold text-text-default border border-border-default bg-bg-card py-1 px-3 rounded-md hover:bg-bg-hover">{t('sources.save')}</button>
+                                <button className="text-xs font-semibold text-text-muted hover:text-text-default">{t('sources.cancel')}</button>
                                 <button onClick={() => handleDelete(source.id)} className="p-2 text-text-subtle hover:text-red-600"><TrashIcon className="w-4 h-4" /></button>
                             </>
                         )}
@@ -98,9 +101,9 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
 
     return (
         <div className="space-y-6">
-            <h1 className="text-2xl font-bold text-text-default">עריכת מקורות גיוס</h1>
+            <h1 className="text-2xl font-bold text-text-default">{t('sources.title')}</h1>
 
-            <AccordionSection title="הוראות שימוש" icon={<InformationCircleIcon className="w-5 h-5" />}>
+            <AccordionSection title={t('sources.instructions_title')} icon={<InformationCircleIcon className="w-5 h-5" />}>
                 <div className="text-sm text-text-muted space-y-2 bg-amber-50 p-4 rounded-lg border border-amber-200">
                     <p><strong className="text-text-default">שם המקור:</strong> חייב להיות שם לא ריק וייחודי בתוך החברה.</p>
                     <p><strong className="text-text-default">כתובת של המקור:</strong> רשימה של מפרידים על ידי נקודה-פסיק, כאשר כל עצם יכול להיות אחת מ-3 אופציות:
@@ -121,10 +124,10 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                 <table className="w-full text-sm text-right min-w-[900px]">
                     <thead className="text-xs text-text-muted uppercase bg-bg-subtle sticky top-0 z-10">
                         <tr>
-                            <th className="p-3 w-1/4">שם מקור הגיוס</th>
-                            <th className="p-3 w-1/2">כתובות או חלקי כתובות דוא"ל של מקור הגיוס</th>
-                            <th className="p-3">חודשי בלעדיות</th>
-                            <th className="p-3 text-center">פעולות</th>
+                            <th className="p-3 w-1/4">{t('sources.col_name')}</th>
+                            <th className="p-3 w-1/2">{t('sources.col_addresses')}</th>
+                            <th className="p-3">{t('sources.col_exclusivity')}</th>
+                            <th className="p-3 text-center">{t('sources.col_actions')}</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-border-subtle">
@@ -135,7 +138,7 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
             </div>
 
             <div className="flex justify-end pt-4">
-                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">שמור שינויים</button>
+                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">{t('sources.save')}</button>
             </div>
         </div>
     );

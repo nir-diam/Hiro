@@ -1,6 +1,8 @@
+
 import React, { useMemo } from 'react';
 import { ChartBarIcon, PencilIcon as PencilSquareIcon, ClipboardDocumentIcon, ArchiveBoxIcon, ArrowPathIcon, UserGroupIcon, ClockIcon, AvatarIcon, FunnelIcon, LinkIcon } from './Icons';
 import { mockJobCandidates } from '../data/mockJobData';
+import { useLanguage } from '../context/LanguageContext';
 
 const SidebarCard: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode; editable?: boolean }> = ({ title, icon, children, editable = false }) => (
     <div className="bg-bg-card rounded-xl border border-border-default shadow-sm">
@@ -25,36 +27,37 @@ const InsightItem: React.FC<{ label: string; count: number; onClick?: () => void
 );
 
 
-// Mock data for the sidebar - these are different from the main candidate list for now
-const quickActions = [
-  { label: 'שכפל משרה', icon: <ClipboardDocumentIcon className="w-5 h-5" /> },
-  { label: 'העבר לארכיון', icon: <ArchiveBoxIcon className="w-5 h-5" /> },
-  { label: 'פרסם מחדש', icon: <ArrowPathIcon className="w-5 h-5" /> },
-  { label: 'הצג מועמדים', icon: <UserGroupIcon className="w-5 h-5" /> },
-];
-
-const recentActivitiesData = [
-    { description: 'נוצר אירוע חדש: ראיון טלפוני', time: 'לפני שעתיים', user: 'חלי' },
-    { description: 'המועמד "ישראל ישראלי" שויך למשרה', time: 'אתמול', user: 'מערכת' },
-    { description: 'המשרה עודכנה: טווח שכר עודכן', time: 'לפני יומיים', user: 'חלי' },
-];
-
 interface JobDetailsSidebarProps {
     job: {
         status: string;
         openDate: string;
-        associatedCandidates: number; // This will now be derived from mock data length
+        associatedCandidates: number; 
     };
     openSummaryDrawer: (candidateId: number) => void;
 }
 
 const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, openSummaryDrawer }) => {
+    const { t } = useLanguage();
     const openDate = new Date(job.openDate);
     const today = new Date();
     const diffTime = Math.max(0, today.getTime() - openDate.getTime());
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
     const totalCandidates = mockJobCandidates.length;
+
+    // Translated actions inside component to use hook
+    const quickActions = [
+      { label: t('job_sidebar.duplicate'), icon: <ClipboardDocumentIcon className="w-5 h-5" /> },
+      { label: t('job_sidebar.archive'), icon: <ArchiveBoxIcon className="w-5 h-5" /> },
+      { label: t('job_sidebar.republish'), icon: <ArrowPathIcon className="w-5 h-5" /> },
+      { label: t('job_sidebar.view_candidates'), icon: <UserGroupIcon className="w-5 h-5" /> },
+    ];
+
+    const recentActivitiesData = [
+        { description: 'נוצר אירוע חדש: ראיון טלפוני', time: 'לפני שעתיים', user: 'חלי' },
+        { description: 'המועמד "ישראל ישראלי" שויך למשרה', time: 'אתמול', user: 'מערכת' },
+        { description: 'המשרה עודכנה: טווח שכר עודכן', time: 'לפני יומיים', user: 'חלי' },
+    ];
 
     const funnelStats = useMemo(() => {
         const newCandidates = mockJobCandidates.filter(c => c.status === 'חדש').length;
@@ -74,39 +77,39 @@ const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, openSummaryD
     
     return (
         <div className="space-y-6">
-            <SidebarCard title="נתונים מהירים" icon={<ChartBarIcon className="w-5 h-5" />}>
+            <SidebarCard title={t('job_sidebar.quick_stats')} icon={<ChartBarIcon className="w-5 h-5" />}>
                 <div className="grid grid-cols-2 gap-y-4 text-sm">
-                    <div className="font-semibold text-text-muted">סטטוס משרה:</div>
-                    <div><span className={`font-bold px-2 py-0.5 rounded-full ${job.status === 'פתוחה' ? 'text-green-600 bg-green-100' : 'text-text-default bg-bg-subtle'}`}>{job.status}</span></div>
+                    <div className="font-semibold text-text-muted">{t('job_sidebar.status')}</div>
+                    <div><span className={`font-bold px-2 py-0.5 rounded-full ${job.status === 'פתוחה' || job.status === 'Open' ? 'text-green-600 bg-green-100' : 'text-text-default bg-bg-subtle'}`}>{t(`status.${job.status}`)}</span></div>
                     
-                    <div className="font-semibold text-text-muted">סה"כ מועמדים:</div>
+                    <div className="font-semibold text-text-muted">{t('job_sidebar.total_candidates')}</div>
                     <div className="font-bold text-text-default">{totalCandidates}</div>
 
-                    <div className="font-semibold text-text-muted">פתוחה למשך:</div>
-                    <div className="font-bold text-text-default">{diffDays} ימים</div>
+                    <div className="font-semibold text-text-muted">{t('job_sidebar.open_for')}</div>
+                    <div className="font-bold text-text-default">{diffDays} {t('job_sidebar.days')}</div>
 
-                    <div className="font-semibold text-text-muted">תאריך פתיחה:</div>
+                    <div className="font-semibold text-text-muted">{t('job_sidebar.open_date')}</div>
                     <div className="font-bold text-text-default">{openDate.toLocaleDateString('he-IL')}</div>
                 </div>
             </SidebarCard>
 
-            <SidebarCard title="משפך הגיוס" icon={<FunnelIcon className="w-5 h-5" />}>
+            <SidebarCard title={t('job_sidebar.funnel')} icon={<FunnelIcon className="w-5 h-5" />}>
                 <div className="space-y-1">
-                    <InsightItem label="מועמדים חדשים (לסינון)" count={funnelStats.newCandidates} />
-                    <InsightItem label="בתהליך מתקדם" count={funnelStats.advancedProcess} />
-                    <InsightItem label="נשלחו קו״ח ללקוח" count={funnelStats.cvSent} />
-                    <InsightItem label="מועמדים שנפסלו" count={funnelStats.rejected} />
+                    <InsightItem label={t('job_sidebar.new_candidates')} count={funnelStats.newCandidates} />
+                    <InsightItem label={t('job_sidebar.advanced_process')} count={funnelStats.advancedProcess} />
+                    <InsightItem label={t('job_sidebar.cv_sent')} count={funnelStats.cvSent} />
+                    <InsightItem label={t('job_sidebar.rejected')} count={funnelStats.rejected} />
                 </div>
             </SidebarCard>
 
-            <SidebarCard title="מקורות גיוס" icon={<LinkIcon className="w-5 h-5" />}>
+            <SidebarCard title={t('job_sidebar.sources')} icon={<LinkIcon className="w-5 h-5" />}>
                  <div className="space-y-1">
-                    <InsightItem label="מועמדים מפרסום" count={sourcingStats.fromAds} />
-                    <InsightItem label="מקורות אחרים" count={sourcingStats.fromOther} />
+                    <InsightItem label={t('job_sidebar.from_ads')} count={sourcingStats.fromAds} />
+                    <InsightItem label={t('job_sidebar.from_other')} count={sourcingStats.fromOther} />
                 </div>
             </SidebarCard>
 
-            <SidebarCard title="פעולות מהירות" icon={<PencilSquareIcon className="w-5 h-5" />} editable>
+            <SidebarCard title={t('job_sidebar.quick_actions')} icon={<PencilSquareIcon className="w-5 h-5" />} editable>
                 <ul className="space-y-3">
                     {quickActions.map(action => (
                         <li key={action.label}>
@@ -119,7 +122,7 @@ const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, openSummaryD
                 </ul>
             </SidebarCard>
             
-            <SidebarCard title="פעילות אחרונה" icon={<ClockIcon className="w-5 h-5" />}>
+            <SidebarCard title={t('job_sidebar.activity')} icon={<ClockIcon className="w-5 h-5" />}>
                 <div className="relative pl-4 space-y-6">
                     {recentActivitiesData.map((activity, index) => (
                          <div key={index} className="relative">

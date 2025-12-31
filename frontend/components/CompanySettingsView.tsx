@@ -5,6 +5,7 @@ import UsageSettingsTab from './UsageSettingsTab';
 import CompanyTagsSettingsView from './CompanyTagsSettingsView';
 import CustomFieldsSettingsView from './CustomFieldsSettingsView';
 import JobHealthSettingsView from './JobHealthSettingsView';
+import { useLanguage } from '../context/LanguageContext';
 
 
 // Reusable components for this view
@@ -90,6 +91,7 @@ const renderField = (label: string, name: string, value: string, onChange: (e: R
 
 
 const ParametersTab: React.FC = () => {
+    const { t } = useLanguage();
     const [params, setParams] = useState({
         companyEmail: 'hr@humand.co.il',
         replyToEmail: '',
@@ -111,12 +113,12 @@ const ParametersTab: React.FC = () => {
         <div className="space-y-8 animate-fade-in">
             {/* Warning Banner */}
             <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-r-lg" role="alert">
-                <p><strong>נא לשים לב:</strong> עריכת הפרמטרים האלה משפיעה באופן מהותי על השימוש במערכת.</p>
+                <p><strong>{t('company_settings.params_warning')}</strong></p>
             </div>
 
             {/* Logo Section */}
             <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
-                <label className="font-semibold text-text-muted">לוגו חברה:</label>
+                <label className="font-semibold text-text-muted">{t('company_settings.logo')}</label>
                 <div className="flex items-center gap-4 flex-wrap">
                     <div className="w-48 h-20 bg-bg-card border border-border-default rounded-md flex items-center justify-center p-2 shadow-sm">
                         {/* Placeholder for the logo */}
@@ -125,13 +127,13 @@ const ParametersTab: React.FC = () => {
                     <div className="flex items-center gap-4">
                          <button className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                             <ArrowUpTrayIcon className="w-5 h-5"/>
-                            <span>העלאת לוגו חדש</span>
+                            <span>{t('company_settings.upload_logo')}</span>
                         </button>
                         <button className="p-2 text-text-subtle hover:text-red-600"><TrashIcon className="w-5 h-5"/></button>
                     </div>
                     <a href="#" className="flex items-center gap-1 text-sm text-primary-600 hover:underline">
                         <InformationCircleIcon className="w-4 h-4"/>
-                        <span>אתר לכיווץ תמונות</span>
+                        <span>{t('company_settings.compress_link')}</span>
                     </a>
                 </div>
             </div>
@@ -139,7 +141,7 @@ const ParametersTab: React.FC = () => {
             {/* Email Section */}
             <div className="space-y-4">
                  <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
-                    <label className="font-semibold text-text-muted">מייל חברה: <span className="text-red-500">*</span></label>
+                    <label className="font-semibold text-text-muted">{t('company_settings.company_email')} <span className="text-red-500">*</span></label>
                     <div className="relative">
                         <input type="email" name="companyEmail" value={params.companyEmail} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"/>
                         <InformationCircleIcon className="w-5 h-5 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2"/>
@@ -148,25 +150,25 @@ const ParametersTab: React.FC = () => {
                  <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
                     <div></div>
                     <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> אימות מייל</span>
-                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> אימות דומיין</span>
-                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> אימות Mail From</span>
-                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> אימות SPF</span>
-                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> אימות DMARC</span>
-                        <a href="#" className="flex items-center gap-1 text-primary-600 hover:underline"><ArrowTopRightOnSquareIcon className="w-4 h-4"/> מידע נוסף</a>
+                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> {t('company_settings.email_verify')}</span>
+                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> {t('company_settings.domain_verify')}</span>
+                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> {t('company_settings.mail_from_verify')}</span>
+                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> {t('company_settings.spf_verify')}</span>
+                        <span className="flex items-center gap-1.5 font-medium text-green-600"><CheckCircleIcon className="w-5 h-5"/> {t('company_settings.dmarc_verify')}</span>
+                        <a href="#" className="flex items-center gap-1 text-primary-600 hover:underline"><ArrowTopRightOnSquareIcon className="w-4 h-4"/> {t('company_settings.more_info')}</a>
                     </div>
                  </div>
             </div>
 
             {/* Other Fields Section */}
             <div className="space-y-4">
-                {renderField('מייל חזרה:', 'replyToEmail', params.replyToEmail, handleChange)}
-                {renderField('מיילים לעותקים:', 'ccEmails', params.ccEmails, handleChange, 'textarea')}
-                {renderField('דומיינים/מיילים מסוננים:', 'filteredDomains', params.filteredDomains, handleChange, 'textarea')}
-                {renderField('טלפונים מסוננים:', 'filteredPhones', params.filteredPhones, handleChange, 'textarea')}
-                {renderField('אתר הבית:', 'websiteUrl', params.websiteUrl, handleChange, 'input')}
-                {renderField('כתובת דף תודה:', 'thankYouPageUrl', params.thankYouPageUrl, handleChange, 'input')}
-                {renderField('מדיניות הפרטיות:', 'privacyPolicyUrl', params.privacyPolicyUrl, handleChange, 'input')}
+                {renderField(t('company_settings.reply_to'), 'replyToEmail', params.replyToEmail, handleChange)}
+                {renderField(t('company_settings.cc_emails'), 'ccEmails', params.ccEmails, handleChange, 'textarea')}
+                {renderField(t('company_settings.filtered_domains'), 'filteredDomains', params.filteredDomains, handleChange, 'textarea')}
+                {renderField(t('company_settings.filtered_phones'), 'filteredPhones', params.filteredPhones, handleChange, 'textarea')}
+                {renderField(t('company_settings.website_url'), 'websiteUrl', params.websiteUrl, handleChange, 'input')}
+                {renderField(t('company_settings.thank_you_url'), 'thankYouPageUrl', params.thankYouPageUrl, handleChange, 'input')}
+                {renderField(t('company_settings.privacy_url'), 'privacyPolicyUrl', params.privacyPolicyUrl, handleChange, 'input')}
             </div>
 
              {/* New Email Signature Section */}
@@ -177,7 +179,7 @@ const ParametersTab: React.FC = () => {
                 >
                     <div className="flex items-center gap-3">
                         <EnvelopeIcon className="w-5 h-5 text-primary-500" />
-                        <span>חתימת החברה למיילים</span>
+                        <span>{t('company_settings.email_signature')}</span>
                     </div>
                     {isSignatureOpen ? <ChevronUpIcon className="w-6 h-6 text-text-muted" /> : <ChevronDownIcon className="w-6 h-6 text-text-muted" />}
                 </button>
@@ -185,15 +187,15 @@ const ParametersTab: React.FC = () => {
                     <div className="border-t border-border-default p-4 md:p-6 space-y-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
                              <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">פרמטר מיילים:</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('company_settings.signature_param')}</label>
                                 <select className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm">
-                                    <option>השתמש בחתימת הרכז המבצע</option>
-                                    <option>השתמש בחתימת הרכז המשויך למשרה</option>
-                                    <option>השתמש בחתימת החברה בלבד</option>
+                                    <option>{t('company_settings.signature_executor')}</option>
+                                    <option>{t('company_settings.signature_assigned')}</option>
+                                    <option>{t('company_settings.signature_company')}</option>
                                 </select>
                             </div>
                             <div className="flex items-center gap-2 pb-2.5">
-                                <label className="text-sm font-semibold text-text-muted">חתימת מייל חברה:</label>
+                                <label className="text-sm font-semibold text-text-muted">{t('company_settings.signature_label')}</label>
                                 <InformationCircleIcon className="w-5 h-5 text-text-subtle"/>
                             </div>
                         </div>
@@ -224,14 +226,14 @@ const ParametersTab: React.FC = () => {
 
                         <div className="flex items-center gap-2 text-sm text-text-muted">
                             <InformationCircleIcon className="w-5 h-5" />
-                            <a href="#" className="hover:underline">בדיקת מייל</a>
+                            <a href="#" className="hover:underline">{t('company_settings.test_email')}</a>
                         </div>
                     </div>
                 )}
             </div>
             
             <div className="flex justify-end pt-6 border-t border-border-default">
-                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">שמור שינויים</button>
+                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">{t('company_settings.save_changes')}</button>
             </div>
         </div>
     );
@@ -239,6 +241,7 @@ const ParametersTab: React.FC = () => {
 
 
 const CompanySettingsView: React.FC = () => {
+    const { t } = useLanguage();
     const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health'>('usage');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
 
@@ -248,30 +251,30 @@ const CompanySettingsView: React.FC = () => {
                 return (
                     <div className="space-y-6 animate-fade-in">
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                            <SettingsInput label="שם חברה" value="מימד אנושי" />
-                            <SettingsInput label="שם" value="מימד אנושי" />
-                            <SettingsInput label="תאריך יצירה" value="12/05/2022" />
-                            <SettingsInput label="מקור סמסים" value="humand" />
-                            <SettingsInput label="IP מורשים" value="" />
-                            <SettingsInput label="טלפונים מאומתים" value="0527372555" />
+                            <SettingsInput label={t('company_settings.field_company_name')} value="מימד אנושי" />
+                            <SettingsInput label={t('company_settings.field_display_name')} value="מימד אנושי" />
+                            <SettingsInput label={t('company_settings.field_creation_date')} value="12/05/2022" />
+                            <SettingsInput label={t('company_settings.field_sms_source')} value="humand" />
+                            <SettingsInput label={t('company_settings.field_ips')} value="" />
+                            <SettingsInput label={t('company_settings.field_verified_phones')} value="0527372555" />
                         </div>
                         
                         {/* Goals Section */}
                         <div className="bg-bg-subtle/50 p-5 rounded-xl border border-border-default mt-6">
                             <div className="flex items-center gap-2 mb-4 text-primary-700">
                                 <TargetIcon className="w-6 h-6" />
-                                <h3 className="text-lg font-bold">יעדים עסקיים</h3>
+                                <h3 className="text-lg font-bold">{t('company_settings.goals_title')}</h3>
                             </div>
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                 <SettingsInput 
-                                    label="יעד גיוסים חודשי (השמות)" 
+                                    label={t('company_settings.monthly_goal')}
                                     value={monthlyGoal} 
                                     onChange={setMonthlyGoal} 
                                     type="number"
                                 />
                             </div>
                             <p className="text-xs text-text-muted mt-2">
-                                הגדרה זו תשפיע על התצוגה בדשבורד החברה ותציג את אחוז העמידה ביעד.
+                                {t('company_settings.goals_desc')}
                             </p>
                         </div>
                     </div>
@@ -280,31 +283,31 @@ const CompanySettingsView: React.FC = () => {
                 return (
                      <div className="space-y-6 animate-fade-in">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                            <UsageMeter label="חבילת קו''ח" used={237985} total={150000} />
-                            <UsageMeter label="ניצול תגיות" used={76} total={200} />
-                            <UsageMeter label="ניצול משרות" used={164} total={200} />
-                            <UsageMeter label="ניצול רכזים" used={8} total={9} />
-                            <UsageMeter label="ניצול אנשי קשר" used={1} total={5} />
+                            <UsageMeter label={t('company_settings.quota_cv')} used={237985} total={150000} />
+                            <UsageMeter label={t('company_settings.quota_tags')} used={76} total={200} />
+                            <UsageMeter label={t('company_settings.quota_jobs')} used={164} total={200} />
+                            <UsageMeter label={t('company_settings.quota_coordinators')} used={8} total={9} />
+                            <UsageMeter label={t('company_settings.quota_contacts')} used={1} total={5} />
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-                             <QuotaCard title="SMS" items={[
-                                { label: 'גיבוי', value: 0 },
-                                { label: 'חודשית', value: 0 },
-                                { label: 'שוטפת', value: 0 },
+                             <QuotaCard title={t('company_settings.quota_sms')} items={[
+                                { label: t('company_settings.quota_backup'), value: 0 },
+                                { label: t('company_settings.quota_monthly'), value: 0 },
+                                { label: t('company_settings.quota_current'), value: 0 },
                             ]} />
-                            <QuotaCard title="שאלונים" items={[
-                                { label: 'גיבוי', value: 0 },
-                                { label: 'חודשית', value: 0 },
-                                { label: 'שוטפת', value: 0 },
+                            <QuotaCard title={t('company_settings.quota_questionnaires')} items={[
+                                { label: t('company_settings.quota_backup'), value: 0 },
+                                { label: t('company_settings.quota_monthly'), value: 0 },
+                                { label: t('company_settings.quota_current'), value: 0 },
                             ]} />
-                            <QuotaCard title="מיילים" items={[
-                                { label: 'גיבוי', value: 0 },
-                                { label: 'חודשית', value: 10000 },
-                                { label: 'שוטפת', value: 9899 },
+                            <QuotaCard title={t('company_settings.quota_emails')} items={[
+                                { label: t('company_settings.quota_backup'), value: 0 },
+                                { label: t('company_settings.quota_monthly'), value: 10000 },
+                                { label: t('company_settings.quota_current'), value: 9899 },
                             ]} />
-                             <QuotaCard title="Hiro AI" items={[
-                                { label: 'מכסה חודשית', value: 710 },
-                                { label: 'נותרו קריאות', value: 709 },
+                             <QuotaCard title={t('company_settings.quota_ai')} items={[
+                                { label: t('company_settings.quota_ai_monthly'), value: 710 },
+                                { label: t('company_settings.quota_ai_remaining'), value: 709 },
                             ]} />
                         </div>
                     </div>
@@ -328,16 +331,16 @@ const CompanySettingsView: React.FC = () => {
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6">
             <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } } .animate-fade-in { animation: fadeIn 0.3s ease-out; }`}</style>
             <header className="flex-shrink-0 mb-6">
-                <h1 className="text-2xl font-bold text-text-default mb-4">הגדרות חברה</h1>
+                <h1 className="text-2xl font-bold text-text-default mb-4">{t('company_settings.title')}</h1>
                 <div className="border-b border-border-default overflow-x-auto">
                     <nav className="flex items-center -mb-px min-w-max gap-2">
-                        <TabButton title="פרטים אישיים" isActive={activeTab === 'details'} onClick={() => setActiveTab('details')} />
-                        <TabButton title="ניצול מכס" isActive={activeTab === 'quota'} onClick={() => setActiveTab('quota')} />
-                        <TabButton title="פרמטרים" isActive={activeTab === 'parameters'} onClick={() => setActiveTab('parameters')} />
-                        <TabButton title="הגדרות שימוש" isActive={activeTab === 'usage'} onClick={() => setActiveTab('usage')} />
-                        <TabButton title="ניהול תגיות" isActive={activeTab === 'tags'} onClick={() => setActiveTab('tags')} />
-                        <TabButton title="שדות מותאמים" isActive={activeTab === 'custom_fields'} onClick={() => setActiveTab('custom_fields')} />
-                        <TabButton title="מדדי בריאות משרה" isActive={activeTab === 'health'} onClick={() => setActiveTab('health')} />
+                        <TabButton title={t('company_settings.tab_details')} isActive={activeTab === 'details'} onClick={() => setActiveTab('details')} />
+                        <TabButton title={t('company_settings.tab_quota')} isActive={activeTab === 'quota'} onClick={() => setActiveTab('quota')} />
+                        <TabButton title={t('company_settings.tab_params')} isActive={activeTab === 'parameters'} onClick={() => setActiveTab('parameters')} />
+                        <TabButton title={t('company_settings.tab_usage')} isActive={activeTab === 'usage'} onClick={() => setActiveTab('usage')} />
+                        <TabButton title={t('company_settings.tab_tags')} isActive={activeTab === 'tags'} onClick={() => setActiveTab('tags')} />
+                        <TabButton title={t('company_settings.tab_custom_fields')} isActive={activeTab === 'custom_fields'} onClick={() => setActiveTab('custom_fields')} />
+                        <TabButton title={t('company_settings.tab_health')} isActive={activeTab === 'health'} onClick={() => setActiveTab('health')} />
                     </nav>
                 </div>
             </header>
@@ -346,7 +349,7 @@ const CompanySettingsView: React.FC = () => {
             </main>
              {activeTab === 'details' && (
                  <div className="flex justify-end pt-6 border-t border-border-default">
-                    <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">שמור שינויים</button>
+                    <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">{t('company_settings.save_changes')}</button>
                 </div>
              )}
         </div>

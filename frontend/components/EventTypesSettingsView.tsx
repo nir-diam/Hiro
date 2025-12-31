@@ -1,6 +1,8 @@
+
 import React, { useState } from 'react';
 import AccordionSection from './AccordionSection';
 import { InformationCircleIcon, TrashIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface EventTypeSetting {
@@ -37,6 +39,7 @@ const newEventTypeInitialState = {
 
 
 const EventTypesSettingsView: React.FC = () => {
+    const { t } = useLanguage();
     const [eventTypes, setEventTypes] = useState<EventTypeSetting[]>(initialEventTypes);
     const [newEvent, setNewEvent] = useState(newEventTypeInitialState);
 
@@ -77,11 +80,11 @@ const EventTypesSettingsView: React.FC = () => {
                 <td className="p-2 text-center">
                     <div className="flex items-center justify-center gap-2">
                         {isNew ? (
-                            <button onClick={handleAddNewEvent} className="text-sm font-semibold text-primary-600 bg-primary-100 py-1.5 px-4 rounded-md hover:bg-primary-200">הוסף</button>
+                            <button onClick={handleAddNewEvent} className="text-sm font-semibold text-primary-600 bg-primary-100 py-1.5 px-4 rounded-md hover:bg-primary-200">{t('event_types.add')}</button>
                         ) : (
                             <>
-                                <button className="text-xs font-semibold text-text-muted border border-border-default bg-bg-card py-1 px-3 rounded-md hover:bg-bg-hover">שמירה</button>
-                                <button className="text-xs font-semibold text-text-muted border border-border-default bg-bg-card py-1 px-3 rounded-md hover:bg-bg-hover">ביטול</button>
+                                <button className="text-xs font-semibold text-text-muted border border-border-default bg-bg-card py-1 px-3 rounded-md hover:bg-bg-hover">{t('event_types.save')}</button>
+                                <button className="text-xs font-semibold text-text-muted border border-border-default bg-bg-card py-1 px-3 rounded-md hover:bg-bg-hover">{t('event_types.cancel')}</button>
                                 <button onClick={() => handleDelete(id)} className="p-2 text-text-subtle hover:text-red-600"><TrashIcon className="w-4 h-4" /></button>
                             </>
                         )}
@@ -93,9 +96,9 @@ const EventTypesSettingsView: React.FC = () => {
 
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6 space-y-6">
-            <h1 className="text-2xl font-bold text-text-default">עריכת סוגי אירועים</h1>
+            <h1 className="text-2xl font-bold text-text-default">{t('event_types.title')}</h1>
 
-            <AccordionSection title="הוראות שימוש" icon={<InformationCircleIcon className="w-5 h-5" />} defaultOpen>
+            <AccordionSection title={t('event_types.instructions_title')} icon={<InformationCircleIcon className="w-5 h-5" />} defaultOpen>
                 <div className="text-sm text-text-muted space-y-1 bg-amber-50 p-4 rounded-lg border border-amber-200">
                     <p>ממשק זה מאפשר ליצור ולערוך סוגי אירועים בנוסף לסוגי מערכת.</p>
                     <p><strong className="text-text-default">סוג אירוע פעיל</strong> - ניתן ליצור אירוע ידני מסוג זה. סוג אירוע שאינו פעיל, אירועים קיימים מסוג זה יישארו. סוג אירוע עדיין יופיע במסננים של טבלאות אירועים.</p>
@@ -109,14 +112,14 @@ const EventTypesSettingsView: React.FC = () => {
                 <table className="w-full text-sm text-right min-w-[1000px]">
                     <thead className="text-xs text-text-muted uppercase bg-bg-subtle sticky top-0 z-10">
                         <tr>
-                            <th className="p-3 text-center">פעיל</th>
-                            <th className="p-3">סוג אירוע</th>
-                            <th className="p-3">צבע טקסט</th>
-                            <th className="p-3">צבע רקע</th>
-                            <th className="p-3 text-center">מועמד</th>
-                            <th className="p-3 text-center">משרה</th>
-                            <th className="p-3 text-center">לקוח</th>
-                            <th className="p-3 text-center">פעולות</th>
+                            <th className="p-3 text-center">{t('event_types.col_active')}</th>
+                            <th className="p-3">{t('event_types.col_name')}</th>
+                            <th className="p-3">{t('event_types.col_text_color')}</th>
+                            <th className="p-3">{t('event_types.col_bg_color')}</th>
+                            <th className="p-3 text-center">{t('event_types.col_for_candidate')}</th>
+                            <th className="p-3 text-center">{t('event_types.col_for_job')}</th>
+                            <th className="p-3 text-center">{t('event_types.col_for_client')}</th>
+                            <th className="p-3 text-center">{t('event_types.col_actions')}</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-border-subtle">

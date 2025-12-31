@@ -4,6 +4,7 @@ import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, Lin
 import { MessageMode } from '../hooks/useUIState';
 import { TagInput } from './TagInput';
 import DevAnnotation from './DevAnnotation';
+import { useLanguage } from '../context/LanguageContext';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
   <button onClick={onClick} title={title} className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors relative z-20 ${className || 'bg-primary-100/70 text-primary-600 hover:bg-primary-200'}`}>
@@ -161,70 +162,74 @@ const mockSmartTags = {
 const ExperienceBar: React.FC<{ 
     data?: { label: string, percentage: number, color: string }[];
     smartTags?: { domains: string[], orgDNA?: { label: string, subLabel: string, icon?: any } }
-}> = ({ data = mockExperienceDistribution, smartTags = mockSmartTags }) => (
-    <div className="w-full mt-2 mb-4">
-        <div className="flex justify-between items-center mb-2">
-             <h4 className="text-sm font-bold text-text-default flex items-center gap-2">
-                <BriefcaseIcon className="w-4 h-4 text-primary-500"/>
-                <span>פרופיל תעשייתי</span>
-             </h4>
-        </div>
-        
-        {/* Visual Bar */}
-        <div className="flex h-2 w-full rounded-full overflow-hidden bg-bg-subtle mb-2">
-            {data.map((item, index) => (
-                <div 
-                    key={index} 
-                    className={`${item.color} h-full relative group cursor-help`} 
-                    style={{ width: `${item.percentage}%` }} 
-                    title={`${item.label}: ${item.percentage}%`}
-                />
-            ))}
-        </div>
-
-        {/* Legend - Inline */}
-        <div className="flex flex-wrap gap-3 mb-3 items-center">
-             {data.map((item, index) => (
-                <div key={index} className="flex items-center gap-1.5 text-[11px]">
-                    <div className={`w-2 h-2 rounded-full ${item.color}`}></div>
-                    <span className="text-text-default font-medium">{item.label}</span>
-                    <span className="text-text-muted">({item.percentage}%)</span>
-                </div>
-            ))}
-        </div>
-
-        {/* Insights Strip - Horizontal Row */}
-        <div className="flex flex-col sm:flex-row gap-3 text-xs bg-bg-subtle/30 p-2 rounded-lg border border-border-default/40 items-start sm:items-center">
-            {/* Org DNA */}
-            {smartTags?.orgDNA && (
-                <div className="flex items-center gap-2 min-w-0 sm:border-l sm:border-border-default sm:pl-3 sm:max-w-[40%]">
-                    <div className="text-text-muted flex-shrink-0">
-                        {smartTags.orgDNA.icon || <BuildingOffice2Icon className="w-3.5 h-3.5" />}
-                    </div>
-                    <div className="min-w-0 overflow-hidden">
-                        <span className="font-bold text-text-default block leading-tight truncate" title={smartTags.orgDNA.label}>
-                            {smartTags.orgDNA.label}
-                        </span>
-                        {smartTags.orgDNA.subLabel && (
-                            <span className="text-[10px] text-text-subtle block leading-tight truncate" title={smartTags.orgDNA.subLabel}>
-                                {smartTags.orgDNA.subLabel}
-                            </span>
-                        )}
-                    </div>
-                </div>
-            )}
-
-            {/* Domains */}
-            <div className="flex flex-wrap gap-1.5 items-center flex-1 min-w-0">
-                {smartTags?.domains.map((tag, i) => (
-                     <span key={i} className="text-[11px] text-text-default bg-white border border-border-default px-2 py-0.5 rounded-md shadow-sm whitespace-nowrap">
-                        {tag}
-                    </span>
+}> = ({ data = mockExperienceDistribution, smartTags = mockSmartTags }) => {
+    const { t } = useLanguage();
+    
+    return (
+        <div className="w-full mt-2 mb-4">
+            <div className="flex justify-between items-center mb-2">
+                <h4 className="text-sm font-bold text-text-default flex items-center gap-2">
+                    <BriefcaseIcon className="w-4 h-4 text-primary-500"/>
+                    <span>{t('profile.industry_profile')}</span>
+                </h4>
+            </div>
+            
+            {/* Visual Bar */}
+            <div className="flex h-2 w-full rounded-full overflow-hidden bg-bg-subtle mb-2">
+                {data.map((item, index) => (
+                    <div 
+                        key={index} 
+                        className={`${item.color} h-full relative group cursor-help`} 
+                        style={{ width: `${item.percentage}%` }} 
+                        title={`${item.label}: ${item.percentage}%`}
+                    />
                 ))}
             </div>
+
+            {/* Legend - Inline */}
+            <div className="flex flex-wrap gap-3 mb-3 items-center">
+                {data.map((item, index) => (
+                    <div key={index} className="flex items-center gap-1.5 text-[11px]">
+                        <div className={`w-2 h-2 rounded-full ${item.color}`}></div>
+                        <span className="text-text-default font-medium">{item.label}</span>
+                        <span className="text-text-muted">({item.percentage}%)</span>
+                    </div>
+                ))}
+            </div>
+
+            {/* Insights Strip - Horizontal Row */}
+            <div className="flex flex-col sm:flex-row gap-3 text-xs bg-bg-subtle/30 p-2 rounded-lg border border-border-default/40 items-start sm:items-center">
+                {/* Org DNA */}
+                {smartTags?.orgDNA && (
+                    <div className="flex items-center gap-2 min-w-0 sm:border-l sm:border-border-default sm:pl-3 sm:max-w-[40%]">
+                        <div className="text-text-muted flex-shrink-0">
+                            {smartTags.orgDNA.icon || <BuildingOffice2Icon className="w-3.5 h-3.5" />}
+                        </div>
+                        <div className="min-w-0 overflow-hidden">
+                            <span className="font-bold text-text-default block leading-tight truncate" title={smartTags.orgDNA.label}>
+                                {smartTags.orgDNA.label}
+                            </span>
+                            {smartTags.orgDNA.subLabel && (
+                                <span className="text-[10px] text-text-subtle block leading-tight truncate" title={smartTags.orgDNA.subLabel}>
+                                    {smartTags.orgDNA.subLabel}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                {/* Domains */}
+                <div className="flex flex-wrap gap-1.5 items-center flex-1 min-w-0">
+                    {smartTags?.domains.map((tag, i) => (
+                        <span key={i} className="text-[11px] text-text-default bg-white border border-border-default px-2 py-0.5 rounded-md shadow-sm whitespace-nowrap">
+                            {tag}
+                        </span>
+                    ))}
+                </div>
+            </div>
         </div>
-    </div>
-);
+    );
+};
 
 interface CandidateProfileProps {
     candidateData: any;
@@ -240,6 +245,7 @@ interface CandidateProfileProps {
 }
 
 const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMatchJobsClick, onScreenCandidateClick, onOpenMessageModal, onTagsChange, onFormChange, isFavorite, onToggleFavorite, onReportInaccuracy, hideActions = false }) => {
+  const { t } = useLanguage();
   const jobMatchesCount = 8; 
   const getInitials = (name: string) => (name || '').split(' ').map(n => n[0]).join('');
   const candidateInitials = getInitials(candidateData.fullName);
@@ -304,7 +310,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
                       <div className="mb-3">
                           <EditableField 
                               value={candidateData.title || ''} 
-                              placeholder="פרופיל ראשי (לדוגמה: מנהל שיווק)" 
+                              placeholder={t('profile.main_profile_label')} 
                               onSave={(val) => onFormChange({ ...candidateData, title: val })}
                               className="text-lg font-bold text-primary-700"
                           />
@@ -313,7 +319,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
                       <div className="mb-4 bg-bg-subtle/30 p-3 rounded-lg border border-border-subtle/50">
                          <EditableField 
                               value={candidateData.professionalSummary || ''} 
-                              placeholder="תמצית השכלה / תקציר מקצועי" 
+                              placeholder={t('profile.summary_placeholder')} 
                               onSave={(val) => onFormChange({ ...candidateData, professionalSummary: val })}
                               className="text-text-default text-sm leading-relaxed"
                               multiline
@@ -325,26 +331,26 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
                           {/* Highlight Badges */}
                           <div title="שליטה באנגלית כשפת אם" className="flex items-center gap-1.5 bg-white text-text-default font-medium text-xs px-2.5 py-1 rounded-md border border-border-default shadow-sm">
                               <LanguageIcon className="w-3.5 h-3.5 text-primary-500" />
-                              <span>אנגלית שפת אם</span>
+                              <span>{t('profile.english_native')}</span>
                           </div>
                           <div title="תואר אקדמי" className="flex items-center gap-1.5 bg-white text-text-default font-medium text-xs px-2.5 py-1 rounded-md border border-border-default shadow-sm">
                               <AcademicCapIcon className="w-3.5 h-3.5 text-primary-500" />
-                              <span>תואר אקדמי</span>
+                              <span>{t('profile.degree')}</span>
                           </div>
                           {/* Job Scope Badge */}
                           <div title="היקף משרה רצוי" className="flex items-center gap-1.5 bg-secondary-50 text-secondary-800 font-medium text-xs px-2.5 py-1 rounded-md border border-secondary-200 shadow-sm">
                               <BriefcaseIcon className="w-3.5 h-3.5" />
-                              <span>{candidateData.jobScope || 'משרה מלאה'}</span>
+                              <span>{candidateData.jobScope || t('profile.full_time')}</span>
                           </div>
                       </div>
 
                       <div className="flex items-center justify-center sm:justify-start text-xs text-text-muted mt-3 flex-wrap gap-y-1">
                           <span className="flex items-center gap-1">
                               <ClockIcon className="w-3.5 h-3.5"/>
-                              עודכן לאחרונה: 14:01 28/05/2025
+                              {t('profile.last_updated')}: 14:01 28/05/2025
                           </span>
                           <span className="mx-2 hidden sm:inline">•</span>
-                          <span>ציפיות שכר: <span className="font-semibold text-text-default">12,000 ₪</span></span>
+                          <span>{t('profile.salary_expectations')}: <span className="font-semibold text-text-default">12,000 ₪</span></span>
                       </div>
 
                       <div className="flex items-center justify-center sm:justify-start gap-3 mt-5 relative z-20">
@@ -352,9 +358,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
                             <a href={`tel:${candidateData.phone}`} title={candidateData.phone} className="w-9 h-9 flex items-center justify-center bg-white border border-border-default text-text-muted rounded-full hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm">
                                 <PhoneIcon className="w-4 h-4" />
                             </a>
-                            <SocialButton onClick={() => openModal('email')} title="שלח אימייל"><EnvelopeIcon className="w-4 h-4" /></SocialButton>
-                            <SocialButton onClick={() => openModal('whatsapp')} title="שלח וואטסאפ"><WhatsappIcon className="w-4 h-4" /></SocialButton>
-                            <SocialButton onClick={() => openModal('sms')} title="שלח SMS"><ChatBubbleBottomCenterTextIcon className="w-4 h-4" /></SocialButton>
+                            <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}><EnvelopeIcon className="w-4 h-4" /></SocialButton>
+                            <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}><WhatsappIcon className="w-4 h-4" /></SocialButton>
+                            <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}><ChatBubbleBottomCenterTextIcon className="w-4 h-4" /></SocialButton>
                             <div className="h-6 w-px bg-border-default mx-1"></div>
                             <a href="#" target="_blank" rel="noopener noreferrer" title="LinkedIn Profile" className="w-9 h-9 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-full hover:bg-[#0077b5]/20 transition-all">
                                 <LinkedInIcon className="w-4 h-4" />
@@ -374,7 +380,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
                                       className="flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-2 px-4 rounded-xl hover:bg-primary-700 transition-all shadow-md shadow-primary-500/20"
                                   >
                                       <MatchIcon className="w-5 h-5" />
-                                      <span>התאמות ({jobMatchesCount})</span>
+                                      <span>{t('profile.matches')} ({jobMatchesCount})</span>
                                   </button>
                               </DevAnnotation>
                               <button
@@ -382,7 +388,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
                                   className="flex items-center justify-center gap-2 bg-white border border-border-default text-text-default font-bold py-2 px-4 rounded-xl hover:bg-bg-hover transition-all shadow-sm"
                               >
                                   <ClipboardDocumentListIcon className="w-5 h-5 text-text-muted" />
-                                  <span>סינון מועמד</span>
+                                  <span>{t('profile.screen_candidate')}</span>
                               </button>
                           </div>
                       )}
@@ -396,7 +402,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
               
                {/* Timeline Section */}
               <div className="mb-2">
-                  <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider mb-2">פעילות אחרונה</h4>
+                  <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider mb-2">{t('profile.recent_activity')}</h4>
                   <div className="flex justify-between items-stretch gap-2">
                       <TimelineEvent day="14" month="יולי" time="13:00" title="קו''ח" company="בזק" color="primary" />
                       <TimelineEvent day="10" month="יולי" time="09:00" title="שיחה" company="Wix" color="accent" />
@@ -412,10 +418,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({ candidateData, onMa
 
               <div className="w-full mt-auto">
                 <div className="flex justify-between items-center mb-2">
-                    <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">תגיות וכישורים</h4>
-                    <button className="text-[10px] text-primary-600 hover:underline">+ הוסף תגית</button>
+                    <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">{t('profile.tags_skills')}</h4>
+                    <button className="text-[10px] text-primary-600 hover:underline">+ {t('profile.add_tag')}</button>
                 </div>
-                <TagInput tags={candidateData.tags || []} setTags={onTagsChange} placeholder="הוסף תגית..." limit={6} />
+                <TagInput tags={candidateData.tags || []} setTags={onTagsChange} placeholder={t('profile.add_tag') + "..."} limit={6} />
               </div>
           </div>
         </div>

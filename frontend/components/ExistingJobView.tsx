@@ -14,6 +14,7 @@ import JobEventsView, { mockJobEvents as initialJobEvents, JobEvent } from './Jo
 import { mockExistingJob, mockJobCandidates } from '../data/mockJobData';
 import HiroAIChat from './HiroAIChat';
 import InviteManagerModal from './InviteManagerModal';
+import { useLanguage } from '../context/LanguageContext';
 
 interface Message {
     role: 'user' | 'model';
@@ -66,6 +67,7 @@ interface ExistingJobViewProps {
 }
 
 const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, openSummaryDrawer }) => {
+    const { t } = useLanguage();
     const [mainView, setMainView] = useState<'edit' | 'events' | 'candidates'>('candidates');
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
@@ -179,7 +181,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 <div className="relative z-10 flex flex-col md:flex-row items-center gap-4 text-center md:text-right">
                     <div className="flex-shrink-0">
                         <div className="bg-white/20 text-white text-[10px] font-black px-2.5 py-1 rounded-lg backdrop-blur-md uppercase tracking-widest border border-white/20 mb-1 inline-block">
-                             ID: {jobDataState.id}
+                             {t('job.id_prefix')} {jobDataState.id}
                         </div>
                         <h1 className="text-2xl font-black tracking-tight leading-none">{jobDataState.title}</h1>
                     </div>
@@ -189,7 +191,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         <div className="flex items-center gap-2 mt-0.5">
                             <span className="text-[11px] text-primary-200">{jobDataState.location.split(',')[0]}</span>
                             <div className="flex items-center gap-1 bg-amber-400 text-amber-900 text-[9px] font-black px-1.5 py-0.5 rounded shadow-sm">
-                                <FireIcon className="w-2.5 h-2.5" /> {jobDataState.priority}
+                                <FireIcon className="w-2.5 h-2.5" /> {t(`priority.${jobDataState.priority}`)}
                             </div>
                         </div>
                     </div>
@@ -201,14 +203,14 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         className="flex-1 md:flex-none bg-white/10 hover:bg-white/20 text-white border border-white/20 font-bold py-2 px-5 rounded-xl transition-all flex items-center justify-center gap-2 backdrop-blur-md text-sm"
                     >
                         <UserPlusIcon className="w-4 h-4" />
-                        שתף מנהל
+                        {t('job.invite_manager')}
                     </button>
                     <button 
                         onClick={handleOpenChat}
                         className="flex-1 md:flex-none bg-white text-primary-700 font-bold py-2 px-6 rounded-xl hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 text-sm"
                     >
                         <SparklesIcon className="w-4 h-4" />
-                        התייעץ עם Hiro
+                        {t('job.consult_hiro')}
                     </button>
                 </div>
             </div>
@@ -227,7 +229,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                                 <div className="w-8 h-8 bg-primary-50 rounded-lg flex items-center justify-center text-primary-600">
                                     <ChartBarIcon className="w-5 h-5" />
                                 </div>
-                                <h3 className="font-bold text-sm text-text-default">מבט מהיר</h3>
+                                <h3 className="font-bold text-sm text-text-default">{t('job.quick_look')}</h3>
                             </div>
                             <div className="lg:hidden">
                                 {isSidebarExpanded ? <ChevronUpIcon className="w-5 h-5 text-text-muted" /> : <ChevronDownIcon className="w-5 h-5 text-text-muted" />}
@@ -238,11 +240,11 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                             <div className="p-5 pt-0 space-y-5 animate-fade-in">
                                 <div className="grid grid-cols-2 lg:grid-cols-1 gap-3">
                                     <div className="p-3 bg-bg-subtle rounded-xl border border-border-subtle">
-                                        <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">מועמדים</p>
+                                        <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">{t('nav.candidates')}</p>
                                         <p className="text-2xl font-black text-primary-600">{mockJobCandidates.length}</p>
                                     </div>
                                     <div className="p-3 bg-bg-subtle rounded-xl border border-border-subtle">
-                                        <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">ימים באוויר</p>
+                                        <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">{t('job.days_on_air')}</p>
                                         <p className="text-2xl font-black text-text-default">14</p>
                                     </div>
                                 </div>
@@ -263,21 +265,21 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'candidates' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <UserGroupIcon className="w-5 h-5" />
-                            מועמדים
+                            {t('job.tab_candidates')}
                         </button>
                         <button 
                             onClick={() => setMainView('edit')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'edit' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <PencilIcon className="w-5 h-5" />
-                            ערוך משרה
+                            {t('job.tab_edit')}
                         </button>
                         <button 
                             onClick={() => setMainView('events')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'events' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
                         >
                             <ClockIcon className="w-5 h-5" />
-                            יומן אירועים
+                            {t('job.tab_journal')}
                         </button>
                     </div>
 
@@ -292,11 +294,6 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
             <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
-                messages={chatMessages}
-                isLoading={isChatLoading}
-                error={chatError}
-                onSendMessage={handleSendMessage}
-                onReset={() => { setChatSession(null); setChatMessages([]); initializeChat(); }}
             />
             
             <InviteManagerModal 

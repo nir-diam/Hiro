@@ -5,13 +5,14 @@ import {
     PlusIcon, MagnifyingGlassIcon, BuildingOffice2Icon, PencilIcon, TrashIcon, Cog6ToothIcon, BriefcaseIcon, 
     UserGroupIcon, CalendarDaysIcon, XMarkIcon,
     ChevronDownIcon, TableCellsIcon, Squares2X2Icon, ArrowPathIcon, StarIcon, SparklesIcon,
-    FireIcon, ExclamationTriangleIcon, FlagIcon, CheckIcon
+    FireIcon, ExclamationTriangleIcon, FlagIcon, CheckIcon, WalletIcon, MapPinIcon, UserIcon
 } from './Icons';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import JobStatusModal from './JobStatusModal';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
+import { useLanguage } from '../context/LanguageContext'; // Imported Language Context
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
@@ -111,38 +112,9 @@ const initialFilters = {
     companyIndustry: '',
     companySizes: [] as string[],
     companySectors: [] as string[],
+    // Filter for Job Scope
+    jobScopes: [] as string[],
 };
-
-const allColumns = [
-    { id: 'rating', header: 'דירוג' },
-    { id: 'health', header: 'דופק משרה' },
-    { id: 'title', header: 'שם משרה' },
-    { id: 'priority', header: 'דחיפות' },
-    { id: 'client', header: 'לקוח' },
-    { id: 'status', header: 'סטטוס' },
-    { id: 'associatedCandidates', header: 'מועמדים' },
-    { id: 'waitingForScreening', header: 'ממתינים' },
-    { id: 'activeProcess', header: 'בתהליך' },
-    { id: 'openDate', header: 'תאריך פתיחה' },
-    { id: 'recruiter', header: 'רכז מטפל' },
-    { id: 'id', header: 'מס׳ משרה' },
-    { id: 'postingCode', header: 'קוד לפרסום' },
-    { id: 'field', header: 'תחום' },
-    { id: 'role', header: 'תפקיד' },
-    { id: 'clientType', header: 'סוג לקוח' },
-    { id: 'location', header: 'מיקום' },
-    { id: 'salaryRange', header: 'טווח שכר' },
-    { id: 'ageRange', header: 'טווח גילאים' },
-    { id: 'openPositions', header: 'תקנים פתוחים' },
-    { id: 'validityDays', header: 'ימי תוקף' },
-    { id: 'recruitingCoordinator', header: 'רכז גיוס' },
-    { id: 'accountManager', header: 'מנהל תיק לקוחות' },
-    { id: 'gender', header: 'מין' },
-    { id: 'mobility', header: 'ניידות' },
-    { id: 'licenseType', header: 'סוג רישיון' },
-];
-
-const defaultVisibleColumns = ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'openDate', 'recruiter'];
 
 // --- HELPER FUNCTIONS ---
 // ... (getJobHealthData same as before)
@@ -234,6 +206,7 @@ const PriorityBadge: React.FC<{ priority: Priority; onUpdate: (p: Priority) => v
     const [isOpen, setIsOpen] = useState(false);
     const popoverRef = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
+    const { t } = useLanguage();
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -253,7 +226,7 @@ const PriorityBadge: React.FC<{ priority: Priority; onUpdate: (p: Priority) => v
             return (
                 <div className="flex items-center gap-1.5 text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-full border border-red-200">
                     <FireIcon className="w-3 h-3" />
-                    <span>קריטית</span>
+                    <span>{t('priority.קריטית')}</span>
                 </div>
             );
         }
@@ -261,7 +234,7 @@ const PriorityBadge: React.FC<{ priority: Priority; onUpdate: (p: Priority) => v
             return (
                 <div className="flex items-center gap-1.5 text-xs font-bold text-orange-600 bg-orange-100 px-2 py-1 rounded-full border border-orange-200">
                     <ExclamationTriangleIcon className="w-3 h-3" />
-                    <span>דחופה</span>
+                    <span>{t('priority.דחופה')}</span>
                 </div>
             );
         }
@@ -290,13 +263,13 @@ const PriorityBadge: React.FC<{ priority: Priority; onUpdate: (p: Priority) => v
                     onClick={(e) => e.stopPropagation()}
                 >
                     <button onClick={() => { onUpdate('רגילה'); setIsOpen(false); }} className="text-right px-4 py-2 text-sm hover:bg-bg-hover text-text-default transition-colors flex items-center gap-2">
-                         <FlagIcon className="w-4 h-4 text-gray-400" /> רגילה
+                         <FlagIcon className="w-4 h-4 text-gray-400" /> {t('priority.רגילה')}
                     </button>
                     <button onClick={() => { onUpdate('דחופה'); setIsOpen(false); }} className="text-right px-4 py-2 text-sm hover:bg-bg-hover text-text-default transition-colors flex items-center gap-2">
-                         <ExclamationTriangleIcon className="w-4 h-4 text-orange-500" /> דחופה
+                         <ExclamationTriangleIcon className="w-4 h-4 text-orange-500" /> {t('priority.דחופה')}
                     </button>
                     <button onClick={() => { onUpdate('קריטית'); setIsOpen(false); }} className="text-right px-4 py-2 text-sm hover:bg-bg-hover text-text-default transition-colors flex items-center gap-2">
-                         <FireIcon className="w-4 h-4 text-red-500" /> קריטית
+                         <FireIcon className="w-4 h-4 text-red-500" /> {t('priority.קריטית')}
                     </button>
                 </div>
             )}
@@ -342,7 +315,7 @@ const FilterSelect: React.FC<{ label?: string; name: string; value: string; onCh
     </div>
 );
 
-// Improved DoubleRangeSlider with inputs and LTR support
+// Enhanced DoubleRangeSlider with numeric inputs (Consistent with Candidate View)
 const DoubleRangeSlider: React.FC<{
     label: string;
     min: number;
@@ -350,14 +323,14 @@ const DoubleRangeSlider: React.FC<{
     step: number;
     valueMin: number;
     valueMax: number;
-    onChange: (name: string, val: number) => void; // Changed signature
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
     nameMin: string;
     nameMax: string;
     unit?: string;
     colorVar?: string;
 }> = ({ label, min, max, step, valueMin, valueMax, onChange, nameMin, nameMax, unit = '', colorVar = '--color-primary-500' }) => {
-    const minVal = Math.min(valueMin, valueMax);
-    const maxVal = Math.max(valueMin, valueMax);
+    const minVal = Math.min(Number(valueMin), Number(valueMax));
+    const maxVal = Math.max(Number(valueMin), Number(valueMax));
     const minPercent = ((minVal - min) / (max - min)) * 100;
     const maxPercent = ((maxVal - min) / (max - min)) * 100;
     
@@ -379,15 +352,15 @@ const DoubleRangeSlider: React.FC<{
                 
                 <div className="flex items-center gap-1.5 bg-bg-card border border-border-default shadow-sm px-3 py-1 rounded-full text-sm font-extrabold z-10 tabular-nums" dir="ltr">
                     <input
-                        type="number" min={min} max={max} step={step} value={minVal}
-                        onChange={(e) => onChange(nameMin, Number(e.target.value))}
-                        className="w-16 bg-transparent text-center outline-none focus:text-primary-600 transition-colors"
+                        type="number" min={min} max={max} step={step} value={minVal} name={nameMin}
+                        onChange={onChange}
+                        className="w-20 bg-transparent text-center outline-none focus:text-primary-600 transition-colors"
                     />
                     <span className="text-text-subtle text-xs font-normal">-</span>
                     <input
-                        type="number" min={min} max={max} step={step} value={maxVal}
-                        onChange={(e) => onChange(nameMax, Number(e.target.value))}
-                        className="w-16 bg-transparent text-center outline-none focus:text-primary-600 transition-colors"
+                        type="number" min={min} max={max} step={step} value={maxVal} name={nameMax}
+                        onChange={onChange}
+                        className="w-20 bg-transparent text-center outline-none focus:text-primary-600 transition-colors"
                     />
                     {unit && <span className="text-[10px] text-text-muted font-bold ml-0.5">{unit}</span>}
                 </div>
@@ -436,13 +409,11 @@ const DoubleRangeSlider: React.FC<{
                 `}</style>
 
                 <input
-                    type="range" min={min} max={max} step={step} value={minVal}
-                    onChange={(e) => onChange(nameMin, Number(e.target.value))}
+                    type="range" min={min} max={max} step={step} value={minVal} name={nameMin} onChange={onChange}
                     className="absolute w-full h-1 bg-transparent appearance-none pointer-events-none z-20 range-thumb-custom"
                 />
                 <input
-                    type="range" min={min} max={max} step={step} value={maxVal}
-                    onChange={(e) => onChange(nameMax, Number(e.target.value))}
+                    type="range" min={min} max={max} step={step} value={maxVal} name={nameMax} onChange={onChange}
                     className="absolute w-full h-1 bg-transparent appearance-none pointer-events-none z-20 range-thumb-custom"
                 />
             </div>
@@ -465,6 +436,7 @@ const DoubleRangeSlider: React.FC<{
 // --- MAIN JOBS VIEW ---
 const JobsView: React.FC = () => {
     const navigate = useNavigate();
+    const { t } = useLanguage();
     const [jobs, setJobs] = useState<Job[]>(jobsData);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
@@ -481,12 +453,44 @@ const JobsView: React.FC = () => {
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     const [isCompanyFilterOpen, setIsCompanyFilterOpen] = useState(false);
     
+    const allColumns = useMemo(() => [
+        { id: 'rating', header: t('jobs.col_rating') },
+        { id: 'health', header: t('jobs.col_health') },
+        { id: 'title', header: t('jobs.col_title') },
+        { id: 'priority', header: t('jobs.col_priority') },
+        { id: 'client', header: t('jobs.col_client') },
+        { id: 'status', header: t('jobs.col_status') },
+        { id: 'associatedCandidates', header: t('jobs.col_candidates') },
+        { id: 'waitingForScreening', header: t('jobs.col_waiting') },
+        { id: 'activeProcess', header: t('jobs.col_process') },
+        { id: 'openDate', header: t('jobs.col_open_date') },
+        { id: 'recruiter', header: t('jobs.col_recruiter') },
+        { id: 'id', header: t('jobs.col_id') },
+        { id: 'postingCode', header: t('jobs.col_posting_code') },
+        { id: 'field', header: t('jobs.col_field') },
+        { id: 'role', header: t('jobs.col_role') },
+        { id: 'clientType', header: t('jobs.col_client_type') },
+        { id: 'location', header: t('jobs.col_location') },
+        { id: 'salaryRange', header: t('jobs.col_salary') },
+        { id: 'ageRange', header: t('jobs.col_age') },
+        { id: 'openPositions', header: t('jobs.col_positions') },
+        { id: 'validityDays', header: t('jobs.col_validity') },
+        { id: 'recruitingCoordinator', header: t('jobs.col_coordinator') },
+        { id: 'accountManager', header: t('jobs.col_account_manager') },
+        { id: 'gender', header: t('jobs.col_gender') },
+        { id: 'mobility', header: t('jobs.col_mobility') },
+        { id: 'licenseType', header: t('jobs.col_license') },
+    ], [t]);
+
+    const defaultVisibleColumns = useMemo(() => ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'openDate', 'recruiter'], []);
     const [visibleColumns, setVisibleColumns] = useState(defaultVisibleColumns);
+
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+    const jobScopeOptions = ['משרה מלאה', 'משרה חלקית', 'משמרות', 'פרילנס'];
 
     const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -500,7 +504,6 @@ const JobsView: React.FC = () => {
         setJobs(prev => prev.map(j => j.id === jobId ? { ...j, rating: newRating } : j));
     };
 
-    // New: Handler to update job priority
     const handlePriorityUpdate = (jobId: number, newPriority: Priority) => {
         setJobs(prev => prev.map(j => j.id === jobId ? { ...j, priority: newPriority } : j));
     };
@@ -525,8 +528,9 @@ const JobsView: React.FC = () => {
         setFilters(prev => ({ ...prev, [name]: value }));
     };
     
-    const handleSliderChange = (name: string, value: number) => {
-        setFilters(prev => ({ ...prev, [name]: value }));
+    const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const { name, value } = e.target;
+        setFilters(prev => ({ ...prev, [name]: Number(value) }));
     };
 
     const handleLocationsChange = (newLocations: LocationItem[]) => {
@@ -535,11 +539,9 @@ const JobsView: React.FC = () => {
 
     const handleResetFilters = () => {
         setFilters(initialFilters);
-        // Also reset company filters manually if needed, though they are part of filters state object now
         setIsAdvancedFilterOpen(false);
     };
 
-    // --- New Handler for Status Modal ---
     const openStatusModal = (job: Job) => {
         setJobToEditStatus(job);
         setIsStatusModalOpen(true);
@@ -551,40 +553,18 @@ const JobsView: React.FC = () => {
             console.log(`Updated job ${jobToEditStatus.id} status to ${newStatus}. Note: ${note}`);
         }
     };
-    // ------------------------------------
-    
-    // Handlers for new filter widgets
+
     const handleJobFieldSelect = (selectedField: SelectedJobField | null) => {
         if (selectedField) {
             setFilters(prev => ({
                 ...prev,
-                field: selectedField.category, // Map category to field filter
-                role: selectedField.role       // Map role to role filter
+                field: selectedField.category, 
+                role: selectedField.role       
             }));
         }
         setIsJobFieldSelectorOpen(false);
     };
     
-    const setCompanyFilters = (newFilters: any) => {
-         // This is a bridge because CompanyFilterPopover expects a specific state shape setter
-         // We merge it into our main filters
-         if (typeof newFilters === 'function') {
-             // Handle functional update if passed by popover
-             // Not ideal but works for direct setState usage inside popover
-             // For now, let's assume we pass a direct object or handle it via a wrapper
-         } else {
-             // CompanyFilterPopover passes an object with { sizes, sectors, industry, field }
-             setFilters(prev => ({
-                 ...prev,
-                 companyIndustry: newFilters.industry,
-                 companySizes: newFilters.sizes,
-                 companySectors: newFilters.sectors,
-                 // Note: 'field' in company filter usually means sub-industry, potentially conflicting with job 'field'.
-                 // We'll map company 'field' to nothing for now to avoid conflict or map it to a specific company sub-field if added.
-             }));
-         }
-    };
-    // Wrapper for CompanyFilterPopover to use a compatible state interface
     const [companyFilterState, setCompanyFilterState] = useState({
         sizes: filters.companySizes,
         sectors: filters.companySectors,
@@ -593,7 +573,6 @@ const JobsView: React.FC = () => {
     });
     
     useEffect(() => {
-        // Sync local bridge state back to main filters
         setFilters(prev => ({
             ...prev,
             companySizes: companyFilterState.sizes,
@@ -601,6 +580,16 @@ const JobsView: React.FC = () => {
             companyIndustry: companyFilterState.industry
         }));
     }, [companyFilterState]);
+    
+    const handleJobScopeToggle = (scope: string) => {
+        setFilters(prev => {
+            const currentScopes = prev.jobScopes || [];
+            const newScopes = currentScopes.includes(scope)
+                ? currentScopes.filter(s => s !== scope)
+                : [...currentScopes, scope];
+            return { ...prev, jobScopes: newScopes };
+        });
+    };
 
 
     const sortedAndFilteredJobs = useMemo(() => {
@@ -629,12 +618,13 @@ const JobsView: React.FC = () => {
                     (loc.type === 'region' && job.region === loc.value)
                 );
             
-            // Company/Industry Match (using 'field' as proxy for industry in mock data or clientType)
-            // In a real app, 'Job' would have an 'industry' field derived from the Client.
-            // Using 'field' (Job Field) as a proxy for industry for now.
             const matchesCompanyIndustry = !filters.companyIndustry || job.field === filters.companyIndustry;
-            // Mock data doesn't have company size/sector directly on Job, would need join with Client. 
-            // Assuming simplified matching or missing data is ignored for now.
+            
+            // Check Job Scope
+            const matchesScope = filters.jobScopes.length === 0 || 
+               (Array.isArray(job.jobType) 
+                    ? job.jobType.some(t => filters.jobScopes.includes(t)) 
+                    : filters.jobScopes.includes(job.jobType as string));
 
             return matchesSearch &&
                 (!filters.client || job.client === filters.client) &&
@@ -657,7 +647,8 @@ const JobsView: React.FC = () => {
                 checkRange(job.salaryMin, job.salaryMax, filters.salaryMin, filters.salaryMax) &&
                 checkRange(job.ageMin, job.ageMax, filters.ageMin, filters.ageMax) &&
                 checkRange(job.openPositions, job.openPositions, filters.positionsMin, filters.positionsMax) &&
-                matchesCompanyIndustry;
+                matchesCompanyIndustry &&
+                matchesScope;
         });
 
         if (sortConfig !== null) {
@@ -703,7 +694,6 @@ const JobsView: React.FC = () => {
         roles: [...new Set(jobsData.map(j => j.role))],
         priorities: ['רגילה', 'דחופה', 'קריטית'],
         clientTypes: [...new Set(jobsData.map(j => j.clientType))],
-        // cities and regions removed as they are handled by LocationSelector
         genders: ['זכר', 'נקבה', 'לא משנה'],
         licenseTypes: ['A', 'B', 'C', 'C1', 'אין'],
         recruitingCoordinators: [...new Set(jobsData.map(j => j.recruitingCoordinator))],
@@ -719,7 +709,6 @@ const JobsView: React.FC = () => {
           const columnToAdd = allColumns.find(c => c.id === columnId);
           if (columnToAdd) {
                 const newColumns = [...prev, columnId];
-                // Sort based on original allColumns order
                 newColumns.sort((a, b) => allColumns.findIndex(c => c.id === a) - allColumns.findIndex(c => c.id === b));
                 return newColumns;
             }
@@ -755,33 +744,26 @@ const JobsView: React.FC = () => {
         case 'health': return <JobHealthIndicator job={job} />;
         case 'priority': return <PriorityBadge priority={job.priority} onUpdate={(p) => handlePriorityUpdate(job.id, p)} />;
         case 'title':
-           const health = getJobHealthData(job);
            return (
              <div className="relative group/title flex items-center">
                 <Link to={`/jobs/edit/${job.id}`} onClick={(e) => e.stopPropagation()} className="font-semibold text-primary-700 hover:underline">{job.title}</Link>
              </div>
            );
-        
-        // Updated Status Cell rendering - Using interactive button
         case 'status': return (
             <button 
-                onClick={(e) => { 
-                    e.stopPropagation(); 
-                    openStatusModal(job); 
-                }}
+                onClick={(e) => { e.stopPropagation(); openStatusModal(job); }}
                 className={`text-xs font-bold px-3 py-1 rounded-full transition-transform hover:scale-105 active:scale-95 shadow-sm border ${statusStyles[job.status].bg} ${statusStyles[job.status].text} ${statusStyles[job.status].border || 'border-transparent'}`}
             >
-                {job.status}
+                {t(`status.${job.status}`)}
             </button>
         );
-
         case 'associatedCandidates': return <span className="font-semibold text-text-default text-center block">{job.associatedCandidates}</span>;
         case 'waitingForScreening': return <span className="font-medium text-amber-600 text-center block">{job.waitingForScreening}</span>;
         case 'activeProcess': return <span className="font-medium text-green-600 text-center block">{job.activeProcess}</span>;
         case 'id': return job.id;
         case 'salaryRange': return `${job.salaryMin.toLocaleString()}₪ - ${job.salaryMax.toLocaleString()}₪`;
         case 'ageRange': return `${job.ageMin} - ${job.ageMax}`;
-        case 'mobility': return job.mobility ? 'כן' : 'לא';
+        case 'mobility': return job.mobility ? t('filter.status_active') : t('filter.status_inactive');
         default: return (job as any)[columnId];
       }
     };
@@ -790,58 +772,55 @@ const JobsView: React.FC = () => {
     return (
         <div className="flex flex-col gap-4">
              <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
-             {/* Header */}
+             
             <header className="bg-bg-subtle/80 backdrop-blur-md -mx-6 -mt-6 px-6 pt-6 pb-4">
                 <div className="flex flex-col md:flex-row items-center justify-between gap-2">
                     <div>
-                        <h1 className="text-2xl font-bold text-text-default">משרות</h1>
-                        <p className="text-sm text-text-muted">ניהול כל המשרות במערכת</p>
+                        <h1 className="text-2xl font-bold text-text-default">{t('jobs.title')}</h1>
+                        <p className="text-sm text-text-muted">{t('jobs.subtitle')}</p>
                     </div>
                     <div className="flex items-center gap-4 w-full md:w-auto">
                         <div className="text-xs text-text-muted hidden lg:block">
-                            <span className="font-semibold">סה"כ:</span> {stats.total} | <span className="font-semibold text-green-600">פתוחות:</span> {stats.open} | <span className="font-semibold text-amber-600">מוקפאות:</span> {stats.frozen} | <span className="font-semibold text-text-subtle">מאוישות:</span> {stats.filled}
+                            <span className="font-semibold">{t('jobs.total')}:</span> {stats.total} | <span className="font-semibold text-green-600">{t('jobs.open')}:</span> {stats.open} | <span className="font-semibold text-amber-600">{t('jobs.frozen')}:</span> {stats.frozen} | <span className="font-semibold text-text-subtle">{t('jobs.filled')}:</span> {stats.filled}
                         </div>
                         <button onClick={() => navigate('/jobs/new')} className="flex-grow md:flex-grow-0 flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                             <PlusIcon className="w-5 h-5"/>
-                            <span>פתיחת משרה חדשה</span>
+                            <span>{t('jobs.new_job_btn')}</span>
                         </button>
                     </div>
                 </div>
             </header>
             
-            {/* Search & Filters */}
             <div className="bg-bg-card p-3 rounded-xl border border-border-default">
                 <div className="pb-2 -mb-2">
                     <div className="flex flex-wrap items-end gap-3">
                         <div className="relative flex-grow min-w-[20rem] flex-shrink-0">
                             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                            <input type="text" placeholder="חיפוש לפי שם משרה, לקוח, עיר או מזהה..." name="searchTerm" value={filters.searchTerm} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition" />
+                            <input type="text" placeholder={t('jobs.search_placeholder')} name="searchTerm" value={filters.searchTerm} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" />
                         </div>
-                        <FilterSelect placeholder="שם הלקוח" name="client" value={filters.client} onChange={handleFilterChange} options={filterOptions.clients} className="flex-grow min-w-[10rem] flex-shrink-0" />
-                        <FilterSelect placeholder="סטטוס" name="status" value={filters.status} onChange={handleFilterChange} options={filterOptions.statuses} className="flex-grow min-w-[8rem] flex-shrink-0" />
+                        <FilterSelect placeholder={t('jobs.filter_client')} name="client" value={filters.client} onChange={handleFilterChange} options={filterOptions.clients} className="flex-grow min-w-[10rem] flex-shrink-0" />
+                        <FilterSelect placeholder={t('jobs.filter_status')} name="status" value={filters.status} onChange={handleFilterChange} options={filterOptions.statuses.map(s => t(`status.${s}`))} className="flex-grow min-w-[8rem] flex-shrink-0" />
                         
-                        {/* New Job Field Selector Trigger - Highly Accessible */}
                         <button 
                             onClick={() => setIsJobFieldSelectorOpen(true)}
                             className="flex-grow min-w-[12rem] flex items-center justify-between gap-2 bg-bg-input border border-border-default text-text-default text-sm rounded-lg py-2.5 px-3 hover:border-primary-300 transition shadow-sm text-right"
                         >
-                            <span className="truncate">{filters.role || 'בחר תפקיד/תחום...'}</span>
+                            <span className="truncate">{filters.role || t('jobs.filter_role')}</span>
                             <BriefcaseIcon className="w-4 h-4 text-text-muted" />
                         </button>
 
-                         {/* New Company/Industry Filter Trigger */}
                          <div className="relative">
                             <button
                                 onClick={() => setIsCompanyFilterOpen(!isCompanyFilterOpen)}
                                 className={`flex items-center gap-2 font-semibold py-2.5 px-4 rounded-lg border border-border-default transition-all whitespace-nowrap text-sm ${
                                     isCompanyFilterOpen || filters.companyIndustry
-                                        ? 'bg-primary-50 text-primary-700 border-primary-300'
+                                        ? 'bg-primary-100 text-primary-700 border-primary-300'
                                         : 'bg-bg-input text-text-default hover:border-primary-300'
                                 }`}
                                 title="סינון לפי תעשייה/סקטור"
                             >
                                 <BuildingOffice2Icon className="w-4 h-4" />
-                                <span className="hidden xl:inline">תעשייה</span>
+                                <span className="hidden xl:inline">{t('jobs.filter_industry_btn')}</span>
                             </button>
                             {isCompanyFilterOpen && (
                                 <CompanyFilterPopover
@@ -854,41 +833,27 @@ const JobsView: React.FC = () => {
 
                         <div className="flex items-center gap-2 flex-grow min-w-[16rem] flex-shrink-0">
                              <div className="relative w-full">
-                                 <input
-                                     type="date"
-                                     name="fromDate"
-                                     value={filters.fromDate}
-                                     onChange={handleFilterChange}
-                                     className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm text-text-muted focus:ring-primary-500 focus:border-primary-300 transition"
-                                     placeholder="מתאריך"
-                                 />
+                                 <input type="date" name="fromDate" value={filters.fromDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm text-text-muted focus:ring-primary-500 focus:border-primary-300 transition" placeholder="מתאריך" />
                              </div>
                              <span className="text-text-muted">-</span>
                              <div className="relative w-full">
-                                 <input
-                                     type="date"
-                                     name="toDate"
-                                     value={filters.toDate}
-                                     onChange={handleFilterChange}
-                                     className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm text-text-muted focus:ring-primary-500 focus:border-primary-300 transition"
-                                     placeholder="עד תאריך"
-                                 />
+                                 <input type="date" name="toDate" value={filters.toDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm text-text-muted focus:ring-primary-500 focus:border-primary-300 transition" placeholder="עד תאריך" />
                              </div>
                          </div>
                         <div className="flex items-center gap-3 flex-shrink-0">
                             <button onClick={() => setIsAdvancedFilterOpen(!isAdvancedFilterOpen)} className="text-sm font-semibold text-primary-600 bg-primary-100/70 py-2.5 px-4 rounded-lg hover:bg-primary-200 transition flex items-center justify-center gap-1">
-                                <span>חיפוש מתקדם</span>
+                                <span>{t('candidates.advanced_search')}</span>
                                 <ChevronDownIcon className={`w-4 h-4 transition-transform ${isAdvancedFilterOpen ? 'rotate-180' : ''}`}/>
                             </button>
                             <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
-                                <button onClick={() => setViewMode('table')} title="תצוגת טבלה" className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
-                                <button onClick={() => setViewMode('grid')} title="תצוגת רשת" className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                                <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                                <button onClick={() => setViewMode('grid')} title={t('candidates.view_grid')} className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
                             </div>
                              <div className="relative" ref={settingsRef}>
-                                <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title="התאם עמודות" className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
+                                <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2.5 bg-bg-subtle text-text-muted rounded-lg hover:bg-bg-hover"><Cog6ToothIcon className="w-5 h-5"/></button>
                                 {isSettingsOpen && (
                                 <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4 max-h-96 overflow-y-auto">
-                                    <p className="font-bold text-text-default mb-2 text-sm">הצג עמודות</p>
+                                    <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                     <div className="space-y-2">
                                     {allColumns.map(column => (
                                         <label key={column.id} className="flex items-center gap-2 text-sm font-normal text-text-default capitalize cursor-pointer">
@@ -907,28 +872,46 @@ const JobsView: React.FC = () => {
                 {isAdvancedFilterOpen && (
                     <div className="pt-4 mt-3 border-t border-border-default space-y-4">
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
-                            {/* Replaced FilterSelect for city/region with LocationSelector */}
                             <div className="relative md:col-span-2">
-                                <label className="block text-xs font-semibold text-text-muted mb-1">מיקום</label>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">{t('filter.location')}</label>
                                 <LocationSelector 
                                     selectedLocations={filters.locations}
                                     onChange={handleLocationsChange}
                                     className="w-full"
+                                    placeholder={t('filter.location_placeholder')}
                                 />
                             </div>
-                            <FilterSelect label="דחיפות" name="priority" value={filters.priority} onChange={handleFilterChange} options={filterOptions.priorities} placeholder="הכל" />
-                            <FilterSelect label="סוג לקוח" name="clientType" value={filters.clientType} onChange={handleFilterChange} options={filterOptions.clientTypes} placeholder="הכל" />
-                            <FilterSelect label="מין" name="gender" value={filters.gender} onChange={handleFilterChange} options={filterOptions.genders} placeholder="הכל" />
-                            <FilterSelect label="ניידות" name="mobility" value={filters.mobility} onChange={handleFilterChange} options={['כן', 'לא']} placeholder="הכל" />
-                            <FilterSelect label="סוג רישיון" name="licenseType" value={filters.licenseType} onChange={handleFilterChange} options={filterOptions.licenseTypes} placeholder="הכל" />
-                            <FilterSelect label="רכז גיוס" name="recruitingCoordinator" value={filters.recruitingCoordinator} onChange={handleFilterChange} options={filterOptions.recruitingCoordinators} placeholder="הכל" />
-                            <FilterSelect label="מנהל תיק לקוחות" name="accountManager" value={filters.accountManager} onChange={handleFilterChange} options={filterOptions.accountManagers} placeholder="הכל" />
-                            <FilterInput label="מס' משרה" name="jobId" value={filters.jobId} onChange={handleFilterChange} />
-                            <FilterInput label="קוד לפרסום" name="postingCode" value={filters.postingCode} onChange={handleFilterChange} />
+                            <FilterSelect label={t('jobs.col_priority')} name="priority" value={filters.priority} onChange={handleFilterChange} options={filterOptions.priorities.map(p => t(`priority.${p}`))} placeholder={t('filter.status_all')} />
+                            <FilterSelect label={t('jobs.col_client_type')} name="clientType" value={filters.clientType} onChange={handleFilterChange} options={filterOptions.clientTypes} placeholder={t('filter.status_all')} />
+                            <FilterSelect label={t('jobs.col_gender')} name="gender" value={filters.gender} onChange={handleFilterChange} options={filterOptions.genders.map(g => t(`filter.gender_${g === 'זכר' ? 'male' : g === 'נקבה' ? 'female' : 'all'}`))} placeholder={t('filter.status_all')} />
+                            <FilterSelect label={t('jobs.col_mobility')} name="mobility" value={filters.mobility} onChange={handleFilterChange} options={[t('filter.status_active'), t('filter.status_inactive')]} placeholder={t('filter.status_all')} />
+                            <FilterSelect label={t('jobs.col_license')} name="licenseType" value={filters.licenseType} onChange={handleFilterChange} options={filterOptions.licenseTypes} placeholder={t('filter.status_all')} />
+                            <FilterSelect label={t('jobs.col_recruiter')} name="recruitingCoordinator" value={filters.recruitingCoordinator} onChange={handleFilterChange} options={filterOptions.recruitingCoordinators} placeholder={t('filter.status_all')} />
+                            <FilterSelect label={t('jobs.col_account_manager')} name="accountManager" value={filters.accountManager} onChange={handleFilterChange} options={filterOptions.accountManagers} placeholder={t('filter.status_all')} />
+                            <FilterInput label={t('jobs.col_id')} name="jobId" value={filters.jobId} onChange={handleFilterChange} />
+                            <FilterInput label={t('jobs.col_posting_code')} name="postingCode" value={filters.postingCode} onChange={handleFilterChange} />
+                             <div className="lg:col-span-2">
+                                <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.job_scope')}</label>
+                                <div className="flex flex-wrap gap-2">
+                                    {jobScopeOptions.map(scope => (
+                                        <button
+                                            key={scope}
+                                            onClick={() => handleJobScopeToggle(scope)}
+                                            className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+                                                filters.jobScopes.includes(scope)
+                                                    ? 'bg-primary-100 text-primary-700 border border-primary-200 shadow-sm'
+                                                    : 'bg-bg-subtle text-text-muted border border-transparent hover:bg-bg-hover'
+                                            }`}
+                                        >
+                                            {scope}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 mt-4 border-t border-border-default">
                              <DoubleRangeSlider 
-                                label="טווח שכר" 
+                                label={t('filter.salary_internal')}
                                 min={5000} max={50000} step={1000} 
                                 valueMin={Number(filters.salaryMin)} valueMax={Number(filters.salaryMax)} 
                                 onChange={handleSliderChange} 
@@ -937,14 +920,14 @@ const JobsView: React.FC = () => {
                                 colorVar="--color-secondary-500"
                             />
                             <DoubleRangeSlider 
-                                label="טווח גילאים" 
+                                label={t('filter.age_range')}
                                 min={18} max={70} step={1} 
                                 valueMin={Number(filters.ageMin)} valueMax={Number(filters.ageMax)} 
                                 onChange={handleSliderChange} 
                                 nameMin="ageMin" nameMax="ageMax" 
                             />
                             <DoubleRangeSlider 
-                                label="תקנים פתוחים" 
+                                label={t('jobs.col_positions')}
                                 min={1} max={20} step={1} 
                                 valueMin={Number(filters.positionsMin)} valueMax={Number(filters.positionsMax)} 
                                 onChange={handleSliderChange} 
@@ -952,13 +935,12 @@ const JobsView: React.FC = () => {
                             />
                         </div>
                         <div className="flex justify-end pt-4 mt-4 border-t border-border-default">
-                            <button onClick={handleResetFilters} className="text-sm font-semibold text-text-muted hover:text-primary-600 py-2 px-4 rounded-lg hover:bg-bg-hover transition flex items-center gap-1.5"><ArrowPathIcon className="w-4 h-4" /> איפוס הכל</button>
+                            <button onClick={handleResetFilters} className="text-sm font-semibold text-text-muted hover:text-primary-600 py-2 px-4 rounded-lg hover:bg-bg-hover transition flex items-center gap-1.5"><ArrowPathIcon className="w-4 h-4" /> {t('candidates.reset_all')}</button>
                         </div>
                     </div>
                 )}
             </div>
 
-            {/* Main Content */}
             <main>
                  {sortedAndFilteredJobs.length > 0 ? (
                     viewMode === 'table' ? (
@@ -993,7 +975,6 @@ const JobsView: React.FC = () => {
                                                 </th>
                                             );
                                         })}
-                                        {/* Removed the dedicated Actions column header */}
                                         <th scope="col" className="px-2 py-3 sticky left-0 bg-bg-subtle w-16"></th>
                                     </tr>
                                 </thead>
@@ -1003,7 +984,6 @@ const JobsView: React.FC = () => {
                                         {visibleColumns.map(colId => (
                                             <td key={colId} className="p-4 text-text-muted">{renderCell(job, colId)}</td>
                                         ))}
-                                        {/* Fixed: Removed extra Actions column data */}
                                         <td className="px-2 py-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover transition-colors w-16"></td>
                                     </tr>
                                 ))}
@@ -1020,7 +1000,7 @@ const JobsView: React.FC = () => {
                                            <p className="text-sm text-text-muted">{job.client}</p>
                                        </div>
                                        <div className="flex flex-col items-end gap-1">
-                                           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusStyles[job.status].bg} ${statusStyles[job.status].text} border ${statusStyles[job.status].border || 'border-transparent'}`}>{job.status}</span>
+                                           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusStyles[job.status]?.bg} ${statusStyles[job.status]?.text} border ${statusStyles[job.status]?.border || 'border-transparent'}`}>{t(`status.${job.status}`)}</span>
                                            <JobHealthIndicator job={job} />
                                        </div>
                                    </div>
@@ -1029,10 +1009,10 @@ const JobsView: React.FC = () => {
                                    </div>
                                    <div className="mt-2 flex justify-between items-end">
                                        <div className="text-xs text-text-subtle">
-                                           <p>מועמדים: <span className="font-semibold text-text-muted">{job.associatedCandidates}</span></p>
-                                           <p>נפתחה ב: {job.openDate}</p>
+                                           <p>{t('jobs.col_candidates')}: <span className="font-semibold text-text-muted">{job.associatedCandidates}</span></p>
+                                           <p>{t('jobs.col_open_date')}: {job.openDate}</p>
                                        </div>
-                                       <p className="text-xs text-text-muted">אחראי/ת: {job.recruiter}</p>
+                                       <p className="text-xs text-text-muted">{t('jobs.col_recruiter')}: {job.recruiter}</p>
                                    </div>
                                </div>
                            ))}

@@ -18,14 +18,40 @@ const LoginScreen: React.FC = () => {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [userType, setUserType] = useState<'recruiter' | 'candidate'>('recruiter');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
 
-    const handleLogin = (e: React.FormEvent) => {
+    const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
-        // Mock login action based on type
-        if (userType === 'candidate') {
-            navigate('/candidate-portal/profile');
-        } else {
-            navigate('/dashboard');
+        setError(null);
+        setLoading(true);
+        try {
+            const res = await fetch(`${apiBase}/api/auth/login`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email, password, role: userType }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.message || 'Login failed');
+            }
+            const data = await res.json();
+            if (!data.token) throw new Error('Missing token from server');
+            localStorage.setItem('token', data.token);
+            if (data.user) {
+                localStorage.setItem('herouser', JSON.stringify(data.user));
+                localStorage.setItem('user', JSON.stringify(data.user)); // for existing consumers
+            }
+            if (userType === 'candidate') {
+                navigate('/candidate-portal/profile');
+            } else {
+                navigate('/dashboard');
+            }
+        } catch (err: any) {
+            setError(err.message || 'Login failed');
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -102,14 +128,24 @@ const LoginScreen: React.FC = () => {
                             </div>
                         </div>
 
-                        <button type="submit" className="w-full bg-primary-600 text-white font-bold py-3 rounded-lg hover:bg-primary-700 transition-transform transform hover:scale-105 shadow-lg shadow-primary-500/40">
-                            {userType === 'recruiter' ? 'התחבר למערכת' : 'כניסה לאזור האישי'}
+                        {error && (
+                            <p className="text-sm text-red-600 text-right">{error}</p>
+                        )}
+
+                        <button 
+                            type="submit" 
+                            disabled={loading}
+                            className="w-full bg-primary-600 text-white font-bold py-3 rounded-lg hover:bg-primary-700 transition-transform transform hover:scale-105 shadow-lg shadow-primary-500/40 disabled:opacity-70 disabled:cursor-not-allowed"
+                        >
+                            {loading ? 'מתחבר...' : userType === 'recruiter' ? 'התחבר למערכת' : 'כניסה לאזור האישי'}
                         </button>
                     </form>
 
-                    <p className="text-center text-sm text-text-muted mt-6">
-                        אין לכם חשבון? <a href="#" className="font-semibold text-primary-600 hover:underline">הרשמה</a>
-                    </p>
+                  
+                        אין לכם חשבון? 
+                          {/* <p className="text-center text-sm text-text-muted mt-6">
+                        <button onClick={() => navigate('/candidate-portal/signup')} className="font-semibold text-primary-600 hover:underline">הרשמה</button>
+                    </p> */}
                     
                     {userType === 'recruiter' && (
                         <div className="mt-8 pt-6 border-t border-border-default text-center">

@@ -7,6 +7,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import ErrorBoundary from './components/ErrorBoundary';
 import { SavedSearchesProvider } from './context/SavedSearchesContext';
 import { DevModeProvider } from './context/DevModeContext';
+import { LanguageProvider } from './context/LanguageContext';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -16,16 +17,18 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement);
 root.render(
   <React.StrictMode>
-    <ThemeProvider>
-      <DevModeProvider>
-        <ErrorBoundary>
-          <SavedSearchesProvider>
-            <HashRouter>
-              <App />
-            </HashRouter>
-          </SavedSearchesProvider>
-        </ErrorBoundary>
-      </DevModeProvider>
-    </ThemeProvider>
+    <LanguageProvider>
+      <ThemeProvider>
+        <DevModeProvider>
+          <ErrorBoundary>
+            <SavedSearchesProvider>
+              <HashRouter>
+                <App />
+              </HashRouter>
+            </SavedSearchesProvider>
+          </ErrorBoundary>
+        </DevModeProvider>
+      </ThemeProvider>
+    </LanguageProvider>
   </React.StrictMode>
 );

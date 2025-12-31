@@ -2,13 +2,14 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { 
     MagnifyingGlassIcon, ArrowUpTrayIcon, BuildingOffice2Icon, LinkIcon, 
-    Cog6ToothIcon, PencilIcon, TrashIcon, XMarkIcon, DocumentArrowDownIcon, FunnelIcon
+    Cog6ToothIcon, PencilIcon, TrashIcon, XMarkIcon, DocumentArrowDownIcon, FunnelIcon, PlusIcon
 } from './Icons';
 
 // --- TYPES ---
 interface Company {
-    id: number;
+    id: string;
     name: string;
+    candidateCount: number;
     mainField: string;
     subField: string;
     tags: string[];
@@ -18,73 +19,9 @@ interface Company {
     location: string;
     classification: string;
     relation: string; // Parent/Child/Independent
+    contactPerson?: string; // Added contact
     description: string;
-    candidateCount: number;
 }
-
-// --- MOCK DATA ---
-const initialCompanies: Company[] = [
-    {
-        id: 1,
-        name: 'גטר גרופ',
-        mainField: 'תעשייה',
-        subField: 'יבוא וסחר סיטונאי',
-        tags: ['ציוד מחשוב', 'תקשורת', 'דפוס', 'רפואה'],
-        employeeCount: '501-1000',
-        type: 'מסחר וקמעונאות',
-        website: 'https://www.getter.co.il/',
-        location: 'פתח תקווה',
-        classification: 'פרטית',
-        relation: 'עצמאית',
-        description: 'קבוצה ותיקה המתמחה בייבוא והפצת ציוד טכנולוגי, כולל מחשוב, תקשורת, דפוס וציוד רפואי.',
-        candidateCount: 142
-    },
-    {
-        id: 2,
-        name: 'בזק',
-        mainField: 'תקשורת',
-        subField: 'תשתיות אינטרנט',
-        tags: ['סיבים אופטיים', 'טלפוניה', 'שירות לקוחות'],
-        employeeCount: '1000+',
-        type: 'שירותים',
-        website: 'https://www.bezeq.co.il/',
-        location: 'חולון',
-        classification: 'ציבורית',
-        relation: 'חברת אם',
-        description: 'חברת התקשורת הגדולה בישראל, מספקת שירותי טלפוניה ואינטרנט.',
-        candidateCount: 850
-    },
-    {
-        id: 3,
-        name: 'אלביט מערכות',
-        mainField: 'תעשייה ביטחונית',
-        subField: 'אלקטרוניקה',
-        tags: ['מל"טים', 'סייבר', 'תעופה'],
-        employeeCount: '10000+',
-        type: 'טכנולוגיה',
-        website: 'https://elbitsystems.com/',
-        location: 'חיפה',
-        classification: 'ציבורית',
-        relation: 'עצמאית',
-        description: 'חברה ביטחונית בינלאומית העוסקת בפיתוח וייצור מערכות אלקטרוניות.',
-        candidateCount: 1205
-    },
-    {
-        id: 4,
-        name: 'Wix',
-        mainField: 'הייטק',
-        subField: 'תוכנה',
-        tags: ['Web', 'SaaS', 'B2C'],
-        employeeCount: '1000-5000',
-        type: 'טכנולוגיה',
-        website: 'https://www.wix.com/',
-        location: 'תל אביב',
-        classification: 'ציבורית',
-        relation: 'עצמאית',
-        description: 'פלטפורמה לבניית אתרים המשרתת מיליוני משתמשים ברחבי העולם.',
-        candidateCount: 620
-    }
-];
 
 const allColumns = [
     { id: 'name', label: 'שם חברה' },
@@ -97,7 +34,8 @@ const allColumns = [
     { id: 'website', label: 'אתר' },
     { id: 'location', label: 'עיר/כתובת' },
     { id: 'classification', label: 'סיווג' },
-    { id: 'relation', label: 'קשר' },
+    { id: 'contactPerson', label: 'קשר' },
+    { id: 'relation', label: 'קשר ארגוני' },
     { id: 'description', label: 'תיאור' },
 ];
 
@@ -107,17 +45,50 @@ const employeeCountOptions = ['1-50', '51-200', '201-500', '501-1000', '1000+', 
 const classificationOptions = ['פרטית', 'ציבורית', 'ממשלתית', 'מלכ"ר'];
 const companyTypeOptions = ['הייטק', 'תעשייה', 'מסחר וקמעונאות', 'שירותים', 'פיננסים', 'נדל"ן', 'אחר'];
 
-// --- EDIT MODAL COMPONENT ---
-const EditCompanyModal: React.FC<{
-    company: Company;
+// --- COMPANY FORM MODAL ---
+const CompanyFormModal: React.FC<{
+    company?: Company;
     isOpen: boolean;
     onClose: () => void;
-    onSave: (updatedCompany: Company) => void;
+    onSave: (companyData: Omit<Company, 'id'>) => void;
 }> = ({ company, isOpen, onClose, onSave }) => {
-    const [formData, setFormData] = useState<Company>(company);
+    // Initial state setup based on existing company or empty defaults
+    const [formData, setFormData] = useState<Omit<Company, 'id'>>({
+        name: '',
+        candidateCount: 0,
+        mainField: '',
+        subField: '',
+        tags: [],
+        employeeCount: '',
+        type: '',
+        website: '',
+        location: '',
+        classification: '',
+        relation: 'עצמאית',
+        contactPerson: '',
+        description: ''
+    });
 
     useEffect(() => {
-        setFormData(company);
+        if (company) {
+            setFormData(company);
+        } else {
+            setFormData({
+                name: '',
+                candidateCount: 0,
+                mainField: '',
+                subField: '',
+                tags: [],
+                employeeCount: '',
+                type: '',
+                website: '',
+                location: '',
+                classification: '',
+                relation: 'עצמאית',
+                contactPerson: '',
+                description: ''
+            });
+        }
     }, [company, isOpen]);
 
     if (!isOpen) return null;
@@ -139,69 +110,91 @@ const EditCompanyModal: React.FC<{
     };
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-40 z-[60] flex items-center justify-center p-4" onClick={onClose}>
-            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden text-text-default max-h-[90vh]" onClick={e => e.stopPropagation()}>
-                <header className="flex items-center justify-between p-4 border-b border-border-default">
-                    <h2 className="text-xl font-bold">עריכת חברה: {formData.name}</h2>
-                    <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover"><XMarkIcon className="w-6 h-6" /></button>
+        <div className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4" onClick={onClose}>
+            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-3xl flex flex-col overflow-hidden text-text-default max-h-[90vh]" onClick={e => e.stopPropagation()}>
+                <header className="flex items-center justify-between p-5 border-b border-border-default bg-bg-subtle/30">
+                    <h2 className="text-xl font-bold">{company ? 'עריכת חברה' : 'הוספת חברה חדשה'}</h2>
+                    <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover"><XMarkIcon className="w-5 h-5" /></button>
                 </header>
-                <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                
+                <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
+                    {/* Basic Info */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div className="md:col-span-2">
+                             <label className="block text-sm font-semibold text-text-muted mb-1.5">שם החברה <span className="text-red-500">*</span></label>
+                             <input type="text" name="name" value={formData.name} onChange={handleChange} required className="w-full bg-bg-input border border-border-default rounded-lg p-3 text-base font-medium focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-shadow" placeholder="שם החברה המלא" />
+                        </div>
+                        
                         <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">שם החברה</label>
-                            <input type="text" name="name" value={formData.name} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5" />
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">תחום עיקרי</label>
+                            <input type="text" name="mainField" value={formData.mainField} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="למשל: הייטק" />
                         </div>
                         <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">אתר אינטרנט</label>
-                            <input type="text" name="website" value={formData.website} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5" />
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">תחום משני</label>
+                            <input type="text" name="subField" value={formData.subField} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="למשל: סייבר" />
                         </div>
+                        
                         <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">תחום עיקרי</label>
-                            <input type="text" name="mainField" value={formData.mainField} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5" />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">תחום משני</label>
-                            <input type="text" name="subField" value={formData.subField} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5" />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">מיקום</label>
-                            <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5" />
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">סוג חברה</label>
+                            <select name="type" value={formData.type} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm">
+                                <option value="">בחר...</option>
+                                {companyTypeOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                            </select>
                         </div>
                          <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">מס' עובדים</label>
-                            <select name="employeeCount" value={formData.employeeCount} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5">
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">מס' עובדים</label>
+                            <select name="employeeCount" value={formData.employeeCount} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm">
                                 <option value="">בחר...</option>
                                 {employeeCountOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                             </select>
                         </div>
+                        
                         <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">סיווג</label>
-                            <select name="classification" value={formData.classification} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5">
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">סיווג</label>
+                            <select name="classification" value={formData.classification} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm">
                                 <option value="">בחר...</option>
                                 {classificationOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                             </select>
                         </div>
                          <div>
-                            <label className="block text-sm font-semibold text-text-muted mb-1">סוג חברה</label>
-                            <select name="type" value={formData.type} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5">
-                                <option value="">בחר...</option>
-                                {companyTypeOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
-                            </select>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">קשר ארגוני</label>
+                            <input type="text" name="relation" value={formData.relation} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="חברת אם / בת / עצמאית" />
                         </div>
                     </div>
-                    <div>
-                        <label className="block text-sm font-semibold text-text-muted mb-1">תגיות (מופרד בפסיק)</label>
-                        <input type="text" name="tags" value={formData.tags.join(', ')} onChange={handleTagsChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5" />
+
+                    {/* Contact & Location */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-4 border-t border-border-default">
+                         <div>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">אתר אינטרנט</label>
+                            <input type="url" name="website" value={formData.website} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="https://..." />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">עיר / כתובת</label>
+                            <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="עיר ושם רחוב" />
+                        </div>
+                         <div className="md:col-span-2">
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">איש קשר ראשי</label>
+                            <input type="text" name="contactPerson" value={formData.contactPerson} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="שם מלא" />
+                        </div>
                     </div>
-                    <div>
-                        <label className="block text-sm font-semibold text-text-muted mb-1">תיאור החברה</label>
-                        <textarea name="description" value={formData.description} onChange={handleChange} rows={4} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5"></textarea>
-                    </div>
-                    <div className="flex justify-end pt-4 border-t border-border-default">
-                        <button type="button" onClick={onClose} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover ml-2">ביטול</button>
-                        <button type="submit" className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 shadow-sm">שמור שינויים</button>
+
+                    {/* Meta & Description */}
+                    <div className="space-y-4 pt-4 border-t border-border-default">
+                        <div>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">תגיות (מופרד בפסיק)</label>
+                            <input type="text" name="tags" value={formData.tags.join(', ')} onChange={handleTagsChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm" placeholder="לדוגמה: הייטק, מרכז, יוניקורן" />
+                        </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">תיאור החברה</label>
+                            <textarea name="description" value={formData.description} onChange={handleChange} rows={4} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm resize-none" placeholder="מידע כללי אודות החברה..."></textarea>
+                        </div>
                     </div>
                 </form>
+
+                <div className="flex justify-end gap-3 p-5 border-t border-border-default bg-bg-subtle/30">
+                    <button type="button" onClick={onClose} className="text-text-muted font-bold py-2.5 px-5 rounded-lg hover:bg-bg-hover transition">ביטול</button>
+                    <button onClick={handleSubmit} type="button" className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-lg hover:bg-primary-700 shadow-sm transition-all">{company ? 'שמור שינויים' : 'צור חברה'}</button>
+                </div>
             </div>
         </div>
     );
@@ -209,7 +202,7 @@ const EditCompanyModal: React.FC<{
 
 
 const AdminCompaniesView: React.FC = () => {
-    const [companies, setCompanies] = useState<Company[]>(initialCompanies);
+    const [companies, setCompanies] = useState<Company[]>([]);
     const fileInputRef = useRef<HTMLInputElement>(null);
     
     // Filter State
@@ -224,37 +217,65 @@ const AdminCompaniesView: React.FC = () => {
         classification: ''
     });
     
-    // Active Filters (applied only on search click)
     const [activeFilters, setActiveFilters] = useState(filters);
-
-    // Column Management
     const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const settingsRef = useRef<HTMLDivElement>(null);
-    
-    // Drag & Drop
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const dragItemIndex = useRef<number | null>(null);
 
-    // Edit Modal
-    const [editingCompany, setEditingCompany] = useState<Company | null>(null);
+    // Edit/Create Modal State
+    const [editingCompany, setEditingCompany] = useState<Company | undefined>(undefined);
+    const [isFormOpen, setIsFormOpen] = useState(false);
 
     // --- Handlers ---
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    useEffect(() => {
+        const load = async () => {
+            setLoading(true);
+            setError(null);
+            try {
+                const res = await fetch(`${apiBase}/api/organizations`);
+                if (!res.ok) throw new Error('Failed to load companies');
+                const data = await res.json();
+                const mapped: Company[] = data.map((c: any) => ({
+                    id: c.id,
+                    name: c.name,
+                    candidateCount: c.candidateCount ?? 0,
+                    mainField: c.mainField ?? '',
+                    subField: c.subField ?? '',
+                    tags: c.tags ?? [],
+                    employeeCount: c.employeeCount ?? '',
+                    type: c.type ?? '',
+                    website: c.website ?? '',
+                    location: c.location ?? '',
+                    classification: c.classification ?? '',
+                    relation: c.relation ?? '',
+                    contactPerson: c.contactPerson ?? '',
+                    description: c.description ?? '',
+                }));
+                setCompanies(mapped);
+            } catch (err: any) {
+                setError(err.message || 'Load failed');
+            } finally {
+                setLoading(false);
+            }
+        };
+        load();
+    }, [apiBase]);
 
     const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
         setFilters(prev => ({ ...prev, [name]: value }));
     };
 
-    const executeSearch = () => {
-        setActiveFilters(filters);
-    };
+    const executeSearch = () => setActiveFilters(filters);
 
     const clearFilters = () => {
-        const emptyFilters = {
-            name: '', mainField: '', subField: '', tag: '',
-            employeeCount: '', type: '', city: '', classification: ''
-        };
+        const emptyFilters = { name: '', mainField: '', subField: '', tag: '', employeeCount: '', type: '', city: '', classification: '' };
         setFilters(emptyFilters);
         setActiveFilters(emptyFilters);
     };
@@ -286,17 +307,12 @@ const AdminCompaniesView: React.FC = () => {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const handleImportClick = () => {
-        fileInputRef.current?.click();
-    };
+    const handleImportClick = () => fileInputRef.current?.click();
 
     const handleDownloadTemplate = () => {
-        // Create a CSV string
         const headers = ["שם חברה", "תחום עיקרי", "תחום משני", "תגיות (מופרד בפסיק)", "מספר עובדים", "סוג חברה", "אתר אינטרנט", "עיר", "סיווג", "תיאור"];
         const exampleRow = ["דוגמה בע״מ", "הייטק", "סייבר", "Cyber, Security", "51-200", "פרטית", "www.example.com", "תל אביב", "פרטית", "תיאור קצר של החברה"];
         const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + [headers.join(","), exampleRow.join(",")].join("\n");
-        
-        // Trigger download
         const encodedUri = encodeURI(csvContent);
         const link = document.createElement("a");
         link.setAttribute("href", encodedUri);
@@ -308,10 +324,7 @@ const AdminCompaniesView: React.FC = () => {
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files.length > 0) {
-            const fileName = e.target.files[0].name;
-            // In a real app, here we would parse the file using XLSX or CSV parser
-            // and then show a mapping wizard.
-            alert(`קובץ ${fileName} התקבל. במערכת האמיתית, כאן ייפתח אשף מיפוי עמודות כדי להתאים את שדות האקסל לשדות המערכת.`);
+            alert(`קובץ ${e.target.files[0].name} התקבל. במערכת האמיתית, כאן ייפתח אשף מיפוי עמודות.`);
             e.target.value = '';
         }
     };
@@ -328,11 +341,7 @@ const AdminCompaniesView: React.FC = () => {
         });
     };
 
-    const handleDragStart = (index: number, colId: string) => { 
-        dragItemIndex.current = index;
-        setDraggingColumn(colId);
-    };
-
+    const handleDragStart = (index: number, colId: string) => { dragItemIndex.current = index; setDraggingColumn(colId); };
     const handleDragEnter = (index: number) => {
         if (dragItemIndex.current === null || dragItemIndex.current === index) return;
         const newCols = [...visibleColumns];
@@ -341,24 +350,72 @@ const AdminCompaniesView: React.FC = () => {
         dragItemIndex.current = index;
         setVisibleColumns(newCols);
     };
+    const handleDragEnd = () => { dragItemIndex.current = null; setDraggingColumn(null); };
 
-    const handleDragEnd = () => { 
-        dragItemIndex.current = null;
-        setDraggingColumn(null);
+    // --- CRUD ---
+    const handleAddNewClick = () => {
+        setEditingCompany(undefined);
+        setIsFormOpen(true);
     };
 
     const handleEditClick = (company: Company) => {
         setEditingCompany(company);
+        setIsFormOpen(true);
     };
 
-    const handleSaveCompany = (updatedCompany: Company) => {
-        setCompanies(prev => prev.map(c => c.id === updatedCompany.id ? updatedCompany : c));
-        setEditingCompany(null);
+    const handleSaveCompany = async (companyData: Omit<Company, 'id'>) => {
+        const payload = {
+            name: companyData.name,
+            mainField: companyData.mainField,
+            subField: companyData.subField,
+            tags: companyData.tags,
+            employeeCount: companyData.employeeCount,
+            type: companyData.type,
+            website: companyData.website,
+            location: companyData.location,
+            classification: companyData.classification,
+            relation: companyData.relation,
+            contactPerson: companyData.contactPerson,
+            description: companyData.description,
+            candidateCount: companyData.candidateCount ?? 0,
+        };
+        try {
+            if (editingCompany) {
+                const res = await fetch(`${apiBase}/api/organizations/${editingCompany.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error('Update failed');
+                const updated = await res.json();
+                setCompanies(prev => prev.map(c => c.id === editingCompany.id ? { ...c, ...updated } : c));
+            } else {
+                const res = await fetch(`${apiBase}/api/organizations`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error('Create failed');
+                const created = await res.json();
+                setCompanies(prev => [...prev, created]);
+            }
+            setIsFormOpen(false);
+            setEditingCompany(undefined);
+        } catch (err: any) {
+            setError(err.message || 'Save failed');
+        }
     };
     
-    const handleDeleteCompany = (id: number) => {
-        if(window.confirm("האם אתה בטוח שברצונך למחוק חברה זו?")) {
-            setCompanies(prev => prev.filter(c => c.id !== id));
+    const handleDeleteCompany = async (id: string) => {
+        if(!window.confirm("האם אתה בטוח שברצונך למחוק חברה זו?")) return;
+        const prev = companies;
+        setCompanies(prev.filter(c => c.id !== id));
+        try {
+            const res = await fetch(`${apiBase}/api/organizations/${id}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Delete failed');
+        } catch (err: any) {
+            setError(err.message || 'Delete failed');
+            setCompanies(prev); // revert
         }
     }
 
@@ -393,10 +450,15 @@ const AdminCompaniesView: React.FC = () => {
                     <p className="text-sm text-text-muted">ניהול וצפייה ברשימת החברות המזוהות במערכת.</p>
                 </div>
                 <div className="flex items-center gap-3 w-full md:w-auto">
+                    <button onClick={handleAddNewClick} className="flex items-center gap-2 bg-primary-600 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-700 transition shadow-sm">
+                        <PlusIcon className="w-5 h-5" />
+                        <span>הוסף חברה</span>
+                    </button>
+                    <div className="h-6 w-px bg-border-default mx-1"></div>
                     <input type="file" ref={fileInputRef} className="hidden" accept=".csv, .xlsx" onChange={handleFileChange} />
                     <button onClick={handleDownloadTemplate} className="text-sm font-medium text-primary-600 hover:underline flex items-center gap-1">
                         <DocumentArrowDownIcon className="w-4 h-4" />
-                        הורד תבנית
+                        תבנית
                     </button>
                     <button onClick={handleImportClick} className="flex items-center gap-2 bg-bg-subtle text-text-default border border-border-default font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition shadow-sm">
                         <ArrowUpTrayIcon className="w-5 h-5" />
@@ -412,70 +474,20 @@ const AdminCompaniesView: React.FC = () => {
                     סינון מתקדם
                 </div>
                 <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    <input 
-                        type="text" 
-                        name="name" 
-                        placeholder="שם חברה" 
-                        value={filters.name} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    />
-                    <input 
-                        type="text" 
-                        name="mainField" 
-                        placeholder="תחום עיקרי" 
-                        value={filters.mainField} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    />
-                     <input 
-                        type="text" 
-                        name="subField" 
-                        placeholder="תחום משני" 
-                        value={filters.subField} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    />
-                     <input 
-                        type="text" 
-                        name="tag" 
-                        placeholder="תגיות" 
-                        value={filters.tag} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    />
-                    <select 
-                        name="employeeCount" 
-                        value={filters.employeeCount} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    >
+                    <input type="text" name="name" placeholder="שם חברה" value={filters.name} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                    <input type="text" name="mainField" placeholder="תחום עיקרי" value={filters.mainField} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                    <input type="text" name="subField" placeholder="תחום משני" value={filters.subField} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                    <input type="text" name="tag" placeholder="תגיות" value={filters.tag} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                    <select name="employeeCount" value={filters.employeeCount} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm">
                         <option value="">מס' עובדים (הכל)</option>
                         {employeeCountOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     </select>
-                    <select 
-                        name="type" 
-                        value={filters.type} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    >
+                    <select name="type" value={filters.type} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm">
                         <option value="">סוג חברה (הכל)</option>
                         {companyTypeOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     </select>
-                    <input 
-                        type="text" 
-                        name="city" 
-                        placeholder="עיר" 
-                        value={filters.city} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    />
-                     <select 
-                        name="classification" 
-                        value={filters.classification} 
-                        onChange={handleFilterChange} 
-                        className="bg-bg-input border border-border-default rounded-lg p-2 text-sm"
-                    >
+                    <input type="text" name="city" placeholder="עיר" value={filters.city} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                     <select name="classification" value={filters.classification} onChange={handleFilterChange} className="bg-bg-input border border-border-default rounded-lg p-2 text-sm">
                         <option value="">סיווג (הכל)</option>
                         {classificationOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                     </select>
@@ -511,6 +523,10 @@ const AdminCompaniesView: React.FC = () => {
                 </div>
             </div>
 
+            {error && <p className="text-red-600 text-sm mb-2">{error}</p>}
+            {loading ? (
+                <p className="text-text-muted text-sm">טוען חברות...</p>
+            ) : (
             <div className="flex-1 overflow-hidden border border-border-default rounded-lg">
                 <div className="overflow-x-auto h-full">
                     <table className="w-full text-sm text-right min-w-[1000px]">
@@ -567,15 +583,14 @@ const AdminCompaniesView: React.FC = () => {
                     </table>
                 </div>
             </div>
-            
-            {editingCompany && (
-                <EditCompanyModal 
-                    company={editingCompany} 
-                    isOpen={!!editingCompany} 
-                    onClose={() => setEditingCompany(null)} 
-                    onSave={handleSaveCompany} 
-                />
             )}
+            
+            <CompanyFormModal 
+                company={editingCompany} 
+                isOpen={isFormOpen} 
+                onClose={() => setIsFormOpen(false)} 
+                onSave={handleSaveCompany} 
+            />
         </div>
     );
 };

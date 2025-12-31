@@ -1,6 +1,8 @@
+
 import React, { useState, useRef, useEffect } from 'react';
 import { ChevronDownIcon, LinkIcon, PencilIcon } from './Icons';
-import AccordionSection from './AccordionSection'; // Import AccordionSection
+import AccordionSection from './AccordionSection'; 
+import { useLanguage } from '../context/LanguageContext';
 
 // Reusable local components for this view
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; }> = ({ label, name, value, onChange }) => (
@@ -36,6 +38,7 @@ const InfoTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 const allRecruiters = ['דנה כהן', 'אביב לוי', 'יעל שחר', 'מיכל אלקבץ'];
 
 const ClientDetailsTab: React.FC = () => {
+    const { t } = useLanguage();
     const [formData, setFormData] = useState({
         clientName: 'גטר גרופ',
         clientType: 'לקוח פעיל',
@@ -73,13 +76,13 @@ const ClientDetailsTab: React.FC = () => {
 
     return (
         <div className="space-y-6">
-            <AccordionSection title="מידע על החברה" icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
+            <AccordionSection title={t('client_details.section_info')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                  <div className="space-y-4 text-sm">
                     <p className="text-text-muted leading-relaxed">
                         קבוצה ותיקה המתמחה בייבוא והפצת ציוד טכנולוגי, כולל מחשוב, תקשורת, דפוס וציוד רפואי.
                     </p>
                     <div>
-                        <h4 className="font-semibold text-text-default mb-2">מוצרים ושירותים:</h4>
+                        <h4 className="font-semibold text-text-default mb-2">{t('client_details.products_services')}</h4>
                         <div className="flex flex-wrap gap-2">
                             <InfoTag>ציוד מחשוב</InfoTag>
                             <InfoTag>תקשורת</InfoTag>
@@ -89,33 +92,33 @@ const ClientDetailsTab: React.FC = () => {
                         </div>
                     </div>
                     <dl className="space-y-2 pt-2 border-t border-border-default">
-                        <div className="flex justify-between"><dt className="text-text-muted">תעשייה:</dt><dd className="font-semibold text-right">מסחר וקמעונאות &gt; יבוא וסחר סיטונאי</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">כמות עובדים:</dt><dd className="font-semibold">501-1000</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">סוג בעלות:</dt><dd className="font-semibold">פרטית</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">מיקום:</dt><dd className="font-semibold">פתח תקווה</dd></div>
-                        <div className="flex justify-between items-center"><dt className="text-text-muted">אתר:</dt><dd><a href="https://www.getter.co.il/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1"><span>getter.co.il</span> <LinkIcon className="w-4 h-4" /></a></dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.industry')}</dt><dd className="font-semibold text-right">מסחר וקמעונאות &gt; יבוא וסחר סיטונאי</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">501-1000</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">פרטית</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">פתח תקווה</dd></div>
+                        <div className="flex justify-between items-center"><dt className="text-text-muted">{t('client_details.website')}</dt><dd><a href="https://www.getter.co.il/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1"><span>getter.co.il</span> <LinkIcon className="w-4 h-4" /></a></dd></div>
                     </dl>
                  </div>
             </AccordionSection>
             
-            <AccordionSection title="ניהול לקוח" icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
+            <AccordionSection title={t('client_details.section_management')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                 <div className="space-y-4">
                      <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div><strong className="text-text-muted">מס' לקוח:</strong> <span className="font-semibold">383</span></div>
-                        <div><strong className="text-text-muted">נוצר:</strong> <span className="font-semibold">11/11/2025</span></div>
+                        <div><strong className="text-text-muted">{t('client_details.client_id')}</strong> <span className="font-semibold">383</span></div>
+                        <div><strong className="text-text-muted">{t('client_details.created_at')}</strong> <span className="font-semibold">11/11/2025</span></div>
                     </div>
-                    <FormInput label="שם הלקוח" name="clientName" value={formData.clientName} onChange={handleChange} />
-                    <FormSelect label="סוג לקוח" name="clientType" value={formData.clientType} onChange={handleChange}>
+                    <FormInput label={t('client_details.field_client_name')} name="clientName" value={formData.clientName} onChange={handleChange} />
+                    <FormSelect label={t('client_details.field_client_type')} name="clientType" value={formData.clientType} onChange={handleChange}>
                         <option>לקוח פעיל</option>
                         <option>לקוח כללי</option>
                         <option>מתעניין</option>
                         <option>לא פעיל</option>
                     </FormSelect>
-                     <FormInput label="מנהל תיקי לקוחות" name="accountManager" value={formData.accountManager} onChange={handleChange} />
+                     <FormInput label={t('client_details.field_account_manager')} name="accountManager" value={formData.accountManager} onChange={handleChange} />
                     <div className="relative" ref={recruiterRef}>
-                        <label className="block text-sm font-semibold text-text-muted mb-1.5">רכז גיוס</label>
+                        <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('client_details.field_recruiter')}</label>
                         <button type="button" onClick={() => setIsRecruiterDropdownOpen(!isRecruiterDropdownOpen)} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-right flex justify-between items-center">
-                            <span className="truncate">{formData.recruiters.length > 0 ? formData.recruiters.join(', ') : 'בחר רכזים'}</span>
+                            <span className="truncate">{formData.recruiters.length > 0 ? formData.recruiters.join(', ') : t('client_details.select_recruiters')}</span>
                             <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform ${isRecruiterDropdownOpen ? 'rotate-180' : ''}`} />
                         </button>
                         {isRecruiterDropdownOpen && (
@@ -129,9 +132,9 @@ const ClientDetailsTab: React.FC = () => {
                             </div>
                         )}
                     </div>
-                     <FormTextArea label="הערה פנימית" name="internalNotes" value={formData.internalNotes} onChange={handleChange} />
+                     <FormTextArea label={t('client_details.field_internal_notes')} name="internalNotes" value={formData.internalNotes} onChange={handleChange} />
                      <div className="flex justify-end pt-2">
-                        <button className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition">שמור שינויים</button>
+                        <button className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition">{t('client_details.save_changes')}</button>
                     </div>
                 </div>
             </AccordionSection>

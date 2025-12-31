@@ -40,7 +40,10 @@ import { SparklesIcon } from './components/Icons';
 import ContactProfileView from './components/ContactProfileView';
 import CandidatePortalLayout from './components/CandidatePortalLayout';
 import CandidateLoginView from './components/CandidateLoginView';
+import CandidateSignup from './components/CandidateSignup'; // NEW IMPORT
 import CandidatePublicProfileView from './components/CandidatePublicProfileView';
+import CandidateRegistrationWizard from './components/CandidateRegistrationWizard'; 
+import CandidateOnboardingChat from './components/CandidateOnboardingChat';
 import DashboardView from './components/DashboardView';
 import ExternalJobPostView from './components/ExternalJobPostView';
 import CommunicationCenterView from './components/CommunicationCenterView';
@@ -130,6 +133,8 @@ interface AppRoutesProps {
 }
 
 const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
+    // ... (rest of ProfilePageWrapper code remains unchanged)
+    // For brevity, including the existing content below:
     const { candidateId } = useParams();
     const numericId = candidateId ? parseInt(candidateId, 10) : 0;
     
@@ -398,7 +403,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
 export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
     const element = useRoutes([
-        { path: '/', element: <Navigate to="/dashboard" replace /> },
+        { path: '/', element: <Navigate to="/login" replace /> },
         { path: '/dashboard', element: <DashboardView /> },
         { path: '/candidates', element: <CandidatesListView openSummaryDrawer={props.openSummaryDrawer} favorites={props.favorites} toggleFavorite={props.toggleFavorite} /> },
         { path: '/candidates/new', element: <NewCandidateViewV2 /> },
@@ -462,10 +467,13 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="login" replace /> },
                  { path: 'login', element: <CandidateLoginView /> },
-                 { path: 'profile', element: <CandidatePublicProfileView openJobAlertModal={props.openJobAlertModal} /> }
+                 { path: 'signup', element: <CandidateSignup /> }, // New Route
+                 { path: 'profile', element: <CandidatePublicProfileView openJobAlertModal={props.openJobAlertModal} /> },
+                 { path: 'register', element: <CandidateRegistrationWizard /> },
+                 { path: 'onboarding', element: <CandidateOnboardingChat /> } 
             ]
         },
-        { path: '*', element: <Navigate to="/dashboard" replace /> },
+        { path: '*', element: <Navigate to="/login" replace /> },
     ]);
     return element;
 };

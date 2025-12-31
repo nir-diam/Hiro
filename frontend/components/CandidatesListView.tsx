@@ -17,6 +17,7 @@ import DevAnnotation from './DevAnnotation';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
+import { useLanguage } from '../context/LanguageContext';
 
 type Operator = 'AND' | 'OR' | 'NOT';
 
@@ -185,67 +186,11 @@ export const candidatesData: Candidate[] = [
   { id: 15, name: 'הילה אזולאי', avatar: 'הא', title: 'מנהלת חשבונות', status: 'עבר בדיקה ראשונית', lastActivity: '16:00 15/05/2025', source: 'AllJobs', tags: ['סוג 3', 'Priority', 'דוחות כספיים'], internalTags: [], matchScore: 90, address: 'בת ים', phone: '058-5678902', industry: 'פיננסים', field: 'הנהלת חשבונות', sector: 'פרטי', companySize: '51-200' },
   { id: 16, name: 'יונתן כהן', avatar: 'יכ', title: 'מנהל פרויקטים', status: 'חדש', lastActivity: '14/05/2025', source: 'AllJobs', tags: ['Project Management', 'Agile'], internalTags: [], matchScore: 82, address: 'אשדוד', phone: '054-9876543', industry: 'תשתיות', field: 'בנייה', sector: 'ממשלתי', companySize: '1000+' },
   { id: 17, name: 'מיכל לוי', avatar: 'מל', title: 'אנליסטית BI', status: 'בבדיקה', lastActivity: '13/05/2025', source: 'LinkedIn', tags: ['BI', 'SQL', 'Tableau'], internalTags: [], matchScore: 89, address: 'נתניה', phone: '052-8765432', industry: 'הייטק', field: 'Data', sector: 'פרטי', companySize: '200-1000' },
-  { id: 18, name: 'אמיר חדד', avatar: 'אח', title: 'איש מכירות', status: 'חדש', lastActivity: '12/05/2025', source: 'חבר מביא חבר', tags: ['מכירות', 'שירות לקוחות'], internalTags: [], matchScore: 70, address: 'רחובות', phone: '053-7654321', industry: 'תחבורה ולוגיסטיקה', field: 'הפצה ושרשרת אספקה', sector: 'פרטי', companySize: '200-1000' },
+  { id: 18, name: 'אמיר חדד', avatar: 'אח', title: 'איש מכירות', status: 'חדש', lastActivity: '12:05/2025', source: 'חבר מביא חבר', tags: ['מכירות', 'שירות לקוחות'], internalTags: [], matchScore: 70, address: 'רחובות', phone: '053-7654321', industry: 'תחבורה ולוגיסטיקה', field: 'הפצה ושרשרת אספקה', sector: 'פרטי', companySize: '200-1000' },
   { id: 19, name: 'רוני פרץ', avatar: 'רפ', title: 'מפתחת Frontend', status: 'ראיון HR', lastActivity: '11/05/2025', source: 'JobMaster', tags: ['React', 'CSS', 'HTML'], internalTags: [], matchScore: 91, address: 'תל אביב', phone: '050-6543210', industry: 'הייטק', field: 'פיתוח תוכנה', sector: 'פרטי', companySize: '51-200' },
   { id: 20, name: 'דניאל ישראלי', avatar: 'די', title: 'מנהל רשת', status: 'עבר בדיקה ראשונית', lastActivity: '10:05/2025', source: 'Ethosia', tags: ['Windows Server', 'Networking'], internalTags: [], matchScore: 85, address: 'באר שבע', phone: '058-5432109', industry: 'הייטק', field: 'IT', sector: 'ציבורי', companySize: '1000+' },
 ];
 
-
-const allColumns = [
-    { id: 'name', header: 'שם המועמד' },
-    { id: 'matchScore', header: 'התאמה למשרה' },
-    { id: 'title', header: 'תפקיד אחרון' },
-    { id: 'status', header: 'סטטוס' },
-    { id: 'lastActivity', header: 'פעילות אחרונה' },
-    { id: 'source', header: 'מקור גיוס' },
-    { id: 'industry', header: 'תעשייה' },
-    { id: 'field', header: 'תחום' },
-    { id: 'sector', header: 'סקטור' },
-    { id: 'companySize', header: 'גודל חברה' },
-];
-
-const MatchScoreIndicator: React.FC<{ 
-    score: number; 
-    analysis?: { jobTitle: string; reason: string; } 
-}> = ({ score, analysis }) => {
-    const getBarColor = (level: number) => {
-        if (score >= 90) return 'bg-green-500';
-        if (score >= 75) return 'bg-yellow-500';
-        return 'bg-red-500';
-    };
-
-    return (
-        <div className="relative group flex items-center gap-2 cursor-help w-full max-w-[140px]">
-            <div className="flex-grow h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                    className={`h-full rounded-full transition-all duration-500 ease-out ${getBarColor(score)}`}
-                    style={{ width: `${score}%` }}
-                ></div>
-            </div>
-            <span className="text-xs font-bold text-text-subtle w-8 text-left">{score}%</span>
-
-            {analysis && (
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-bg-card border border-border-default rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-[9999] text-right">
-                    <div className="flex items-start gap-2 mb-2">
-                        <SparklesIcon className="w-4 h-4 text-primary-500 mt-0.5 flex-shrink-0" />
-                        <h4 className="font-bold text-text-default text-xs leading-tight">
-                            ניתוח התאמה AI
-                        </h4>
-                    </div>
-                    <div className="space-y-1">
-                        <p className="text-xs text-text-muted font-semibold">
-                            משרה: <span className="text-text-default">{analysis.jobTitle}</span>
-                        </p>
-                        <p className="text-xs text-text-subtle leading-relaxed">
-                            {analysis.reason}
-                        </p>
-                    </div>
-                    <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-border-default"></div>
-                </div>
-            )}
-        </div>
-    );
-};
 
 const getMissingFields = (candidate: Candidate): string[] => {
     const missing: string[] = [];
@@ -378,7 +323,7 @@ const DoubleRangeSlider: React.FC<{
             </div>
 
             {onIncludeUnknownChange && (
-                <label className="flex items-center gap-2 cursor-pointer mt-3 px-1">
+                <label className="flex items-center gap-2 cursor-pointer mt-3 px-1 justify-center">
                     <input 
                         type="checkbox" 
                         checked={includeUnknown} 
@@ -405,9 +350,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const navigate = useNavigate();
     const [searchParamsFromUrl] = useSearchParams();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
+    const { t } = useLanguage();
 
     const [searchTerm, setSearchTerm] = useState('');
-    const [columns, setColumns] = useState(allColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const settingsRef = useRef<HTMLDivElement>(null);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
@@ -472,10 +417,41 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [isBulkActionsMobileOpen, setIsBulkActionsMobileOpen] = useState(false);
     const [isMoreActionsOpen, setIsMoreActionsOpen] = useState(false);
     
+    // Add state for active tooltip in list view
+    const [activeMatchState, setActiveMatchState] = useState<{ id: number, top: number, left: number } | null>(null);
+
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>(null);
     
     const [showNeedsAttention, setShowNeedsAttention] = useState(false);
     const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+
+    // Initialize columns state with translations
+    const allColumns = useMemo(() => [
+        { id: 'name', header: t('col.name') },
+        { id: 'matchScore', header: t('col.match') },
+        { id: 'title', header: t('col.role') },
+        { id: 'status', header: t('col.status') },
+        { id: 'lastActivity', header: t('col.last_activity') },
+        { id: 'source', header: t('col.source') },
+        { id: 'industry', header: t('col.industry') },
+        { id: 'field', header: t('col.field') },
+        { id: 'sector', header: t('col.sector') },
+        { id: 'companySize', header: t('col.company_size') },
+    ], [t]);
+
+    // Use a subset for default visibility
+    const defaultVisibleColumns = useMemo(() => ['name', 'matchScore', 'title', 'status', 'lastActivity', 'source'], []);
+    const [columns, setColumns] = useState(allColumns.filter(c => defaultVisibleColumns.includes(c.id)));
+
+    // Effect to update columns when language changes
+    useEffect(() => {
+        // Re-construct the currently visible columns with new translations
+        setColumns(prevColumns => {
+            const visibleIds = prevColumns.map(c => c.id);
+            return allColumns.filter(c => visibleIds.includes(c.id));
+        });
+    }, [allColumns]);
+
 
     const requestSort = (key: keyof Candidate) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -512,6 +488,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
           return () => clearTimeout(timer);
         }
     }, [feedbackMessage]);
+    
+    // Close match tooltip when clicking outside
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+          if (activeMatchState !== null && !(event.target as Element).closest('.match-score-popup')) {
+            setActiveMatchState(null);
+          }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [activeMatchState]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -758,11 +745,38 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setDraggingColumn(null);
     };
 
-    // FIX: Define handleShowResults to fix the 'Cannot find name' error on line 1157.
     const handleShowResults = () => {
         setIsAdvancedSearchOpen(false);
-        setFeedbackMessage(`נמצאו ${processedCandidates.length} מועמדים תואמים`);
+        setFeedbackMessage(t('candidates.found_count', { count: processedCandidates.length }));
     };
+
+    // Helper for score circle colors inside the list view (duplicated logic for consistency)
+    const getScoreColorClass = (score: number) => {
+        if (score >= 90) return 'text-green-600 border-green-200 bg-green-50';
+        if (score >= 75) return 'text-yellow-600 border-yellow-200 bg-yellow-50';
+        if (score >= 60) return 'text-orange-600 border-orange-200 bg-orange-50';
+        return 'text-red-600 border-red-200 bg-red-50';
+    };
+
+    const handleScoreClick = (e: React.MouseEvent, id: number) => {
+        e.stopPropagation();
+        if (activeMatchState?.id === id) {
+            setActiveMatchState(null);
+            return;
+        }
+        const rect = e.currentTarget.getBoundingClientRect();
+        // Calculate position relative to viewport, centered horizontally on button
+        setActiveMatchState({
+            id,
+            top: rect.top - 10,
+            left: rect.left + (rect.width / 2)
+        });
+    };
+
+    // Render logic for the popup based on activeMatchState
+    const activeCandidateForPopup = activeMatchState 
+        ? processedCandidates.find(c => c.id === activeMatchState.id)
+        : null;
 
     const renderCell = (candidate: Candidate, columnId: string) => {
         const missingFields = getMissingFields(candidate);
@@ -773,29 +787,43 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             case 'name':
                 return (
                     <div className="flex items-center gap-3">
-                        <button 
-                            onClick={(e) => { e.stopPropagation(); toggleFavorite(candidate.id); }} 
-                            className="text-text-subtle hover:text-primary-500 transition-colors p-1"
-                            title={isFavorite ? 'הסר ממועדפים' : 'הוסף למועדפים'}
-                        >
-                            {isFavorite ? <BookmarkIconSolid className="w-5 h-5 text-primary-500" /> : <BookmarkIcon className="w-5 h-5" />}
-                        </button>
-                        <AvatarIcon initials={candidate.avatar} size={32} fontSize={14} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
-                        <span 
-                            onClick={(e) => { e.stopPropagation(); navigate(`/candidates/${candidate.id}`); }} 
-                            className="font-semibold text-primary-700 hover:underline cursor-pointer flex items-center gap-1.5"
-                        >
-                            {candidate.name}
-                             {hasMissingFields && (
-                                <span title={`חסרים פרטים: ${missingFields.join(', ')}`}>
-                                    <ExclamationTriangleIcon className="w-4 h-4 text-yellow-500" />
-                                </span>
-                            )}
-                        </span>
+                        {/* Restore Avatar */}
+                        <AvatarIcon initials={candidate.avatar} size={36} fontSize={14} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
+                        <div className="flex flex-col">
+                            <span 
+                                onClick={(e) => { e.stopPropagation(); navigate(`/candidates/${candidate.id}`); }} 
+                                className="font-bold text-text-default hover:text-primary-600 cursor-pointer transition-colors text-base"
+                            >
+                                {candidate.name}
+                            </span>
+                             {/* Keep missing fields warning and favorite button here */}
+                             <div className="flex items-center gap-2 mt-0.5">
+                                {hasMissingFields && (
+                                    <span title={`חסרים פרטים: ${missingFields.join(', ')}`}>
+                                        <ExclamationTriangleIcon className="w-3.5 h-3.5 text-amber-500" />
+                                    </span>
+                                )}
+                                 <button 
+                                    onClick={(e) => { e.stopPropagation(); toggleFavorite(candidate.id); }} 
+                                    className="text-text-subtle hover:text-primary-500 transition-colors"
+                                >
+                                    {isFavorite ? <BookmarkIconSolid className="w-4 h-4 text-primary-500" /> : <BookmarkIcon className="w-4 h-4" />}
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 );
             case 'matchScore':
-                return <MatchScoreIndicator score={candidate.matchScore} analysis={candidate.matchAnalysis} />;
+                 return (
+                    <div className="flex items-center justify-center">
+                        <div 
+                            onClick={(e) => handleScoreClick(e, candidate.id)}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border-2 shadow-sm cursor-pointer ${getScoreColorClass(candidate.matchScore)}`}
+                        >
+                            {candidate.matchScore}%
+                        </div>
+                    </div>
+                 );
             default:
                 return (candidate as any)[columnId];
         }
@@ -835,13 +863,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
             <header className="flex flex-col lg:flex-row items-start lg:items-center gap-3 pb-2">
                 <div className="relative w-full lg:flex-grow">
-                    <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute start-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                     <input 
                         type="text" 
-                        placeholder="חיפוש מועמד..." 
+                        placeholder={t('candidates.search_placeholder')} 
                         value={searchTerm} 
                         onChange={e => setSearchTerm(e.target.value)} 
-                        className="w-full bg-bg-card border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
+                        className="w-full bg-bg-card border border-border-default rounded-xl py-3 ps-10 pe-3 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
                     />
                 </div>
 
@@ -849,11 +877,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     <div className="flex flex-wrap gap-2 w-full sm:w-auto flex-grow sm:flex-grow-0">
                         <button onClick={() => navigate('/candidates/new')} className="flex-1 sm:flex-none flex items-center justify-center gap-2 bg-primary-600 text-white font-semibold py-2.5 px-5 rounded-xl hover:bg-primary-700 transition shadow-sm whitespace-nowrap">
                             <PlusIcon className="w-5 h-5"/>
-                            <span>מועמד חדש</span>
+                            <span>{t('candidates.new_candidate_btn')}</span>
                         </button>
                         <button onClick={() => setIsAdvancedSearchOpen(!isAdvancedSearchOpen)} className={`flex-1 sm:flex-none flex items-center justify-center gap-2 font-semibold py-2.5 px-4 rounded-xl border-2 transition-all whitespace-nowrap ${isAdvancedSearchOpen ? 'bg-primary-600 text-white border-primary-600' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`}>
                              <AdjustmentsHorizontalIcon className="w-5 h-5" />
-                            <span>סינון</span>
+                            <span>{t('candidates.filter_btn')}</span>
                             <ChevronDownIcon className={`w-4 h-4 transition-transform ${isAdvancedSearchOpen ? 'rotate-180' : ''}`} />
                         </button>
                         <div className="relative">
@@ -867,7 +895,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 }`}
                             >
                                 <BuildingOffice2Icon className="w-5 h-5" />
-                                <span>רקע תעסוקתי</span>
+                                <span>{t('candidates.employment_background_btn')}</span>
                             </button>
                             {isCompanyFilterOpen && (
                                 <CompanyFilterPopover
@@ -879,18 +907,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         </div>
                     </div>
 
-                    <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 sm:pb-0 w-full sm:w-auto sm:ml-auto justify-between sm:justify-end lg:justify-start">
+                    <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 sm:pb-0 w-full sm:w-auto sm:ms-auto justify-between sm:justify-end lg:justify-start">
                         <div className="flex gap-2">
-                            <button onClick={toggleSelectionMode} className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title="בחירה מרובה">
+                            <button onClick={toggleSelectionMode} className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
                                  <CheckCircleIcon className="w-5 h-5" />
                             </button>
-                             <button onClick={() => setShowNeedsAttention(!showNeedsAttention)} className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${showNeedsAttention ? 'bg-yellow-100 text-yellow-800 border-yellow-300' : 'bg-bg-card text-text-default border-border-default hover:border-yellow-300'}`} title="דורש טיפול">
+                             <button onClick={() => setShowNeedsAttention(!showNeedsAttention)} className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${showNeedsAttention ? 'bg-yellow-100 text-yellow-800 border-yellow-300' : 'bg-bg-card text-text-default border-border-default hover:border-yellow-300'}`} title={t('candidates.needs_attention_tooltip')}>
                                 <ExclamationTriangleIcon className="w-5 h-5" />
                             </button>
                             <button 
                                 onClick={() => setShowFavoritesOnly(!showFavoritesOnly)} 
                                 className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${showFavoritesOnly ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`}
-                                title="הצג מועדפים בלבד"
+                                title={t('candidates.favorites_only_tooltip')}
                             >
                                 {showFavoritesOnly ? <BookmarkIconSolid className="w-5 h-5" /> : <BookmarkIcon className="w-5 h-5" />}
                             </button>
@@ -898,9 +926,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
                         <div className="w-px h-8 bg-border-default mx-1 hidden sm:block flex-shrink-0"></div>
 
-                         <div className="flex items-center bg-bg-subtle p-1.5 rounded-xl border border-border-default flex-shrink-0 ml-2 sm:ml-0">
-                            <button onClick={() => setViewMode('grid')} title="תצוגת רשת" className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
-                            <button onClick={() => setViewMode('table')} title="תצוגת רשימה" className={`p-2 rounded-lg transition-colors ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                         <div className="flex items-center bg-bg-subtle p-1.5 rounded-xl border border-border-default flex-shrink-0 ml-2 sm:ms-0">
+                            <button onClick={() => setViewMode('grid')} title={t('candidates.view_grid')} className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                            <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-2 rounded-lg transition-colors ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
                         </div>
                     </div>
                 </div>
@@ -910,14 +938,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                  <div className="bg-bg-card rounded-2xl shadow-sm p-3 space-y-3 border border-border-default transition-all duration-300">
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
                         <div className="lg:col-span-2">
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">תגיות וכישורים</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.tags_skills')}</label>
                             <div className="w-full bg-bg-input border border-border-default rounded-xl p-1.5 flex items-center flex-wrap gap-2 min-h-[38px] focus-within:ring-2 focus-within:ring-primary-500 transition-shadow">
                                 {searchParams.mainFieldTags.map((tag, index) => (
                                     <span key={index} className="flex items-center bg-primary-100 text-primary-800 text-xs font-medium pl-2 pr-1.5 py-0.5 rounded-full animate-fade-in">
                                         {tag}
                                         <button
                                             onClick={() => handleRemoveMainFieldTag(tag)}
-                                            className="mr-1 text-primary-500 hover:text-primary-700"
+                                            className="me-1 text-primary-500 hover:text-primary-700"
                                             aria-label={`Remove ${tag}`}
                                         >
                                             <XMarkIcon className="h-3 w-3" />
@@ -929,39 +957,40 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     value={mainFieldInput} 
                                     onChange={(e) => setMainFieldInput(e.target.value)} 
                                     onKeyDown={handleMainFieldKeyDown} 
-                                    placeholder="הקלד תגית ולחץ Enter..." 
+                                    placeholder={t('filter.tags_placeholder')} 
                                     className="flex-grow bg-transparent outline-none text-sm min-w-[100px]" 
                                 />
                             </div>
                         </div>
                         <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">מיקום</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.location')}</label>
                              <LocationSelector 
                                 selectedLocations={searchParams.locations}
                                 onChange={(newLocations) => setSearchParams(prev => ({ ...prev, locations: newLocations }))}
                                 className="w-full"
+                                placeholder={t('filter.location_placeholder')}
                             />
                         </div>
                          <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">סטטוס</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.status')}</label>
                             <select className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-primary-500 focus:border-primary-500">
-                                <option>הכל</option>
-                                <option>פעיל</option>
-                                <option>לא פעיל</option>
+                                <option>{t('filter.status_all')}</option>
+                                <option>{t('filter.status_active')}</option>
+                                <option>{t('filter.status_inactive')}</option>
                             </select>
                         </div>
                         
                         <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">עודכן לאחרונה</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.last_updated')}</label>
                             <DateRangeSelector 
                                 value={searchParams.lastUpdated} 
                                 onChange={(val) => setSearchParams(prev => ({...prev, lastUpdated: val}))} 
-                                placeholder="כל הזמנים"
+                                placeholder={t('filter.status_all')}
                             />
                         </div>
 
                          <div className="lg:col-span-2">
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">היקף משרה</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.job_scope')}</label>
                             <div className="flex flex-wrap gap-2">
                                 {jobScopeOptions.map(scope => (
                                     <button
@@ -979,83 +1008,83 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             </div>
                         </div>
                         <div>
-                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">תחום עניין / תפקיד</label>
+                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.interest_role')}</label>
                              <button 
                                 onClick={() => setIsJobFieldSelectorOpen(true)}
-                                className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors h-[38px]"
+                                className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm flex justify-between items-center text-start hover:border-primary-300 transition-colors h-[38px]"
                             >
-                                <span className="truncate">{searchParams.interestRole || 'בחר תחום או תפקיד...'}</span>
+                                <span className="truncate">{searchParams.interestRole || t('filter.interest_role_placeholder')}</span>
                                 <BriefcaseIcon className="w-4 h-4 text-text-subtle" />
                             </button>
                         </div>
                         
                         <div className={`transition-all duration-300 ease-in-out relative z-30 ${searchParams.interestRole ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 pointer-events-none'}`}>
-                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">מתי התעניין?</label>
+                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.interest_date')}</label>
                              <DateRangeSelector 
                                 value={searchParams.interestDate} 
                                 onChange={(val) => setSearchParams(prev => ({...prev, interestDate: val}))} 
-                                placeholder="כל הזמנים"
+                                placeholder={t('filter.status_all')}
                                 disabled={!searchParams.interestRole}
                             />
                         </div>
 
                          <div>
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">מין</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.gender')}</label>
                             <div className="flex bg-bg-input border border-border-default rounded-xl p-1 h-[38px]">
                                 <button 
                                     onClick={() => setSearchParams(prev => ({...prev, gender: 'any'}))} 
                                     className={`flex-1 text-xs font-medium rounded-lg transition-colors ${searchParams.gender === 'any' ? 'bg-primary-100 text-primary-700 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
-                                >הכל</button>
+                                >{t('filter.gender_all')}</button>
                                 <button 
                                     onClick={() => setSearchParams(prev => ({...prev, gender: 'female'}))} 
                                     className={`flex-1 text-xs font-medium rounded-lg transition-colors ${searchParams.gender === 'female' ? 'bg-pink-100 text-pink-700 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
                                 >
-                                    <span className="flex items-center justify-center gap-1"><GenderFemaleIcon className="w-3 h-3"/> נקבה</span>
+                                    <span className="flex items-center justify-center gap-1"><GenderFemaleIcon className="w-3 h-3"/> {t('filter.gender_female')}</span>
                                 </button>
                                 <button 
                                     onClick={() => setSearchParams(prev => ({...prev, gender: 'male'}))} 
                                     className={`flex-1 text-xs font-medium rounded-lg transition-colors ${searchParams.gender === 'male' ? 'bg-blue-100 text-blue-700 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
                                 >
-                                     <span className="flex items-center justify-center gap-1"><GenderMaleIcon className="w-3 h-3"/> זכר</span>
+                                     <span className="flex items-center justify-center gap-1"><GenderMaleIcon className="w-3 h-3"/> {t('filter.gender_male')}</span>
                                 </button>
                             </div>
                         </div>
 
                         <div className="lg:col-span-1">
                              <DoubleRangeSlider
-                                label="טווח גילאים" min={18} max={80} step={1}
+                                label={t('filter.age_range')} min={18} max={80} step={1}
                                 valueMin={Number(searchParams.ageMin)} valueMax={Number(searchParams.ageMax)}
                                 onChange={handleSliderChange} nameMin="ageMin" nameMax="ageMax"
                                 includeUnknown={searchParams.includeUnknownAge}
                                 onIncludeUnknownChange={(checked) => setSearchParams(prev => ({...prev, includeUnknownAge: checked}))}
-                                unknownLabel="כלול גיל לא ידוע"
+                                unknownLabel={t('filter.include_unknown_age')}
                             />
                         </div>
                         
                          <div className="lg:col-span-1">
-                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">השכלה</label>
+                            <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.education')}</label>
                              <button 
                                 onClick={() => setSearchParams(p => ({ ...p, hasDegree: !p.hasDegree }))} 
                                 className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border-2 transition-all h-[38px] ${searchParams.hasDegree ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-sm' : 'bg-bg-input border-border-default text-text-muted hover:border-primary-300'}`}
                             >
-                                <span className="font-semibold text-xs">בעל תואר אקדמי</span>
+                                <span className="font-semibold text-xs">{t('filter.has_degree')}</span>
                                 {searchParams.hasDegree ? <CheckCircleIcon className="w-4 h-4" /> : <AcademicCapIcon className="w-4 h-4 opacity-50"/>}
                             </button>
                         </div>
 
                         <div className="col-span-full md:col-span-2 lg:col-span-2 grid grid-cols-2 gap-4 p-3 bg-bg-subtle/30 rounded-xl border border-border-default/50 relative overflow-hidden">
                             <DoubleRangeSlider
-                                label="ציפיות שכר מועמד" min={5000} max={50000} step={500}
+                                label={t('filter.salary_candidate')} min={5000} max={50000} step={500}
                                 valueMin={Number(searchParams.salaryMin)} valueMax={Number(searchParams.salaryMax)}
                                 onChange={handleSliderChange} nameMin="salaryMin" nameMax="salaryMax" unit="₪"
                                 colorVar="--color-secondary-500"
                                 includeUnknown={searchParams.includeUnknownSalary}
                                 onIncludeUnknownChange={(checked) => setSearchParams(prev => ({...prev, includeUnknownSalary: checked}))}
-                                unknownLabel="גם מועמדים ללא שכר"
+                                unknownLabel={t('filter.include_unknown_salary')}
                                 icon={<WalletIcon className="w-4 h-4 text-primary-600"/>}
                             />
                              <DoubleRangeSlider
-                                label="הערכת שכר פנימית" min={5000} max={50000} step={500}
+                                label={t('filter.salary_internal')} min={5000} max={50000} step={500}
                                 valueMin={Number(searchParams.internalSalaryMin)} valueMax={Number(searchParams.internalSalaryMax)}
                                 onChange={handleSliderChange} nameMin="internalSalaryMin" nameMax="internalSalaryMax" unit="₪"
                                 colorVar="--color-primary-600"
@@ -1064,7 +1093,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         </div>
                         
                         <div className="lg:col-span-1">
-                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">שפות</label>
+                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.languages')}</label>
                              <div className="flex gap-1.5">
                                 <select value={currentLanguage} onChange={(e) => setCurrentLanguage(e.target.value)} className="flex-1 bg-bg-input border border-border-default rounded-xl py-1.5 px-2 text-[11px] h-[38px]"><option>עברית</option><option>אנגלית</option><option>רוסית</option></select>
                                 <select value={currentLevel} onChange={(e) => setCurrentLevel(e.target.value)} className="flex-1 bg-bg-input border border-border-default rounded-xl py-1.5 px-2 text-[11px] h-[38px]"><option>שפת אם</option><option>גבוהה</option></select>
@@ -1074,7 +1103,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 {languageFilters.map(filter => (
                                     <span key={filter.language} className="flex items-center bg-sky-50 text-sky-700 text-[10px] font-semibold px-2 py-0.5 rounded-lg border border-sky-100">
                                         {filter.language}
-                                        <button onClick={() => handleRemoveLanguage(filter.language)} className="mr-1 hover:text-red-500"><XMarkIcon className="h-3 w-3" /></button>
+                                        <button onClick={() => handleRemoveLanguage(filter.language)} className="me-1 hover:text-red-500"><XMarkIcon className="h-3 w-3" /></button>
                                     </span>
                                 ))}
                             </div>
@@ -1084,7 +1113,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     <div className="bg-bg-subtle/40 rounded-xl p-3 border border-border-default/50 mt-2">
                          <div className="flex items-center gap-2 mb-2">
                              <FunnelIcon className="w-4 h-4 text-primary-500" />
-                             <h4 className="text-xs font-bold text-primary-700 uppercase tracking-wide">שאילתות מורכבות (הוסף תנאי)</h4>
+                             <h4 className="text-xs font-bold text-primary-700 uppercase tracking-wide">{t('filter.complex_queries')}</h4>
                          </div>
                          
                          {complexRules.length > 0 && (
@@ -1153,15 +1182,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     <div className="mt-4 pt-3 border-t border-border-default flex justify-between items-center">
                         <div className="flex items-center gap-2">
                             <button onClick={() => {setSearchParams(prev => ({...prev, mainFieldTags: [], locations: [], interestRole: '', industryExperience: '', hasDegree: false, jobScopes: jobScopeOptions, lastUpdated: null, interestDate: null })); setLanguageFilters([]); setMainFieldInput(''); setComplexRules([]);}} className="text-xs font-semibold text-text-muted hover:text-red-500 transition-colors">
-                                נקה הכל
+                                {t('candidates.reset_all')}
                             </button>
                             <button onClick={handleOpenSaveModal} className="flex items-center gap-1 text-xs font-semibold text-primary-600 hover:text-primary-800 bg-primary-50 px-3 py-1.5 rounded-lg hover:bg-primary-100 transition">
                                 <BookmarkIcon className="w-3.5 h-3.5"/>
-                                <span>שמור חיפוש</span>
+                                <span>{t('candidates.save_search')}</span>
                             </button>
                         </div>
                         <button onClick={handleShowResults} className="bg-primary-600 text-white font-bold py-2 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 text-sm">
-                            הצג תוצאות
+                            {t('candidates.show_results')}
                         </button>
                     </div>
                  </div>
@@ -1201,12 +1230,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             </div>
                                         </th>
                                     ))}
-                                    <th scope="col" className="px-2 py-3 sticky left-0 bg-bg-subtle w-16">
+                                    <th scope="col" className="px-2 py-3 sticky end-0 bg-bg-subtle w-16">
                                         <div className="relative" ref={settingsRef}>
-                                            <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title="התאם עמודות" className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
+                                            <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
                                             {isSettingsOpen && (
-                                            <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                                <p className="font-bold text-text-default mb-2 text-sm">הצג עמודות</p>
+                                            <div className="absolute top-full end-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
+                                                <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                                 <div className="space-y-2">
                                                 {allColumns.map(column => (
                                                     <label key={column.id} className="flex items-center gap-2 text-sm font-normal text-text-default capitalize cursor-pointer">
@@ -1232,7 +1261,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     {columns.map(col => (
                                         <td key={col.id} className="p-4 text-text-muted">{renderCell(candidate, col.id)}</td>
                                     ))}
-                                    <td className="px-2 py-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover group-[:has(:checked)]:bg-primary-50 transition-colors w-16"></td>
+                                    <td className="px-2 py-4 sticky end-0 bg-bg-card group-hover:bg-bg-hover group-[:has(:checked)]:bg-primary-50 transition-colors w-16"></td>
                                 </tr>
                             ))}
                             </tbody>
@@ -1247,7 +1276,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             return (
                                 <div key={candidate.id} onClick={() => selectionMode && handleSelect(candidate.id)} className={`relative rounded-lg transition-all ${selectionMode ? 'cursor-pointer' : ''} ${isSelected ? 'ring-2 ring-primary-500' : ''}`}>
                                     {selectionMode && (
-                                        <div className="absolute top-3 right-3 z-10 bg-bg-card/50 backdrop-blur-sm p-1 rounded-full">
+                                        <div className="absolute top-3 end-3 z-10 bg-bg-card/50 backdrop-blur-sm p-1 rounded-full">
                                             <input type="checkbox" checked={isSelected} readOnly className="h-5 w-5 rounded-full border-2 border-white text-primary-600 focus:ring-primary-500 pointer-events-none" />
                                         </div>
                                     )}
@@ -1259,6 +1288,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                         missingFields={missingFields}
                                         isFavorite={isFavorite}
                                         onToggleFavorite={toggleFavorite}
+                                        onScoreClick={handleScoreClick} // Pass the handler
                                     />
                                 </div>
                             );
@@ -1266,6 +1296,58 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     </div>
                 )}
             </main>
+
+            {/* Global Match Score Popup - Rendered outside overflow containers */}
+            {activeMatchState && activeCandidateForPopup && (
+                <div 
+                    className="fixed z-[9999] w-72 bg-white rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.3)] border border-border-default p-4 text-right animate-fade-in match-score-popup"
+                    style={{ 
+                        top: activeMatchState.top, 
+                        left: activeMatchState.left,
+                        transform: 'translate(-50%, -100%)',
+                        marginTop: '-10px'
+                    }}
+                    onClick={e => e.stopPropagation()}
+                >
+                    {/* Arrow */}
+                    <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-b border-r border-border-default transform rotate-45"></div>
+
+                    <div className="flex justify-between items-center mb-3 pb-2 border-b border-border-subtle">
+                        <div className="flex items-center gap-2">
+                            <div className="p-1 bg-primary-50 rounded">
+                                <SparklesIcon className="w-4 h-4 text-primary-600" />
+                            </div>
+                            <span className="text-sm font-bold text-gray-900">ניתוח התאמה AI</span>
+                        </div>
+                        <button onClick={() => setActiveMatchState(null)} className="text-text-muted hover:text-text-default">
+                            <XMarkIcon className="w-4 h-4" />
+                        </button>
+                    </div>
+
+                    <div className="space-y-3">
+                        {activeCandidateForPopup.matchAnalysis ? (
+                            <>
+                                <p className="text-xs text-text-subtle font-medium">
+                                    משרה: <span className="text-text-default font-bold">{activeCandidateForPopup.matchAnalysis.jobTitle}</span>
+                                </p>
+                                <p className="text-xs text-text-default leading-relaxed bg-bg-subtle/50 p-2.5 rounded-lg border border-border-subtle">
+                                    {activeCandidateForPopup.matchAnalysis.reason}
+                                </p>
+                            </>
+                        ) : (
+                            <p className="text-xs text-text-muted italic">אין ניתוח זמין למועמד זה.</p>
+                        )}
+                        
+                        <div className="pt-2">
+                             <button className="w-full flex items-center justify-center gap-2 text-primary-600 hover:bg-primary-50 py-1.5 rounded-lg transition-colors text-xs font-bold border border-transparent hover:border-primary-100">
+                                <ArrowPathIcon className="w-3.5 h-3.5" />
+                                <span>חשב מחדש</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {isSaveModalOpen && (
                 <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-center justify-center p-4" onClick={() => setIsSaveModalOpen(false)}>
                     <div className="bg-bg-card rounded-lg shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
@@ -1295,12 +1377,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 </div>
             )}
              {selectedIds.size > 0 && (
-                <div className="fixed bottom-0 left-0 right-0 z-40 p-4 pointer-events-none">
+                <div className="fixed bottom-0 start-0 end-0 z-40 p-4 pointer-events-none">
                     <div className="w-full max-w-5xl mx-auto pointer-events-auto">
                         <div className="hidden md:block bg-bg-card rounded-xl shadow-2xl border border-border-default px-4 py-2 animate-slide-up">
                             {isMoreActionsOpen && (
                                 <div className="flex items-center justify-between py-2 border-b border-border-default mb-2">
-                                     <span className="text-sm font-bold text-text-muted">פעולות נוספות:</span>
+                                     <span className="text-sm font-bold text-text-muted">{t('actions.more_actions')}:</span>
                                      <div className="flex items-center gap-3">
                                         <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><WhatsappIcon className="w-5 h-5 text-green-600"/><span>שלח Whatsapp</span></button>
                                         <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><FolderIcon className="w-5 h-5"/><span>הוסף למאגר</span></button>
@@ -1319,41 +1401,41 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                              <div className="flex items-center justify-between">
                                 <div className="flex items-center gap-4">
                                     <div className="flex items-center gap-2">
-                                        <span className="text-sm font-bold">{selectedIds.size} נבחרו</span>
-                                        <button onClick={() => setSelectedIds(new Set())} className="text-sm font-semibold text-primary-600 hover:underline">נקה בחירה</button>
+                                        <span className="text-sm font-bold">{t('actions.selected_count', { count: selectedIds.size })}</span>
+                                        <button onClick={() => setSelectedIds(new Set())} className="text-sm font-semibold text-primary-600 hover:underline">{t('actions.clear_selection')}</button>
                                     </div>
                                     <div className="w-px h-6 bg-border-default" />
                                     <button onClick={() => setIsMoreActionsOpen(!isMoreActionsOpen)} className="text-sm font-semibold text-primary-600 flex items-center gap-1">
-                                        <span>פעולות נוספות</span>
+                                        <span>{t('actions.more_actions')}</span>
                                         {isMoreActionsOpen ? <ChevronUpIcon className="w-4 h-4"/> : <ChevronDownIcon className="w-4 h-4"/>}
                                     </button>
                                 </div>
                                 <div className="flex items-center gap-2 font-semibold text-sm">
-                                    <span className="text-text-default">פעולות קבוצתיות:</span>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">הפנה למשרה</button>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">הוסף לסינון</button>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">שנה סטטוס</button>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">הוסף אירוע</button>
+                                    <span className="text-text-default">{t('actions.bulk_label')}</span>
+                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.refer')}</button>
+                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.add_to_filter')}</button>
+                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.change_status')}</button>
+                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.add_event')}</button>
                                 </div>
                              </div>
                         </div>
                          <div className="md:hidden">
-                            <button onClick={() => setIsBulkActionsMobileOpen(true)} className="fixed bottom-6 right-6 bg-primary-600 text-white rounded-full shadow-lg h-16 w-16 flex flex-col items-center justify-center animate-fade-in">
+                            <button onClick={() => setIsBulkActionsMobileOpen(true)} className="fixed bottom-6 end-6 bg-primary-600 text-white rounded-full shadow-lg h-16 w-16 flex flex-col items-center justify-center animate-fade-in">
                                 <span className="font-bold text-lg">{selectedIds.size}</span>
                                 <span className="text-xs">פעולות</span>
                             </button>
                             {isBulkActionsMobileOpen && (
                                 <div className="fixed inset-0 bg-black/40" onClick={() => setIsBulkActionsMobileOpen(false)}>
-                                    <div className="absolute bottom-0 left-0 right-0 bg-bg-card rounded-t-2xl p-4 animate-slide-up" onClick={e => e.stopPropagation()}>
+                                    <div className="absolute bottom-0 start-0 end-0 bg-bg-card rounded-t-2xl p-4 animate-slide-up" onClick={e => e.stopPropagation()}>
                                         <div className="flex justify-between items-center mb-4">
-                                            <h3 className="font-bold text-lg">{selectedIds.size} מועמדים נבחרו</h3>
+                                            <h3 className="font-bold text-lg">{t('actions.selected_count', { count: selectedIds.size })}</h3>
                                             <button onClick={() => setIsBulkActionsMobileOpen(false)}><XMarkIcon className="w-6 h-6"/></button>
                                         </div>
                                         <div className="grid grid-cols-2 gap-3 text-center font-semibold">
-                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">הפנה למשרה</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">הוסף לסינון</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">שנה סטטוס</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">הוסף אירוע</button>
+                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.refer')}</button>
+                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.add_to_filter')}</button>
+                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.change_status')}</button>
+                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.add_event')}</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><EnvelopeIcon className="w-5 h-5"/>שלח מייל</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/>שלח SMS</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><WhatsappIcon className="w-5 h-5"/>שלח Whatsapp</button>

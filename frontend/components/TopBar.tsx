@@ -222,7 +222,8 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                             );
                         })}
                     </div>
-                    <button onClick={onToggleSidebar} className="p-2 text-text-muted rounded-full hover:bg-bg-hover lg:hidden" aria-label="Open menu">
+                    {/* On Desktop: This toggles Mini/Full Sidebar. On Mobile: This toggles Drawer */}
+                    <button onClick={onToggleSidebar} className="p-2 text-text-muted rounded-full hover:bg-bg-hover" aria-label="Toggle menu">
                         <Bars3Icon className="w-6 h-6" />
                     </button>
                 </div>

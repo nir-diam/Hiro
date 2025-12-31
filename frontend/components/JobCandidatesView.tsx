@@ -5,9 +5,11 @@ import {
     MagnifyingGlassIcon, AvatarIcon, TableCellsIcon, Squares2X2Icon,
     PlusIcon, ChevronUpIcon, FolderIcon, ArchiveBoxIcon, ArrowPathIcon,
     ChatBubbleBottomCenterTextIcon, EnvelopeIcon, WhatsappIcon, XMarkIcon, SparklesIcon,
-    MapPinIcon, CheckCircleIcon, FlagIcon
+    MapPinIcon, CheckCircleIcon, FlagIcon, ChevronLeftIcon
 } from './Icons';
 import { mockJobCandidates } from '../data/mockJobData';
+import { jobsData } from './JobsView';
+import { useLanguage } from '../context/LanguageContext';
 
 type CandidateStatus = 'חדש' | 'סינון טלפוני' | 'ראיון' | 'הצעה' | 'נדחה';
 
@@ -26,6 +28,7 @@ const MatchAnalysisPopover: React.FC<{
     onRecalculate: () => Promise<void>; 
     lastAnalyzed: string; 
 }> = ({ candidate, onClose, onRecalculate, lastAnalyzed }) => {
+    const { t } = useLanguage();
     const [isLoading, setIsLoading] = useState(false);
 
     const handleRecalculate = async (e: React.MouseEvent) => {
@@ -44,7 +47,7 @@ const MatchAnalysisPopover: React.FC<{
                     <div className="p-1.5 bg-primary-50 rounded-lg">
                         <SparklesIcon className="w-5 h-5 text-primary-600" />
                     </div>
-                    <h4 className="font-extrabold text-text-default text-base">ניתוח התאמת AI</h4>
+                    <h4 className="font-extrabold text-text-default text-base">{t('job_candidates.ai_analysis')}</h4>
                 </div>
                 <button onClick={(e) => { e.stopPropagation(); onClose(); }} className="p-1.5 rounded-full hover:bg-bg-hover transition-colors">
                     <XMarkIcon className="w-4 h-4 text-text-muted" />
@@ -59,7 +62,7 @@ const MatchAnalysisPopover: React.FC<{
                 <div className="pt-3 border-t border-border-subtle flex justify-between items-center">
                     <div className="flex items-center gap-1.5 text-text-subtle">
                          <FlagIcon className="w-3.5 h-3.5" />
-                         <span className="text-[10px] font-bold uppercase tracking-tight">נותח ב: {lastAnalyzed}</span>
+                         <span className="text-[10px] font-bold uppercase tracking-tight">{t('job_candidates.analyzed_at')} {lastAnalyzed}</span>
                     </div>
                 </div>
 
@@ -73,7 +76,7 @@ const MatchAnalysisPopover: React.FC<{
                     ) : (
                         <ArrowPathIcon className="w-4 h-4" />
                     )}
-                    <span>חשב מחדש התאמה</span>
+                    <span>{t('job_candidates.recalculate')}</span>
                 </button>
             </div>
         </div>
@@ -86,11 +89,15 @@ interface JobCandidatesViewProps {
 }
 
 const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer, jobId }) => {
+    const { t } = useLanguage();
     const navigate = useNavigate();
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState('הכל');
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [activePopoverId, setActivePopoverId] = useState<number | null>(null);
+    
+    // Find the current job to get its location
+    const job = jobsData.find(j => j.id === jobId) || jobsData[0];
 
     const filteredCandidates = useMemo(() => {
         return mockJobCandidates
@@ -106,13 +113,25 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
         setActivePopoverId(activePopoverId === id ? null : id);
     };
 
+    const handleNavigate = (e: React.MouseEvent, candidateAddress: string) => {
+        e.stopPropagation();
+        if (!candidateAddress) return;
+        const jobAddress = job.location || "תל אביב";
+        const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(candidateAddress)}&destination=${encodeURIComponent(jobAddress)}&travelmode=driving`;
+        window.open(url, '_blank');
+    };
+
     return (
         <div className="flex flex-col h-full bg-white relative">
             <header className="p-4 border-b border-border-subtle flex flex-wrap items-center justify-between gap-4 bg-bg-subtle/20">
                 <div className="flex items-center gap-3">
-                    <h3 className="font-bold text-lg text-text-default">מועמדים למשרה</h3>
+                    <h3 className="font-bold text-lg text-text-default">{t('job_candidates.title')}</h3>
                     <span className="text-xs font-bold bg-primary-100 text-primary-700 px-2 py-0.5 rounded-full">
-                        {filteredCandidates.length}
+                        {t('job_candidates.active_count', { count: filteredCandidates.length })}
+                    </span>
+                    <span className="text-xs text-text-subtle flex items-center gap-1 border-r border-border-default pr-3 mr-1">
+                        <MapPinIcon className="w-3 h-3" />
+                        {t('job_candidates.location')} {job.city}
                     </span>
                 </div>
 
@@ -121,7 +140,7 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                         <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                         <input 
                             type="text" 
-                            placeholder="חיפוש..." 
+                            placeholder={t('job_candidates.search_placeholder')} 
                             value={searchTerm} 
                             onChange={e => setSearchTerm(e.target.value)}
                             className="bg-bg-input border border-border-default rounded-xl py-2 pr-9 pl-3 text-sm focus:ring-2 focus:ring-primary-500/20 w-48" 
@@ -140,11 +159,12 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                         <table className="w-full text-sm text-right">
                             <thead className="bg-bg-subtle/50 text-text-muted font-bold uppercase text-[11px] tracking-wider sticky top-0 z-20 backdrop-blur-sm">
                                 <tr>
-                                    <th className="p-4">שם המועמד</th>
-                                    <th className="p-4">סטטוס</th>
-                                    <th className="p-4">התאמה</th>
-                                    <th className="p-4">מקור</th>
-                                    <th className="p-4">פעילות אחרונה</th>
+                                    <th className="p-4">{t('job_candidates.col_name')}</th>
+                                    <th className="p-4">{t('job_candidates.col_status')}</th>
+                                    <th className="p-4">{t('job_candidates.col_distance')}</th>
+                                    <th className="p-4">{t('job_candidates.col_match')}</th>
+                                    <th className="p-4">{t('job_candidates.col_source')}</th>
+                                    <th className="p-4">{t('job_candidates.col_activity')}</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle overflow-visible">
@@ -155,13 +175,26 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                                 <div className="w-9 h-9 rounded-full bg-primary-100 flex items-center justify-center text-primary-700 font-bold border border-primary-200">
                                                     {c.avatar}
                                                 </div>
-                                                <span className="font-bold text-text-default group-hover:text-primary-700">{c.name}</span>
+                                                <div>
+                                                    <span className="font-bold text-text-default group-hover:text-primary-700 block">{c.name}</span>
+                                                    <span className="text-xs text-text-muted">{c.title}</span>
+                                                </div>
                                             </div>
                                         </td>
                                         <td className="p-4">
                                             <span className={`text-[11px] font-black px-2.5 py-1 rounded-full border ${statusStyles[c.status as CandidateStatus] || 'bg-gray-100'}`}>
                                                 {c.status}
                                             </span>
+                                        </td>
+                                        <td className="p-4">
+                                            <button 
+                                                onClick={(e) => handleNavigate(e, c.address || '')}
+                                                className="flex items-center gap-1.5 text-xs font-semibold bg-bg-subtle hover:bg-blue-50 text-text-default hover:text-blue-600 px-2 py-1 rounded-md border border-transparent hover:border-blue-200 transition-all group/map"
+                                                title={`${t('job_candidates.nav_waze')} ${c.address || t('job_candidates.unknown_location')}`}
+                                            >
+                                                <MapPinIcon className="w-3.5 h-3.5 text-text-subtle group-hover/map:text-blue-500" />
+                                                <span>{c.address ? `${Math.floor(Math.random() * 40) + 2} ק"מ` : t('job_candidates.unknown_location')}</span>
+                                            </button>
                                         </td>
                                         <td className="p-4 overflow-visible">
                                             <div className="relative flex items-center gap-2">
@@ -224,6 +257,16 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                     </div>
                                 </div>
                                 
+                                <div className="flex items-center justify-between mb-4">
+                                     <button 
+                                        onClick={(e) => handleNavigate(e, c.address || '')}
+                                        className="text-xs flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md text-text-muted hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                    >
+                                        <MapPinIcon className="w-3 h-3"/>
+                                        {c.address ? `${c.address} (~${Math.floor(Math.random() * 40) + 2} ק"מ)` : t('job_candidates.unknown_location')}
+                                    </button>
+                                </div>
+
                                 <div className="flex items-center justify-between mt-6 pt-4 border-t border-border-subtle">
                                     <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${statusStyles[c.status as CandidateStatus]}`}>
                                         {c.status}

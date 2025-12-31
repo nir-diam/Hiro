@@ -1,6 +1,8 @@
+
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ArrowDownTrayIcon, FolderIcon, DocumentIcon, PhotoIcon, ArchiveBoxIcon } from './Icons';
 import DocumentFormModal, { Document, DocumentType } from './DocumentFormModal';
+import { useLanguage } from '../context/LanguageContext';
 
 // Mock Data
 const initialDocumentsData: Document[] = [
@@ -44,6 +46,7 @@ const formatFileSize = (kilobytes: number) => {
 }
 
 const DocumentsView: React.FC = () => {
+    const { t } = useLanguage();
     const [documents, setDocuments] = useState<Document[]>(initialDocumentsData);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterType, setFilterType] = useState('הכול');
@@ -100,7 +103,7 @@ const DocumentsView: React.FC = () => {
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                         <input
                             type="text"
-                            placeholder="חפש מסמך לפי שם או סוג…"
+                            placeholder={t('documents_view.search')}
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm"
@@ -112,12 +115,14 @@ const DocumentsView: React.FC = () => {
                             onChange={(e) => setFilterType(e.target.value)}
                             className="appearance-none bg-bg-input border border-border-default rounded-lg py-2 pl-8 pr-3 text-sm font-semibold text-text-default"
                          >
-                            <option>הכול</option>
-                            <option>קורות חיים</option>
-                            <option>תעודות</option>
-                            <option>מסמכי זיהוי</option>
-                            <option>חוזים</option>
-                            <option>אחרים</option>
+                            <option value="הכול">{t('filter.status_all')}</option>
+                            <option value="קורות חיים">{t('documents_view.type_cv')}</option>
+                            <option value="תעודה">{t('documents_view.type_certificate')}</option>
+                            <option value="מסמך זיהוי">{t('documents_view.type_id')}</option>
+                            <option value="חוזה">{t('documents_view.type_contract')}</option>
+                            <option value="הסכם">{t('documents_view.type_agreement')}</option>
+                            <option value="חשבונית">{t('documents_view.type_invoice')}</option>
+                            <option value="אחר">{t('documents_view.type_other')}</option>
                         </select>
                         <ChevronDownIcon className="w-4 h-4 text-text-muted absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"/>
                     </div>
@@ -129,7 +134,7 @@ const DocumentsView: React.FC = () => {
                     </div>
                      <button onClick={handleCreateDoc} className="flex-grow sm:flex-grow-0 flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                         <PlusIcon className="w-5 h-5"/>
-                        <span>העלה מסמך</span>
+                        <span>{t('documents_view.upload')}</span>
                     </button>
                 </div>
             </header>
@@ -141,13 +146,13 @@ const DocumentsView: React.FC = () => {
                     <table className="w-full text-sm text-right">
                         <thead className="text-xs text-text-muted uppercase bg-bg-subtle/80">
                             <tr>
-                                <th className="px-4 py-3">שם מסמך</th>
-                                <th className="px-4 py-3">סוג</th>
-                                <th className="px-4 py-3">תאריך העלאה</th>
-                                <th className="px-4 py-3">הועלה ע"י</th>
-                                <th className="px-4 py-3">גודל</th>
-                                <th className="px-4 py-3">הערות</th>
-                                <th className="px-4 py-3 text-center">פעולות</th>
+                                <th className="px-4 py-3">{t('documents_view.col_name')}</th>
+                                <th className="px-4 py-3">{t('documents_view.col_type')}</th>
+                                <th className="px-4 py-3">{t('documents_view.col_date')}</th>
+                                <th className="px-4 py-3">{t('documents_view.col_uploadedBy')}</th>
+                                <th className="px-4 py-3">{t('documents_view.col_size')}</th>
+                                <th className="px-4 py-3">{t('documents_view.col_notes')}</th>
+                                <th className="px-4 py-3 text-center">{t('documents_view.col_actions')}</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
@@ -164,9 +169,9 @@ const DocumentsView: React.FC = () => {
                                         <button onClick={() => setOpenMenuId(openMenuId === doc.id ? null : doc.id)} className="p-2 rounded-full hover:bg-bg-hover text-text-subtle"><EllipsisVerticalIcon className="w-5 h-5"/></button>
                                         {openMenuId === doc.id && (
                                             <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10">
-                                                <button onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> ערוך</button>
-                                                <a href="#" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</a>
-                                                <button onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> מחק</button>
+                                                <button onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> {t('resume.edit')}</button>
+                                                <a href="#" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> {t('resume.download')}</a>
+                                                <button onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> {t('resume.delete')}</button>
                                             </div>
                                         )}
                                     </div>
@@ -184,9 +189,9 @@ const DocumentsView: React.FC = () => {
                                 <button onClick={() => setOpenMenuId(openMenuId === doc.id ? null : doc.id)} className="p-1.5 rounded-full hover:bg-bg-hover text-text-subtle opacity-0 group-hover:opacity-100 transition-opacity"><EllipsisVerticalIcon className="w-5 h-5"/></button>
                                 {openMenuId === doc.id && (
                                     <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10">
-                                        <button onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> ערוך</button>
-                                        <a href="#" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</a>
-                                        <button onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> מחק</button>
+                                        <button onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> {t('resume.edit')}</button>
+                                        <a href="#" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> {t('resume.download')}</a>
+                                        <button onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> {t('resume.delete')}</button>
                                     </div>
                                 )}
                             </div>
@@ -209,7 +214,7 @@ const DocumentsView: React.FC = () => {
                     <p className="mt-2 text-text-muted">אין מסמכים שמורים עבור מועמד זה.</p>
                     <button onClick={handleCreateDoc} className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-5 rounded-lg hover:bg-primary-600 transition shadow-md mt-4">
                         <PlusIcon className="w-5 h-5"/>
-                        <span>העלה מסמך ראשון</span>
+                        <span>{t('documents_view.upload')}</span>
                     </button>
                 </div>
             )}

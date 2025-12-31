@@ -18,6 +18,7 @@ interface DateRangeSelectorProps {
 
 const quickOptions = [
     { label: 'היום', days: 0 },
+    { label: 'החודש', type: 'current_month' },
     { label: '7 ימים אחרונים', days: 7 },
     { label: '30 ימים אחרונים', days: 30 },
     { label: 'מתחילת השנה', type: 'ytd' }
@@ -48,6 +49,8 @@ const DateRangeSelector: React.FC<DateRangeSelectorProps> = ({ value, onChange, 
         
         if (option.type === 'ytd') {
             start.setMonth(0, 1); // Jan 1st
+        } else if (option.type === 'current_month') {
+            start.setDate(1); // 1st of current month
         } else {
             start.setDate(end.getDate() - option.days);
         }

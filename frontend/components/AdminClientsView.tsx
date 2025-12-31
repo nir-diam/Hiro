@@ -1,10 +1,10 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PlusIcon, MagnifyingGlassIcon, PencilIcon } from './Icons';
 
 // --- TYPES ---
 interface Client {
-  id: number;
+  id: string;
   name: string;
   creationDate: string;
   jobsUsed: number;
@@ -13,14 +13,6 @@ interface Client {
   coordinatorsTotal: number;
   isActive: boolean;
 }
-
-// --- MOCK DATA ---
-const clientsData: Client[] = [
-  { id: 1, name: 'מימד אנושי', creationDate: '2022-05-12', jobsUsed: 164, jobsTotal: 200, coordinatorsUsed: 8, coordinatorsTotal: 9, isActive: true },
-  { id: 2, name: 'בזק', creationDate: '2023-01-20', jobsUsed: 50, jobsTotal: 50, coordinatorsUsed: 10, coordinatorsTotal: 10, isActive: true },
-  { id: 3, name: 'Wix', creationDate: '2022-11-05', jobsUsed: 198, jobsTotal: 200, coordinatorsUsed: 15, coordinatorsTotal: 20, isActive: false },
-  { id: 4, name: 'אל-על', creationDate: '2024-03-10', jobsUsed: 5, jobsTotal: 10, coordinatorsUsed: 2, coordinatorsTotal: 5, isActive: true },
-];
 
 const UsageCell: React.FC<{ used: number; total: number; }> = ({ used, total }) => {
     const percentage = total > 0 ? (used / total) * 100 : 0;
@@ -36,8 +28,39 @@ const UsageCell: React.FC<{ used: number; total: number; }> = ({ used, total }) 
 
 const AdminClientsView: React.FC = () => {
     const navigate = useNavigate();
-    const [clients, setClients] = useState<Client[]>(clientsData);
+    const [clients, setClients] = useState<Client[]>([]);
     const [searchTerm, setSearchTerm] = useState('');
+    const [error, setError] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    useEffect(() => {
+        const load = async () => {
+            setLoading(true);
+            setError(null);
+            try {
+                const res = await fetch(`${apiBase}/api/clients`);
+                if (!res.ok) throw new Error('Failed to load clients');
+                const data = await res.json();
+                const mapped: Client[] = data.map((c: any) => ({
+                    id: c.id,
+                    name: c.name || 'ללא שם',
+                    creationDate: c.creationDate || new Date().toISOString(),
+                    jobsUsed: c.jobsUsed ?? 0,
+                    jobsTotal: c.jobsTotal ?? 0,
+                    coordinatorsUsed: c.coordinatorsUsed ?? 0,
+                    coordinatorsTotal: c.coordinatorsTotal ?? 0,
+                    isActive: c.contactIsActive ?? true,
+                }));
+                setClients(mapped);
+            } catch (err: any) {
+                setError(err.message || 'Load failed');
+            } finally {
+                setLoading(false);
+            }
+        };
+        load();
+    }, [apiBase]);
 
     const filteredClients = useMemo(() => {
         return clients.filter(client => 
@@ -45,10 +68,20 @@ const AdminClientsView: React.FC = () => {
         );
     }, [clients, searchTerm]);
 
-    const handleStatusToggle = (clientId: number) => {
-        setClients(prev => prev.map(client => 
-            client.id === clientId ? { ...client, isActive: !client.isActive } : client
-        ));
+    const handleStatusToggle = async (clientId: string) => {
+        const target = clients.find(c => c.id === clientId);
+        if (!target) return;
+        const updated = { ...target, isActive: !target.isActive };
+        setClients(prev => prev.map(c => c.id === clientId ? updated : c));
+        try {
+            await fetch(`${apiBase}/api/clients/${clientId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contactIsActive: updated.isActive }),
+            });
+        } catch {
+            setClients(prev => prev.map(c => c.id === clientId ? target : c));
+        }
     };
 
     return (
@@ -64,6 +97,10 @@ const AdminClientsView: React.FC = () => {
                 </button>
             </div>
 
+            {error && <p className="text-red-600 text-sm mb-2">{error}</p>}
+            {loading ? (
+                <p className="text-text-muted text-sm">טוען לקוחות...</p>
+            ) : (
             <div className="overflow-x-auto border border-border-default rounded-lg">
                 <table className="w-full text-sm text-right min-w-[800px]">
                     <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
@@ -99,6 +136,7 @@ const AdminClientsView: React.FC = () => {
                     </tbody>
                 </table>
             </div>
+            )}
         </div>
     );
 };

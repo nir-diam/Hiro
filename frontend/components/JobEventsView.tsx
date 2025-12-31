@@ -5,6 +5,7 @@ import {
     CalendarIcon, TableCellsIcon, Squares2X2Icon, ChatBubbleBottomCenterTextIcon 
 } from './Icons';
 import AddJobEventModal from './AddJobEventModal';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface EventHistory {
@@ -99,6 +100,7 @@ interface JobEventsViewProps {
 }
 
 const JobEventsView: React.FC<JobEventsViewProps> = ({ externalEvents, onAddEvent }) => {
+    const { t } = useLanguage();
     const [localEvents, setLocalEvents] = useState<JobEvent[]>(mockJobEvents);
     const jobEvents = externalEvents || localEvents;
     
@@ -191,16 +193,16 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({ externalEvents, onAddEven
         <div className="bg-bg-card rounded-2xl h-full flex flex-col p-4 sm:p-6 space-y-6">
             <header className="flex flex-col md:flex-row items-center justify-between gap-4">
                 <div>
-                    <h3 className="text-xl font-bold text-text-default">יומן אירועי משרה</h3>
-                    <p className="text-sm text-text-muted">תיעוד אוטומטי וידני של פעולות במשרה</p>
+                    <h3 className="text-xl font-bold text-text-default">{t('job_events.title')}</h3>
+                    <p className="text-sm text-text-muted">{t('job_events.subtitle')}</p>
                 </div>
                 
                 <div className="flex items-center gap-3">
                      <div className="flex items-center bg-bg-subtle p-1 rounded-lg border border-border-default">
-                        <button onClick={() => setViewMode('timeline')} title="תצוגת ציר זמן" className={`p-2 rounded-md transition-all ${viewMode === 'timeline' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}>
+                        <button onClick={() => setViewMode('timeline')} title={t('job_events.view_timeline')} className={`p-2 rounded-md transition-all ${viewMode === 'timeline' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}>
                             <TableCellsIcon className="w-5 h-5"/>
                         </button>
-                        <button onClick={() => setViewMode('cards')} title="תצוגת כרטיסיות" className={`p-2 rounded-md transition-all ${viewMode === 'cards' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}>
+                        <button onClick={() => setViewMode('cards')} title={t('job_events.view_cards')} className={`p-2 rounded-md transition-all ${viewMode === 'cards' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}>
                             <Squares2X2Icon className="w-5 h-5"/>
                         </button>
                     </div>
@@ -210,7 +212,7 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({ externalEvents, onAddEven
                         className="bg-primary-600 text-white font-bold py-2.5 px-5 rounded-xl hover:bg-primary-700 transition shadow-md flex items-center gap-2 text-sm whitespace-nowrap"
                     >
                         <PlusIcon className="w-5 h-5"/>
-                        <span>הוספת אירוע</span>
+                        <span>{t('job_events.add_event')}</span>
                     </button>
                 </div>
             </header>
@@ -219,23 +221,23 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({ externalEvents, onAddEven
             <div className="p-4 bg-bg-subtle/50 rounded-xl border border-border-default">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
                     <div>
-                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">סוג אירוע</label>
+                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('job_events.filter_type')}</label>
                         <select name="eventType" value={eventFilters.eventType} onChange={handleEventFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
                             {eventTypeOptions.map(opt => <option key={opt}>{opt}</option>)}
                         </select>
                     </div>
                     <div>
-                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">רכז</label>
+                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('job_events.filter_recruiter')}</label>
                         <select name="coordinator" value={eventFilters.coordinator} onChange={handleEventFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
                             {coordinatorOptions.map(opt => <option key={opt}>{opt}</option>)}
                         </select>
                     </div>
                     <div>
-                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">מתאריך</label>
+                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('job_events.filter_from')}</label>
                         <input type="date" name="fromDate" value={eventFilters.fromDate} onChange={handleEventFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none" />
                     </div>
                     <div>
-                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">עד תאריך</label>
+                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('job_events.filter_to')}</label>
                         <input type="date" name="toDate" value={eventFilters.toDate} onChange={handleEventFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none" />
                     </div>
                 </div>
@@ -277,7 +279,7 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({ externalEvents, onAddEven
                                                          {hasHistory && (
                                                             <button 
                                                                 className={`p-1.5 rounded-full transition-colors ${showHistory ? 'bg-primary-100 text-primary-700' : 'hover:bg-bg-subtle text-text-subtle'}`}
-                                                                title="היסטוריית שינויים"
+                                                                title={t('job_events.history_title')}
                                                                 onClick={() => setExpandedHistoryId(showHistory ? null : event.id)}
                                                             >
                                                                 <ClockIcon className="w-4 h-4"/>
@@ -306,7 +308,7 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({ externalEvents, onAddEven
                                                 {/* History Dropdown */}
                                                 {showHistory && (
                                                     <div className="mt-3 pt-3 border-t border-border-subtle bg-bg-subtle/30 rounded-lg p-3 space-y-2 animate-fade-in">
-                                                        <p className="text-xs font-bold text-text-muted mb-1">היסטוריית שינויים:</p>
+                                                        <p className="text-xs font-bold text-text-muted mb-1">{t('job_events.history_title')}</p>
                                                         {event.history?.map((hist, idx) => (
                                                             <div key={idx} className="flex justify-between text-xs text-text-subtle">
                                                                 <span>{hist.change} ({hist.updatedBy})</span>

@@ -1,29 +1,32 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
     Cog6ToothIcon, InformationCircleIcon, ArrowPathIcon, MagnifyingGlassIcon, UserGroupIcon, BriefcaseIcon, 
     ArrowTopRightOnSquareIcon, ClockIcon, PaperAirplaneIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, ChartBarIcon,
-    UserPlusIcon, ChevronUpIcon, ChevronDownIcon
+    UserPlusIcon, ChevronUpIcon, ChevronDownIcon, CheckIcon, BellIcon, ExclamationTriangleIcon, CalendarIcon
 } from './Icons';
 import CustomizeViewsPopover, { ViewConfig } from './CustomizeViewsPopover';
 import RecruitmentGoalWidget from './RecruitmentGoalWidget';
 import DevAnnotation from './DevAnnotation';
+import DateRangeSelector, { DateRange } from './DateRangeSelector';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- Reusable Dashboard Components ---
 
-const DashboardCard: React.FC<{ children: React.ReactNode; className?: string; title: string; linkText?: string; onLinkClick?: () => void; chartColorClass?: string; chartColorShade?: string; }> = ({ children, className = '', title, linkText, onLinkClick, chartColorClass = 'primary', chartColorShade = '600' }) => (
-    <div className={`bg-bg-card rounded-xl border border-border-default shadow-sm flex flex-col h-full overflow-hidden ${className}`}>
-        <header className="px-4 py-3 border-b border-border-subtle flex justify-between items-center bg-bg-subtle/30">
-            <h3 className="font-bold text-sm text-text-default truncate" title={title}>{title}</h3>
+const DashboardCard: React.FC<{ children: React.ReactNode; className?: string; title: string; linkText?: string; onLinkClick?: () => void; chartColorClass?: string; chartColorShade?: string; icon?: React.ReactNode }> = ({ children, className = '', title, linkText, onLinkClick, chartColorClass = 'primary', chartColorShade = '600', icon }) => (
+    <div className={`bg-bg-card rounded-2xl border border-border-default shadow-sm flex flex-col h-full overflow-hidden ${className}`}>
+        <header className="px-5 py-4 border-b border-border-subtle flex justify-between items-center bg-white">
+            <div className="flex items-center gap-2">
+                {icon && <div className="text-primary-500">{icon}</div>}
+                <h3 className="font-bold text-base text-text-default truncate" title={title}>{title}</h3>
+            </div>
             {linkText && onLinkClick ? (
-                 <button onClick={onLinkClick} className="text-xs font-semibold text-primary-600 hover:underline flex-shrink-0 ml-2 bg-primary-50 px-2 py-1 rounded-md hover:bg-primary-100 transition-colors">
+                 <button onClick={onLinkClick} className="text-xs font-bold text-primary-600 hover:text-primary-700 transition-colors">
                     {linkText}
                 </button>
-            ) : (
-                <InformationCircleIcon className="w-4 h-4 text-text-subtle opacity-50" />
-            )}
+            ) : null}
         </header>
-        <div className="p-4 flex-grow flex flex-col justify-center" style={{'--chart-color': `rgb(var(--color-${chartColorClass}-${chartColorShade}))`, '--chart-color-subtle': `rgb(var(--color-${chartColorClass}-100))` } as React.CSSProperties}>
+        <div className="p-5 flex-grow flex flex-col" style={{'--chart-color': `rgb(var(--color-${chartColorClass}-${chartColorShade}))`, '--chart-color-subtle': `rgb(var(--color-${chartColorClass}-100))` } as React.CSSProperties}>
             {children}
         </div>
     </div>
@@ -36,65 +39,43 @@ interface KpiCardProps {
     icon: React.ReactNode;
     sentiment?: 'neutral' | 'success' | 'warning' | 'critical';
     trend?: number; // Percentage change (+ or -)
+    subtext?: string;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ title, value, icon, sentiment = 'neutral', trend }) => {
-    let colorStyles = 'bg-bg-card border-border-default hover:border-primary-300';
-    let iconColor = 'text-primary-200 group-hover:text-primary-500';
+const KpiCard: React.FC<KpiCardProps> = ({ title, value, icon, sentiment = 'neutral', trend, subtext }) => {
+    let colorStyles = 'bg-white border-border-default hover:border-primary-300';
+    let iconBg = 'bg-primary-50';
+    let iconColor = 'text-primary-600';
     let valueColor = 'text-text-default';
 
     if (sentiment === 'critical') {
-        colorStyles = 'bg-red-50/40 border-red-200 hover:border-red-300';
-        iconColor = 'text-red-300 group-hover:text-red-500';
-        valueColor = 'text-red-700';
+        iconBg = 'bg-red-50';
+        iconColor = 'text-red-500';
     } else if (sentiment === 'warning') {
-        colorStyles = 'bg-orange-50/40 border-orange-200 hover:border-orange-300';
-        iconColor = 'text-orange-300 group-hover:text-orange-500';
-        valueColor = 'text-orange-800';
+        iconBg = 'bg-orange-50';
+        iconColor = 'text-orange-500';
     } else if (sentiment === 'success') {
-        colorStyles = 'bg-emerald-50/40 border-emerald-200 hover:border-emerald-300';
-        iconColor = 'text-emerald-300 group-hover:text-emerald-500';
-        valueColor = 'text-emerald-800';
+        iconBg = 'bg-emerald-50';
+        iconColor = 'text-emerald-500';
     }
 
     return (
-        <div className={`${colorStyles} rounded-xl border shadow-sm flex flex-col relative overflow-hidden group transition-all hover:shadow-md w-full aspect-[1.6/1] min-h-[100px] p-3`}>
-            {/* Header: Title & Icon */}
-            <div className="flex justify-between items-start w-full z-10">
-                <div className={`${iconColor} transition-colors opacity-80 scale-90 origin-top-right`}>
-                    {React.cloneElement(icon as React.ReactElement<any>, { className: "w-5 h-5" })}
+        <div className={`${colorStyles} rounded-2xl border shadow-sm flex flex-col items-center justify-center p-6 transition-all hover:shadow-md h-full text-center relative overflow-hidden group`}>
+             {/* Trend Badge (Absolute Top Right) */}
+             {trend !== undefined && (
+                 <div className={`absolute top-3 right-3 flex items-center text-[10px] font-bold px-2 py-0.5 rounded-full ${trend > 0 ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+                    {trend > 0 ? '+' : ''}{trend}%
                 </div>
-                <p className="text-[11px] font-bold text-text-muted uppercase tracking-wide truncate ml-2" title={title}>{title}</p>
+            )}
+            
+            <div className={`p-3 rounded-2xl mb-4 ${iconBg} ${iconColor} transition-colors transform group-hover:scale-110 duration-200`}>
+                {React.cloneElement(icon as React.ReactElement<any>, { className: "w-8 h-8" })}
             </div>
             
-            {/* Center: Number */}
-            <div className="flex-grow flex items-center justify-center z-10 -mt-1">
-                <p className={`text-4xl font-extrabold tracking-tight ${valueColor}`}>{value}</p>
-            </div>
-
-            {/* Footer: Trend (Fixed height to prevent jumping) */}
-            <div className="h-5 flex items-end justify-center w-full z-10">
-                {trend !== undefined ? (
-                    <div className="flex items-center text-[10px] font-medium bg-white/60 px-1.5 py-0.5 rounded-full backdrop-blur-sm shadow-sm">
-                         {trend > 0 ? (
-                            <span className="text-emerald-600 flex items-center">
-                                <ChevronUpIcon className="w-3 h-3 mr-0.5 stroke-2" /> {Math.abs(trend)}%
-                            </span>
-                        ) : trend < 0 ? (
-                            <span className="text-red-600 flex items-center">
-                                <ChevronDownIcon className="w-3 h-3 mr-0.5 stroke-2" /> {Math.abs(trend)}%
-                            </span>
-                        ) : (
-                            <span className="text-text-muted flex items-center">
-                                 - 0%
-                            </span>
-                        )}
-                        <span className="text-text-subtle mr-1 hidden sm:inline">שינוי</span>
-                    </div>
-                ) : (
-                    // Invisible placeholder to maintain alignment
-                    <div className="h-4"></div>
-                )}
+            <div>
+                <p className="text-4xl font-extrabold tracking-tight text-text-default mb-1">{value}</p>
+                <p className="text-sm font-medium text-text-muted">{title}</p>
+                {subtext && <p className="text-xs text-text-subtle mt-1.5 opacity-80">{subtext}</p>}
             </div>
         </div>
     );
@@ -102,7 +83,7 @@ const KpiCard: React.FC<KpiCardProps> = ({ title, value, icon, sentiment = 'neut
 
 const KpiCardsGrid: React.FC<{ kpis: (KpiCardProps & { id: string })[] }> = ({ kpis }) => {
     return (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3 mb-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
             {kpis.map((kpi) => (
                 <div key={kpi.id} className="col-span-1">
                     <KpiCard {...kpi} />
@@ -120,66 +101,27 @@ const VerticalBarChart: React.FC<{ data: { label: string; value: number }[]; max
                     <div 
                         className="w-full max-w-[12px] rounded-t-md opacity-60 group-hover:opacity-100 transition-all duration-300 bg-primary-400 group-hover:bg-primary-600 relative" 
                         style={{ height: `${(item.value / max) * 100}%` }}
-                    >
-                         {/* Tooltip on hover */}
-                        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-800 text-white text-xs py-1 px-2 rounded pointer-events-none whitespace-nowrap z-20">
-                            {item.value}
-                        </div>
-                    </div>
+                    ></div>
                 </div>
-                {index % 5 === 0 && <span className="text-[10px] text-text-subtle">{item.label}</span>}
+                {index % 2 === 0 && <span className="text-[10px] text-text-subtle">{item.label}</span>}
             </div>
         ))}
     </div>
 );
 
-// Funnel Visualization Component
 const FunnelChart: React.FC<{ data: { label: string; value: number; total?: number }[]; max: number; }> = ({ data, max }) => (
     <div className="space-y-4 py-2">
         {data.map((item, index) => {
-            const widthPercent = Math.max((item.value / max) * 100, 5); // Min 5% width
-            const dropOff = index > 0 ? Math.round(((data[index - 1].value - item.value) / data[index - 1].value) * 100) : 0;
-            
-            // Gradient colors for funnel depth effect
+            const widthPercent = Math.max((item.value / max) * 100, 5);
             const opacity = 1 - (index * 0.15); 
-            
             return (
                 <div key={index} className="relative group">
                     <div className="flex items-center h-8">
-                        {/* Label */}
-                        <div className="w-28 flex-shrink-0 text-xs font-semibold text-text-muted group-hover:text-primary-700 transition-colors truncate pl-1">
-                            {item.label}
-                        </div>
-                        
-                        {/* Bar Container */}
+                        <div className="w-28 flex-shrink-0 text-xs font-semibold text-text-muted pl-1">{item.label}</div>
                         <div className="flex-grow relative h-full flex items-center">
-                             {/* Connector Line */}
-                            {index < data.length - 1 && (
-                                <div 
-                                    className="absolute left-0 top-1/2 w-0.5 bg-border-subtle z-0"
-                                    style={{ height: '40px', left: `${(data[index+1].value / max) * 100 / 2}%` }}
-                                ></div>
-                            )}
-                            
-                            {/* The Bar */}
-                            <div 
-                                className="h-full rounded-r-lg rounded-l-sm bg-primary-500 transition-all duration-500 ease-out shadow-sm relative z-10 flex items-center justify-end px-2"
-                                style={{ 
-                                    width: `${widthPercent}%`, 
-                                    opacity: Math.max(opacity, 0.3) 
-                                }}
-                            >
+                            <div className="h-full rounded-r-lg rounded-l-sm bg-primary-500 transition-all duration-500 ease-out shadow-sm relative z-10 flex items-center justify-end px-2" style={{ width: `${widthPercent}%`, opacity: Math.max(opacity, 0.3) }}>
                                 <span className="text-white text-xs font-bold">{item.value}</span>
                             </div>
-                        </div>
-
-                        {/* Dropoff Stat (Right side) */}
-                        <div className="w-12 flex-shrink-0 text-right">
-                             {index > 0 && dropOff > 0 && (
-                                <span className="text-[9px] text-red-500 bg-red-50 px-1 py-0.5 rounded font-medium">
-                                    -{dropOff}%
-                                </span>
-                            )}
                         </div>
                     </div>
                 </div>
@@ -188,7 +130,6 @@ const FunnelChart: React.FC<{ data: { label: string; value: number; total?: numb
     </div>
 );
 
-// Compact Bar Chart (kept for other widgets)
 const CompactBarChart: React.FC<{ data: { label: string; value: number; total?: number }[]; max: number; }> = ({ data, max }) => (
     <div className="space-y-3">
         {data.map((item, index) => (
@@ -198,10 +139,7 @@ const CompactBarChart: React.FC<{ data: { label: string; value: number; total?: 
                     <span className="text-text-muted font-bold tabular-nums">{item.value}</span>
                 </div>
                 <div className="w-full bg-bg-subtle rounded-full h-1.5 overflow-hidden">
-                    <div 
-                        className="h-full rounded-full transition-all duration-500 ease-out group-hover:opacity-80" 
-                        style={{ width: `${(item.value / max) * 100}%`, backgroundColor: 'var(--chart-color)' }}
-                    ></div>
+                    <div className="h-full rounded-full transition-all duration-500 ease-out group-hover:opacity-80" style={{ width: `${(item.value / max) * 100}%`, backgroundColor: 'var(--chart-color)' }}></div>
                 </div>
             </div>
         ))}
@@ -211,7 +149,7 @@ const CompactBarChart: React.FC<{ data: { label: string; value: number; total?: 
 const SimpleList: React.FC<{ items: { main: string; sub?: string }[] }> = ({ items }) => (
     <div className="space-y-0 divide-y divide-border-subtle -my-2">
         {items.map((item, index) => (
-            <div key={index} className="flex flex-col justify-center py-2.5 first:pt-1 last:pb-1 hover:bg-bg-subtle/30 px-2 rounded transition-colors cursor-default">
+            <div key={index} className="flex flex-col justify-center py-3 first:pt-1 last:pb-1 hover:bg-bg-subtle/30 px-2 rounded transition-colors cursor-default">
                 <span className="font-semibold text-text-default text-sm truncate">{item.main}</span>
                 {item.sub && <span className="text-text-muted text-xs truncate mt-0.5">{item.sub}</span>}
             </div>
@@ -219,494 +157,441 @@ const SimpleList: React.FC<{ items: { main: string; sub?: string }[] }> = ({ ite
     </div>
 );
 
-// --- MOCK DATA ---
-const candidatesEnteredLastMonth = Array.from({ length: 30 }, (_, i) => ({ label: `${i + 1}`, value: Math.floor(Math.random() * 15) + 5 })).reverse();
-const candidatesEnteredLastMonthMax = Math.max(...candidatesEnteredLastMonth.map(d => d.value), 1);
+// --- NEW WIDGETS FOR COMPANY DASHBOARD ---
 
-const recentOpenJobs = [
-    { main: 'רכז.ת לוגיסטיקה', sub: 'מיכלי זהב' },
-    { main: 'מנהל/ת שיווק', sub: 'בזק' },
-    { main: 'מפתח/ת Fullstack', sub: 'Wix' },
-    { main: 'נציג/ת מכירות', sub: 'תנובה' },
-    { main: 'מנהל מוצר', sub: 'Monday' },
-];
-
-const tasksData = [
-    { main: 'Follow-up: גדעון ש.', sub: 'היום 14:00' },
-    { main: 'שלח קו"ח: בזק', sub: 'מחר 09:00' },
-    { main: 'ראיון: מאיה כהן', sub: 'יום ג\'' },
-    { main: 'עדכון סטטוס משרה', sub: 'יום ה\'' },
-];
-
-const correctionsData = [
-    { main: 'חסר טלפון: יוסי לוי', sub: 'איש מכירות' },
-    { main: 'שגיאת ניתוח: שרה כץ', sub: 'LinkedIn' },
-];
-
-const coordinatorActionsData = [
-    { label: 'דנה', value: 45 },
-    { label: 'אביב', value: 38 },
-    { label: 'יעל', value: 32 },
-    { label: 'אני', value: 25 },
-];
-
-
-const allPersonalViews: { id: string, name: string }[] = [
-  { id: 'kpi_cards_personal', name: 'מדדי ביצוע מרכזיים' },
-  { id: 'referrals', name: 'הפניות' },
-  { id: 'candidates_in_process', name: 'מועמדים בתהליך' },
-  { id: 'open_jobs', name: 'משרות פתוחות' },
-  { id: 'new_candidates', name: 'מועמדים חדשים' },
-  { id: 'hired', name: 'התקבלו לעבודה' },
-  { id: 'started_work', name: 'התחילו לעבוד' },
-  { id: 'top_sources', name: 'מקורות גיוס מובילים' },
-  { id: 'tasks', name: 'משימות לטיפול' },
-  { id: 'corrections', name: 'תיקונים' },
-  { id: 'initial_screening', name: 'סינון ראשוני' },
-  { id: 'coordinator_actions', name: 'פעולות רכזים' },
-];
-
-const defaultPersonalViewsConfig = allPersonalViews.map(view => ({
-    ...view,
-    visible: view.id === 'kpi_cards_personal' || view.id === 'referrals' || view.id === 'candidates_in_process' || view.id === 'open_jobs',
-}));
-
-// --- MOCK DATA FOR COMPANY DASHBOARD ---
-// Updated KPIs with sentiment and trend
-const companyKpis: (KpiCardProps & { id: string })[] = [
-    { 
-        id: 'c5', 
-        title: "מחכים לסינון", 
-        value: "8,423", 
-        icon: <MagnifyingGlassIcon className="w-6 h-6" />,
-        sentiment: 'critical',
-        trend: 12
-    },
-    { 
-        id: 'c6', 
-        title: "תיקונים דחופים", 
-        value: "7", 
-        icon: <ArrowPathIcon className="w-6 h-6" />,
-        sentiment: 'warning',
-        trend: -5
-    },
-    { 
-        id: 'c2', 
-        title: "התקבלו לעבודה", 
-        value: "15", 
-        icon: <CheckCircleIcon className="w-6 h-6" />,
-        sentiment: 'success',
-        trend: 25
-    },
-    { 
-        id: 'c7', 
-        title: "תקנים פתוחים", 
-        value: "38", 
-        icon: <BriefcaseIcon className="w-6 h-6" />,
-        sentiment: 'neutral',
-        trend: 0
-    },
-    { 
-        id: 'c1', 
-        title: "התחילו לעבוד", 
-        value: "13", 
-        icon: <UserGroupIcon className="w-6 h-6" />, 
-        sentiment: 'success',
-        trend: 1
-    },
-    { 
-        id: 'c3', 
-        title: "הפניות החודש", 
-        value: "356", 
-        icon: <PaperAirplaneIcon className="w-6 h-6" />, 
-        sentiment: 'neutral', 
-        trend: 8 
-    },
-];
-
-
-const companyCandidatesByStage = {
-    max: 215,
-    data: [
-        { label: 'נשלחו קו"ח', value: 215, total: 264 },
-        { label: 'ראיון פרונטלי', value: 65, total: 264 },
-        { label: 'מבחן מקצועי', value: 32, total: 264 },
-        { label: 'בדיקת ממליצים', value: 12, total: 264 },
-        { label: 'הצעת שכר', value: 8, total: 264 },
-        { label: 'חתימה', value: 4, total: 264 },
-    ]
-};
-
-const companyCandidatesEntered = {
-    max: 250,
-    data: "16 15 14 13 12 11 10 09 08 07 06 05 04 03 02 01 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17".split(" ").map(label => ({
-        label, value: Math.floor(Math.random() * 230) + 20
-    }))
-};
-const companyOpenJobs = [
-    { main: 'מנהל.ת קשרי לקוחות', sub: 'ליווי שטראוס משאיות' },
-    { main: 'אחראי.ת יבוא', sub: 'גטר גרופ' },
-    { main: 'פקיד.ה למשרה חלקית', sub: 'ליווי שטראוס משאיות' },
-    { main: 'פקיד.ת קבלה ושירות', sub: 'קרני תכלת' },
-    { main: 'מהנדס/ת מכונות', sub: 'אלביט' },
-];
-const companyReferralsByDay = {
-    max: 13,
-    data: [
-        { label: 'עדי', value: 13 },
-        { label: 'שרית', value: 12 },
-        { label: 'עדן', value: 9 },
-        { label: 'דיאנה', value: 8 },
-    ]
-};
-const companyTopSources = {
-    max: 3032,
-    data: [
-        { label: '(לא מזוהה)', value: 3032, total: 4203 },
-        { label: 'AllJobs', value: 535, total: 4203 },
-        { label: 'JobMaster', value: 425, total: 4203 },
-        { label: 'פורטל דרושים', value: 95, total: 4203 },
-    ]
-};
-
-// --- Definitions for Company Dashboard Widgets ---
-const allCompanyViews: { id: string, name: string }[] = [
-    { id: 'goal_widget', name: 'יעד גיוסים' }, 
-    { id: 'kpi_cards', name: 'מדדי ביצוע מרכזיים' },
-    { id: 'candidates_by_stage', name: 'מועמדים בתהליך (משפך)' },
-    { id: 'new_candidates_by_month', name: 'מועמדים שנכנסו בחודש האחרון' },
-    { id: 'recent_open_jobs', name: 'משרות פתוחות אחרונות' },
-    { id: 'top_sources', name: 'מקורות גיוס מובילים' },
-    { id: 'tasks_and_corrections', name: 'משימות ותיקונים' },
-    { id: 'referrals_by_recruiter_daily', name: 'הפניות היום לפי רכזים' },
-    { id: 'coordinator_actions_weekly', name: 'פעולות רכזים השבוע' },
-    { id: 'hired_by_source', name: 'התקבלו לעבודה לפי מקור' },
-    { id: 'screening_by_recruiter', name: 'סינון ראשוני לפי רכז' },
-];
-
-const defaultCompanyViewsConfig = allCompanyViews.map(view => ({
-    ...view,
-    visible: true, 
-}));
-
-// --- Specific Widget Components ---
-const personalKpisData: (KpiCardProps & { id: string })[] = [
-    { id: 'open_jobs', title: "משרות פתוחות", value: "12", icon: <BriefcaseIcon className="w-6 h-6" />, sentiment: 'neutral' },
-    { id: 'in_process', title: "מועמדים בתהליך", value: "87", icon: <UserGroupIcon className="w-6 h-6" />, sentiment: 'neutral' },
-    { id: 'referrals', title: "הפניות החודש", value: "42", icon: <PaperAirplaneIcon className="w-6 h-6" />, sentiment: 'success', trend: 15 },
-    { id: 'hired', title: "התקבלו", value: "4", icon: <CheckCircleIcon className="w-6 h-6" />, sentiment: 'success' },
-    { id: 'corrections', title: "תיקונים דחופים", value: "3", icon: <ArrowPathIcon className="w-6 h-6" />, sentiment: 'critical' },
-    { id: 'screening', title: "ממתינים לסינון", value: "18", icon: <MagnifyingGlassIcon className="w-6 h-6" />, sentiment: 'warning', trend: 5 },
-];
-
-const ReferralsByRecruiterWidget = ({ className }: { className?: string }) => (
-    <DashboardCard title="הפניות היום לפי רכזים" className={className}>
-         <CompactBarChart data={companyReferralsByDay.data} max={companyReferralsByDay.max} />
-    </DashboardCard>
-);
-
-const CandidatesInProcessWidget = ({ className }: { className?: string }) => (
-    <DashboardCard title="משפך מועמדים בתהליך" className={className}>
-        {/* REPLACED WITH FUNNEL CHART */}
-        <FunnelChart data={companyCandidatesByStage.data} max={companyCandidatesByStage.max} />
-    </DashboardCard>
-);
-
-const RecentOpenJobsWidget = ({ className }: { className?: string }) => (
-    <DashboardCard title="משרות פתוחות" linkText="לכל המשרות" onLinkClick={() => {}} className={className}>
-        <SimpleList items={companyOpenJobs} />
-    </DashboardCard>
-);
-
-const NewCandidatesWidget = ({ className }: { className?: string }) => (
-    <DashboardCard title="כניסות החודש" linkText="לדוח המלא" onLinkClick={() => {}} className={className}>
-        <VerticalBarChart data={candidatesEnteredLastMonth} max={candidatesEnteredLastMonthMax} />
-    </DashboardCard>
-);
-
-const TopSourcesWidget = ({ className }: { className?: string }) => (
-     <DashboardCard title="מקורות גיוס" linkText="לדוח המלא" onLinkClick={() => {}} className={className}>
-        <CompactBarChart data={companyTopSources.data} max={companyTopSources.max} />
-    </DashboardCard>
-);
-
-const TasksAndCorrectionsWidget = ({ className }: { className?: string }) => (
-    <div className={`grid grid-cols-1 gap-4 ${className}`}>
-        <DashboardCard title="משימות לטיפול" linkText="לכל המשימות" onLinkClick={() => {}}>
-            <SimpleList items={tasksData} />
+const TimeToHireWidget: React.FC<{ className?: string, title: string }> = ({ className, title }) => {
+    const data = [
+        { label: 'Q1', value: 45 }, { label: 'Q2', value: 42 }, { label: 'Q3', value: 48 }, { label: 'Q4', value: 40 },
+        { label: 'Q5', value: 38 }, { label: 'Q6', value: 35 }, { label: 'Q7', value: 36 }, { label: 'Q8', value: 32 },
+        { label: 'Q9', value: 30 }, { label: 'Q10', value: 28 }, { label: 'Q11', value: 29 }, { label: 'Q12', value: 25 }
+    ];
+    return (
+        <DashboardCard title={title} className={className}>
+             <div className="flex flex-col h-full justify-end">
+                <VerticalBarChart data={data} max={50} />
+                <div className="text-center mt-2">
+                    <span className="text-xs text-text-muted">Avg: <span className="font-bold text-text-default">34 days</span></span>
+                    <span className="text-xs text-green-600 font-bold mr-2">▼ 15%</span>
+                </div>
+             </div>
         </DashboardCard>
-        <DashboardCard title="תיקונים דחופים" linkText="לכל התיקונים" onLinkClick={() => {}}>
-            <SimpleList items={correctionsData} />
-        </DashboardCard>
-    </div>
-);
-
-const InitialScreeningWidget = ({ className }: { className?: string }) => (
-     <DashboardCard title="מחכים לסינון" linkText="הצג הכל" onLinkClick={() => {}} className={className}>
-        <SimpleList items={[{main: 'יעל ישראלי', sub: '3 ימים'}, {main: 'דוד לוי', sub: 'יומיים'}]} />
-    </DashboardCard>
-);
-
-const CoordinatorActionsWidget = ({ className }: { className?: string }) => (
-    <DashboardCard title="פעולות רכזים" className={className}>
-        <CompactBarChart data={coordinatorActionsData} max={Math.max(...coordinatorActionsData.map(d => d.value))} />
-    </DashboardCard>
-);
-
-const HiredBySourceWidget = ({ className }: { className?: string }) => (
-    <DashboardCard title="התקבלו לפי מקור" className={className}>
-        <CompactBarChart data={[{label: 'AllJobs', value: 8}, {label: 'חבר מביא חבר', value: 4}, {label: 'LinkedIn', value: 3}]} max={8} />
-    </DashboardCard>
-);
-
-const ScreeningByRecruiterWidget = ({ className }: { className?: string }) => (
-     <DashboardCard title="סינון לפי רכז" className={className}>
-        <CompactBarChart data={[{label: 'דנה', value: 120}, {label: 'אביב', value: 95}, {label: 'יעל', value: 80}]} max={120} />
-    </DashboardCard>
-);
-
-// --- Main Dashboard Component ---
-const DashboardView: React.FC = () => {
-    const [activeTab, setActiveTab] = useState<'personal' | 'company'>('personal');
-    
-    // State Management
-    const [personalViewsConfig, setPersonalViewsConfig] = useState<ViewConfig[]>([]);
-    const [personalKpiConfig, setPersonalKpiConfig] = useState<ViewConfig[]>(
-        personalKpisData.map(k => ({ id: k.id, name: k.title, visible: true }))
     );
-    const [companyViewsConfig, setCompanyViewsConfig] = useState<ViewConfig[]>([]);
+};
+
+const RecruiterPerformanceWidget: React.FC<{ className?: string, title: string }> = ({ className, title }) => {
+    const recruiters = [
+        { name: 'Dana Cohen', sent: 120, interviewed: 45, hired: 8 },
+        { name: 'Aviv Levi', sent: 95, interviewed: 30, hired: 5 },
+        { name: 'Yael Shahar', sent: 150, interviewed: 55, hired: 12 },
+    ];
     
-    // Popovers State
-    const [isPersonalCustomizePopoverOpen, setIsPersonalCustomizePopoverOpen] = useState(false);
-    const [isKpiCustomizePopoverOpen, setIsKpiCustomizePopoverOpen] = useState(false);
-    const [isCompanyCustomizePopoverOpen, setIsCompanyCustomizePopoverOpen] = useState(false);
-    
-    // Refs
-    const personalPopoverRef = useRef<HTMLDivElement>(null);
-    const kpiPopoverRef = useRef<HTMLDivElement>(null);
-    const companyPopoverRef = useRef<HTMLDivElement>(null);
-    const personalCustomizeButtonRef = useRef<HTMLButtonElement>(null);
-    const kpiCustomizeButtonRef = useRef<HTMLButtonElement>(null);
-    const companyCustomizeButtonRef = useRef<HTMLButtonElement>(null);
+    return (
+        <DashboardCard title={title} className={className}>
+            <div className="overflow-x-auto">
+                <table className="w-full text-xs text-right">
+                    <thead>
+                        <tr className="border-b border-border-default text-text-muted">
+                            <th className="pb-2 font-medium">Recruiter</th>
+                            <th className="pb-2 font-medium text-center">Ref.</th>
+                            <th className="pb-2 font-medium text-center">Int.</th>
+                            <th className="pb-2 font-medium text-center">Hired</th>
+                        </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border-subtle">
+                        {recruiters.map((r, i) => (
+                            <tr key={i} className="group">
+                                <td className="py-3 font-semibold text-text-default">{r.name}</td>
+                                <td className="py-3 text-center text-text-muted">{r.sent}</td>
+                                <td className="py-3 text-center text-text-muted">{r.interviewed}</td>
+                                <td className="py-3 text-center">
+                                    <span className="bg-primary-50 text-primary-700 px-2 py-0.5 rounded-full font-bold">{r.hired}</span>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </DashboardCard>
+    );
+}
 
-    // Load Configs
-    useEffect(() => {
-        try {
-            const savedPersonal = localStorage.getItem('hiro-dashboard-config-v2');
-            setPersonalViewsConfig(savedPersonal ? JSON.parse(savedPersonal) : defaultPersonalViewsConfig);
-            
-            const savedKpi = localStorage.getItem('hiro-personal-kpi-config');
-            if (savedKpi) setPersonalKpiConfig(JSON.parse(savedKpi));
-            
-            const savedCompany = localStorage.getItem('hiro-company-dashboard-config');
-            setCompanyViewsConfig(savedCompany ? JSON.parse(savedCompany) : defaultCompanyViewsConfig);
-        } catch (e) {
-            setPersonalViewsConfig(defaultPersonalViewsConfig);
-            setCompanyViewsConfig(defaultCompanyViewsConfig);
-        }
-    }, []);
+// --- NEW WIDGET COMPONENTS FOR PERSONAL DASHBOARD ---
 
-    // Save Configs
-    useEffect(() => {
-        if (personalViewsConfig.length) localStorage.setItem('hiro-dashboard-config-v2', JSON.stringify(personalViewsConfig));
-    }, [personalViewsConfig]);
-    
-    useEffect(() => {
-        if (personalKpiConfig.length) localStorage.setItem('hiro-personal-kpi-config', JSON.stringify(personalKpiConfig));
-    }, [personalKpiConfig]);
-    
-    useEffect(() => {
-        if (companyViewsConfig.length) localStorage.setItem('hiro-company-dashboard-config', JSON.stringify(companyViewsConfig));
-    }, [companyViewsConfig]);
+const MyTasksWidget: React.FC<{ title: string }> = ({ title }) => {
+    const tasks = [
+        { id: 1, title: 'Interview with Maya Cohen', time: 'Today, 14:00', status: 'urgent' },
+        { id: 2, title: 'Update status for Product Manager job', time: 'Tomorrow', status: 'pending' },
+        { id: 3, title: 'Send contract to Getter Group', time: 'Thu', status: 'urgent' },
+        { id: 4, title: 'Review new CVs (15)', time: 'This week', status: 'done' },
+    ];
 
-
-    // Click Outside Handler
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-             if (personalPopoverRef.current && !personalPopoverRef.current.contains(event.target as Node) && personalCustomizeButtonRef.current && !personalCustomizeButtonRef.current.contains(event.target as Node)) setIsPersonalCustomizePopoverOpen(false);
-             if (kpiPopoverRef.current && !kpiPopoverRef.current.contains(event.target as Node) && kpiCustomizeButtonRef.current && !kpiCustomizeButtonRef.current.contains(event.target as Node)) setIsKpiCustomizePopoverOpen(false);
-             if (companyPopoverRef.current && !companyPopoverRef.current.contains(event.target as Node) && companyCustomizeButtonRef.current && !companyCustomizeButtonRef.current.contains(event.target as Node)) setIsCompanyCustomizePopoverOpen(false);
-        };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, []);
-    
-
-    const visiblePersonalKpis = personalKpisData.filter(kpi => personalKpiConfig.find(c => c.id === kpi.id)?.visible ?? true);
-
-    // Dynamic renderer for Personal Dashboard widgets
-    const renderPersonalWidget = (id: string) => {
-        const spanClass = "col-span-1 h-full"; 
-        
-        switch(id) {
-            case 'kpi_cards_personal':
-                 return (
-                     <DevAnnotation
-                        title="KPI Widget Config"
-                        description="User can customize which KPIs are visible."
-                        logic={["Loads config from localStorage", "Filters KPIs list based on visibility boolean"]}
-                    >
-                        <div className="col-span-1 md:col-span-2 xl:col-span-4 relative group/kpi-container mb-2">
-                            <div className="absolute top-0 left-2 z-10 opacity-0 group-hover/kpi-container:opacity-100 transition-opacity">
-                                <button ref={kpiCustomizeButtonRef} onClick={() => setIsKpiCustomizePopoverOpen(p => !p)} className="p-1.5 bg-bg-card border border-border-default rounded-full shadow-sm hover:text-primary-600 hover:bg-bg-hover"><Cog6ToothIcon className="w-4 h-4" /></button>
-                                {isKpiCustomizePopoverOpen && <div ref={kpiPopoverRef} className="absolute top-full left-0 mt-1 z-20"><CustomizeViewsPopover isOpen={isKpiCustomizePopoverOpen} onClose={() => setIsKpiCustomizePopoverOpen(false)} views={personalKpiConfig} onSave={(c) => {setPersonalKpiConfig(c); setIsKpiCustomizePopoverOpen(false)}} onReset={() => {setPersonalKpiConfig(personalKpisData.map(k => ({ id: k.id, name: k.title, visible: true }))); setIsKpiCustomizePopoverOpen(false)}} /></div>}
-                            </div>
-                            <KpiCardsGrid kpis={visiblePersonalKpis} />
-                        </div>
-                    </DevAnnotation>
-                 );
-            case 'tasks':
-                return <div className={spanClass}><DashboardCard title="משימות לטיפול"><SimpleList items={tasksData} /></DashboardCard></div>;
-            case 'corrections':
-                return <div className={spanClass}><DashboardCard title="תיקונים"><SimpleList items={correctionsData} /></DashboardCard></div>;
-            case 'open_jobs':
-                return <div className={spanClass}><DashboardCard title="משרות פתוחות"><SimpleList items={recentOpenJobs} /></DashboardCard></div>;
-            case 'initial_screening':
-                return <div className={spanClass}><InitialScreeningWidget /></div>;
-            case 'referrals':
-                return <div className={spanClass}><DashboardCard title="הפניות החודש"><div className="text-center py-6"><p className="text-5xl font-light text-primary-600">42</p></div></DashboardCard></div>;
-            case 'hired':
-                return <div className={spanClass}><DashboardCard title="התקבלו לעבודה"><div className="text-center py-6"><p className="text-5xl font-light text-green-600">4</p></div></DashboardCard></div>;
-            case 'started_work':
-                 return <div className={spanClass}><DashboardCard title="התחילו לעבוד"><div className="text-center py-6"><p className="text-5xl font-light text-purple-600">2</p></div></DashboardCard></div>;
-            case 'candidates_in_process':
-                 return <div className="col-span-1 md:col-span-2"><CandidatesInProcessWidget /></div>;
-            case 'new_candidates':
-                 return <div className={spanClass}><NewCandidatesWidget /></div>;
-            case 'top_sources':
-                 return <div className={spanClass}><TopSourcesWidget /></div>;
-            case 'coordinator_actions':
-                 return <div className="col-span-1 md:col-span-2"><CoordinatorActionsWidget /></div>;
-            default:
-                return null;
+    const getStatusColor = (status: string) => {
+        switch(status) {
+            case 'urgent': return 'bg-red-500';
+            case 'pending': return 'bg-orange-500';
+            case 'done': return 'bg-green-500';
+            default: return 'bg-gray-300';
         }
     };
 
     return (
-        <div className="space-y-6">
-            {/* Header Row */}
-            <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
-                {/* Tabs */}
-                <div className="flex items-center gap-2 bg-bg-subtle p-1 rounded-full">
-                    <button onClick={() => setActiveTab('personal')} className={`py-1.5 px-6 text-sm font-semibold rounded-full transition ${activeTab === 'personal' ? 'bg-bg-card shadow text-primary-700' : 'text-text-muted'}`}>דף הבית האישי</button>
-                    <button onClick={() => setActiveTab('company')} className={`py-1.5 px-6 text-sm font-semibold rounded-full transition ${activeTab === 'company' ? 'bg-bg-card shadow text-primary-700' : 'text-text-muted'}`}>דף הבית - חברה</button>
+        <DashboardCard title={title} icon={<CheckCircleIcon className="w-5 h-5"/>} linkText="..." onLinkClick={() => {}}>
+            <div className="space-y-0 divide-y divide-border-subtle -mx-4">
+                {tasks.map(task => (
+                    <div key={task.id} className="flex items-center justify-between p-4 hover:bg-bg-subtle/30 transition-colors group cursor-pointer">
+                        <div className="flex items-center gap-3">
+                            <div className={`w-2 h-2 rounded-full ${getStatusColor(task.status)}`}></div>
+                            <span className="text-sm font-medium text-text-default group-hover:text-primary-700 transition-colors">{task.title}</span>
+                        </div>
+                        <span className="text-xs text-text-muted bg-bg-subtle px-2 py-1 rounded-md">{task.time}</span>
+                    </div>
+                ))}
+            </div>
+        </DashboardCard>
+    );
+};
+
+const RecentUpdatesWidget: React.FC<{ title: string }> = ({ title }) => {
+    const updates = [
+        { id: 1, user: 'Dana Cohen', action: 'moved Gideon Shapira to Interview', time: '10m ago' },
+        { id: 2, user: 'System', action: 'received new candidate Noa Levi', time: '32m ago' },
+        { id: 3, user: 'Aviv Levi', action: 'updated Fullstack job status', time: '1h ago' },
+        { id: 4, user: 'Yael Shahar', action: 'sent invite to Ron Kaufman', time: '2h ago' },
+    ];
+
+    return (
+        <DashboardCard title={title} icon={<ClockIcon className="w-5 h-5"/>} linkText="..." onLinkClick={() => {}}>
+             <div className="space-y-4 relative">
+                {/* Vertical Line */}
+                <div className="absolute top-2 bottom-2 right-[5px] w-0.5 bg-border-subtle"></div>
+                
+                {updates.map(update => (
+                    <div key={update.id} className="flex items-start gap-3 relative pr-4">
+                        <div className="absolute top-1.5 right-0 w-2.5 h-2.5 rounded-full bg-primary-300 border-2 border-white ring-1 ring-primary-100 z-10"></div>
+                        <div className="flex-1">
+                            <p className="text-xs text-text-default leading-snug">
+                                <span className="font-bold text-primary-700">{update.user}</span> {update.action}
+                            </p>
+                            <p className="text-[10px] text-text-muted mt-0.5">{update.time}</p>
+                        </div>
+                    </div>
+                ))}
+             </div>
+             <div className="mt-4 text-center">
+                 <button className="text-xs text-text-subtle hover:text-primary-600 transition-colors">Load more...</button>
+             </div>
+        </DashboardCard>
+    );
+};
+
+// --- MOCK DATA ---
+const companyOpenJobs = [
+    { main: 'Customer Relations Manager', sub: 'Strauss Trucks' },
+    { main: 'Import Manager', sub: 'Getter Group' },
+    { main: 'Part-time Clerk', sub: 'Strauss Trucks' },
+    { main: 'Receptionist', sub: 'Karney Tchelet' },
+    { main: 'Mechanical Engineer', sub: 'Elbit' },
+];
+
+const allPersonalViews: { id: string, name: string }[] = [
+  { id: 'recruitment_goal', name: 'Recruitment Goal' },
+  { id: 'my_tasks', name: 'My Tasks' },
+  { id: 'recent_updates', name: 'Recent Updates' },
+];
+
+const defaultPersonalViewsConfig = allPersonalViews.map(view => ({
+    ...view,
+    visible: true,
+}));
+
+// ... (Keeping company chart data from previous version to ensure company tab works) ...
+const companyCandidatesByStage = {
+    max: 215, data: [{ label: 'CV Sent', value: 215 }, { label: 'Interview', value: 65 }, { label: 'Test', value: 32 }, { label: 'Ref Check', value: 12 }, { label: 'Offer', value: 8 }, { label: 'Signed', value: 4 }]
+};
+const companyTopSources = { max: 3032, data: [{ label: '(Unknown)', value: 3032 }, { label: 'AllJobs', value: 535 }, { label: 'JobMaster', value: 425 }, { label: 'Drushim', value: 95 }] };
+
+// --- Configuration for Company Dashboard ---
+const allCompanyViews: { id: string, name: string }[] = [
+    { id: 'recruitment_goal_company', name: 'Recruitment Goal' },
+    { id: 'candidates_by_stage', name: 'Funnel' },
+    { id: 'time_to_hire', name: 'Time to Hire' },
+    { id: 'recruiter_performance', name: 'Recruiter Performance' },
+    { id: 'recent_open_jobs', name: 'Open Jobs' },
+    { id: 'top_sources', name: 'Top Sources' },
+];
+
+const defaultCompanyViewsConfig = allCompanyViews.map(view => ({ ...view, visible: true }));
+
+// --- Specific Widget Components (Company) ---
+const CandidatesInProcessWidget = ({ className, title }: { className?: string, title: string }) => (
+    <DashboardCard title={title} className={className}>
+        <FunnelChart data={companyCandidatesByStage.data} max={companyCandidatesByStage.max} />
+    </DashboardCard>
+);
+const RecentOpenJobsWidget = ({ className, title }: { className?: string, title: string }) => (
+    <DashboardCard title={title} linkText="..." onLinkClick={() => {}} className={className}>
+        <SimpleList items={companyOpenJobs} />
+    </DashboardCard>
+);
+const TopSourcesWidget = ({ className, title }: { className?: string, title: string }) => (
+     <DashboardCard title={title} linkText="..." onLinkClick={() => {}} className={className}>
+        <CompactBarChart data={companyTopSources.data} max={companyTopSources.max} />
+    </DashboardCard>
+);
+
+
+// --- Main Dashboard Component ---
+const DashboardView: React.FC = () => {
+    const { t } = useLanguage();
+    const [activeTab, setActiveTab] = useState<'personal' | 'company'>('personal');
+    // Initialize dateRange with "Current Month" logic helper
+    const getCurrentMonthRange = () => {
+         const now = new Date();
+         const start = new Date(now.getFullYear(), now.getMonth(), 1);
+         return {
+             from: start.toISOString().split('T')[0],
+             to: now.toISOString().split('T')[0],
+             label: t('filter_option.month')
+         };
+    }
+    const [dateRange, setDateRange] = useState<DateRange | null>(getCurrentMonthRange());
+    
+    // KPIs Data - Using translation keys
+    const personalKpisData: (KpiCardProps & { id: string })[] = [
+        { id: 'k1', title: t('dashboard.kpi_exceptions'), value: "3", icon: <ExclamationTriangleIcon className="w-6 h-6" />, sentiment: 'critical', subtext: '-2 vs last month' },
+        { id: 'k2', title: t('dashboard.kpi_monthly_referrals'), value: "42", icon: <PaperAirplaneIcon className="w-6 h-6" />, sentiment: 'neutral', subtext: '+8% vs last month', trend: 8 },
+        { id: 'k3', title: t('dashboard.kpi_open_jobs'), value: "12", icon: <BriefcaseIcon className="w-6 h-6" />, sentiment: 'neutral', subtext: '0% change' },
+        { id: 'k4', title: t('dashboard.kpi_active_candidates'), value: "87", icon: <UserGroupIcon className="w-6 h-6" />, sentiment: 'success', subtext: '+12% vs last month', trend: 12 },
+        { id: 'k5', title: t('dashboard.kpi_interviews_today'), value: "4", icon: <CalendarIcon className="w-6 h-6" />, sentiment: 'neutral', subtext: '2 Frontal, 2 Phone' },
+        { id: 'k6', title: t('dashboard.kpi_avg_status_time'), value: "5.2 days", icon: <ClockIcon className="w-6 h-6" />, sentiment: 'warning', subtext: '+10% vs last month', trend: -10 },
+    ];
+    
+    const companyKpisData: (KpiCardProps & { id: string })[] = [
+        { id: 'c2', title: t('dashboard.kpi_hires'), value: "25", icon: <CheckCircleIcon className="w-6 h-6" />, sentiment: 'success', trend: 25 },
+        { id: 'c_tth', title: t('dashboard.kpi_time_to_hire'), value: "34 days", icon: <ClockIcon className="w-6 h-6" />, sentiment: 'success', trend: -15, subtext: '-5 days' },
+        { id: 'c_oar', title: t('dashboard.kpi_offer_acceptance'), value: "82%", icon: <PaperAirplaneIcon className="w-6 h-6" />, sentiment: 'neutral', subtext: 'of 30 offers' },
+        { id: 'c5', title: t('dashboard.kpi_waiting_screening'), value: "1,423", icon: <MagnifyingGlassIcon className="w-6 h-6" />, sentiment: 'warning', trend: 12 },
+    ];
+
+    // State Management
+    const [personalViewsConfig, setPersonalViewsConfig] = useState<ViewConfig[]>(defaultPersonalViewsConfig);
+    // KPIs Config - Allows reordering and hiding
+    const [personalKpiConfig, setPersonalKpiConfig] = useState<ViewConfig[]>(personalKpisData.map(k => ({ id: k.id, name: k.title, visible: true })));
+    
+    // Company Configs
+    const [companyViewsConfig, setCompanyViewsConfig] = useState<ViewConfig[]>(defaultCompanyViewsConfig);
+    const [companyKpiConfig, setCompanyKpiConfig] = useState<ViewConfig[]>(companyKpisData.map(k => ({ id: k.id, name: k.title, visible: true })));
+    
+    // Popovers State
+    const [isPersonalCustomizePopoverOpen, setIsPersonalCustomizePopoverOpen] = useState(false);
+    const [isKpiCustomizePopoverOpen, setIsKpiCustomizePopoverOpen] = useState(false);
+    
+    const [isCompanyCustomizePopoverOpen, setIsCompanyCustomizePopoverOpen] = useState(false);
+    const [isCompanyKpiCustomizePopoverOpen, setIsCompanyKpiCustomizePopoverOpen] = useState(false);
+
+    // Refs
+    const personalPopoverRef = useRef<HTMLDivElement>(null);
+    const personalCustomizeButtonRef = useRef<HTMLButtonElement>(null);
+    const kpiPopoverRef = useRef<HTMLDivElement>(null);
+    const kpiCustomizeButtonRef = useRef<HTMLButtonElement>(null);
+
+    // Click Outside Handler
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+             // Personal Tab Popovers
+             if (personalPopoverRef.current && !personalPopoverRef.current.contains(event.target as Node) && personalCustomizeButtonRef.current && !personalCustomizeButtonRef.current.contains(event.target as Node)) setIsPersonalCustomizePopoverOpen(false);
+             if (kpiPopoverRef.current && !kpiPopoverRef.current.contains(event.target as Node) && kpiCustomizeButtonRef.current && !kpiCustomizeButtonRef.current.contains(event.target as Node)) setIsKpiCustomizePopoverOpen(false);
+             // Company Tab Popovers
+             if (activeTab === 'company') {
+                 if (personalPopoverRef.current && !personalPopoverRef.current.contains(event.target as Node) && personalCustomizeButtonRef.current && !personalCustomizeButtonRef.current.contains(event.target as Node)) setIsCompanyCustomizePopoverOpen(false);
+                 if (kpiPopoverRef.current && !kpiPopoverRef.current.contains(event.target as Node) && kpiCustomizeButtonRef.current && !kpiCustomizeButtonRef.current.contains(event.target as Node)) setIsCompanyKpiCustomizePopoverOpen(false);
+             }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [activeTab]);
+    
+    // SIMULATED DATA FILTERING FOR DEMO
+    // In a real app, this would trigger an API call.
+    const getFilteredPersonalKPIs = () => {
+        // Just return mock data for simplicity as translation is the focus
+        return personalKpisData; 
+    };
+
+    const getFilteredCompanyKPIs = () => {
+        return companyKpisData;
+    };
+    
+    const personalKPIsToRender = getFilteredPersonalKPIs();
+    const companyKPIsToRender = getFilteredCompanyKPIs();
+
+    // Correctly sort and filter KPIs based on configuration order
+    const visiblePersonalKpis = personalKpiConfig
+        .filter(config => config.visible)
+        .map(config => personalKPIsToRender.find(kpi => kpi.id === config.id))
+        .filter((kpi): kpi is KpiCardProps & { id: string } => kpi !== undefined);
+
+    const visibleCompanyKpis = companyKpiConfig
+        .filter(config => config.visible)
+        .map(config => companyKPIsToRender.find(kpi => kpi.id === config.id))
+        .filter((kpi): kpi is KpiCardProps & { id: string } => kpi !== undefined);
+
+    // Save Handlers
+    const handleSavePersonalViews = (newViews: ViewConfig[]) => { setPersonalViewsConfig(newViews); setIsPersonalCustomizePopoverOpen(false); };
+    const handleResetPersonalViews = () => { setPersonalViewsConfig(defaultPersonalViewsConfig); setIsPersonalCustomizePopoverOpen(false); };
+    
+    const handleSaveCompanyViews = (newViews: ViewConfig[]) => { setCompanyViewsConfig(newViews); setIsCompanyCustomizePopoverOpen(false); };
+    const handleResetCompanyViews = () => { setCompanyViewsConfig(defaultCompanyViewsConfig); setIsCompanyCustomizePopoverOpen(false); };
+
+    const handleSaveKpis = (newViews: ViewConfig[], type: 'personal' | 'company') => {
+        if (type === 'personal') { setPersonalKpiConfig(newViews); setIsKpiCustomizePopoverOpen(false); }
+        else { setCompanyKpiConfig(newViews); setIsCompanyKpiCustomizePopoverOpen(false); }
+    };
+    
+    const handleResetKpis = (type: 'personal' | 'company') => {
+        if (type === 'personal') { setPersonalKpiConfig(personalKpisData.map(k => ({ id: k.id, name: k.title, visible: true }))); setIsKpiCustomizePopoverOpen(false); }
+        else { setCompanyKpiConfig(companyKpisData.map(k => ({ id: k.id, name: k.title, visible: true }))); setIsCompanyKpiCustomizePopoverOpen(false); }
+    };
+
+    return (
+        <div className="space-y-6 max-w-[1600px] mx-auto p-4 sm:p-6 h-full flex flex-col">
+            <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } } .animate-fade-in { animation: fadeIn 0.4s ease-out; }`}</style>
+            
+            {/* Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                    <h1 className="text-2xl font-bold text-text-default">
+                        {activeTab === 'personal' ? t('dashboard.personal_title') : t('dashboard.company_title')}
+                    </h1>
+                    <p className="text-sm text-text-muted">
+                        {activeTab === 'personal' ? 'Overview of your personal performance' : 'Overview of company-wide performance'}
+                    </p>
                 </div>
 
-                {/* Action Buttons (Customize) - Moved here */}
-                <div className="relative">
-                     {activeTab === 'personal' ? (
-                        <>
-                            <button
-                                ref={personalCustomizeButtonRef}
-                                onClick={() => setIsPersonalCustomizePopoverOpen(p => !p)}
-                                className="flex items-center gap-2 text-text-muted font-semibold p-2 rounded-lg hover:bg-bg-hover"
-                                title="התאם תצוגות"
-                            >
-                                <AdjustmentsHorizontalIcon className="w-6 h-6"/>
-                            </button>
-                            {isPersonalCustomizePopoverOpen && (
-                                <div ref={personalPopoverRef} className="absolute top-full left-0 z-20"><CustomizeViewsPopover isOpen={isPersonalCustomizePopoverOpen} onClose={() => setIsPersonalCustomizePopoverOpen(false)} views={personalViewsConfig} onSave={(c) => {setPersonalViewsConfig(c); setIsPersonalCustomizePopoverOpen(false)}} onReset={() => {setPersonalViewsConfig(defaultPersonalViewsConfig); setIsPersonalCustomizePopoverOpen(false)}} /></div>
-                            )}
-                        </>
-                     ) : (
-                        <>
-                            <button
-                                ref={companyCustomizeButtonRef}
-                                onClick={() => setIsCompanyCustomizePopoverOpen(p => !p)}
-                                className="flex items-center gap-2 text-text-muted font-semibold p-2 rounded-lg hover:bg-bg-hover"
-                                title="התאם תצוגות"
-                            >
-                                <AdjustmentsHorizontalIcon className="w-6 h-6"/>
-                            </button>
-                            {isCompanyCustomizePopoverOpen && (
-                                <div ref={companyPopoverRef} className="absolute top-full left-0 z-20"><CustomizeViewsPopover isOpen={isCompanyCustomizePopoverOpen} onClose={() => setIsCompanyCustomizePopoverOpen(false)} views={companyViewsConfig} onSave={(c) => {setCompanyViewsConfig(c); setIsCompanyCustomizePopoverOpen(false)}} onReset={() => {setCompanyViewsConfig(defaultCompanyViewsConfig); setIsCompanyCustomizePopoverOpen(false)}} /></div>
-                            )}
-                        </>
-                     )}
+                <div className="flex flex-wrap items-center gap-3">
+                     <div className="bg-bg-subtle p-1 rounded-lg flex text-sm font-semibold border border-border-default">
+                        <button 
+                            onClick={() => setActiveTab('personal')}
+                            className={`px-4 py-1.5 rounded-md transition-all ${activeTab === 'personal' ? 'bg-white shadow-sm text-primary-700' : 'text-text-muted hover:text-text-default'}`}
+                        >
+                            {t('dashboard.personal_tab')}
+                        </button>
+                        <button 
+                            onClick={() => setActiveTab('company')}
+                            className={`px-4 py-1.5 rounded-md transition-all ${activeTab === 'company' ? 'bg-white shadow-sm text-primary-700' : 'text-text-muted hover:text-text-default'}`}
+                        >
+                            {t('dashboard.company_tab')}
+                        </button>
+                    </div>
+                    
+                    <DateRangeSelector 
+                        value={dateRange} 
+                        onChange={setDateRange} 
+                        className="w-48"
+                        placeholder="Select Date Range"
+                    />
                 </div>
             </div>
-
-            {/* === COMPANY DASHBOARD === */}
-            {activeTab === 'company' && (
-                <div className="space-y-4">
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 auto-rows-min">
-                        {/* 1. Goal Widget - Span 2 cols on desktop */}
-                        {companyViewsConfig.find(v => v.id === 'goal_widget')?.visible && (
-                             <div className="col-span-1 md:col-span-2 xl:col-span-2 h-full">
-                                <RecruitmentGoalWidget current={15} target={20} />
-                             </div>
-                        )}
-                        
-                        {/* 2. KPI Cards - Span 4 cols (full row) on large screens */}
-                        {companyViewsConfig.find(v => v.id === 'kpi_cards')?.visible && (
-                             <div className="col-span-1 md:col-span-2 xl:col-span-4">
-                                <KpiCardsGrid kpis={companyKpis} />
-                             </div>
-                        )}
-
-                        {/* 3. Candidates By Stage - Span 2 cols on desktop */}
-                         {companyViewsConfig.find(v => v.id === 'candidates_by_stage')?.visible && (
-                             <CandidatesInProcessWidget className="col-span-1 md:col-span-2 xl:col-span-2" />
-                        )}
-                        
-                        {/* 4. Recent Open Jobs - Span 1 col */}
-                         {companyViewsConfig.find(v => v.id === 'recent_open_jobs')?.visible && (
-                             <RecentOpenJobsWidget className="col-span-1 xl:col-span-1" />
-                        )}
-                        
-                        {/* 5. Top Sources - Span 1 col */}
-                         {companyViewsConfig.find(v => v.id === 'top_sources')?.visible && (
-                             <TopSourcesWidget className="col-span-1 xl:col-span-1" />
-                        )}
-
-                        {/* 6. New Candidates - Span 2 cols */}
-                        {companyViewsConfig.find(v => v.id === 'new_candidates_by_month')?.visible && (
-                             <NewCandidatesWidget className="col-span-1 md:col-span-2 xl:col-span-2" />
-                        )}
-                        
-                        {/* 7. Referrals By Recruiter - Span 2 cols */}
-                        {companyViewsConfig.find(v => v.id === 'referrals_by_recruiter_daily')?.visible && (
-                             <ReferralsByRecruiterWidget className="col-span-1 md:col-span-2 xl:col-span-2" />
-                        )}
-                        
-                         {/* 8. Tasks - Span 2 cols */}
-                        {companyViewsConfig.find(v => v.id === 'tasks_and_corrections')?.visible && (
-                             <div className="col-span-1 md:col-span-2 xl:col-span-2">
-                                <TasksAndCorrectionsWidget className="grid-cols-1 md:grid-cols-2" />
-                             </div>
-                        )}
-
-                         {/* 9. Actions - Span 2 cols */}
-                        {companyViewsConfig.find(v => v.id === 'coordinator_actions_weekly')?.visible && (
-                             <CoordinatorActionsWidget className="col-span-1 md:col-span-2 xl:col-span-2" />
-                        )}
-                         
-                         {/* 10. Hired - Span 1 col */}
-                        {companyViewsConfig.find(v => v.id === 'hired_by_source')?.visible && (
-                             <HiredBySourceWidget className="col-span-1 xl:col-span-1" />
-                        )}
-                         
-                         {/* 11. Screening - Span 1 col */}
-                        {companyViewsConfig.find(v => v.id === 'screening_by_recruiter')?.visible && (
-                             <ScreeningByRecruiterWidget className="col-span-1 xl:col-span-1" />
-                        )}
-                    </div>
-                </div>
-            )}
             
-            {/* === PERSONAL DASHBOARD === */}
-            {activeTab === 'personal' && (
-                <div className="space-y-4">
-                    {/* Grid Container for Personal Dashboard - Iterating through Config */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4 auto-rows-min">
-                        {personalViewsConfig.filter(v => v.visible).map(view => (
-                            <React.Fragment key={view.id}>
-                                {renderPersonalWidget(view.id)}
-                            </React.Fragment>
-                        ))}
+            {/* Scrollable Content */}
+            <div className="flex-1 overflow-y-auto pb-10">
+                
+                {/* KPIs Section */}
+                <div className="mb-8">
+                     <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-lg font-bold text-text-default">KPIs</h2>
+                        <div className="relative">
+                            <button 
+                                ref={kpiCustomizeButtonRef}
+                                onClick={() => activeTab === 'personal' ? setIsKpiCustomizePopoverOpen(!isKpiCustomizePopoverOpen) : setIsCompanyKpiCustomizePopoverOpen(!isCompanyKpiCustomizePopoverOpen)}
+                                className="p-2 text-text-muted hover:bg-bg-subtle rounded-full transition-colors"
+                                title={t('dashboard.customize_views')}
+                            >
+                                <Cog6ToothIcon className="w-5 h-5" />
+                            </button>
+                             {(activeTab === 'personal' ? isKpiCustomizePopoverOpen : isCompanyKpiCustomizePopoverOpen) && (
+                                <div ref={kpiPopoverRef} className="z-20">
+                                    <CustomizeViewsPopover
+                                        isOpen={true}
+                                        onClose={() => activeTab === 'personal' ? setIsKpiCustomizePopoverOpen(false) : setIsCompanyKpiCustomizePopoverOpen(false)}
+                                        views={activeTab === 'personal' ? personalKpiConfig : companyKpiConfig}
+                                        onSave={(views) => handleSaveKpis(views, activeTab)}
+                                        onReset={() => handleResetKpis(activeTab)}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    <div className="animate-fade-in">
+                        <KpiCardsGrid kpis={activeTab === 'personal' ? visiblePersonalKpis : visibleCompanyKpis} />
                     </div>
                 </div>
-            )}
+
+                {/* Dashboard Widgets Grid */}
+                <div>
+                     <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-lg font-bold text-text-default">Widgets</h2>
+                        <div className="relative">
+                            <button 
+                                ref={personalCustomizeButtonRef}
+                                onClick={() => activeTab === 'personal' ? setIsPersonalCustomizePopoverOpen(!isPersonalCustomizePopoverOpen) : setIsCompanyCustomizePopoverOpen(!isCompanyCustomizePopoverOpen)}
+                                className="flex items-center gap-2 text-sm font-semibold text-primary-600 bg-primary-50 px-3 py-1.5 rounded-lg hover:bg-primary-100 transition-colors"
+                            >
+                                <AdjustmentsHorizontalIcon className="w-4 h-4" />
+                                <span>{t('dashboard.customize_views')}</span>
+                            </button>
+                             {(activeTab === 'personal' ? isPersonalCustomizePopoverOpen : isCompanyCustomizePopoverOpen) && (
+                                <div ref={personalPopoverRef} className="z-20">
+                                    <CustomizeViewsPopover
+                                        isOpen={true}
+                                        onClose={() => activeTab === 'personal' ? setIsPersonalCustomizePopoverOpen(false) : setIsCompanyCustomizePopoverOpen(false)}
+                                        views={activeTab === 'personal' ? personalViewsConfig : companyViewsConfig}
+                                        onSave={activeTab === 'personal' ? handleSavePersonalViews : handleSaveCompanyViews}
+                                        onReset={activeTab === 'personal' ? handleResetPersonalViews : handleResetCompanyViews}
+                                    />
+                                </div>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 animate-fade-in">
+                        {activeTab === 'personal' ? (
+                            // --- PERSONAL WIDGETS ---
+                            personalViewsConfig.filter(v => v.visible).map(view => {
+                                switch (view.id) {
+                                    case 'recruitment_goal':
+                                        return <div key={view.id} className="h-full"><RecruitmentGoalWidget current={18} target={20} /></div>;
+                                    case 'my_tasks':
+                                        return <div key={view.id} className="h-full"><MyTasksWidget title={t('dashboard.my_tasks')} /></div>;
+                                    case 'recent_updates':
+                                        return <div key={view.id} className="h-full"><RecentUpdatesWidget title={t('dashboard.recent_updates')} /></div>;
+                                    default:
+                                        return null;
+                                }
+                            })
+                        ) : (
+                             // --- COMPANY WIDGETS ---
+                             companyViewsConfig.filter(v => v.visible).map(view => {
+                                 switch(view.id) {
+                                     case 'recruitment_goal_company':
+                                          return <div key={view.id} className="h-full"><RecruitmentGoalWidget current={45} target={60} /></div>;
+                                     case 'candidates_by_stage':
+                                         return <div key={view.id} className="h-full"><CandidatesInProcessWidget title={t('dashboard.funnel')} /></div>;
+                                     case 'time_to_hire':
+                                         return <div key={view.id} className="h-full"><TimeToHireWidget title={t('metric.time_to_hire')} /></div>;
+                                     case 'recruiter_performance':
+                                         return <div key={view.id} className="h-full"><RecruiterPerformanceWidget title={t('dashboard.recruiter_performance')} /></div>;
+                                     case 'recent_open_jobs':
+                                         return <div key={view.id} className="h-full"><RecentOpenJobsWidget title={t('metric.open_jobs')} /></div>;
+                                     case 'top_sources':
+                                         return <div key={view.id} className="h-full"><TopSourcesWidget title={t('dashboard.top_sources')} /></div>;
+                                     default: return null;
+                                 }
+                             })
+                        )}
+                    </div>
+                </div>
+            </div>
         </div>
     );
 };

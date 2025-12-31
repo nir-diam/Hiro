@@ -14,6 +14,7 @@ import { type Event, initialEventsData } from './components/EventsView';
 import { useSavedSearches } from './context/SavedSearchesContext';
 import SendMessageModal from './components/SendMessageModal';
 import CreateJobAlertModal from './components/CreateJobAlertModal';
+import { useLanguage } from './context/LanguageContext';
 
 
 export type PageType = 'list' | 'profile' | 'new' | 'login' | 'jobs' | 'new-job' | 'clients' | 'new-client' | 'notifications' | 'company-settings' | 'coordinators-settings' | 'coordinator-profile' | 'admin-dashboard' | 'admin-client-form' | 'message-templates' | 'event-types-settings' | 'candidate-pool' | 'job-board';
@@ -23,6 +24,7 @@ const AppContent: React.FC = () => {
     const navigate = useNavigate();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const [searchParams] = useSearchParams();
+    const { t } = useLanguage();
     
     const { 
         activeView, isMatchingJobs, isScreening, contentAreaRef, 
@@ -59,83 +61,83 @@ const AppContent: React.FC = () => {
     
     const breadcrumbs = React.useMemo(() => {
         const pathParts = location.pathname.split('/').filter(p => p);
-        const crumbs = [{ label: 'Hiro', path: '/dashboard' }];
+        const crumbs = [{ label: t('breadcrumbs.home'), path: '/dashboard' }];
         
         if (pathParts[0] === 'dashboard') {
-             crumbs.push({ label: 'דף הבית', path: '/dashboard' });
+             crumbs.push({ label: t('breadcrumbs.dashboard'), path: '/dashboard' });
         }
         if (pathParts[0] === 'candidates') {
-            crumbs.push({ label: 'רשימת מועמדים', path: '/candidates' });
+            crumbs.push({ label: t('breadcrumbs.candidates_list'), path: '/candidates' });
             const savedSearchId = searchParams.get('savedSearchId');
             
             if (pathParts[1] && pathParts[1] !== 'new') {
-                crumbs.push({ label: 'פרופיל מועמד', path: `/candidates/${pathParts[1]}` });
+                crumbs.push({ label: t('breadcrumbs.candidate_profile'), path: `/candidates/${pathParts[1]}` });
             } else if (savedSearchId) {
                 const savedSearch = savedSearches.find(s => s.id === Number(savedSearchId));
                 if (savedSearch) {
                     crumbs.push({ label: savedSearch.name, path: `/candidates?savedSearchId=${savedSearchId}` });
                 }
             } else if (pathParts[1] === 'new') {
-                crumbs.push({ label: 'מועמד חדש', path: '/candidates/new' });
+                crumbs.push({ label: t('breadcrumbs.new_candidate'), path: '/candidates/new' });
             }
         }
          if (pathParts[0] === 'candidate-pool') {
-            crumbs.push({ label: 'מאגר מועמדים', path: '/candidate-pool' });
+            crumbs.push({ label: t('breadcrumbs.candidate_pool'), path: '/candidate-pool' });
         }
         if (pathParts[0] === 'job-board') {
-            crumbs.push({ label: 'לוח משרות', path: '/job-board' });
+            crumbs.push({ label: t('breadcrumbs.job_board'), path: '/job-board' });
         }
         if (pathParts[0] === 'jobs') {
-            crumbs.push({ label: 'משרות', path: '/jobs' });
+            crumbs.push({ label: t('breadcrumbs.jobs'), path: '/jobs' });
             if (pathParts[1] === 'new') {
-                crumbs.push({ label: 'משרה חדשה', path: '/jobs/new' });
+                crumbs.push({ label: t('breadcrumbs.new_job'), path: '/jobs/new' });
             }
             if (pathParts[1] === 'existing') {
-                crumbs.push({ label: 'משרה קיימת', path: '/jobs/existing' });
+                crumbs.push({ label: t('breadcrumbs.existing_job'), path: '/jobs/existing' });
                 if (pathParts[2] === 'events') {
-                    crumbs.push({ label: 'אירועי משרה', path: '/jobs/existing/events' });
+                    crumbs.push({ label: t('breadcrumbs.job_events'), path: '/jobs/existing/events' });
                 }
             }
         }
          if (pathParts[0] === 'clients') {
-            crumbs.push({ label: 'לקוחות', path: '/clients' });
+            crumbs.push({ label: t('breadcrumbs.clients'), path: '/clients' });
             if (pathParts[1] === 'new') {
-                crumbs.push({ label: 'לקוח חדש', path: '/clients/new' });
+                crumbs.push({ label: t('breadcrumbs.new_client'), path: '/clients/new' });
             } else if (/^\d+$/.test(pathParts[1])) {
-                crumbs.push({ label: 'פרופיל לקוח', path: `/clients/${pathParts[1]}` });
+                crumbs.push({ label: t('breadcrumbs.client_profile'), path: `/clients/${pathParts[1]}` });
             }
         }
         if (pathParts[0] === 'reports') {
-            crumbs.push({ label: 'דוחות', path: '/reports/referrals' });
+            crumbs.push({ label: t('breadcrumbs.reports'), path: '/reports/referrals' });
             if (pathParts[1] === 'referrals') {
-                crumbs.push({ label: 'הפניות', path: '/reports/referrals' });
+                crumbs.push({ label: t('nav.referrals'), path: '/reports/referrals' });
             }
             if (pathParts[1] === 'publications') {
-                crumbs.push({ label: 'פרסומים', path: '/reports/publications' });
+                crumbs.push({ label: t('nav.publications'), path: '/reports/publications' });
             }
             if (pathParts[1] === 'recruitment-sources') {
-                crumbs.push({ label: 'מקורות גיוס', path: '/reports/recruitment-sources' });
+                crumbs.push({ label: t('nav.recruitment_sources'), path: '/reports/recruitment-sources' });
             }
         }
         if (pathParts[0] === 'settings') {
-             crumbs.push({ label: 'הגדרות', path: '/settings/company' });
-             if(pathParts[1] === 'company') crumbs.push({ label: 'חברה', path: '/settings/company' });
+             crumbs.push({ label: t('breadcrumbs.settings'), path: '/settings/company' });
+             if(pathParts[1] === 'company') crumbs.push({ label: t('breadcrumbs.company'), path: '/settings/company' });
              if(pathParts[1] === 'coordinators') {
-                crumbs.push({ label: 'רכזים', path: '/settings/coordinators' });
-                if(pathParts[2]) crumbs.push({ label: 'פרופיל רכז', path: `/settings/coordinators/${pathParts[2]}`});
+                crumbs.push({ label: t('breadcrumbs.coordinators'), path: '/settings/coordinators' });
+                if(pathParts[2]) crumbs.push({ label: t('breadcrumbs.coordinator_profile'), path: `/settings/coordinators/${pathParts[2]}`});
              }
-             if(pathParts[1] === 'message-templates') crumbs.push({ label: 'תבניות להודעות', path: '/settings/message-templates' });
-             if(pathParts[1] === 'event-types') crumbs.push({ label: 'סוגי אירועים', path: '/settings/event-types' });
-             if(pathParts[1] === 'recruitment-sources') crumbs.push({ label: 'מקורות גיוס', path: '/settings/recruitment-sources' });
+             if(pathParts[1] === 'message-templates') crumbs.push({ label: t('breadcrumbs.message_templates'), path: '/settings/message-templates' });
+             if(pathParts[1] === 'event-types') crumbs.push({ label: t('breadcrumbs.event_types'), path: '/settings/event-types' });
+             if(pathParts[1] === 'recruitment-sources') crumbs.push({ label: t('breadcrumbs.recruitment_sources'), path: '/settings/recruitment-sources' });
         }
          if (pathParts[0] === 'admin') {
-             crumbs.push({ label: 'פאנל ניהול', path: '/admin' });
-             if(pathParts[1] === 'client') crumbs.push({ label: 'טופס לקוח', path: '/admin/client/new' });
+             crumbs.push({ label: t('breadcrumbs.admin'), path: '/admin' });
+             if(pathParts[1] === 'client') crumbs.push({ label: t('breadcrumbs.client_form'), path: '/admin/client/new' });
         }
 
         return crumbs;
 
-    }, [location.pathname, searchParams, savedSearches]);
+    }, [location.pathname, searchParams, savedSearches, t]);
 
     const handleViewFullProfileFromDrawer = (candidateId: number) => {
         closeSummaryDrawer();

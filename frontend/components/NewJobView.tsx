@@ -5,17 +5,20 @@ import {
     BriefcaseIcon, UserGroupIcon, Cog6ToothIcon, PlusIcon, ChevronDownIcon, 
     PencilIcon, SparklesIcon, GenderMaleIcon, GenderFemaleIcon, MapPinIcon, TrashIcon, XMarkIcon,
     BellIcon, ShareIcon, CheckCircleIcon, UserIcon, NoSymbolIcon, TagIcon, InformationCircleIcon,
-    MagnifyingGlassIcon, BuildingOffice2Icon, GlobeAmericasIcon, ChevronUpIcon, ExclamationTriangleIcon, CheckIcon
+    MagnifyingGlassIcon, BuildingOffice2Icon, GlobeAmericasIcon, ChevronUpIcon, ExclamationTriangleIcon, CheckIcon,
+    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon
 } from './Icons';
 import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
 type TagMode = 'normal' | 'mandatory' | 'negative';
 type TagSource = 'global' | 'company' | 'manual';
 type PublicationStatus = 'draft' | 'published';
+type QuestionType = 'text' | 'yes_no' | 'multiple_choice' | 'video';
 
 interface JobSkill {
     id: string;
@@ -24,11 +27,30 @@ interface JobSkill {
     source: TagSource;
 }
 
-interface TelephoneQuestion {
+interface QuestionOption {
+    id: string;
+    text: string;
+    isCorrect: boolean;
+}
+
+interface Question {
     id: number;
-    question: string;
+    text: string;
+    type: QuestionType; 
     order: number;
-    disqualificationReason: string;
+    disqualificationReason?: string; // Only relevant if disqualifyIfWrong is true
+    
+    // Expanded Props for UI
+    options?: QuestionOption[];
+    isMandatory: boolean;
+    disqualifyIfWrong: boolean; // "Killer Question" Toggle
+    isExpanded?: boolean; // UI State
+    
+    // Additional props for digital
+    introText?: string; 
+    presentationMode?: 'text' | 'video';
+    timeLimit?: number; 
+    retriesAllowed?: boolean;
 }
 
 interface LanguageRequirement {
@@ -41,8 +63,8 @@ interface RecruitmentSource {
     id: string;
     name: string;
     selected: boolean;
-    status: PublicationStatus; // New: Publication status
-    alertDays: number | null; // New: Days before expiration (null = no alert)
+    status: PublicationStatus;
+    alertDays: number | null;
 }
 
 // --- CONSTANTS ---
@@ -57,7 +79,27 @@ const jobTypeOptions = [
 ];
 const languageLevels = ['שפת אם', 'רמה גבוהה מאוד', 'טוב מאוד', 'בינוני', 'בסיסי'];
 
-// 1. GLOBAL SYSTEM TAGS (Managed by You/Platform Admin)
+const questionTypeOptions: { id: QuestionType; label: string; icon: any }[] = [
+    { id: 'text', label: 'טקסט חופשי', icon: DocumentTextIcon },
+    { id: 'yes_no', label: 'כן / לא', icon: CheckCircleIcon },
+    { id: 'multiple_choice', label: 'רב-ברירה', icon: UserGroupIcon }, 
+    { id: 'video', label: 'וידאו', icon: VideoCameraIcon },
+];
+
+const disqualificationReasons = [
+    "ניסיון",
+    "שכר",
+    "השכלה / הכשרה",
+    "זמינות / שעות עבודה",
+    "מיקום / ניידות",
+    "התאמה לתפקיד / ארגונית",
+    "יציבות תעסוקתית",
+    "חוסר תגובה",
+    "סיבה אישית של המועמד",
+    "אחר"
+];
+
+// 1. GLOBAL SYSTEM TAGS
 const systemTagsList = [
     { id: 'sys_1', name: 'ניהול', synonyms: ['מנהל', 'ראש צוות', 'VP', 'Director'] },
     { id: 'sys_2', name: 'מכירות', synonyms: ['Sales', 'SDR', 'Account Manager', 'מכירה'] },
@@ -67,7 +109,7 @@ const systemTagsList = [
     { id: 'sys_6', name: 'Fullstack', synonyms: ['Full Stack', 'Web Developer'] },
 ];
 
-// 2. COMPANY TAGS (Managed by Client Admin in Settings)
+// 2. COMPANY TAGS
 const companyTagsList = [
     { id: 'comp_1', name: 'בוגר טכניון', synonyms: ['Technion', 'מכון טכנולוגי'] },
     { id: 'comp_2', name: 'יוצא 8200', synonyms: ['יחידה 8200', 'מודיעין'] },
@@ -95,20 +137,6 @@ const mockAccountManagers = [
     { id: 'm3', name: 'גילעד בן חיים' },
 ];
 
-const disqualificationReasons = [
-    "ללא סיבה",
-    "ניסיון",
-    "שכר",
-    "השכלה / הכשרה",
-    "זמינות / שעות עבודה",
-    "מיקום / ניידות",
-    "התאמה לתפקיד / ארגונית",
-    "יציבות תעסוקתית",
-    "חוסר תגובה",
-    "סיבה אישית של המועמד",
-    "אחר"
-];
-
 const availableSources: RecruitmentSource[] = [
     { id: 'alljobs', name: 'AllJobs', selected: false, status: 'draft', alertDays: null },
     { id: 'linkedin', name: 'LinkedIn', selected: false, status: 'draft', alertDays: null },
@@ -119,6 +147,8 @@ const availableSources: RecruitmentSource[] = [
 ];
 
 // --- COMPONENTS ---
+
+// ... (Other components: SectionCard, TechnicalIdentifiers, PriorityToggle, SourceRow, MultiSelect, DoubleRangeSlider, SmartTag remain unchanged)
 
 const SectionCard: React.FC<{ id: string; title: string; icon: React.ReactNode; children: React.ReactNode; className?: string }> = ({ id, title, icon, children, className = '' }) => (
     <div id={id} className={`bg-bg-card border border-border-default rounded-2xl shadow-sm overflow-visible scroll-mt-52 ${className}`}>
@@ -135,6 +165,7 @@ const SectionCard: React.FC<{ id: string; title: string; icon: React.ReactNode; 
 const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creationDate: string }> = ({ jobId, postingCode, creationDate }) => {
     const [isOpen, setIsOpen] = useState(false);
     const uniqueEmail = `humand+j${jobId}@app.hiro.co.il`;
+    const { t } = useLanguage();
 
     return (
         <div className="mt-6 pt-4 border-t border-border-default">
@@ -143,14 +174,14 @@ const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creat
                 onClick={() => setIsOpen(!isOpen)}
                 className="flex items-center gap-2 text-sm font-bold text-primary-600 hover:text-primary-700 transition-colors w-full justify-end sm:justify-start"
             >
-                {isOpen ? 'הסתר מזהים טכניים' : 'הצג מזהים טכניים'}
+                {t('new_job.toggle_tech_ids')}
                 {isOpen ? <ChevronUpIcon className="w-4 h-4" /> : <ChevronDownIcon className="w-4 h-4" />}
             </button>
 
             {isOpen && (
                 <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-4 animate-fade-in">
                     <div className="md:col-span-2">
-                        <label className="block text-xs font-semibold text-text-muted mb-1">מייל ייחודי (לקליטת קו"ח)</label>
+                        <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.unique_email')}</label>
                         <input 
                             type="text" 
                             value={uniqueEmail} 
@@ -159,7 +190,7 @@ const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creat
                         />
                     </div>
                      <div>
-                        <label className="block text-xs font-semibold text-text-muted mb-1">קוד לפרסום</label>
+                        <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.posting_code')}</label>
                         <input 
                             type="text" 
                             value={postingCode} 
@@ -169,7 +200,7 @@ const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creat
                     </div>
                      <div className="grid grid-cols-2 gap-2">
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">מס' משרה</label>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.job_id')}</label>
                             <input 
                                 type="text" 
                                 value={jobId} 
@@ -178,7 +209,7 @@ const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creat
                             />
                         </div>
                         <div>
-                             <label className="block text-xs font-semibold text-text-muted mb-1">תאריך יצירה</label>
+                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.creation_date')}</label>
                             <input 
                                 type="text" 
                                 value={creationDate} 
@@ -197,11 +228,12 @@ const PriorityToggle: React.FC<{
     value: Priority;
     onChange: (value: Priority) => void;
 }> = ({ value, onChange }) => {
+    const { t } = useLanguage();
     const selectedIndex = priorityOptions.indexOf(value);
 
     return (
         <div>
-            <label className="block text-sm font-semibold text-text-muted mb-1.5">דחיפות</label>
+            <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.priority')}</label>
             <div className="relative flex w-full p-1 bg-bg-subtle rounded-lg">
                 <div 
                     className="absolute top-1 bottom-1 bg-bg-card rounded-md shadow-sm transition-transform duration-300 ease-in-out"
@@ -219,7 +251,7 @@ const PriorityToggle: React.FC<{
                             value === option ? 'text-primary-700' : 'text-text-muted hover:text-text-default'
                         }`}
                     >
-                        {option}
+                        {t(`priority.${option}`)}
                     </button>
                 ))}
             </div>
@@ -227,12 +259,15 @@ const PriorityToggle: React.FC<{
     );
 };
 
+// ... (SourceRow, MultiSelect, DoubleRangeSlider, SmartTag omitted for brevity, assumed unchanged)
+
 const SourceRow: React.FC<{
     source: RecruitmentSource;
     onToggleSelect: () => void;
     onStatusChange: (newStatus: PublicationStatus) => void;
     onAlertChange: (days: number | null) => void;
 }> = ({ source, onToggleSelect, onStatusChange, onAlertChange }) => {
+    // ... (Implementation unchanged)
     const [isAlertPopoverOpen, setIsAlertPopoverOpen] = useState(false);
     const [daysInput, setDaysInput] = useState<number>(source.alertDays || 3);
     const popoverRef = useRef<HTMLDivElement>(null);
@@ -373,6 +408,7 @@ const MultiSelect: React.FC<{
     onChange: (selectedIds: string[]) => void;
     placeholder?: string;
 }> = ({ label, options, selectedIds, onChange, placeholder = 'בחר...' }) => {
+    // ... (Implementation unchanged)
     const [isOpen, setIsOpen] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
 
@@ -467,6 +503,7 @@ const DoubleRangeSlider: React.FC<{
     highlight?: boolean;
     colorVar?: string;
 }> = ({ label, min, max, step, valueMin, valueMax, onChange, nameMin, nameMax, unit = '', className = '', includeUnknown, onIncludeUnknownChange, unknownLabel, highlight, colorVar = '--color-primary-500' }) => {
+    // ... (Implementation unchanged)
     const minVal = Math.min(Number(valueMin), Number(valueMax));
     const maxVal = Math.max(Number(valueMin), Number(valueMax));
     const minPercent = ((minVal - min) / (max - min)) * 100;
@@ -630,18 +667,19 @@ const SmartTag: React.FC<{
     );
 };
 
+
 const EditQuestionModal: React.FC<{
     isOpen: boolean;
     onClose: () => void;
-    question: TelephoneQuestion;
-    onSave: (updatedQ: TelephoneQuestion) => void;
+    question: Question;
+    onSave: (updatedQ: Question) => void;
 }> = ({ isOpen, onClose, question, onSave }) => {
-    const [text, setText] = useState(question.question);
-    const [reason, setReason] = useState(question.disqualificationReason);
+    const [text, setText] = useState(question.text);
+    const [reason, setReason] = useState(question.disqualificationReason || 'ללא סיבה');
 
     useEffect(() => {
-        setText(question.question);
-        setReason(question.disqualificationReason);
+        setText(question.text);
+        setReason(question.disqualificationReason || 'ללא סיבה');
     }, [question]);
 
     if (!isOpen) return null;
@@ -664,8 +702,9 @@ const EditQuestionModal: React.FC<{
                         className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500" 
                     />
                 </div>
+                 {/* Only show rejection reason for Digital (Killer) questions logic context if needed, but for generic Question struct let's allow it */}
                 <div>
-                    <label className="block text-sm font-semibold text-text-muted mb-1.5">סיבת פסילה</label>
+                    <label className="block text-sm font-semibold text-text-muted mb-1.5">סיבת פסילה (אם רלוונטי)</label>
                     <select 
                         value={reason} 
                         onChange={e => setReason(e.target.value)} 
@@ -678,7 +717,7 @@ const EditQuestionModal: React.FC<{
                     <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-semibold text-text-muted hover:bg-bg-hover rounded-lg transition-colors">ביטול</button>
                     <button 
                         type="button" 
-                        onClick={() => onSave({ ...question, question: text, disqualificationReason: reason })} 
+                        onClick={() => onSave({ ...question, text: text, disqualificationReason: reason })} 
                         className="px-6 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all"
                     >
                         שמור שינויים
@@ -689,12 +728,370 @@ const EditQuestionModal: React.FC<{
     );
 };
 
+// --- NEW COMPONENT FOR MANUAL SCREENING LIST ---
+// Simplified Manual Edit Modal
+const EditManualQuestionModal: React.FC<{
+    isOpen: boolean;
+    onClose: () => void;
+    onSave: (text: string, isKiller: boolean, reason?: string) => void;
+    question?: Question | null;
+}> = ({ isOpen, onClose, onSave, question }) => {
+    const [text, setText] = useState('');
+    const [isKiller, setIsKiller] = useState(false);
+    const [reason, setReason] = useState('ניסיון'); // Default reason
+
+    useEffect(() => {
+        if (question) {
+            setText(question.text);
+            setIsKiller(question.disqualifyIfWrong);
+            setReason(question.disqualificationReason || 'ניסיון');
+        } else {
+            setText('');
+            setIsKiller(false);
+            setReason('ניסיון');
+        }
+    }, [question, isOpen]);
+
+    if (!isOpen) return null;
+
+    const handleSave = () => {
+        if (!text.trim()) return;
+        onSave(text, isKiller, isKiller ? reason : undefined);
+        onClose();
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/40 z-[100] flex items-center justify-center p-4" onClick={onClose}>
+            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-5 border border-border-default animate-fade-in" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-center pb-2 border-b border-border-default">
+                    <h3 className="text-lg font-bold text-text-default">{question ? 'עריכת שאלה' : 'הוספת שאלה לתסריט'}</h3>
+                    <button onClick={onClose} className="p-1.5 rounded-full text-text-muted hover:bg-bg-hover hover:text-text-default">
+                        <XMarkIcon className="w-5 h-5"/>
+                    </button>
+                </div>
+                
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-bold text-text-default mb-1.5">תוכן השאלה</label>
+                        <input 
+                            type="text" 
+                            value={text} 
+                            onChange={e => setText(e.target.value)} 
+                            placeholder="לדוגמה: מה ציפיות השכר שלך?"
+                            className="w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" 
+                            autoFocus
+                        />
+                    </div>
+
+                    <div className="bg-red-50/50 p-4 rounded-xl border border-red-100 space-y-3">
+                         <label className="flex items-center gap-2 cursor-pointer w-fit">
+                            <div className="relative">
+                                <input 
+                                    type="checkbox" 
+                                    checked={isKiller} 
+                                    onChange={(e) => setIsKiller(e.target.checked)}
+                                    className="sr-only peer"
+                                />
+                                <div className="w-9 h-5 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-600"></div>
+                            </div>
+                            <span className={`text-sm font-bold ${isKiller ? 'text-red-700' : 'text-text-muted'}`}>פסילה אוטומטית (Killer Question)</span>
+                        </label>
+                        
+                        {isKiller && (
+                             <div className="animate-fade-in pl-2">
+                                <label className="block text-xs font-semibold text-red-800 mb-1">סיבת פסילה (חובה לבחירה)</label>
+                                <select 
+                                    value={reason} 
+                                    onChange={e => setReason(e.target.value)} 
+                                    className="w-full bg-white border border-red-200 text-red-900 text-sm rounded-lg p-2.5 focus:ring-red-500 focus:border-red-500"
+                                >
+                                     {disqualificationReasons.map(r => <option key={r} value={r}>{r}</option>)}
+                                </select>
+                                <p className="text-[10px] text-red-600/80 mt-1">
+                                    * במידה והתשובה בשיחה לא תהיה מספקת, המועמד ייפסל על סעיף זה.
+                                </p>
+                            </div>
+                        )}
+                    </div>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                    <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors">ביטול</button>
+                    <button 
+                        type="button" 
+                        onClick={handleSave} 
+                        disabled={!text.trim()}
+                        className="px-6 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        {question ? 'שמור שינויים' : 'הוסף שאלה'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// ... (JOB QUESTION CARD FOR DIGITAL - High Fidelity - Kept as is)
+const JobQuestionCard: React.FC<{
+    question: Question;
+    index: number;
+    onUpdate: (id: number, field: keyof Question, value: any) => void;
+    onRemove: (id: number) => void;
+    onToggleExpand: (id: number) => void;
+    isExpanded: boolean;
+    onMove: (id: number, direction: 'up'|'down') => void;
+    isFirst: boolean;
+    isLast: boolean;
+}> = ({ question, index, onUpdate, onRemove, onToggleExpand, isExpanded, onMove, isFirst, isLast }) => {
+
+    const handleOptionTextChange = (optId: string, text: string) => {
+        const newOptions = question.options?.map(o => o.id === optId ? { ...o, text } : o);
+        onUpdate(question.id, 'options', newOptions);
+    };
+
+    const toggleCorrectOption = (optId: string) => {
+        const newOptions = question.options?.map(o => o.id === optId ? { ...o, isCorrect: !o.isCorrect } : o);
+         onUpdate(question.id, 'options', newOptions);
+    };
+
+    const addOption = () => {
+        const newOption: QuestionOption = { id: Date.now().toString(), text: '', isCorrect: false };
+        onUpdate(question.id, 'options', [...(question.options || []), newOption]);
+    };
+
+    const removeOption = (optId: string) => {
+        const newOptions = question.options?.filter(o => o.id !== optId);
+        onUpdate(question.id, 'options', newOptions);
+    };
+
+    return (
+        <div className={`bg-bg-card border transition-all duration-300 rounded-2xl shadow-sm group ${isExpanded ? 'border-primary-300 ring-2 ring-primary-50' : 'border-border-default hover:border-primary-200'}`}>
+            {/* Card Header */}
+            <div 
+                className="flex items-center gap-4 p-4 cursor-pointer select-none"
+                onClick={() => onToggleExpand(question.id)}
+            >
+                <div className="flex flex-col gap-1 items-center" onClick={e => e.stopPropagation()}>
+                    <button 
+                        onClick={() => onMove(question.id, 'up')} 
+                        disabled={isFirst}
+                        className="text-text-subtle hover:text-primary-600 disabled:opacity-20 p-0.5"
+                    >
+                        <ChevronUpIcon className="w-3.5 h-3.5"/>
+                    </button>
+                    <div className="w-6 h-6 rounded-full bg-bg-subtle flex items-center justify-center text-xs font-bold text-text-muted">
+                        {index + 1}
+                    </div>
+                     <button 
+                        onClick={() => onMove(question.id, 'down')} 
+                        disabled={isLast}
+                        className="text-text-subtle hover:text-primary-600 disabled:opacity-20 p-0.5"
+                    >
+                        <ChevronDownIcon className="w-3.5 h-3.5"/>
+                    </button>
+                </div>
+
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1">
+                        {question.type === 'video' && <span title="וידאו"><VideoCameraIcon className="w-3.5 h-3.5 text-red-500" /></span>}
+                        {question.type === 'multiple_choice' && <span title="רב-ברירה"><UserGroupIcon className="w-3.5 h-3.5 text-blue-500" /></span>}
+                        {question.type === 'yes_no' && <span title="כן/לא"><CheckCircleIcon className="w-3.5 h-3.5 text-green-500" /></span>}
+                        {(!question.type || question.type === 'text') && <span title="טקסט"><DocumentTextIcon className="w-3.5 h-3.5 text-gray-500" /></span>}
+                        
+                        <span className="text-xs font-bold text-text-muted uppercase tracking-wider">
+                            {questionTypeOptions.find(t => t.id === question.type)?.label}
+                        </span>
+                        {question.isMandatory && <span className="text-[10px] bg-red-50 text-red-700 px-1.5 rounded font-bold border border-red-100">חובה</span>}
+                        {question.disqualifyIfWrong && <span className="text-[10px] bg-gray-800 text-white px-1.5 rounded font-bold flex items-center gap-1"><NoSymbolIcon className="w-3 h-3"/> שאלה פוסלת</span>}
+                    </div>
+                    <div className="font-semibold text-text-default truncate text-sm">
+                        {question.text || <span className="text-text-subtle italic">ללא כותרת...</span>}
+                    </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                    <button onClick={(e) => { e.stopPropagation(); onRemove(question.id); }} className="p-2 text-text-subtle hover:bg-red-50 hover:text-red-500 rounded-lg transition-colors">
+                        <TrashIcon className="w-4 h-4"/>
+                    </button>
+                    <div className={`transform transition-transform duration-200 text-text-muted ${isExpanded ? 'rotate-180' : ''}`}>
+                        <ChevronDownIcon className="w-5 h-5"/>
+                    </div>
+                </div>
+            </div>
+
+            {/* Card Body (Expanded) */}
+            {isExpanded && (
+                <div className="p-5 pt-0 border-t border-border-subtle/50 mt-2 animate-fade-in">
+                    <div className="space-y-5 pt-4">
+                        
+                        {/* Question Text Input */}
+                         <div>
+                            <input 
+                                type="text" 
+                                value={question.text} 
+                                onChange={(e) => onUpdate(question.id, 'text', e.target.value)}
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all font-medium"
+                                placeholder="מה תרצה לשאול?"
+                                autoFocus
+                            />
+                        </div>
+
+                         {/* Type Selector */}
+                         <div>
+                            <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">סוג שאלה</label>
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                {questionTypeOptions.map(typeOpt => (
+                                    <button
+                                        key={typeOpt.id}
+                                        type="button"
+                                        onClick={() => onUpdate(question.id, 'type', typeOpt.id)}
+                                        className={`flex items-center justify-center gap-2 p-2 rounded-lg border text-xs font-semibold transition-all ${
+                                            question.type === typeOpt.id 
+                                            ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-sm' 
+                                            : 'bg-bg-subtle border-transparent text-text-muted hover:bg-bg-hover'
+                                        }`}
+                                    >
+                                        <typeOpt.icon className="w-4 h-4" />
+                                        {typeOpt.label}
+                                    </button>
+                                ))}
+                            </div>
+                         </div>
+
+
+                        {/* OPTIONS LOGIC (Multiple Choice) */}
+                        {(question.type === 'multiple_choice' || question.type === 'yes_no') && (
+                            <div className="bg-bg-subtle/30 p-3 rounded-xl border border-border-subtle/60">
+                                <div className="flex justify-between items-center mb-2">
+                                    <label className="block text-xs font-bold text-text-muted uppercase">אפשרויות תשובה</label>
+                                    <div className="text-[10px] text-text-subtle bg-blue-50 px-2 py-0.5 rounded text-blue-700 font-medium">
+                                        סמן <CheckCircleIcon className="w-3 h-3 inline text-green-500 mx-0.5"/> לתשובה נכונה (עבור סינון אוטומטי)
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    {question.options?.map((opt, optIdx) => (
+                                        <div key={opt.id} className={`flex items-center gap-2 group/opt p-2 rounded-lg border transition-colors ${opt.isCorrect ? 'bg-green-50/50 border-green-200' : 'bg-white border-border-default'}`}>
+                                            <button 
+                                                type="button"
+                                                onClick={() => toggleCorrectOption(opt.id)}
+                                                className={`flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center border transition-all ${opt.isCorrect ? 'bg-green-500 border-green-500 text-white' : 'bg-gray-100 border-gray-300 text-gray-400 hover:border-green-400 hover:text-green-400'}`}
+                                                title={opt.isCorrect ? "זו התשובה הנכונה" : "סמן כתשובה נכונה"}
+                                            >
+                                                <CheckIcon className="w-3.5 h-3.5" />
+                                            </button>
+
+                                            <input 
+                                                type="text" 
+                                                value={opt.text} 
+                                                onChange={(e) => handleOptionTextChange(opt.id, e.target.value)}
+                                                className="flex-1 bg-transparent border-none px-2 py-1 text-sm focus:ring-0 placeholder:text-text-subtle/50"
+                                                placeholder={`אפשרות ${optIdx + 1}`}
+                                                readOnly={question.type === 'yes_no'} // Yes/No usually fixed text
+                                            />
+                                            
+                                            {question.type !== 'yes_no' && (
+                                                <button 
+                                                    type="button"
+                                                    onClick={() => removeOption(opt.id)} 
+                                                    className="p-1.5 text-text-subtle hover:text-red-500 hover:bg-red-50 rounded opacity-0 group-hover/opt:opacity-100 transition-opacity"
+                                                >
+                                                    <XMarkIcon className="w-3.5 h-3.5"/>
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                    {question.type !== 'yes_no' && (
+                                        <button 
+                                            type="button"
+                                            onClick={addOption}
+                                            className="flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors mt-2"
+                                        >
+                                            <PlusIcon className="w-3 h-3"/> הוסף אפשרות
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        
+                        {/* VIDEO SETTINGS */}
+                        {question.type === 'video' && (
+                            <div className="bg-bg-subtle/30 p-3 rounded-xl border border-border-subtle/60 flex items-center gap-4">
+                                <div>
+                                    <label className="block text-xs font-bold text-text-muted mb-1">מגבלת זמן (שניות)</label>
+                                    <input 
+                                        type="number" 
+                                        value={question.timeLimit || 60} 
+                                        onChange={(e) => onUpdate(question.id, 'timeLimit', parseInt(e.target.value))}
+                                        className="w-20 bg-white border border-border-default rounded-lg p-2 text-sm text-center font-bold"
+                                    />
+                                </div>
+                                <div className="h-8 w-px bg-border-subtle"></div>
+                                <label className="flex items-center gap-2 cursor-pointer mt-4">
+                                    <input 
+                                        type="checkbox" 
+                                        checked={question.retriesAllowed} 
+                                        onChange={(e) => onUpdate(question.id, 'retriesAllowed', e.target.checked)}
+                                        className="w-4 h-4 rounded text-primary-600 focus:ring-primary-500 border-border-default"
+                                    />
+                                    <span className="text-xs font-medium text-text-default">אפשר הקלטה מחדש</span>
+                                </label>
+                            </div>
+                        )}
+
+                        {/* Footer Settings: Mandatory & Killer */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-2 border-t border-border-subtle">
+                             <label className="flex items-center gap-2 cursor-pointer bg-bg-subtle px-3 py-1.5 rounded-lg hover:bg-bg-hover transition-colors w-fit">
+                                <input 
+                                    type="checkbox" 
+                                    checked={question.isMandatory} 
+                                    onChange={(e) => onUpdate(question.id, 'isMandatory', e.target.checked)}
+                                    className="w-4 h-4 rounded text-primary-600 focus:ring-primary-500"
+                                />
+                                <span className="text-sm font-semibold text-text-default">שאלת חובה</span>
+                            </label>
+
+                            <div className="flex flex-col gap-2">
+                                <label className={`flex items-center gap-2 cursor-pointer px-3 py-1.5 rounded-lg transition-all border ${question.disqualifyIfWrong ? 'bg-red-50 border-red-200' : 'bg-transparent border-transparent hover:bg-bg-subtle'}`}>
+                                    <div className="relative">
+                                        <input 
+                                            type="checkbox" 
+                                            checked={question.disqualifyIfWrong} 
+                                            onChange={(e) => onUpdate(question.id, 'disqualifyIfWrong', e.target.checked)}
+                                            className="sr-only peer"
+                                        />
+                                        <div className="w-9 h-5 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-red-600"></div>
+                                    </div>
+                                    <span className={`text-sm font-bold ${question.disqualifyIfWrong ? 'text-red-700' : 'text-text-muted'}`}>פסילה אוטומטית (Killer Question)</span>
+                                </label>
+
+                                {/* CONDITIONAL REASON SELECTOR */}
+                                {question.disqualifyIfWrong && (
+                                    <div className="animate-fade-in mr-11">
+                                        <select 
+                                            value={question.disqualificationReason || ''}
+                                            onChange={(e) => onUpdate(question.id, 'disqualificationReason', e.target.value)}
+                                            className="w-full sm:w-48 bg-white border border-red-200 text-red-800 text-xs rounded-lg p-2 focus:ring-red-500 focus:border-red-500 font-medium"
+                                        >
+                                            <option value="" disabled>בחר סיבת פסילה...</option>
+                                            {disqualificationReasons.map(r => <option key={r} value={r}>{r}</option>)}
+                                        </select>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
 const sections = [
-    { id: 'general-info', title: 'מידע כללי', icon: <BriefcaseIcon className="w-5 h-5"/> },
-    { id: 'description-content', title: 'תיאור ותוכן', icon: <PencilIcon className="w-5 h-5"/> },
-    { id: 'conditions-reqs', title: 'תנאים ודרישות', icon: <UserGroupIcon className="w-5 h-5"/> },
-    { id: 'distribution', title: 'הפצה וצוות', icon: <ShareIcon className="w-5 h-5"/> },
-    { id: 'screening', title: 'סינון', icon: <Cog6ToothIcon className="w-5 h-5"/> },
+    { id: 'general-info', titleKey: 'new_job.section_general', icon: <BriefcaseIcon className="w-5 h-5"/> },
+    { id: 'description-content', titleKey: 'new_job.section_description', icon: <PencilIcon className="w-5 h-5"/> },
+    { id: 'conditions-reqs', titleKey: 'new_job.section_requirements', icon: <UserGroupIcon className="w-5 h-5"/> },
+    { id: 'distribution', titleKey: 'new_job.section_distribution', icon: <ShareIcon className="w-5 h-5"/> },
+    { id: 'screening', titleKey: 'new_job.section_screening', icon: <Cog6ToothIcon className="w-5 h-5"/> },
 ];
 
 // --- MAIN COMPONENT ---
@@ -735,14 +1132,22 @@ const initialJobState = {
     languages: [] as LanguageRequirement[],
     skills: [] as JobSkill[], 
     locations: [] as LocationItem[], 
-    telephoneQuestions: [] as TelephoneQuestion[],
+    
+    // Updated Screening State
+    enableDigitalScreening: true,
+    enableManualScreening: true,
+    digitalQuestions: [] as Question[], // Knockout / Auto
+    telephoneQuestions: [] as Question[], // Human / Script
+    
     assignedRecruiters: [] as string[],
     assignedAccountManagers: [] as string[],
+    selectedTemplate: '',
 };
 
 const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = false, jobData, isEmbedded = false }) => {
     const navigate = useNavigate();
     const { jobId } = useParams<{ jobId: string }>();
+    const { t } = useLanguage();
 
     const [formData, setFormData] = useState(initialJobState);
     const [activeSection, setActiveSection] = useState('general-info');
@@ -766,9 +1171,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [isSuggestionsOpen, setIsSuggestionsOpen] = useState(false);
     const skillInputRef = useRef<HTMLInputElement>(null);
 
-    const [newQuestionText, setNewQuestionText] = useState('');
-    const [newQuestionKiller, setNewQuestionKiller] = useState('ללא סיבה');
-    const [editingQuestion, setEditingQuestion] = useState<TelephoneQuestion | null>(null);
+    // Manual Question Edit State
+    const [manualEditState, setManualEditState] = useState<{isOpen: boolean, question: Question | null}>({ isOpen: false, question: null });
 
     const navRef = useRef<HTMLDivElement>(null);
 
@@ -786,7 +1190,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 priority: jobData.priority || prev.priority,
                 healthProfile: jobData.healthProfile || 'standard',
                 jobType: Array.isArray(jobData.jobType) ? jobData.jobType : (jobData.jobType ? [jobData.jobType] : ['משרה מלאה']),
-                telephoneQuestions: jobData.telephoneQuestions || [],
+                
+                // Hydrate questions if they exist in jobData, otherwise fallback to defaults
+                // Ensure defaults for new properties if missing
+                telephoneQuestions: (jobData.telephoneQuestions || []).map((q: any) => ({...q, type: q.type || 'text'})), 
+                digitalQuestions: (jobData.digitalQuestions || []).map((q: any) => ({
+                    ...q, 
+                    type: q.type || 'text',
+                    options: q.options || (q.type === 'multiple_choice' ? [{id:'1', text:'', isCorrect:false}] : undefined),
+                    isMandatory: q.isMandatory ?? true,
+                    disqualifyIfWrong: q.disqualifyIfWrong ?? false
+                })),
+                enableDigitalScreening: jobData.enableDigitalScreening ?? true,
+                enableManualScreening: jobData.enableManualScreening ?? true,
+                
                 languages: jobData.languages || [],
                 skills: jobData.skills || [], 
                 locations: jobData.locations || [], 
@@ -902,11 +1319,16 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 if (extractedData.city) { filled.add('locations'); filledList.push('מיקום'); } else missingList.push('מיקום');
                 if (extractedData.screeningQuestions?.length > 0) { filledList.push(`${extractedData.screeningQuestions.length} שאלות סינון`); }
 
+                // Map AI questions to Digital Questions (Knockout) - Defaulting type to 'text' for simplicity, but editable
                 const newQuestions = extractedData.screeningQuestions?.map((q: any, index: number) => ({
                     id: Date.now() + index,
-                    question: q.question,
+                    text: q.question,
+                    type: 'text', // Default from AI
                     order: index + 1,
-                    disqualificationReason: q.disqualificationReason || 'ניסיון'
+                    disqualificationReason: q.disqualificationReason || 'ניסיון',
+                    isMandatory: true,
+                    disqualifyIfWrong: true,
+                    isExpanded: false
                 })) || [];
 
                 setFormData(prev => ({
@@ -917,7 +1339,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     salaryMin: extractedData.salaryMin || prev.salaryMin,
                     salaryMax: extractedData.salaryMax || prev.salaryMax,
                     locations: extractedData.city ? [...prev.locations, { type: 'city', value: extractedData.city }] : prev.locations,
-                    telephoneQuestions: newQuestions
+                    digitalQuestions: newQuestions, // Populate digital
+                    enableDigitalScreening: true
                 }));
                 
                 setAiFilledFields(filled);
@@ -1084,28 +1507,114 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    // --- QUESTION MANAGEMENT HANDLERS (UPDATED for Cards) ---
 
-    const handleAddQuestion = (e: React.MouseEvent) => {
-        e.preventDefault();
-        e.stopPropagation();
-        if (newQuestionText) {
-            setFormData(prev => ({
-                ...prev,
-                telephoneQuestions: [...(prev.telephoneQuestions || []), { id: Date.now(), question: newQuestionText, order: (prev.telephoneQuestions?.length || 0) + 1, disqualificationReason: newQuestionKiller }]
-            }));
-            setNewQuestionText('');
-            setNewQuestionKiller('ללא סיבה'); 
-        }
-    };
-    const handleRemoveQuestion = (id: number) => { setFormData(prev => ({...prev, telephoneQuestions: prev.telephoneQuestions.filter(q => q.id !== id)})) };
-    
-    const handleUpdateQuestion = (updatedQ: TelephoneQuestion) => {
+    const handleAddQuestionCard = (type: 'digital' | 'manual', qType: QuestionType = 'text') => {
+        const field = type === 'digital' ? 'digitalQuestions' : 'telephoneQuestions';
+        const newQuestion: Question = {
+            id: Date.now(),
+            text: '',
+            type: qType,
+            order: (formData[field]?.length || 0) + 1,
+            isMandatory: true,
+            disqualifyIfWrong: false,
+            isExpanded: true,
+            // Default options for multiple choice
+            options: qType === 'multiple_choice' ? [{id: '1', text: '', isCorrect: false}] : undefined,
+            // Default for Yes/No
+            ...(qType === 'yes_no' ? {options: [{id: '1', text: 'כן', isCorrect: true}, {id: '2', text: 'לא', isCorrect: false}]} : {}),
+            presentationMode: 'text',
+            timeLimit: type === 'digital' && qType === 'video' ? 60 : undefined,
+            retriesAllowed: type === 'digital' && qType === 'video' ? true : undefined,
+            introText: ''
+        };
+
         setFormData(prev => ({
             ...prev,
-            telephoneQuestions: prev.telephoneQuestions.map(q => q.id === updatedQ.id ? updatedQ : q)
+            [field]: [...(prev[field] || []), newQuestion]
         }));
-        setEditingQuestion(null);
     };
+
+    const handleUpdateQuestion = (type: 'digital' | 'manual', id: number, fieldName: keyof Question, value: any) => {
+        const field = type === 'digital' ? 'digitalQuestions' : 'telephoneQuestions';
+        setFormData(prev => ({
+            ...prev,
+            [field]: prev[field].map(q => q.id === id ? { ...q, [fieldName]: value } : q)
+        }));
+    };
+
+    const handleRemoveQuestion = (type: 'digital' | 'manual', id: number) => {
+        const field = type === 'digital' ? 'digitalQuestions' : 'telephoneQuestions';
+        setFormData(prev => ({
+            ...prev,
+            [field]: prev[field].filter(q => q.id !== id)
+        }));
+    };
+    
+    const handleToggleExpandQuestion = (type: 'digital' | 'manual', id: number) => {
+        const field = type === 'digital' ? 'digitalQuestions' : 'telephoneQuestions';
+        setFormData(prev => ({
+            ...prev,
+            [field]: prev[field].map(q => q.id === id ? { ...q, isExpanded: !q.isExpanded } : q)
+        }));
+    };
+
+    const handleMoveQuestion = (type: 'digital' | 'manual', id: number, direction: 'up' | 'down') => {
+        const field = type === 'digital' ? 'digitalQuestions' : 'telephoneQuestions';
+        const questions = [...formData[field]];
+        const index = questions.findIndex(q => q.id === id);
+        
+        if (index === -1) return;
+        if (direction === 'up' && index === 0) return;
+        if (direction === 'down' && index === questions.length - 1) return;
+
+        const swapIndex = direction === 'up' ? index - 1 : index + 1;
+        [questions[index], questions[swapIndex]] = [questions[swapIndex], questions[index]];
+        
+        setFormData(prev => ({ ...prev, [field]: questions }));
+    };
+
+    // MANUAL QUESTION HANDLING - NEW LOGIC
+    const handleOpenManualEdit = (question?: Question) => {
+        setManualEditState({ isOpen: true, question: question || null });
+    };
+
+    const handleSaveManualQuestion = (text: string, isKiller: boolean, reason?: string) => {
+        const currentQ = manualEditState.question;
+        
+        if (currentQ) {
+            // Update
+            const updated: Question = { 
+                ...currentQ, 
+                text, 
+                disqualifyIfWrong: isKiller, 
+                disqualificationReason: reason 
+            };
+            
+            setFormData(prev => ({
+                ...prev,
+                telephoneQuestions: prev.telephoneQuestions.map(q => q.id === updated.id ? updated : q)
+            }));
+        } else {
+            // Add New
+            const newQuestion: Question = {
+                id: Date.now(),
+                text,
+                type: 'text',
+                order: (formData.telephoneQuestions?.length || 0) + 1,
+                isMandatory: true, // Default true for manual? Or based on user choice. Let's assume true for simplicity or add to modal if needed.
+                disqualifyIfWrong: isKiller,
+                disqualificationReason: reason,
+                isExpanded: false
+            };
+            
+             setFormData(prev => ({
+                ...prev,
+                telephoneQuestions: [...(prev.telephoneQuestions || []), newQuestion]
+            }));
+        }
+    };
+
 
     const toggleContact = (contactId: number) => {
         setFormData(prev => ({
@@ -1148,7 +1657,6 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
     const handleJustSave = () => {
         onSave(formData);
-        // Optional: show a toast notification here
         alert('השינויים נשמרו בהצלחה');
     };
 
@@ -1175,18 +1683,18 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
                 <div>
                      <h1 className="text-2xl font-extrabold text-text-default">
-                        {isEditing ? `עריכת משרה: ${formData.jobTitle}` : 'פתיחת משרה חדשה'}
+                        {isEditing ? t('new_job.title_edit', {title: formData.jobTitle}) : t('new_job.title_new')}
                     </h1>
                     <p className="text-sm text-text-muted mt-1">
-                        מלא את הפרטים ליצירה ופרסום המשרה.
+                        {t('new_job.subtitle')}
                     </p>
                 </div>
                 <div className="flex items-center gap-3">
                      <button type="button" onClick={() => setIsAIModalOpen(true)} className="flex items-center gap-2 bg-primary-600 text-white font-bold py-2.5 px-5 rounded-xl hover:shadow-lg transition-all transform hover:scale-105">
                         <SparklesIcon className="w-5 h-5"/>
-                        <span>ייבוא חכם (AI)</span>
+                        <span>{t('new_job.smart_import')}</span>
                     </button>
-                     <button type="button" onClick={handleSaveAndContinue} className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md">שמור והמשך</button>
+                     <button type="button" onClick={handleSaveAndContinue} className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md">{t('new_job.save_continue')}</button>
                 </div>
             </div>
 
@@ -1208,7 +1716,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             }`}
                         >
                             {section.icon}
-                            {section.title}
+                            {t(section.titleKey)}
                         </button>
                     ))}
                 </div>
@@ -1220,22 +1728,22 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         <div className="p-6">
                             <h3 className="text-xl font-bold mb-2 flex items-center gap-2">
                                 <SparklesIcon className="w-6 h-6 text-primary-500"/>
-                                ייבוא משרה באמצעות AI
+                                {t('new_job.ai_import_title')}
                             </h3>
-                            <p className="text-text-muted mb-4 text-sm">הדבק את תיאור המשרה והמערכת תמלא את הטופס אוטומטית.</p>
+                            <p className="text-text-muted mb-4 text-sm">{t('new_job.ai_import_desc')}</p>
                             <textarea
                                 value={pastedJobText}
                                 onChange={(e) => setPastedJobText(e.target.value)}
                                 rows={8}
                                 className="w-full bg-bg-input border border-border-default rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary-500 resize-none"
-                                placeholder="הדבק כאן את הטקסט..."
+                                placeholder={t('new_job.paste_here')}
                                 disabled={isParsing}
                             />
                         </div>
                         <div className="p-4 bg-bg-subtle border-t border-border-default flex justify-end gap-3">
-                            <button type="button" onClick={() => setIsAIModalOpen(false)} className="px-5 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">ביטול</button>
+                            <button type="button" onClick={() => setIsAIModalOpen(false)} className="px-5 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_job.cancel')}</button>
                             <button type="button" onClick={handleParseJob} disabled={isParsing || !pastedJobText} className="px-6 py-2.5 bg-primary-600 text-white rounded-xl font-bold hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
-                                {isParsing ? 'מנתח...' : 'נתח ומלא טופס'}
+                                {isParsing ? t('new_job.analyzing') : t('new_job.analyze_btn')}
                                 {parseSuccess && <CheckCircleIcon className="w-5 h-5"/>}
                             </button>
                         </div>
@@ -1282,17 +1790,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             )}
 
             <div className="space-y-8">
-                <SectionCard id="general-info" title="מידע כללי" icon={<BriefcaseIcon className="w-5 h-5"/>} className="z-10 relative">
+                <SectionCard id="general-info" title={t('new_job.section_general')} icon={<BriefcaseIcon className="w-5 h-5"/>} className="z-10 relative">
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">שם הלקוח</label>
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.client_name')}</label>
                             {isClientConfirmed ? (
                                 <div className="flex items-center gap-2">
                                     <div className="w-full bg-primary-50 border border-primary-200 text-primary-900 font-bold text-sm rounded-lg p-2.5 flex items-center justify-between">
                                         <span>{formData.clientName}</span>
                                         <CheckCircleIcon className="w-4 h-4 text-primary-600" />
                                     </div>
-                                    <button type="button" onClick={() => setIsClientConfirmed(false)} className="text-sm font-semibold text-text-muted hover:text-primary-600 underline flex-shrink-0">החלף</button>
+                                    <button type="button" onClick={() => setIsClientConfirmed(false)} className="text-sm font-semibold text-text-muted hover:text-primary-600 underline flex-shrink-0">{t('new_job.replace')}</button>
                                 </div>
                             ) : (
                                 <div className="flex items-center gap-2">
@@ -1303,7 +1811,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                             onChange={handleChange}
                                             className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
                                         >
-                                            <option value="">בחר לקוח...</option>
+                                            <option value="">{t('new_job.choose_client')}</option>
                                             <option>בזק</option><option>Wix</option><option>אל-על</option>
                                         </select>
                                     </div>
@@ -1315,16 +1823,27 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                        </div>
 
                        <div className="lg:col-span-1">
-                            <JobFieldSelector 
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('jobs.col_field')}</label>
+                            <button
+                                type="button"
+                                onClick={() => setIsJobFieldSelectorOpen(true)}
+                                className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors focus:ring-1 focus:ring-primary-500"
+                            >
+                                <span className={`truncate ${formData.jobField ? 'text-text-default' : 'text-text-muted'}`}>
+                                    {formData.jobField ? `${formData.jobField.category} > ${formData.jobField.role}` : t('new_job.choose_field_placeholder') || 'בחר תחום...'}
+                                </span>
+                                <BriefcaseIcon className="w-4 h-4 text-text-subtle" />
+                            </button>
+                            <JobFieldSelector
                                 value={formData.jobField}
-                                onChange={(value) => setFormData(prev => ({...prev, jobField: value}))}
+                                onChange={(value) => setFormData(prev => ({ ...prev, jobField: value }))}
                                 isModalOpen={isJobFieldSelectorOpen}
                                 setIsModalOpen={setIsJobFieldSelectorOpen}
                             />
                        </div>
                        
                        <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">פרופיל בריאות (SLA)</label>
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.health_profile')}</label>
                            <div className="relative">
                                <select name="healthProfile" value={formData.healthProfile} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 pr-9 appearance-none focus:ring-primary-500 focus:border-primary-500 cursor-pointer">
                                     <option value="standard">רגיל (Standard)</option>
@@ -1338,7 +1857,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                        
                         <div className="lg:col-span-1">
                              <MultiSelect 
-                                label="רכזים משויכים" 
+                                label={t('new_job.assigned_recruiters')}
                                 options={mockInternalRecruiters} 
                                 selectedIds={formData.assignedRecruiters} 
                                 onChange={(ids) => setFormData(prev => ({ ...prev, assignedRecruiters: ids }))}
@@ -1348,7 +1867,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
                          <div className="lg:col-span-1">
                              <MultiSelect 
-                                label="מנהלי תיק לקוח" 
+                                label={t('new_job.account_managers')}
                                 options={mockAccountManagers} 
                                 selectedIds={formData.assignedAccountManagers} 
                                 onChange={(ids) => setFormData(prev => ({ ...prev, assignedAccountManagers: ids }))}
@@ -1357,7 +1876,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         </div>
 
                        <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">סטטוס</label>
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.status')}</label>
                             <select name="status" value={formData.status} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm">
                                 <option>טיוטה</option><option>פעילה</option><option>מוקפאת</option>
                             </select>
@@ -1365,7 +1884,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
                        <div className="lg:col-span-1">
                            <MultiSelect
-                               label="היקף משרה"
+                               label={t('new_job.job_scope')}
                                options={jobTypeOptions}
                                selectedIds={formData.jobType} 
                                onChange={(ids) => setFormData(prev => ({ ...prev, jobType: ids }))}
@@ -1380,10 +1899,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     <TechnicalIdentifiers jobId={formData.jobId} postingCode={formData.postingCode} creationDate={formData.creationDate} />
                 </SectionCard>
 
-                <SectionCard id="description-content" title="תיאור ותוכן" icon={<PencilIcon className="w-5 h-5"/>}>
+                <SectionCard id="description-content" title={t('new_job.section_description')} icon={<PencilIcon className="w-5 h-5"/>}>
                     <div className="space-y-4">
                         <div className="relative">
-                            <label className="block text-sm font-semibold text-text-muted mb-1.5">כותרת המשרה</label>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.job_title')}</label>
                             <input 
                                 type="text" 
                                 name="jobTitle" 
@@ -1397,23 +1916,23 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="relative">
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">תיאור המשרה</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.job_description')}</label>
                                 <textarea name="jobDescription" value={formData.jobDescription} onChange={handleChange} rows={8} className={getInputClass('jobDescription', "w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm focus:ring-primary-500 focus:border-primary-500 resize-y")} placeholder="פירוט תחומי אחריות..."></textarea>
                                 <AIIndicator name="jobDescription" />
                             </div>
                             <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">הערות פנימיות (לא לפרסום) - רקע צהוב</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.internal_notes')}</label>
                                 <textarea name="internalNotes" value={formData.internalNotes} onChange={handleChange} rows={8} className="w-full bg-yellow-50 border border-yellow-200 text-text-default text-sm rounded-xl p-3 focus:ring-yellow-500 focus:border-yellow-500 resize-y" placeholder="דגשים לצוות הגיוס..."></textarea>
                             </div>
                         </div>
                     </div>
                 </SectionCard>
 
-                <SectionCard id="conditions-reqs" title="תנאים ודרישות" icon={<UserGroupIcon className="w-5 h-5"/>}>
+                <SectionCard id="conditions-reqs" title={t('new_job.section_requirements')} icon={<UserGroupIcon className="w-5 h-5"/>}>
                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                          
                          <div className="lg:col-span-3">
-                             <h4 className="text-sm font-bold text-text-default mb-2">כישורים ותגיות חכמות</h4>
+                             <h4 className="text-sm font-bold text-text-default mb-2">{t('new_job.skills_tags')}</h4>
                              <div className="relative mb-3">
                                  <div className="flex items-center gap-2">
                                      <div className="relative flex-grow max-w-md">
@@ -1524,7 +2043,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                          </div>
 
                          <div className="lg:col-span-3 mt-4 border-t border-border-default pt-4">
-                             <h4 className="text-sm font-bold text-text-default mb-4">שפות נדרשות</h4>
+                             <h4 className="text-sm font-bold text-text-default mb-4">{t('new_job.languages')}</h4>
                              <div className="flex items-end gap-2 mb-3 max-w-md">
                                  <div className="flex-grow">
                                      <label className="block text-sm font-semibold text-text-muted mb-1.5">שפה</label>
@@ -1549,7 +2068,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                          </div>
 
                         <div className="lg:col-span-3 mt-4 border-t border-border-default pt-4">
-                             <h4 className="text-sm font-bold text-text-default mb-4">שכר ותנאים</h4>
+                             <h4 className="text-sm font-bold text-text-default mb-4">{t('new_job.salary_conditions')}</h4>
                              <div className={`bg-bg-subtle/30 p-4 rounded-xl border border-border-default/50 ${aiFilledFields.has('salaryMin') ? 'ring-2 ring-purple-100' : ''}`}>
                                  <div className="relative">
                                     <DoubleRangeSlider 
@@ -1565,7 +2084,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                         unit="₪" 
                                         includeUnknown={formData.includeUnknownSalary}
                                         onIncludeUnknownChange={(checked) => setFormData(prev => ({...prev, includeUnknownSalary: checked}))}
-                                        unknownLabel="כלול ציפיות שכר לא ידועות"
+                                        unknownLabel={t('filter.include_unknown_salary')}
                                         highlight={aiFilledFields.has('salaryMin')}
                                         colorVar="--color-primary-500"
                                     />
@@ -1573,13 +2092,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                 </div>
                                  <div className="mt-4 flex flex-wrap gap-4">
                                      <div>
-                                        <label className="block text-sm font-semibold text-text-muted mb-1.5">רשיון נהיגה</label>
+                                        <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('form.driving_license')}</label>
                                         <select name="drivingLicense" value={formData.drivingLicense} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 min-w-[150px]">
                                             <option>לא חשוב</option><option>B</option><option>C</option>
                                         </select>
                                      </div>
                                      <div>
-                                        <label className="block text-sm font-semibold text-text-muted mb-1.5">ניידות</label>
+                                        <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('form.mobility')}</label>
                                         <select name="mobility" value={formData.mobility} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 min-w-[150px]">
                                             <option>לא חשוב</option><option>חובה</option>
                                         </select>
@@ -1589,10 +2108,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         </div>
 
                         <div className="lg:col-span-3 mt-4">
-                             <h4 className="text-sm font-bold text-text-default mb-4">דמוגרפיה (אופציונלי)</h4>
+                             <h4 className="text-sm font-bold text-text-default mb-4">{t('new_job.demographics')}</h4>
                              <div className="flex items-center gap-4">
                                  <div className="flex items-center gap-2">
-                                     <span className="text-sm font-semibold text-text-muted">מין:</span>
+                                     <span className="text-sm font-semibold text-text-muted">{t('filter.gender')}:</span>
                                      <div className="flex gap-1">
                                          <button type="button" onClick={() => handleGenderChange('male')} className={`p-1.5 rounded-lg border ${formData.gender.includes('male') ? 'bg-blue-100 border-blue-300 text-blue-700' : 'bg-white border-gray-200 text-gray-400'}`}><GenderMaleIcon className="w-5 h-5"/></button>
                                          <button type="button" onClick={() => handleGenderChange('female')} className={`p-1.5 rounded-lg border ${formData.gender.includes('female') ? 'bg-pink-100 border-pink-300 text-pink-700' : 'bg-white border-gray-200 text-gray-400'}`}><GenderFemaleIcon className="w-5 h-5"/></button>
@@ -1600,7 +2119,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                  </div>
                                   <div className="flex-grow max-w-sm">
                                      <DoubleRangeSlider 
-                                        label="גילאים" 
+                                        label={t('filter.age_range')}
                                         min={18} 
                                         max={70} 
                                         step={1} 
@@ -1611,7 +2130,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                         nameMax="ageMax" 
                                         includeUnknown={formData.includeUnknownAge}
                                         onIncludeUnknownChange={(checked) => setFormData(prev => ({...prev, includeUnknownAge: checked}))}
-                                        unknownLabel="כלול גיל לא ידוע"
+                                        unknownLabel={t('filter.include_unknown_age')}
                                         className="" 
                                         colorVar="--color-secondary-500"
                                     />
@@ -1621,11 +2140,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                      </div>
                 </SectionCard>
                 
-                <SectionCard id="distribution" title="הפצה וצוות" icon={<ShareIcon className="w-5 h-5"/>}>
+                <SectionCard id="distribution" title={t('new_job.section_distribution')} icon={<ShareIcon className="w-5 h-5"/>}>
                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                          <div>
                              <h4 className="font-bold text-text-default mb-3 flex items-center justify-between">
-                                 <span>אנשי קשר למשרה</span>
+                                 <span>{t('new_job.contacts')}</span>
                                  <span className="text-xs font-normal text-text-muted">ברירת מחדל: כולם</span>
                              </h4>
                              <div className="space-y-2 max-h-60 overflow-y-auto border border-border-default rounded-lg p-2 bg-bg-subtle/30">
@@ -1647,7 +2166,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                          </div>
 
                          <div>
-                             <h4 className="font-bold text-text-default mb-3">פרסום והתראות</h4>
+                             <h4 className="font-bold text-text-default mb-3">{t('new_job.publishing')}</h4>
                              <div className="space-y-2 max-h-60 overflow-y-auto border border-border-default rounded-lg p-2 bg-bg-subtle/30">
                                  {formData.recruitmentSources.map(source => (
                                      <SourceRow 
@@ -1663,12 +2182,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                      </div>
                 </SectionCard>
 
-                <SectionCard id="location-settings" title="מיקום גיאוגרפי" icon={<MapPinIcon className="w-5 h-5"/>}>
+                <SectionCard id="location-settings" title={t('new_job.location')} icon={<MapPinIcon className="w-5 h-5"/>}>
                      <div className="space-y-4">
                         <div className="flex flex-col md:flex-row gap-4 items-end relative">
                              <AIIndicator name="locations" />
                             <div className="flex-grow w-full">
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">הוסף מיקום (עיר/אזור)</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('filter.location_placeholder')}</label>
                                 <LocationSelector
                                     selectedLocations={formData.locations}
                                     onChange={handleLocationsChange}
@@ -1679,66 +2198,173 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                      </div>
                 </SectionCard>
 
-                 <SectionCard id="screening" title="שאלות סינון (Automation)" icon={<Cog6ToothIcon className="w-5 h-5"/>}>
-                     <div className="space-y-4">
-                         <div>
-                             <h4 className="text-sm font-bold text-text-default mb-3">שאלות לסינון טלפוני</h4>
-                             <div className="space-y-3 mb-4">
-                                 {formData.telephoneQuestions.map((q, idx) => (
-                                     <div key={q.id} className="flex items-center gap-3 bg-bg-subtle/50 p-3 rounded-lg border border-border-default group hover:border-primary-300 transition-colors">
-                                         <span className="font-bold text-text-muted text-sm">#{idx+1}</span>
-                                         <div className="flex-grow">
-                                             <div className="font-medium text-sm text-text-default">{q.question}</div>
-                                             {q.disqualificationReason && <div className="text-xs text-red-600">סיבת פסילה: {q.disqualificationReason}</div>}
-                                         </div>
-                                          <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                                             <button type="button" onClick={() => setEditingQuestion(q)} className="p-1.5 text-text-subtle hover:text-primary-600 rounded-full hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/></button>
-                                             <button type="button" onClick={() => handleRemoveQuestion(q.id)} className="p-1.5 text-text-subtle hover:text-red-500 rounded-full hover:bg-bg-hover"><TrashIcon className="w-4 h-4"/></button>
-                                         </div>
+                 <SectionCard id="screening" title={t('new_job.section_screening')} icon={<Cog6ToothIcon className="w-5 h-5"/>}>
+                     <div className="space-y-6">
+                        
+                        {/* BLOCK 1: DIGITAL (Knockout) */}
+                        <div className="border border-border-default rounded-xl p-4 bg-bg-card transition-all duration-200">
+                             <div className="flex items-center justify-between mb-3">
+                                 <div>
+                                     <div className="flex items-center gap-2">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${formData.enableDigitalScreening ? 'bg-primary-100 text-primary-700' : 'bg-bg-subtle text-text-muted'}`}>
+                                            <ComputerDesktopIcon className="w-4 h-4" />
+                                        </div>
+                                         <h4 className="font-bold text-text-default text-lg">שאלון דיגיטלי (אוטומטי)</h4>
                                      </div>
-                                 ))}
-                             </div>
-                             
-                             <div className="flex flex-col gap-3 bg-primary-50/30 p-4 rounded-xl border border-primary-100">
-                                 <div>
-                                     <label className="block text-sm font-semibold text-text-muted mb-1.5">שאלה</label>
-                                     <input type="text" name="newQuestionText" value={newQuestionText} onChange={(e) => setNewQuestionText(e.target.value)} placeholder="האם יש לך ניסיון ב...?" className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5" />
+                                     <p className="text-sm text-text-muted mt-1 pr-10">
+                                         המועמד יענה מיד לאחר ההגשה. כישלון בשאלת פסילה = דחייה אוטומטית.
+                                     </p>
                                  </div>
-                                 <div>
-                                     <label className="block text-sm font-semibold text-text-muted mb-1.5">קטגוריית פסילה</label>
-                                     <select 
-                                        name="newQuestionKiller" 
-                                        value={newQuestionKiller} 
-                                        onChange={(e) => setNewQuestionKiller(e.target.value)} 
-                                        className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"
-                                     >
-                                         {disqualificationReasons.map(reason => (
-                                             <option key={reason} value={reason}>{reason}</option>
-                                         ))}
-                                     </select>
-                                 </div>
-                                 <button type="button" onClick={handleAddQuestion} className="w-full bg-primary-100 text-primary-700 font-bold py-2 rounded-lg hover:bg-primary-200 mt-2">הוסף שאלה</button>
+                                 
+                                 {/* Toggle Switch */}
+                                 <label className="relative inline-flex items-center cursor-pointer">
+                                     <input 
+                                         type="checkbox" 
+                                         className="sr-only peer" 
+                                         checked={formData.enableDigitalScreening}
+                                         onChange={(e) => setFormData(prev => ({ ...prev, enableDigitalScreening: e.target.checked }))}
+                                     />
+                                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-primary-600"></div>
+                                 </label>
                              </div>
-                         </div>
+
+                             {formData.enableDigitalScreening && (
+                                <div className="animate-fade-in border-t border-border-default pt-4 mt-2">
+                                     
+                                    <div className="mb-4">
+                                        <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">תבנית שאלון (אופציונלי)</label>
+                                        <select 
+                                            value={formData.selectedTemplate} 
+                                            onChange={(e) => setFormData(prev => ({ ...prev, selectedTemplate: e.target.value }))}
+                                            className="w-full sm:w-64 bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 focus:ring-primary-500 focus:border-primary-500"
+                                        >
+                                            <option value="">ללא תבנית</option>
+                                            <option value="general">שאלון כללי</option>
+                                            <option value="sales">שאלון מכירות</option>
+                                            <option value="tech">שאלון טכנולוגי</option>
+                                        </select>
+                                    </div>
+
+                                    {/* Replace QuestionsList with mapping of JobQuestionCard */}
+                                    <div className="space-y-4">
+                                        {formData.digitalQuestions.map((q, index) => (
+                                            <JobQuestionCard
+                                                key={q.id}
+                                                question={q}
+                                                index={index}
+                                                isLast={index === formData.digitalQuestions.length - 1}
+                                                onUpdate={(id, field, value) => handleUpdateQuestion('digital', id, field, value)}
+                                                onRemove={(id) => handleRemoveQuestion('digital', id)}
+                                                onToggleExpand={(id) => handleToggleExpandQuestion('digital', id)}
+                                                isExpanded={q.isExpanded || false}
+                                                onMove={(id, direction) => handleMoveQuestion('digital', id, direction)}
+                                                isFirst={index === 0}
+                                            />
+                                        ))}
+                                        <button 
+                                            type="button" 
+                                            onClick={() => handleAddQuestionCard('digital')} 
+                                            className="w-full flex items-center justify-center gap-2 bg-primary-100 text-primary-700 font-semibold py-2.5 px-4 rounded-lg hover:bg-primary-200 transition"
+                                        >
+                                            <PlusIcon className="w-5 h-5" />
+                                            <span>הוסף שאלה חדשה</span>
+                                        </button>
+                                    </div>
+                                </div>
+                             )}
+                        </div>
+
+                        {/* BLOCK 2: MANUAL (Phone Script) */}
+                        <div className="border border-border-default rounded-xl p-4 bg-bg-card transition-all duration-200">
+                             <div className="flex items-center justify-between mb-3">
+                                 <div>
+                                     <div className="flex items-center gap-2">
+                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center ${formData.enableManualScreening ? 'bg-primary-100 text-primary-700' : 'bg-bg-subtle text-text-muted'}`}>
+                                            <PhoneIcon className="w-4 h-4" />
+                                        </div>
+                                         <h4 className="font-bold text-text-default text-lg">שאלון ידני (תסריט שיחה)</h4>
+                                     </div>
+                                     <p className="text-sm text-text-muted mt-1 pr-10">
+                                         יוצג לרכז/ת בזמן שיחה טלפונית לתיעוד תשובות המועמד.
+                                     </p>
+                                 </div>
+                                 
+                                 {/* Toggle Switch */}
+                                 <label className="relative inline-flex items-center cursor-pointer">
+                                     <input 
+                                         type="checkbox" 
+                                         className="sr-only peer" 
+                                         checked={formData.enableManualScreening}
+                                         onChange={(e) => setFormData(prev => ({ ...prev, enableManualScreening: e.target.checked }))}
+                                     />
+                                     <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-primary-600"></div>
+                                 </label>
+                             </div>
+
+                             {formData.enableManualScreening && (
+                                <div className="animate-fade-in border-t border-border-default pt-4 mt-2">
+                                    <div className="space-y-2">
+                                        {/* Simple List View for Manual Questions */}
+                                        {formData.telephoneQuestions.map((q, index) => (
+                                            <div key={q.id} className="flex items-center justify-between bg-white p-3 rounded-xl border border-border-default shadow-sm hover:border-primary-300 transition-colors group">
+                                                 <div className="flex items-center gap-3">
+                                                    <span className="text-sm font-bold text-text-muted">#{index + 1}</span>
+                                                    <span className="text-sm font-medium text-text-default">{q.text || <span className="text-text-subtle italic">שאלה ללא כותרת...</span>}</span>
+                                                     {q.disqualifyIfWrong && (
+                                                        <span className="text-[10px] font-bold text-red-600 bg-red-50 px-2 py-0.5 rounded border border-red-100 flex items-center gap-1">
+                                                            <ExclamationTriangleIcon className="w-3 h-3"/>
+                                                            {q.disqualificationReason}
+                                                        </span>
+                                                     )}
+                                                 </div>
+                                                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                     <button 
+                                                        onClick={() => handleOpenManualEdit(q)}
+                                                        className="p-1.5 text-text-subtle hover:text-primary-600 hover:bg-bg-subtle rounded-lg transition-colors"
+                                                     >
+                                                         <PencilIcon className="w-4 h-4"/>
+                                                     </button>
+                                                     <button 
+                                                        onClick={() => handleRemoveQuestion('manual', q.id)}
+                                                        className="p-1.5 text-text-subtle hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                                     >
+                                                         <TrashIcon className="w-4 h-4"/>
+                                                     </button>
+                                                 </div>
+                                            </div>
+                                        ))}
+
+                                         <button 
+                                            type="button" 
+                                            onClick={() => handleOpenManualEdit()} 
+                                            className="w-full flex items-center justify-center gap-2 bg-primary-50 text-primary-700 font-semibold py-2.5 px-4 rounded-xl hover:bg-primary-100 border border-dashed border-primary-200 transition-colors mt-2"
+                                        >
+                                            <PlusIcon className="w-4 h-4" />
+                                            <span>הוסף שאלה לתסריט</span>
+                                        </button>
+                                    </div>
+                                </div>
+                             )}
+                        </div>
+
                      </div>
                  </SectionCard>
             </div>
             
-             {editingQuestion && (
-                <EditQuestionModal 
-                    isOpen={!!editingQuestion} 
-                    onClose={() => setEditingQuestion(null)} 
-                    question={editingQuestion} 
-                    onSave={handleUpdateQuestion} 
-                />
-            )}
+            <EditManualQuestionModal 
+                isOpen={manualEditState.isOpen}
+                onClose={() => setManualEditState({ isOpen: false, question: null })}
+                onSave={handleSaveManualQuestion}
+                question={manualEditState.question}
+            />
+
             <div className="sticky bottom-0 z-30 p-4 bg-bg-card border-t border-border-default flex justify-between items-center -mx-4 md:mx-0 rounded-b-2xl shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">
                 <div className="text-xs text-text-muted">
                     * שינויים נשמרים בטיוטה
                 </div>
                 <div className="flex gap-3">
                     <button type="button" onClick={handleJustSave} className="bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition">
-                        שמור (ללא מעבר)
+                        שמור
                     </button>
                     {/* Ensure floating AI button (z-40) is not covered. This bar is z-30. */}
                 </div>

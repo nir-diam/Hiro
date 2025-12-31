@@ -1,7 +1,8 @@
 
 import React, { useRef, useEffect, useId } from 'react';
-import { XMarkIcon, SunIcon, MoonIcon, PaintBrushIcon, ViewColumnsIcon, Bars3BottomLeftIcon } from './Icons';
+import { XMarkIcon, SunIcon, MoonIcon, PaintBrushIcon, ViewColumnsIcon, Bars3BottomLeftIcon, GlobeAmericasIcon } from './Icons';
 import { useTheme, Theme } from '../context/ThemeContext';
+import { useLanguage } from '../context/LanguageContext';
 
 interface PreferencesModalProps {
   onClose: () => void;
@@ -23,6 +24,7 @@ const themes: { name: Theme; label: string; colors: { primary: string; secondary
 
 const PreferencesModal: React.FC<PreferencesModalProps> = ({ onClose }) => {
   const { theme, setTheme, mode, setMode, fontSize, setFontSize, density, setDensity } = useTheme();
+  const { language, setLanguage, t } = useLanguage();
   const modalRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const previouslyFocusedElement = useRef<HTMLElement | null>(null);
@@ -86,6 +88,19 @@ const PreferencesModal: React.FC<PreferencesModalProps> = ({ onClose }) => {
         <main className="p-6 flex-1 overflow-y-auto">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-8 gap-y-6">
             <div className="space-y-6">
+               
+               {/* Language Selection */}
+               <div>
+                <h3 className="text-base font-semibold mb-3 flex items-center gap-2">
+                    <GlobeAmericasIcon className="w-4 h-4 text-text-muted"/>
+                    {t('settings.language')}
+                </h3>
+                <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
+                    <button onClick={() => setLanguage('he')} className={`flex-1 py-1.5 text-sm font-semibold rounded-md transition ${language === 'he' ? 'bg-bg-card shadow-sm text-primary-700' : 'text-text-muted'}`}>{t('settings.hebrew')}</button>
+                    <button onClick={() => setLanguage('en')} className={`flex-1 py-1.5 text-sm font-semibold rounded-md transition ${language === 'en' ? 'bg-bg-card shadow-sm text-primary-700' : 'text-text-muted'}`}>{t('settings.english')}</button>
+                </div>
+               </div>
+
                {/* Display Mode */}
               <div>
                 <h3 className="text-base font-semibold mb-3">מצב תצוגה</h3>

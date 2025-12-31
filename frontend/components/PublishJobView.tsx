@@ -711,11 +711,6 @@ const PublishJobView: React.FC = () => {
             <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
-                messages={chatMessages}
-                isLoading={isChatLoading}
-                error={chatError}
-                onSendMessage={handleSendMessage}
-                onReset={() => { setChatSession(null); setChatMessages([]); initializeChat(); }}
             />
         </div>
     );

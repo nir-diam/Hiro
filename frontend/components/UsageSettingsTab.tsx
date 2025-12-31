@@ -1,5 +1,7 @@
+
 import React, { useState } from 'react';
 import { InformationCircleIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 // Reusable local components
 const FormSelect: React.FC<{ value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; name: string; children: React.ReactNode; }> = ({ value, onChange, name, children }) => (
@@ -71,6 +73,7 @@ const initialSettings = {
 };
 
 const UsageSettingsTab: React.FC = () => {
+    const { t } = useLanguage();
     const [settings, setSettings] = useState(initialSettings);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -84,56 +87,56 @@ const UsageSettingsTab: React.FC = () => {
 
     return (
         <div className="animate-fade-in">
-            <h2 className="text-xl font-bold text-text-default mb-6">הגדרות שימוש</h2>
+            <h2 className="text-xl font-bold text-text-default mb-6">{t('company_settings.tab_usage')}</h2>
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-8">
                 {/* Left Column from image */}
                 <div className="bg-bg-card p-4 rounded-lg border border-border-default">
-                    <h3 className="text-base font-bold mb-2">הגדרות ממשק</h3>
+                    <h3 className="text-base font-bold mb-2">{t('company_settings.interface_settings')}</h3>
                     <div>
-                        <SettingRow label="שפת הממשק"><FormSelect name="interfaceLanguage" value={settings.interfaceLanguage} onChange={handleChange}><option>עברית</option><option>English</option></FormSelect></SettingRow>
-                        <SettingRow label="אימות כפול"><FormSelect name="doubleAuth" value={settings.doubleAuth} onChange={handleChange}><option>לא פעיל</option><option>פעיל</option></FormSelect></SettingRow>
-                        <SettingRow label="התחברות עם גוגל"><FormSelect name="googleLogin" value={settings.googleLogin} onChange={handleChange}><option>פעיל</option><option>לא פעיל</option></FormSelect></SettingRow>
-                        <SettingRow label={'טלפונים חו"ל'}><FormSelect name="foreignPhones" value={settings.foreignPhones} onChange={handleChange}><option>לא נתמך</option><option>נתמך</option></FormSelect></SettingRow>
-                        <SettingRow label="רמת סינון ראשוני"><FormSelect name="initialScreeningLevel" value={settings.initialScreeningLevel} onChange={handleChange}><option>טלפוני</option><option>פרונטלי</option></FormSelect></SettingRow>
-                        <SettingRow label="שיטת שליחה"><FormSelect name="sendMethod" value={settings.sendMethod} onChange={handleChange}><option>{'דוא"ל'}</option><option>SMS</option></FormSelect></SettingRow>
-                        <SettingRow label="שליחה מתיקון"><FormSelect name="sendFromFix" value={settings.sendFromFix} onChange={handleChange}><option>כן</option><option>לא</option></FormSelect></SettingRow>
-                        <SettingRow label="הסתר פרטים"><FormSelect name="hideDetails" value={settings.hideDetails} onChange={handleChange}><option>לא</option><option>כן</option></FormSelect></SettingRow>
-                        <SettingRow label={'קו"ח בעברית'}><FormSelect name="cvInHebrew" value={settings.cvInHebrew} onChange={handleChange}><option>לא</option><option>כן</option></FormSelect></SettingRow>
-                        <SettingRow label="ערי משרה"><FormSelect name="jobCities" value={settings.jobCities} onChange={handleChange}><option>כלום לא מסומן</option></FormSelect></SettingRow>
-                        <SettingRow label="תוקף ימי משרה"><FormInput name="jobValidityDays" value={settings.jobValidityDays} onChange={handleChange} type="number" /></SettingRow>
-                        <SettingRow label="תוקף סוג משרה"><FormInput name="jobTypeValidityDays" value={settings.jobTypeValidityDays} onChange={handleChange} type="number" /></SettingRow>
-                        <SettingRow label="חזרה (חודשים)"><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>
-                        <SettingRow label="מקור שאלון"><FormSelect name="questionnaireSource" value={settings.questionnaireSource} onChange={handleChange}><option>חברה</option></FormSelect></SettingRow>
-                        <SettingRow label="הפניית מערכת"><FormSelect name="systemReferral" value={settings.systemReferral} onChange={handleChange}><option>מערכת</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.interface_lang')}><FormSelect name="interfaceLanguage" value={settings.interfaceLanguage} onChange={handleChange}><option>עברית</option><option>English</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.double_auth')}><FormSelect name="doubleAuth" value={settings.doubleAuth} onChange={handleChange}><option>לא פעיל</option><option>פעיל</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.google_login')}><FormSelect name="googleLogin" value={settings.googleLogin} onChange={handleChange}><option>פעיל</option><option>לא פעיל</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.foreign_phones')}><FormSelect name="foreignPhones" value={settings.foreignPhones} onChange={handleChange}><option>לא נתמך</option><option>נתמך</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.initial_screening')}><FormSelect name="initialScreeningLevel" value={settings.initialScreeningLevel} onChange={handleChange}><option>טלפוני</option><option>פרונטלי</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.send_method')}><FormSelect name="sendMethod" value={settings.sendMethod} onChange={handleChange}><option>{'דוא"ל'}</option><option>SMS</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.send_from_fix')}><FormSelect name="sendFromFix" value={settings.sendFromFix} onChange={handleChange}><option>כן</option><option>לא</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.hide_details')}><FormSelect name="hideDetails" value={settings.hideDetails} onChange={handleChange}><option>לא</option><option>כן</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.cv_hebrew')}><FormSelect name="cvInHebrew" value={settings.cvInHebrew} onChange={handleChange}><option>לא</option><option>כן</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.job_cities')}><FormSelect name="jobCities" value={settings.jobCities} onChange={handleChange}><option>כלום לא מסומן</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.job_validity')}><FormInput name="jobValidityDays" value={settings.jobValidityDays} onChange={handleChange} type="number" /></SettingRow>
+                        <SettingRow label={t('company_settings.job_type_validity')}><FormInput name="jobTypeValidityDays" value={settings.jobTypeValidityDays} onChange={handleChange} type="number" /></SettingRow>
+                        <SettingRow label={t('company_settings.return_months')}><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>
+                        <SettingRow label={t('company_settings.questionnaire_source')}><FormSelect name="questionnaireSource" value={settings.questionnaireSource} onChange={handleChange}><option>חברה</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.system_referral')}><FormSelect name="systemReferral" value={settings.systemReferral} onChange={handleChange}><option>מערכת</option></FormSelect></SettingRow>
                     </div>
                 </div>
 
                 {/* Right Column from image (checkboxes) */}
                 <div className="bg-bg-card p-4 rounded-lg border border-border-default">
-                    <h3 className="text-base font-bold mb-2">הגדרות נוספות</h3>
+                    <h3 className="text-base font-bold mb-2">{t('company_settings.additional_settings')}</h3>
                     <div>
-                        <CheckboxRow label={'ניתוק אוטומטי של רכז אחרי 60 דקות של חוסר פעילות'} name="autoDisconnect" checked={settings.autoDisconnect} onChange={handleChange} />
-                        <CheckboxRow label="לוגו על קורות חיים" name="logoOnCv" checked={settings.logoOnCv} onChange={handleChange} />
-                        <CheckboxRow label={'תמיד לשלוח רק קבצי קו"ח מקוריים, לעולם לא לחולל קבצים'} name="sendOnlyOriginalCv" checked={settings.sendOnlyOriginalCv} onChange={handleChange} />
-                        <CheckboxRow label="מועמד ללא ישוב נשלח לתיקונים" name="candidateNoLocationToFix" checked={settings.candidateNoLocationToFix} onChange={handleChange} />
-                        <CheckboxRow label="מועמד ללא תגית חדשה נשלח לתיקונים" name="candidateNoTagToFix" checked={settings.candidateNoTagToFix} onChange={handleChange} />
-                        <CheckboxRow label="הצג קורות חיים בתצוגה מקדימה בטעינת כרטיס מועמד" name="showCvPreview" checked={settings.showCvPreview} onChange={handleChange} />
-                        <CheckboxRow label="להכניס למערכת מועמד שמגיע מועמדות דרך פרסום של Hunter" name="importHunterCandidates" checked={settings.importHunterCandidates} onChange={handleChange} />
-                        <CheckboxRow label="התראות משרה" name="jobAlerts" checked={settings.jobAlerts} onChange={handleChange} />
-                        <CheckboxRow label="הורדת קורות חיים בדשבורד צדדי ובממשק אנשי קשר" name="downloadCvInDashboard" checked={settings.downloadCvInDashboard} onChange={handleChange} />
-                        <CheckboxRow label={'לשלוח הודעת תודה אוטומטית במייל'} name="autoThanksEmail" checked={settings.autoThanksEmail} onChange={handleChange} />
-                        <CheckboxRow label="כרטיס מועמד אחד למייל" name="oneCandidatePerEmail" checked={settings.oneCandidatePerEmail} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.auto_disconnect')} name="autoDisconnect" checked={settings.autoDisconnect} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.logo_on_cv')} name="logoOnCv" checked={settings.logoOnCv} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.original_cv_only')} name="sendOnlyOriginalCv" checked={settings.sendOnlyOriginalCv} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.no_location_fix')} name="candidateNoLocationToFix" checked={settings.candidateNoLocationToFix} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.no_tag_fix')} name="candidateNoTagToFix" checked={settings.candidateNoTagToFix} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.cv_preview')} name="showCvPreview" checked={settings.showCvPreview} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.import_hunter')} name="importHunterCandidates" checked={settings.importHunterCandidates} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.job_alerts')} name="jobAlerts" checked={settings.jobAlerts} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.download_cv_dashboard')} name="downloadCvInDashboard" checked={settings.downloadCvInDashboard} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.auto_thanks')} name="autoThanksEmail" checked={settings.autoThanksEmail} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.one_candidate_email')} name="oneCandidatePerEmail" checked={settings.oneCandidatePerEmail} onChange={handleChange} />
                          <div>
-                             <CheckboxRow label="סטטוסים שיוצרים חיוב:" name="billingStatusParent" checked={settings.billingStatusParent} onChange={handleChange} />
-                             <CheckboxRow label="התקבל לעבודה" name="billingStatusAccepted" checked={settings.billingStatusAccepted} onChange={handleChange} isSub />
+                             <CheckboxRow label={t('company_settings.billing_statuses')} name="billingStatusParent" checked={settings.billingStatusParent} onChange={handleChange} />
+                             <CheckboxRow label={t('company_settings.billing_accepted')} name="billingStatusAccepted" checked={settings.billingStatusAccepted} onChange={handleChange} isSub />
                         </div>
                     </div>
                 </div>
             </div>
 
             <div className="flex justify-end pt-6 mt-6 border-t border-border-default">
-                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">שמור שינויים</button>
+                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">{t('company_settings.save_changes')}</button>
             </div>
         </div>
     );

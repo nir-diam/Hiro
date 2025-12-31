@@ -1,6 +1,6 @@
 
-import React from 'react';
-import { BookmarkIcon, BriefcaseIcon, AcademicCapIcon, LanguageIcon, BookmarkIconSolid, ExclamationTriangleIcon, MapPinIcon, AvatarIcon, SparklesIcon } from './Icons';
+import React, { useRef } from 'react';
+import { BookmarkIcon, BookmarkIconSolid, ExclamationTriangleIcon, MapPinIcon, ClockIcon, BriefcaseIcon, SparklesIcon } from './Icons';
 import { Candidate } from './CandidatesListView';
 
 interface CandidateCardProps {
@@ -13,158 +13,140 @@ interface CandidateCardProps {
     selectionMode?: boolean;
     isSelected?: boolean;
     onSelect?: (id: number) => void;
+    onScoreClick?: (e: React.MouseEvent, id: number) => void; // Added prop
 }
 
 const statusStyles: { [key: string]: string } = {
-  'עבר בדיקה ראשונית': 'bg-blue-100 text-blue-800',
-  'חדש': 'bg-primary-100 text-primary-800',
-  'בבדיקה': 'bg-yellow-100 text-yellow-800',
-  'ראיון HR': 'bg-secondary-100 text-secondary-800',
-  'נדחה': 'bg-gray-200 text-gray-700',
+  'עבר בדיקה ראשונית': 'bg-blue-50 text-blue-700 border-blue-100',
+  'חדש': 'bg-purple-50 text-purple-700 border-purple-100',
+  'בבדיקה': 'bg-yellow-50 text-yellow-700 border-yellow-100',
+  'ראיון HR': 'bg-pink-50 text-pink-700 border-pink-100',
+  'נדחה': 'bg-gray-50 text-gray-600 border-gray-100',
 };
 
-// Updated MatchScoreIndicator for CandidateCard - Identical to CandidatesListView but local if needed, or imported if exported. 
-// Since we are duplicating logic to keep components self-contained as per request pattern:
-const MatchScoreIndicator: React.FC<{ 
-    score: number; 
-    analysis?: { jobTitle: string; reason: string; } 
-}> = ({ score, analysis }) => {
-    const getBarColor = (level: number) => {
-        if (score >= 90) return 'bg-green-500';
-        if (score >= 75) return 'bg-yellow-500';
-        return 'bg-red-500';
-    };
+// Simplified ScoreCircle - Just triggers the click
+const ScoreCircle: React.FC<{ score: number; onClick: (e: React.MouseEvent) => void }> = ({ score, onClick }) => {
+    let colorClass = 'text-gray-500 border-gray-200 bg-gray-50';
+    if (score >= 90) colorClass = 'text-green-600 border-green-200 bg-green-50';
+    else if (score >= 75) colorClass = 'text-yellow-600 border-yellow-200 bg-yellow-50';
+    else if (score >= 60) colorClass = 'text-orange-600 border-orange-200 bg-orange-50';
+    else colorClass = 'text-red-600 border-red-200 bg-red-50';
 
     return (
-        <div className="relative group flex items-center gap-2 cursor-help w-full max-w-[140px]">
-             {/* The Bar */}
-            <div className="flex-grow h-2 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                    className={`h-full rounded-full transition-all duration-500 ease-out ${getBarColor(score)}`}
-                    style={{ width: `${score}%` }}
-                ></div>
-            </div>
-            <span className="text-xs font-bold text-text-subtle w-8 text-left">{score}%</span>
-
-            {/* The Tooltip */}
-            {analysis && (
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-bg-card border border-border-default rounded-lg shadow-xl opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-[9999] text-right">
-                    <div className="flex items-start gap-2 mb-2">
-                        <SparklesIcon className="w-4 h-4 text-primary-500 mt-0.5 flex-shrink-0" />
-                        <h4 className="font-bold text-text-default text-xs leading-tight">
-                            ניתוח התאמה AI
-                        </h4>
-                    </div>
-                    <div className="space-y-1">
-                        <p className="text-xs text-text-muted font-semibold">
-                            משרה: <span className="text-text-default">{analysis.jobTitle}</span>
-                        </p>
-                        <p className="text-xs text-text-subtle leading-relaxed">
-                            {analysis.reason}
-                        </p>
-                    </div>
-                    {/* Arrow */}
-                    <div className="absolute top-full left-1/2 -translate-x-1/2 -mt-1 border-4 border-transparent border-t-border-default"></div>
-                </div>
-            )}
+        <div 
+            onClick={onClick}
+            className={`w-12 h-12 rounded-full flex items-center justify-center border-2 text-sm font-bold shadow-sm cursor-pointer transition-transform active:scale-95 ${colorClass}`}
+            title="לחץ לניתוח התאמה"
+        >
+            {score}%
         </div>
     );
 };
 
-const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile, onOpenSummary, missingFields, isFavorite, onToggleFavorite, selectionMode, isSelected, onSelect }) => {
-    const hasMissingFields = missingFields.length > 0;
+// Simple Avatar Component
+const Avatar: React.FC<{ initials: string; size?: number }> = ({ initials, size = 48 }) => (
+    <div 
+        className="rounded-full bg-primary-100 flex items-center justify-center text-primary-700 font-bold border-2 border-white shadow-sm"
+        style={{ width: size, height: size, fontSize: size * 0.4 }}
+    >
+        {initials}
+    </div>
+);
 
-    // Theme-aware color cycle for the bars
-    const colorCycle = [
-        'bg-primary-500', 
-        'bg-secondary-500', 
-        'bg-accent-500'
-    ];
+const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile, onOpenSummary, missingFields, isFavorite, onToggleFavorite, selectionMode, isSelected, onSelect, onScoreClick }) => {
+    const hasMissingFields = missingFields.length > 0;
 
     return (
         <div 
             onClick={() => selectionMode && onSelect ? onSelect(candidate.id) : onOpenSummary(candidate.id)} 
-            className={`bg-bg-card rounded-lg border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-md transition-shadow flex flex-col h-full relative ${isSelected ? 'ring-2 ring-primary-500 border-primary-500' : ''}`}
+            className={`bg-bg-card rounded-xl border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col h-full relative group ${isSelected ? 'ring-2 ring-primary-500 border-primary-500 bg-primary-50/10' : ''}`}
         >
-             {selectionMode ? (
-                <div className="absolute top-3 left-3 z-10 bg-bg-card/50 backdrop-blur-sm p-1 rounded-full">
-                    <input type="checkbox" checked={isSelected} readOnly className="h-5 w-5 rounded-full border-2 border-white text-primary-600 focus:ring-primary-500 pointer-events-none" />
-                </div>
-            ) : (
-                <button 
-                    onClick={(e) => { e.stopPropagation(); onToggleFavorite(candidate.id); }} 
-                    className="absolute top-3 left-3 p-1.5 text-text-subtle hover:text-primary-500 transition-colors z-10"
-                    title={isFavorite ? "הסר ממועדפים" : "הוסף למועדפים"}
-                >
-                    {isFavorite ? <BookmarkIconSolid className="w-5 h-5 text-primary-500" /> : <BookmarkIcon className="w-5 h-5" />}
-                </button>
-            )}
-
-            <div className="flex items-start justify-between">
-                <div className="flex items-center gap-3">
-                    <AvatarIcon initials={candidate.avatar} size={40} fontSize={16} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
-                    <div>
-                        <p className="font-bold text-primary-700 hover:underline flex items-center gap-1.5" onClick={(e) => { e.stopPropagation(); onViewProfile(candidate.id); }}>
-                            {candidate.name}
-                            {hasMissingFields && (
-                                <span title={`חסרים פרטים: ${missingFields.join(', ')}`}>
-                                    <ExclamationTriangleIcon className="w-4 h-4 text-yellow-500" />
-                                </span>
-                            )}
-                        </p>
-                        <p className="text-sm text-text-muted">{candidate.title || 'לא צוין תפקיד'}</p>
+             {/* Selection / Favorite Action */}
+             <div className="absolute top-4 end-4 z-10">
+                {selectionMode ? (
+                    <div className="bg-bg-card/80 backdrop-blur-sm p-1 rounded-full">
+                        <input type="checkbox" checked={isSelected} readOnly className="h-5 w-5 rounded-md border-2 border-border-default text-primary-600 focus:ring-primary-500 pointer-events-none" />
                     </div>
+                ) : (
+                    <button 
+                        onClick={(e) => { e.stopPropagation(); onToggleFavorite(candidate.id); }} 
+                        className={`p-1.5 rounded-full transition-colors ${isFavorite ? 'text-primary-500' : 'text-text-subtle hover:text-primary-500 hover:bg-bg-subtle'}`}
+                        title={isFavorite ? "הסר ממועדפים" : "הוסף למועדפים"}
+                    >
+                        {isFavorite ? <BookmarkIconSolid className="w-5 h-5" /> : <BookmarkIcon className="w-5 h-5" />}
+                    </button>
+                )}
+            </div>
+
+            {/* Header: Avatar + Name */}
+            <div className="flex items-start gap-3 mb-3">
+                <div className="flex-shrink-0 pt-1">
+                     <Avatar initials={candidate.avatar} />
                 </div>
-                <div className="flex flex-col items-end gap-2 mt-1">
-                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusStyles[candidate.status] || 'bg-gray-100 text-gray-800'}`}>{candidate.status}</span>
-                    <MatchScoreIndicator score={candidate.matchScore} analysis={candidate.matchAnalysis} />
+                
+                <div className="flex-1 min-w-0 pr-6"> {/* pr-6 to avoid overlap with favorite button */}
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                        <h3 
+                            className="font-bold text-lg text-text-default hover:text-primary-600 transition-colors truncate"
+                            onClick={(e) => { e.stopPropagation(); onViewProfile(candidate.id); }}
+                            title={candidate.name}
+                        >
+                            {candidate.name}
+                        </h3>
+                        {hasMissingFields && (
+                            <span title={`חסרים פרטים: ${missingFields.join(', ')}`} className="flex items-center text-amber-500">
+                                <ExclamationTriangleIcon className="w-4 h-4 flex-shrink-0" />
+                            </span>
+                        )}
+                    </div>
+                    <p className="text-sm text-text-muted truncate" title={candidate.title || 'לא צוין תפקיד'}>
+                        {candidate.title || 'לא צוין תפקיד'}
+                    </p>
                 </div>
             </div>
 
-            <div className="flex-grow mt-4 space-y-3">
-                {/* Industry Experience Bar - ONLY if data exists */}
-                {candidate.industryAnalysis && candidate.industryAnalysis.industries && candidate.industryAnalysis.industries.length > 0 && (
-                    <div className="w-full">
-                        <div className="flex justify-between items-baseline mb-1.5">
-                            <span className="text-xs font-bold text-text-default">ניסיון בתעשייה</span>
-                        </div>
-                        
-                        {/* The Bar */}
-                        <div className="flex h-2 w-full rounded-full overflow-hidden bg-bg-subtle">
-                            {candidate.industryAnalysis.industries.map((item, index) => (
-                                <div 
-                                    key={index} 
-                                    className={`h-full ${colorCycle[index % colorCycle.length]}`} 
-                                    style={{ width: `${item.percentage}%` }} 
-                                    title={`${item.label}: ${item.percentage}%`}
-                                />
-                            ))}
-                        </div>
+            {/* Status Badge + Match Score Row */}
+            <div className="flex justify-between items-center mb-4">
+                <span className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-md border ${statusStyles[candidate.status] || 'bg-gray-100 text-gray-800 border-gray-200'}`}>
+                    {candidate.status}
+                </span>
+                
+                <div className="flex items-center gap-1.5">
+                    <ScoreCircle 
+                        score={candidate.matchScore} 
+                        onClick={(e) => onScoreClick && onScoreClick(e, candidate.id)} 
+                    />
+                </div>
+            </div>
 
-                        {/* The Legend */}
-                        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5">
-                            {candidate.industryAnalysis.industries.slice(0, 3).map((item, index) => (
-                                <div key={index} className="flex items-center gap-1.5">
-                                    <span className={`w-2 h-2 rounded-full ${colorCycle[index % colorCycle.length]}`}></span>
-                                    <span className="text-[10px] text-text-muted font-medium truncate max-w-[100px]" title={item.label}>
-                                        {item.label}
-                                    </span>
-                                </div>
-                            ))}
-                        </div>
+            {/* Info Grid (Location, Last Active, Source) */}
+            <div className="grid grid-cols-2 gap-y-2 gap-x-1 text-xs text-text-muted mt-auto mb-4 border-t border-border-subtle pt-3">
+                {candidate.address && (
+                    <div className="flex items-center gap-1.5 col-span-2">
+                        <MapPinIcon className="w-3.5 h-3.5 text-text-subtle" />
+                        <span className="truncate">{candidate.address}</span>
                     </div>
                 )}
-
-                <div>
-                    <p className="text-xs text-text-subtle">פעילות אחרונה: {candidate.lastActivity}</p>
-                    <p className="text-xs text-text-subtle">מקור: {candidate.source}</p>
+                <div className="flex items-center gap-1.5">
+                    <ClockIcon className="w-3.5 h-3.5 text-text-subtle" />
+                    <span className="truncate" title={candidate.lastActivity}>{candidate.lastActivity.split(' ')[0]}</span>
                 </div>
-
-                <div className="flex flex-wrap gap-1 mt-2 min-h-[26px]">
-                    {(candidate.tags || []).slice(0, 3).map(tag => (
-                        <span key={tag} className="text-xs font-semibold bg-bg-subtle text-text-muted px-2 py-1 rounded-full border border-border-subtle">{tag}</span>
-                    ))}
+                <div className="flex items-center gap-1.5">
+                    <BriefcaseIcon className="w-3.5 h-3.5 text-text-subtle" />
+                    <span className="truncate" title={`מקור: ${candidate.source}`}>{candidate.source}</span>
                 </div>
+            </div>
+
+            {/* Tags (Fixed Height to prevent layout jumping) */}
+            <div className="h-[28px] overflow-hidden flex flex-wrap gap-1.5">
+                {(candidate.tags || []).slice(0, 3).map(tag => (
+                    <span key={tag} className="text-[11px] font-medium bg-bg-subtle text-text-muted px-2 py-0.5 rounded-full border border-border-subtle whitespace-nowrap">
+                        {tag}
+                    </span>
+                ))}
+                {(candidate.tags?.length || 0) > 3 && (
+                    <span className="text-[10px] text-text-subtle self-center">+{candidate.tags.length - 3}</span>
+                )}
             </div>
         </div>
     );

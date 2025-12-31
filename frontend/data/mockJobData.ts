@@ -1,14 +1,15 @@
+
 // data/mockJobData.ts
 
 export const mockJobCandidates = [
-  { id: 1, name: 'שפירא גדעון', avatar: 'שג', title: 'מנהל הפצה', status: 'חדש', lastActivity: '14:01 28/05/2025', source: 'AllJobs', matchScore: 92, phone: '054-1234567' },
-  { id: 2, name: 'כהן מאיה', avatar: 'כמ', title: 'סגן מנהל לוגיסטיקה', status: 'סינון טלפוני', lastActivity: '11:23 27/05/2025', source: 'LinkedIn', matchScore: 85, phone: '052-2345678' },
-  { id: 3, name: 'לוי דוד', avatar: 'לד', title: 'אחראי משמרת', status: 'ראיון', lastActivity: '09:05 27/05/2025', source: 'חבר מביא חבר', matchScore: 78, phone: '053-3456789' },
-  { id: 4, name: 'ישראלי יעל', avatar: 'יי', title: 'מנהלת תפעול', status: 'הצעה', lastActivity: '18:45 26/05/2025', source: 'Ethosia', matchScore: 95, phone: '050-4567890' },
-  { id: 5, name: 'מזרחי אבי', avatar: 'מא', title: 'רכז הפצה', status: 'נדחה', lastActivity: '16:30 25/05/2025', source: 'GotFriends', matchScore: 45, phone: '058-5678901' },
-  { id: 6, name: 'פרץ שמעון', avatar: 'פש', title: 'נהג חלוקה', status: 'חדש', lastActivity: '11:00 29/05/2025', source: 'JobMaster', matchScore: 88, phone: '055-1122334' },
-  { id: 7, name: 'ביטון רחל', avatar: 'בר', title: 'מנהלת לוגיסטיקה', status: 'נדחה', lastActivity: '15:20 28/05/2025', source: 'LinkedIn', matchScore: 65, phone: '056-2233445' },
-  { id: 8, name: 'אזולאי משה', avatar: 'אמ', title: 'ראש צוות מחסן', status: 'סינון טלפוני', lastActivity: '10:10 29/05/2025', source: 'AllJobs', matchScore: 91, phone: '058-3344556' },
+  { id: 1, name: 'שפירא גדעון', avatar: 'שג', title: 'מנהל הפצה', status: 'חדש', lastActivity: '14:01 28/05/2025', source: 'AllJobs', matchScore: 92, phone: '054-1234567', address: 'רחובות' },
+  { id: 2, name: 'כהן מאיה', avatar: 'כמ', title: 'סגן מנהל לוגיסטיקה', status: 'סינון טלפוני', lastActivity: '11:23 27/05/2025', source: 'LinkedIn', matchScore: 85, phone: '052-2345678', address: 'תל אביב' },
+  { id: 3, name: 'לוי דוד', avatar: 'לד', title: 'אחראי משמרת', status: 'ראיון', lastActivity: '09:05 27/05/2025', source: 'חבר מביא חבר', matchScore: 78, phone: '053-3456789', address: 'ראשון לציון' },
+  { id: 4, name: 'ישראלי יעל', avatar: 'יי', title: 'מנהלת תפעול', status: 'הצעה', lastActivity: '18:45 26/05/2025', source: 'Ethosia', matchScore: 95, phone: '050-4567890', address: 'מודיעין' },
+  { id: 5, name: 'מזרחי אבי', avatar: 'מא', title: 'רכז הפצה', status: 'נדחה', lastActivity: '16:30 25/05/2025', source: 'GotFriends', matchScore: 45, phone: '058-5678901', address: 'חולון' },
+  { id: 6, name: 'פרץ שמעון', avatar: 'פש', title: 'נהג חלוקה', status: 'חדש', lastActivity: '11:00 29/05/2025', source: 'JobMaster', matchScore: 88, phone: '055-1122334', address: 'לוד' },
+  { id: 7, name: 'ביטון רחל', avatar: 'בר', title: 'מנהלת לוגיסטיקה', status: 'נדחה', lastActivity: '15:20 28/05/2025', source: 'LinkedIn', matchScore: 65, phone: '056-2233445', address: 'פתח תקווה' },
+  { id: 8, name: 'אזולאי משה', avatar: 'אמ', title: 'ראש צוות מחסן', status: 'סינון טלפוני', lastActivity: '10:10 29/05/2025', source: 'AllJobs', matchScore: 91, phone: '058-3344556', address: 'רמלה' },
 ];
 
 export const mockExistingJob = {

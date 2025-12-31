@@ -1,6 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, CheckCircleIcon, UserIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 interface InviteManagerModalProps {
   isOpen: boolean;
@@ -16,6 +17,7 @@ const allStatuses = [
 ];
 
 const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose, onInvite, jobTitle }) => {
+    const { t } = useLanguage();
     const [email, setEmail] = useState('');
     const [name, setName] = useState('');
     const [selectedStatuses, setSelectedStatuses] = useState<string[]>(allStatuses);
@@ -57,8 +59,8 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
             <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden text-text-default max-h-[90vh]" onClick={e => e.stopPropagation()}>
                 <header className="flex items-center justify-between p-4 border-b border-border-default">
                     <div>
-                        <h2 className="text-xl font-bold text-text-default">הזמנת מנהל מגייס</h2>
-                        <p className="text-sm text-text-muted">שיתוף המשרה: {jobTitle}</p>
+                        <h2 className="text-xl font-bold text-text-default">{t('invite.title')}</h2>
+                        <p className="text-sm text-text-muted">{t('invite.subtitle', { jobTitle })}</p>
                     </div>
                     <button type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור">
                         <XMarkIcon className="w-6 h-6" />
@@ -69,7 +71,7 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
                     <main className="p-6 overflow-y-auto space-y-6">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">שם המנהל</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('invite.manager_name')}</label>
                                 <input 
                                     type="text" 
                                     required 
@@ -80,7 +82,7 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
                                 />
                             </div>
                             <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">דוא"ל</label>
+                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('invite.email')}</label>
                                 <input 
                                     type="email" 
                                     required 
@@ -96,7 +98,7 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
                             <div className="flex justify-between items-center mb-3">
                                 <h3 className="font-bold text-text-default flex items-center gap-2">
                                     <UserIcon className="w-5 h-5 text-primary-600" />
-                                    הרשאות צפייה במועמדים
+                                    {t('invite.permissions')}
                                 </h3>
                                 <label className="flex items-center gap-2 text-sm cursor-pointer">
                                     <input 
@@ -105,12 +107,11 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
                                         onChange={handleSelectAll}
                                         className="rounded text-primary-600 focus:ring-primary-500" 
                                     />
-                                    בחר הכל
+                                    {t('invite.select_all')}
                                 </label>
                             </div>
                             <p className="text-xs text-text-muted mb-4">
-                                המנהל יוכל לראות ולתת חוות דעת רק על מועמדים שנמצאים בסטטוסים המסומנים מטה.
-                                מועמדים בסטטוסים אחרים יוסתרו ממנו.
+                                {t('invite.desc')}
                             </p>
                             
                             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -130,10 +131,10 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
                     </main>
 
                     <footer className="p-4 border-t border-border-default bg-bg-subtle flex justify-end gap-3">
-                        <button type="button" onClick={onClose} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition">ביטול</button>
+                        <button type="button" onClick={onClose} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition">{t('invite.cancel')}</button>
                         <button type="submit" className="bg-primary-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-primary-700 transition shadow-sm flex items-center gap-2">
                             <CheckCircleIcon className="w-5 h-5" />
-                            שלח הזמנה
+                            {t('invite.send')}
                         </button>
                     </footer>
                 </form>

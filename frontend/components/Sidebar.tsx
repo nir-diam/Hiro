@@ -1,8 +1,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { UserGroupIcon, BriefcaseIcon, ChartPieIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon } from './Icons';
+import { UserGroupIcon, BriefcaseIcon, ChartPieIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { useSavedSearches } from '../context/SavedSearchesContext';
+import { useLanguage } from '../context/LanguageContext';
 
 interface NavItemProps {
   icon: React.ReactElement<{ className?: string }>;
@@ -18,23 +19,27 @@ const NavItem: React.FC<NavItemProps> = ({ icon, label, isActive, onClick, isOpe
         <Link
             to={to}
             onClick={onClick}
-            title={label}
-            className={`w-full flex items-center rounded-lg transition-colors duration-200 group ${
-                isActive ? 'bg-primary-600 text-white' : 'text-text-muted hover:bg-primary-100'
-            } ${isOpen ? 'justify-start p-3' : 'h-16 justify-center'}`}
+            title={!isOpen ? label : ''} // Show tooltip only when collapsed
+            className={`flex items-center rounded-lg transition-all duration-200 group relative ${
+                isActive ? 'bg-primary-600 text-white shadow-md shadow-primary-500/20' : 'text-text-muted hover:bg-primary-50 hover:text-primary-700'
+            } ${isOpen ? 'px-3 py-2.5 mx-2 justify-start' : 'p-3 mx-auto justify-center w-12 h-12'}`}
         >
             {React.cloneElement(icon, {
-                className: `w-7 h-7 shrink-0 transition-colors ${
+                className: `w-6 h-6 shrink-0 transition-colors ${
                     isActive ? 'text-white' : 'text-text-muted group-hover:text-primary-600'
-                } ${isOpen ? 'ml-4' : ''}`
+                }`
             })}
-            {isOpen && <span className="font-bold text-base whitespace-nowrap">{label}</span>}
+            
+            {/* Text Label - Only visible when open */}
+            <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                {label}
+            </span>
         </Link>
     );
 };
 
 const SubMenuLink: React.FC<{label: string, onClick: () => void, isActive: boolean, to: string}> = ({label, onClick, isActive, to}) => (
-    <Link to={to} onClick={onClick} className={`block w-full text-right text-base font-medium py-2 px-4 rounded-md transition-colors ${isActive ? 'text-primary-700 bg-primary-100' : 'text-text-muted hover:bg-bg-hover'}`}>
+    <Link to={to} onClick={onClick} className={`block w-full text-start text-sm font-medium py-2 px-9 rounded-md transition-colors ${isActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-hover hover:text-text-default'}`}>
         {label}
     </Link>
 );
@@ -42,16 +47,18 @@ const SubMenuLink: React.FC<{label: string, onClick: () => void, isActive: boole
 
 interface SidebarProps {
     isSidebarOpen: boolean;
-    onClose: () => void;
+    onClose: () => void; // This toggles the state
 }
 
 const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const navigate = useNavigate();
     const location = useLocation();
     const { savedSearches, deleteSearch } = useSavedSearches();
+    const { t, dir } = useLanguage();
 
-    const [isHoverOpen, setIsHoverOpen] = useState(false);
     const [isMobileView, setIsMobileView] = useState(window.innerWidth < 1024);
+    
+    // Sub-menu states
     const [isCandidatesOpen, setIsCandidatesOpen] = useState(true);
     const [isSavedSearchesOpen, setIsSavedSearchesOpen] = useState(false);
     const [isJobsOpen, setIsJobsOpen] = useState(false);
@@ -80,7 +87,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         navigate('/p/gidon-shapira');
     };
 
-    const isOpen = (!isMobileView && isHoverOpen) || (isMobileView && isSidebarOpen);
+    // On Desktop: isSidebarOpen determines if it's Expanded (true) or Collapsed/Mini (false)
+    // On Mobile: isSidebarOpen determines if the drawer is Visible (true) or Hidden (false)
+    const isOpen = isSidebarOpen; 
     const pathname = location.pathname;
 
     const isCandidatesActive = pathname.startsWith('/candidates');
@@ -93,116 +102,137 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const isSettingsActive = pathname.startsWith('/settings') || pathname.startsWith('/admin');
     const isCommunicationsActive = pathname.startsWith('/communications');
 
+    // Helper to auto-expand parent if collapsed when clicking a parent item
+    const handleParentClick = (
+        subState: boolean, 
+        setSubState: React.Dispatch<React.SetStateAction<boolean>>, 
+        navPath: string
+    ) => {
+        if (!isOpen && !isMobileView) {
+            onClose(); // Expand sidebar
+            setSubState(true); // Open sub-menu
+            return;
+        }
+        
+        if (isOpen) {
+            setSubState(!subState);
+        } else {
+             handleNavigation(navPath);
+        }
+    };
+
+    // Determine chevron direction based on RTL/LTR and open state
+    const CollapseIcon = isOpen 
+        ? (dir === 'rtl' ? ChevronRightIcon : ChevronLeftIcon)
+        : (dir === 'rtl' ? ChevronLeftIcon : ChevronRightIcon);
+
     return (
         <>
+            {/* Mobile Overlay */}
             {isMobileView && isSidebarOpen && (
-                <div onClick={onClose} className="fixed inset-0 bg-black bg-opacity-30 z-30 lg:hidden"></div>
+                <div onClick={onClose} className="fixed inset-0 bg-black/40 backdrop-blur-sm z-30 lg:hidden transition-opacity"></div>
             )}
+            
             <aside 
-                onMouseEnter={() => !isMobileView && setIsHoverOpen(true)}
-                onMouseLeave={() => !isMobileView && setIsHoverOpen(false)}
-                className={`bg-bg-card border-l border-border-default flex flex-col shadow-md transition-all duration-300 ease-in-out z-40
+                className={`bg-bg-card border-e border-border-default flex flex-col transition-all duration-300 ease-in-out z-40
                     ${isMobileView 
-                        ? `fixed top-0 bottom-0 h-full ${isSidebarOpen ? 'translate-x-0 w-64' : 'translate-x-full w-64'}`
-                        : `relative flex-shrink-0 ${(isHoverOpen) ? 'w-64' : 'w-24'}`
+                        ? `fixed top-0 bottom-0 h-full start-0 shadow-2xl ${isSidebarOpen ? 'translate-x-0 w-72' : (dir === 'rtl' ? 'translate-x-full' : '-translate-x-full')} w-72`
+                        : `relative flex-shrink-0 h-screen sticky top-0 ${isOpen ? 'w-64' : 'w-20'}`
                     }
                 `}
             >
-                <Link 
-                    to="/dashboard" 
-                    title="Go to Dashboard"
-                    className={`flex items-center h-20 border-b border-border-default shrink-0 ${isOpen ? 'justify-start px-4' : 'justify-center px-0'}`}
-                >
-                    {isOpen ? (
-                        <HiroLogotype className="text-3xl" />
-                    ) : (
-                        <HiroLogoIcon className="w-8 h-8 text-primary-600" />
-                    )}
-                </Link>
+                {/* Logo Area */}
+                <div className={`flex items-center h-20 border-b border-border-default shrink-0 transition-all ${isOpen ? 'px-6' : 'justify-center px-0'}`}>
+                    <Link to="/dashboard" title="דף הבית">
+                        {isOpen ? (
+                            <HiroLogotype className="h-8" />
+                        ) : (
+                            <HiroLogoIcon className="w-9 h-9 text-primary-600" />
+                        )}
+                    </Link>
+                </div>
                 
-                <div className="flex-1 flex flex-col justify-between overflow-y-auto overflow-x-hidden">
-                    <nav className={`flex flex-col space-y-2 ${isOpen ? 'p-4' : 'p-2 items-center'}`}>
-                        {/* Candidates Collapsible Menu */}
+                {/* Navigation Items */}
+                <div className="flex-1 flex flex-col justify-between overflow-y-auto overflow-x-hidden custom-scrollbar py-4 space-y-1">
+                    <nav className="flex flex-col space-y-1">
+                        
+                        {/* Candidates Group */}
                         <div className="w-full">
                             <button
-                                onClick={() => {
-                                    if (isOpen) {
-                                        setIsCandidatesOpen(!isCandidatesOpen);
-                                    } else {
-                                        handleNavigation('/candidates');
-                                    }
-                                }}
-                                aria-expanded={isOpen && isCandidatesOpen}
-                                aria-controls="candidates-submenu"
-                                className={`w-full flex items-center justify-between p-3 rounded-lg group transition-colors ${
-                                    isCandidatesActive ? 'bg-primary-50 text-primary-700' : 'text-text-muted hover:bg-primary-100'
-                                } ${!isOpen ? 'h-16 justify-center' : ''}`}
+                                onClick={() => handleParentClick(isCandidatesOpen, setIsCandidatesOpen, '/candidates')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isCandidatesActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? t('nav.candidates') : ''}
                             >
                                 <div className="flex items-center">
-                                    <UserGroupIcon className={`w-7 h-7 shrink-0 ${isCandidatesActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'} ${isOpen ? 'ml-4' : ''}`}/>
-                                    {isOpen && <span className="font-bold text-base">מועמדים</span>}
+                                    <UserGroupIcon className={`w-6 h-6 shrink-0 transition-colors ${isCandidatesActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        {t('nav.candidates')}
+                                    </span>
                                 </div>
                                 {isOpen && (
-                                    <ChevronDownIcon className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isCandidatesOpen ? '' : '-rotate-90'}`} />
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isCandidatesOpen ? 'rotate-180' : ''}`} />
                                 )}
                             </button>
-                            {isOpen && isCandidatesOpen && (
-                                <div id="candidates-submenu" className="mt-2 space-y-1 pr-6 pl-2">
+                            
+                            {/* Submenu */}
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isCandidatesOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
                                     <SubMenuLink 
                                         to="/candidates"
-                                        label="רשימת מועמדים" 
+                                        label={t('nav.list_candidates')}
                                         onClick={() => handleNavigation('/candidates')} 
                                         isActive={pathname === '/candidates' || (pathname.startsWith('/candidates/') && !pathname.includes('new'))}
                                     />
                                     <SubMenuLink 
                                         to="/candidates/new"
-                                        label="מועמד חדש" 
+                                        label={t('nav.new_candidate')}
                                         onClick={() => handleNavigation('/candidates/new')} 
                                         isActive={pathname === '/candidates/new'}
                                     />
-                                    <div className="border-t border-border-default my-2 -mx-2"></div>
-                                    <div className="w-full">
-                                        <button
-                                            onClick={() => setIsSavedSearchesOpen(!isSavedSearchesOpen)}
-                                            className="w-full flex items-center justify-between py-2 text-base font-medium text-text-muted hover:bg-bg-hover rounded-md"
-                                        >
-                                            <div className="flex items-center gap-2">
-                                                <BookmarkIcon className="w-5 h-5" />
-                                                <span>חיפושים שמורים</span>
-                                            </div>
-                                            <ChevronDownIcon className={`w-5 h-5 transition-transform ${isSavedSearchesOpen ? '' : '-rotate-90'}`} />
-                                        </button>
-                                        {isSavedSearchesOpen && (
-                                        <div className="mt-1 space-y-1 pr-4">
+                                    {/* Saved Searches Toggle inside Candidates */}
+                                    <button
+                                        onClick={() => setIsSavedSearchesOpen(!isSavedSearchesOpen)}
+                                        className="w-full text-start text-sm font-medium py-2 px-9 text-text-muted hover:bg-bg-hover hover:text-text-default flex items-center justify-between group"
+                                    >
+                                        <span>{t('nav.saved_searches')}</span>
+                                        <ChevronDownIcon className={`w-3 h-3 transition-transform ${isSavedSearchesOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                    
+                                    {isSavedSearchesOpen && (
+                                        <div className="bg-bg-subtle/30 py-1 border-y border-border-subtle/50">
                                             {savedSearches.length > 0 ? (
-                                            savedSearches.map(search => (
-                                                <div key={search.id} className="group flex items-center justify-between w-full text-right rounded-md transition-colors text-sm text-text-muted hover:bg-bg-hover">
-                                                    <Link to={`/candidates?savedSearchId=${search.id}`} onClick={() => handleNavigation(`/candidates?savedSearchId=${search.id}`)} className="flex-grow py-1.5 px-2 flex items-center gap-2">
-                                                        {search.isPublic 
-                                                            ? <span title="חיפוש ציבורי"><UserGroupIcon className="w-4 h-4 text-text-subtle flex-shrink-0"/></span> 
-                                                            : <span title="חיפוש פרטי"><LockClosedIcon className="w-4 h-4 text-text-subtle flex-shrink-0"/></span>
-                                                        }
-                                                        <span className="truncate">{search.name}</span>
-                                                    </Link>
-                                                    <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                                        <button onClick={(e) => { e.stopPropagation(); deleteSearch(search.id); }} className="p-1 text-text-subtle hover:text-red-500"><TrashIcon className="w-4 h-4"/></button>
+                                                savedSearches.map(search => (
+                                                    <div key={search.id} className="relative group/search">
+                                                        <Link 
+                                                            to={`/candidates?savedSearchId=${search.id}`} 
+                                                            onClick={() => handleNavigation(`/candidates?savedSearchId=${search.id}`)}
+                                                            className="block w-full text-start text-xs py-1.5 px-11 text-text-subtle hover:text-primary-600 truncate"
+                                                        >
+                                                            {search.name}
+                                                        </Link>
+                                                        <button 
+                                                            onClick={(e) => { e.stopPropagation(); deleteSearch(search.id); }} 
+                                                            className="absolute start-2 top-1/2 -translate-y-1/2 p-1 text-text-subtle hover:text-red-500 opacity-0 group-hover/search:opacity-100 transition-opacity"
+                                                        >
+                                                            <TrashIcon className="w-3 h-3"/>
+                                                        </button>
                                                     </div>
-                                                </div>
-                                            ))
+                                                ))
                                             ) : (
-                                            <span className="block py-1.5 px-2 text-xs text-text-subtle">אין חיפושים שמורים.</span>
+                                                <span className="block py-1.5 px-11 text-xs text-text-subtle">אין חיפושים</span>
                                             )}
                                         </div>
-                                        )}
-                                    </div>
-
+                                    )}
                                 </div>
-                            )}
+                            </div>
                         </div>
                         
                         <NavItem 
                             to="/communications"
-                            label="מרכז תקשורת" 
+                            label={t('nav.communications')} 
                             icon={<ChatBubbleBottomCenterTextIcon />} 
                             isActive={isCommunicationsActive} 
                             onClick={() => handleNavigation('/communications')}
@@ -211,7 +241,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                          
                          <NavItem 
                             to="/candidate-pool"
-                            label="מאגר מועמדים" 
+                            label={t('nav.candidate_pool')}
                             icon={<CircleStackIcon />} 
                             isActive={isCandidatePoolActive} 
                             onClick={() => handleNavigation('/candidate-pool')}
@@ -220,264 +250,293 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
 
                         <NavItem 
                             to="/job-board"
-                            label="לוח משרות" 
+                            label={t('nav.job_board')}
                             icon={<BriefcaseIcon />} 
                             isActive={isJobBoardActive} 
                             onClick={() => handleNavigation('/job-board')}
                             isOpen={isOpen} 
                         />
 
+                        {/* Jobs Group */}
                         <div className="w-full">
-                            <button
-                                onClick={() => {
-                                    if (isOpen) {
-                                        setIsJobsOpen(!isJobsOpen);
-                                    } else {
-                                        handleNavigation('/jobs');
-                                    }
-                                }}
-                                aria-expanded={isOpen && isJobsOpen}
-                                aria-controls="jobs-submenu"
-                                className={`w-full flex items-center justify-between p-3 rounded-lg group transition-colors ${
-                                    isJobsActive ? 'bg-primary-50 text-primary-700' : 'text-text-muted hover:bg-primary-100'
-                                } ${!isOpen ? 'h-16 justify-center' : ''}`}
+                             <button
+                                onClick={() => handleParentClick(isJobsOpen, setIsJobsOpen, '/jobs')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isJobsActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? t('nav.jobs') : ''}
                             >
                                 <div className="flex items-center">
-                                    <BriefcaseIcon className={`w-7 h-7 shrink-0 ${isJobsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'} ${isOpen ? 'ml-4' : ''}`}/>
-                                    {isOpen && <span className="font-bold text-base">משרות</span>}
+                                    <BriefcaseIcon className={`w-6 h-6 shrink-0 transition-colors ${isJobsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        {t('nav.jobs')}
+                                    </span>
                                 </div>
                                 {isOpen && (
-                                    <ChevronDownIcon className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isJobsOpen ? '' : '-rotate-90'}`} />
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isJobsOpen ? 'rotate-180' : ''}`} />
                                 )}
                             </button>
-                            {isOpen && isJobsOpen && (
-                                <div id="jobs-submenu" className="mt-2 space-y-1 pr-6 pl-2">
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isJobsOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
                                     <SubMenuLink 
                                         to="/jobs"
-                                        label="רשימת משרות" 
+                                        label={t('nav.list_jobs')} 
                                         onClick={() => handleNavigation('/jobs')} 
                                         isActive={isJobsActive && !pathname.startsWith('/jobs/new') && !pathname.startsWith('/jobs/existing')}
                                     />
                                     <SubMenuLink 
                                         to="/jobs/new"
-                                        label="פתיחת משרה חדשה" 
+                                        label={t('nav.new_job')}
                                         onClick={() => handleNavigation('/jobs/new')} 
                                         isActive={pathname === '/jobs/new'}
                                     />
                                      <SubMenuLink 
                                         to="/jobs/existing"
-                                        label="משרה קיימת" 
+                                        label={t('nav.existing_job')}
                                         onClick={() => handleNavigation('/jobs/existing')} 
-                                        isActive={pathname === '/jobs/existing'}
+                                        isActive={pathname.startsWith('/jobs/existing')}
+                                    />
+                                    <SubMenuLink 
+                                        to="/jobs/existing/events"
+                                        label={t('job_events.title')}
+                                        onClick={() => handleNavigation('/jobs/existing/events')} 
+                                        isActive={pathname === '/jobs/existing/events'}
                                     />
                                 </div>
-                            )}
+                            </div>
                         </div>
-                         {/* Clients Collapsible Menu */}
+
+                        {/* Clients Group */}
                         <div className="w-full">
                             <button
-                                onClick={() => {
-                                    if (isOpen) {
-                                        setIsClientsOpen(!isClientsOpen);
-                                    } else {
-                                        handleNavigation('/clients');
-                                    }
-                                }}
-                                aria-expanded={isOpen && isClientsOpen}
-                                aria-controls="clients-submenu"
-                                className={`w-full flex items-center justify-between p-3 rounded-lg group transition-colors ${
-                                    isClientsActive ? 'bg-primary-50 text-primary-700' : 'text-text-muted hover:bg-primary-100'
-                                } ${!isOpen ? 'h-16 justify-center' : ''}`}
+                                onClick={() => handleParentClick(isClientsOpen, setIsClientsOpen, '/clients')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isClientsActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? t('nav.clients') : ''}
                             >
                                 <div className="flex items-center">
-                                    <BuildingOffice2Icon className={`w-7 h-7 shrink-0 ${isClientsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'} ${isOpen ? 'ml-4' : ''}`}/>
-                                    {isOpen && <span className="font-bold text-base">לקוחות</span>}
+                                    <BuildingOffice2Icon className={`w-6 h-6 shrink-0 transition-colors ${isClientsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        {t('nav.clients')}
+                                    </span>
                                 </div>
                                 {isOpen && (
-                                    <ChevronDownIcon className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isClientsOpen ? '' : '-rotate-90'}`} />
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isClientsOpen ? 'rotate-180' : ''}`} />
                                 )}
                             </button>
-                            {isOpen && isClientsOpen && (
-                                <div id="clients-submenu" className="mt-2 space-y-1 pr-6 pl-2">
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isClientsOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
                                     <SubMenuLink 
                                         to="/clients"
-                                        label="רשימת לקוחות" 
+                                        label={t('nav.list_clients')} 
                                         onClick={() => handleNavigation('/clients')} 
-                                        isActive={pathname === '/clients'}
+                                        isActive={pathname === '/clients' || /^\/clients\/\d+/.test(pathname)}
                                     />
                                     <SubMenuLink 
                                         to="/clients/new"
-                                        label="לקוח חדש" 
+                                        label={t('nav.new_client')}
                                         onClick={() => handleNavigation('/clients/new')} 
                                         isActive={pathname === '/clients/new'}
                                     />
                                 </div>
-                            )}
+                            </div>
                         </div>
-                        
-                        {/* Reports Collapsible Menu */}
-                        <div className="w-full">
+
+                         {/* Reports Group */}
+                         <div className="w-full">
                             <button
-                                onClick={() => {
-                                    if (isOpen) {
-                                        setIsReportsOpen(!isReportsOpen);
-                                    } else {
-                                        handleNavigation('/reports/bi');
-                                    }
-                                }}
-                                aria-expanded={isOpen && isReportsOpen}
-                                aria-controls="reports-submenu"
-                                className={`w-full flex items-center justify-between p-3 rounded-lg group transition-colors ${
-                                    isReportsActive ? 'bg-primary-50 text-primary-700' : 'text-text-muted hover:bg-primary-100'
-                                } ${!isOpen ? 'h-16 justify-center' : ''}`}
+                                onClick={() => handleParentClick(isReportsOpen, setIsReportsOpen, '/reports')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isReportsActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? t('nav.reports') : ''}
                             >
                                 <div className="flex items-center">
-                                    <ChartPieIcon className={`w-7 h-7 shrink-0 ${isReportsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'} ${isOpen ? 'ml-4' : ''}`}/>
-                                    {isOpen && <span className="font-bold text-base">דוחות</span>}
+                                    <ChartPieIcon className={`w-6 h-6 shrink-0 transition-colors ${isReportsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        {t('nav.reports')}
+                                    </span>
                                 </div>
                                 {isOpen && (
-                                    <ChevronDownIcon className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isReportsOpen ? '' : '-rotate-90'}`} />
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isReportsOpen ? 'rotate-180' : ''}`} />
                                 )}
                             </button>
-                            {isOpen && isReportsOpen && (
-                                <div id="reports-submenu" className="mt-2 space-y-1 pr-6 pl-2">
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isReportsOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
                                      <SubMenuLink 
                                         to="/reports/bi"
-                                        label="דוח BI מתקדם" 
+                                        label={t('nav.bi_report')}
                                         onClick={() => handleNavigation('/reports/bi')} 
                                         isActive={pathname === '/reports/bi'}
                                     />
                                     <SubMenuLink 
                                         to="/reports/referrals"
-                                        label="הפניות" 
+                                        label={t('nav.referrals')}
                                         onClick={() => handleNavigation('/reports/referrals')} 
                                         isActive={pathname === '/reports/referrals'}
                                     />
-                                    <SubMenuLink 
+                                     <SubMenuLink 
                                         to="/reports/publications"
-                                        label="פרסומים" 
+                                        label={t('nav.publications')}
                                         onClick={() => handleNavigation('/reports/publications')} 
                                         isActive={pathname === '/reports/publications'}
                                     />
-                                     <SubMenuLink 
+                                    <SubMenuLink 
                                         to="/reports/recruitment-sources"
-                                        label="מקורות גיוס" 
+                                        label={t('nav.recruitment_sources')}
                                         onClick={() => handleNavigation('/reports/recruitment-sources')} 
                                         isActive={pathname === '/reports/recruitment-sources'}
                                     />
                                 </div>
-                            )}
+                            </div>
                         </div>
 
-
-                        {/* Miscellaneous Collapsible Menu */}
-                        <div className="w-full">
+                         {/* Settings Group */}
+                         <div className="w-full">
                             <button
-                                onClick={() => {
-                                    if (isOpen) {
-                                        setIsMiscOpen(!isMiscOpen);
-                                    } else {
-                                        handleNavigation('/login');
-                                    }
-                                }}
-                                aria-expanded={isOpen && isMiscOpen}
-                                aria-controls="misc-submenu"
-                                className={`w-full flex items-center justify-between p-3 rounded-lg group transition-colors ${
-                                    isMiscActive ? 'bg-primary-50 text-primary-700' : 'text-text-muted hover:bg-primary-100'
-                                } ${!isOpen ? 'h-16 justify-center' : ''}`}
+                                onClick={() => handleParentClick(isSettingsOpen, setIsSettingsOpen, '/settings')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isSettingsActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? t('nav.settings') : ''}
                             >
                                 <div className="flex items-center">
-                                    <SquaresPlusIcon className={`w-7 h-7 shrink-0 ${isMiscActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'} ${isOpen ? 'ml-4' : ''}`}/>
-                                    {isOpen && <span className="font-bold text-base">שונות</span>}
+                                    <WrenchScrewdriverIcon className={`w-6 h-6 shrink-0 transition-colors ${isSettingsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        {t('nav.settings')}
+                                    </span>
                                 </div>
                                 {isOpen && (
-                                    <ChevronDownIcon className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isMiscOpen ? '' : '-rotate-90'}`} />
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isSettingsOpen ? 'rotate-180' : ''}`} />
                                 )}
                             </button>
-                            {isOpen && isMiscOpen && (
-                                <div id="misc-submenu" className="mt-2 space-y-1 pr-6 pl-2">
-                                    <SubMenuLink 
-                                        to="/login"
-                                        label="מסך לוגין" 
-                                        onClick={() => handleNavigation('/login')} 
-                                        isActive={pathname === '/login'}
-                                    />
-                                    <button 
-                                        onClick={handleOpenPublicProfile}
-                                        className="w-full text-right text-base font-medium py-2 px-4 rounded-md transition-colors text-text-muted hover:bg-bg-hover flex items-center gap-2"
-                                    >
-                                        פרופיל ציבורי (דמו)
-                                        <ArrowTopRightOnSquareIcon className="w-4 h-4" />
-                                    </button>
-                                </div>
-                            )}
-                        </div>
-                    </nav>
-                    
-                    <div className={`flex flex-col space-y-2 ${isOpen ? 'p-4' : 'p-2 items-center'}`}>
-                        <div className="w-full">
-                            <button
-                                onClick={() => {
-                                    if (isOpen) {
-                                        setIsSettingsOpen(!isSettingsOpen);
-                                    } else {
-                                        handleNavigation('/settings/company');
-                                    }
-                                }}
-                                aria-expanded={isOpen && isSettingsOpen}
-                                aria-controls="settings-submenu"
-                                className={`w-full flex items-center justify-between p-3 rounded-lg group transition-colors ${
-                                    isSettingsActive ? 'bg-primary-50 text-primary-700' : 'text-text-muted hover:bg-primary-100'
-                                } ${!isOpen ? 'h-16 justify-center' : ''}`}
-                            >
-                                <div className="flex items-center">
-                                    <Cog6ToothIcon className={`w-7 h-7 shrink-0 ${isSettingsActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'} ${isOpen ? 'ml-4' : ''}`}/>
-                                    {isOpen && <span className="font-bold text-base">הגדרות</span>}
-                                </div>
-                                {isOpen && (
-                                    <ChevronDownIcon className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isSettingsOpen ? '' : '-rotate-90'}`} />
-                                )}
-                            </button>
-                            {isOpen && isSettingsOpen && (
-                                <div id="settings-submenu" className="mt-2 space-y-1 pr-6 pl-2">
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isSettingsOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
                                     <SubMenuLink 
                                         to="/settings/company"
-                                        label="חברה" 
+                                        label={t('nav.company_settings')}
                                         onClick={() => handleNavigation('/settings/company')} 
                                         isActive={pathname === '/settings/company'}
                                     />
                                     <SubMenuLink 
                                         to="/settings/coordinators"
-                                        label="רכזים" 
+                                        label={t('nav.coordinators')}
                                         onClick={() => handleNavigation('/settings/coordinators')} 
                                         isActive={pathname.startsWith('/settings/coordinators')}
                                     />
                                     <SubMenuLink 
                                         to="/settings/message-templates"
-                                        label="תבניות הודעה" 
+                                        label={t('nav.message_templates')}
                                         onClick={() => handleNavigation('/settings/message-templates')} 
                                         isActive={pathname === '/settings/message-templates'}
                                     />
                                     <SubMenuLink 
                                         to="/settings/event-types"
-                                        label="סוגי אירועים" 
+                                        label={t('nav.event_types')}
                                         onClick={() => handleNavigation('/settings/event-types')} 
                                         isActive={pathname === '/settings/event-types'}
                                     />
-                                     <SubMenuLink 
+                                    <SubMenuLink 
                                         to="/settings/recruitment-sources"
-                                        label="מקורות גיוס" 
+                                        label={t('nav.recruitment_sources')}
                                         onClick={() => handleNavigation('/settings/recruitment-sources')} 
                                         isActive={pathname === '/settings/recruitment-sources'}
                                     />
                                      <SubMenuLink 
-                                        to="/admin/clients"
-                                        label="פאנל ניהול" 
-                                        onClick={() => handleNavigation('/admin/clients')} 
+                                        to="/settings/questionnaires"
+                                        label={t('breadcrumbs.questionnaires')}
+                                        onClick={() => handleNavigation('/settings/questionnaires')} 
+                                        isActive={pathname === '/settings/questionnaires'}
+                                    />
+                                    <SubMenuLink 
+                                        to="/admin"
+                                        label={t('nav.admin_panel')}
+                                        onClick={() => handleNavigation('/admin')} 
                                         isActive={pathname.startsWith('/admin')}
                                     />
                                 </div>
-                            )}
+                            </div>
+                        </div>
+
+                         {/* Misc Group */}
+                         <div className="w-full">
+                            <button
+                                onClick={() => handleParentClick(isMiscOpen, setIsMiscOpen, '')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isMiscActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? t('nav.misc') : ''}
+                            >
+                                <div className="flex items-center">
+                                    <SquaresPlusIcon className={`w-6 h-6 shrink-0 transition-colors ${isMiscActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        {t('nav.misc')}
+                                    </span>
+                                </div>
+                                {isOpen && (
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isMiscOpen ? 'rotate-180' : ''}`} />
+                                )}
+                            </button>
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isMiscOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
+                                    <SubMenuLink 
+                                        to="/login"
+                                        label={t('nav.login')}
+                                        onClick={() => handleNavigation('/login')} 
+                                        isActive={pathname === '/login'}
+                                    />
+                                    <div className="relative group/public">
+                                         <a 
+                                            href="#" 
+                                            onClick={handleOpenPublicProfile}
+                                            className="block w-full text-start text-sm font-medium py-2 px-9 rounded-md text-text-muted hover:bg-bg-hover hover:text-text-default"
+                                        >
+                                            {t('nav.public_profile')}
+                                        </a>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                    </nav>
+                </div>
+                
+                {/* Collapse / User Section */}
+                <div className="border-t border-border-default mt-auto">
+                    {/* Only show collapse toggle on desktop */}
+                    {!isMobileView && (
+                        <div className="p-2 border-b border-border-default flex justify-center">
+                            <button 
+                                onClick={onClose} 
+                                className="p-2 text-text-muted hover:bg-bg-subtle rounded-lg w-full flex items-center justify-center transition-colors hover:text-primary-600"
+                                title={isOpen ? "סגור סרגל" : "פתח סרגל"}
+                            >
+                                <CollapseIcon className="w-5 h-5" />
+                            </button>
+                        </div>
+                    )}
+                    
+                    <div className="p-4">
+                        <button className={`w-full flex items-center gap-3 p-2 rounded-lg hover:bg-bg-subtle transition-colors group ${!isOpen ? 'justify-center' : ''}`}>
+                             <div className="w-10 h-10 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center font-bold text-lg border-2 border-white shadow-sm group-hover:scale-105 transition-transform">
+                                 ש
+                             </div>
+                             <div className={`flex flex-col text-start overflow-hidden transition-all duration-300 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0 hidden'}`}>
+                                 <span className="font-bold text-sm text-text-default truncate">שפירא גדעון</span>
+                                 <span className="text-xs text-text-muted truncate">מנהל גיוס</span>
+                             </div>
+                        </button>
+                        <div className={`mt-2 flex justify-center transition-all duration-300 ${isOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
+                             <button className="text-xs text-text-subtle hover:text-red-500 flex items-center gap-1 p-1">
+                                 <ArrowTopRightOnSquareIcon className="w-3 h-3"/>
+                                 <span>התנתק</span>
+                             </button>
                         </div>
                     </div>
                 </div>

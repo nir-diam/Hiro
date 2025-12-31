@@ -1,9 +1,11 @@
+
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, XMarkIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import UpdateStatusModal from './UpdateStatusModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { jobsData as allJobsData } from './JobsView';
+import { useLanguage } from '../context/LanguageContext';
 
 
 type Status = 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון';
@@ -35,19 +37,6 @@ export const jobsData: JobInterest[] = [
   { id: 4, industry: 'טכנולוגיה', role: 'מהנדס/ת תוכנה', jobTitle: 'Fullstack Developer (React & Node)', company: 'Wix', location: 'הרצליה', lastUpdated: '01/07/2025', status: 'לא רלוונטי', matchScore: 45, matchDetails: { positive: ['ניסיון עם React'], negative: ['אין ניסיון עם Node.js', 'אין ניסיון בעבודה עם TypeScript', 'רק שנתיים ניסיון בתעשייה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '25/07/2025' },
   { id: 5, industry: 'קמעונאות', role: 'מנהל/ת סניף', jobTitle: 'מנהל/ת סניף לרשת אופנה', company: 'קסטרו', location: 'ירושלים', lastUpdated: '28/06/2025', status: 'בארכיון', matchScore: 20, matchDetails: { positive: ['ניסיון ניהולי כללי'], negative: ['אין ניסיון מתחום הקמעונאות', 'אין ניסיון בניהול צוות של מעל 5 עובדים', 'אין היכרות עם עולם האופנה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '24/07/2025' },
 ];
-
-const allColumns = [
-    { id: 'jobTitle', header: 'כותרת משרה' },
-    { id: 'company', header: 'חברה' },
-    { id: 'location', header: 'מיקום' },
-    { id: 'status', header: 'סטטוס' },
-    { id: 'matchScore', header: 'התאמת AI' },
-    { id: 'lastUpdated', header: 'עדכון אחרון' },
-    { id: 'industry', header: 'תעשייה' },
-    { id: 'role', header: 'תפקיד' },
-];
-
-const defaultVisibleColumns = allColumns.map(c => c.id);
 
 const statusStyles: { [key in Status]: { bg: string; text: string; icon: React.ReactElement<{ className?: string }> } } = {
   'פעיל': { bg: 'bg-accent-100', text: 'text-accent-800', icon: <CheckCircleIcon className="w-4 h-4 text-accent-600" /> },
@@ -186,6 +175,7 @@ const JobInterestCard: React.FC<{ job: JobInterest; onStatusClick: () => void; o
 
 
 const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask }) => {
+    const { t } = useLanguage();
     const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
     const [activePopoverId, setActivePopoverId] = useState<number | null>(null);
     const popoverRef = useRef<HTMLDivElement>(null);
@@ -194,6 +184,19 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewT
     
     // New state for advanced table features & modals
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+    
+    const allColumns = useMemo(() => [
+        { id: 'jobTitle', header: t('interested_jobs.col_jobTitle') },
+        { id: 'company', header: t('interested_jobs.col_company') },
+        { id: 'location', header: t('interested_jobs.col_location') },
+        { id: 'status', header: t('interested_jobs.col_status') },
+        { id: 'matchScore', header: t('interested_jobs.col_matchScore') },
+        { id: 'lastUpdated', header: t('interested_jobs.col_lastUpdated') },
+        { id: 'industry', header: t('interested_jobs.col_industry') },
+        { id: 'role', header: t('interested_jobs.col_role') },
+    ], [t]);
+
+    const defaultVisibleColumns = useMemo(() => allColumns.map(c => c.id), [allColumns]);
     const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
@@ -387,18 +390,18 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewT
                  <div className="flex items-center gap-3">
                     <button onClick={() => setIsJobFieldSelectorOpen(true)} className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                         <PlusIcon className="w-5 h-5"/>
-                        <span>הוסף התעניינות</span>
+                        <span>{t('interested_jobs.add_button')}</span>
                     </button>
                     <div className="relative">
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                        <input type="text" placeholder="חיפוש משרה..." className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition" />
+                        <input type="text" placeholder={t('interested_jobs.search_placeholder')} className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition" />
                     </div>
                 </div>
                 <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold text-text-muted ml-3">{jobs.length} שורות</span>
+                    <span className="text-sm font-semibold text-text-muted ml-3">{t('candidates.found_count', { count: jobs.length })}</span>
                     <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
-                        <button onClick={() => setViewMode('table')} title="תצוגת טבלה" className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
-                        <button onClick={() => setViewMode('grid')} title="תצוגת רשת" className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                        <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                        <button onClick={() => setViewMode('grid')} title={t('candidates.view_grid')} className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
                     </div>
                 </div>
             </header>
@@ -419,10 +422,10 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewT
                             })}
                             <th className="p-4 sticky left-0 bg-bg-subtle/80 w-16">
                                 <div className="relative" ref={settingsRef}>
-                                    <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title="התאם עמודות" className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
+                                    <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
                                     {isSettingsOpen && (
                                     <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                        <p className="font-bold text-text-default mb-2 text-sm">הצג עמודות</p>
+                                        <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
                                         <div className="space-y-2 max-h-60 overflow-y-auto">{allColumns.map(c => (<label key={c.id} className="flex items-center gap-2 text-sm font-normal text-text-default"><input type="checkbox" checked={visibleColumns.includes(c.id)} onChange={() => handleColumnToggle(c.id)} className="w-4 h-4 text-primary-600" />{c.header}</label>))}</div>
                                     </div>
                                     )}

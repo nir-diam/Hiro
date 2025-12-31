@@ -1,0 +1,62 @@
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
+
+const Candidate = sequelize.define(
+  'Candidate',
+  {
+    id: {
+      type: DataTypes.UUID,
+      primaryKey: true,
+      defaultValue: DataTypes.UUIDV4,
+    },
+    fullName: { type: DataTypes.STRING, allowNull: false },
+    status: { type: DataTypes.STRING, defaultValue: 'חדש' },
+    phone: DataTypes.STRING,
+    email: { type: DataTypes.STRING },
+    address: DataTypes.STRING,
+    idNumber: DataTypes.STRING,
+    maritalStatus: DataTypes.STRING,
+    gender: DataTypes.STRING,
+    drivingLicense: DataTypes.STRING,
+    mobility: DataTypes.STRING,
+    employmentType: DataTypes.STRING,
+    jobScope: DataTypes.STRING,
+    availability: DataTypes.STRING,
+    physicalWork: DataTypes.STRING,
+    birthYear: DataTypes.STRING,
+    birthMonth: DataTypes.STRING,
+    birthDay: DataTypes.STRING,
+    age: DataTypes.STRING,
+    title: DataTypes.STRING,
+    professionalSummary: DataTypes.TEXT,
+    tags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    internalTags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    skills: { type: DataTypes.JSONB, defaultValue: { soft: [], technical: [] } },
+    languages: { type: DataTypes.JSONB, defaultValue: [] },
+    salaryMin: DataTypes.INTEGER,
+    salaryMax: DataTypes.INTEGER,
+    workExperience: { type: DataTypes.JSONB, defaultValue: [] },
+    industryAnalysis: { type: DataTypes.JSONB, defaultValue: {} },
+    education: { type: DataTypes.JSONB, defaultValue: [] },
+    internalNotes: DataTypes.TEXT,
+    source: DataTypes.STRING,
+    jobScopes: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    highlights: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    experience: { type: DataTypes.JSONB, defaultValue: [] },
+    lastActivity: DataTypes.STRING,
+    lastActive: DataTypes.STRING,
+    matchScore: DataTypes.INTEGER,
+    matchAnalysis: { type: DataTypes.JSONB, defaultValue: {} },
+    sector: DataTypes.STRING,
+    companySize: DataTypes.STRING,
+    field: DataTypes.STRING,
+    industry: DataTypes.STRING,
+    isArchived: { type: DataTypes.BOOLEAN, defaultValue: false },
+  },
+  {
+    tableName: 'candidates',
+  },
+);
+
+module.exports = Candidate;
+
