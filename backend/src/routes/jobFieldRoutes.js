@@ -19,6 +19,7 @@ router.delete('/roles/:id', controller.deleteRole);
 
 router.post('/ai/suggest-clusters', controller.suggestClusters);
 router.post('/ai/suggest-roles', controller.suggestRoles);
+router.post('/ai/suggest-role-synonyms', controller.suggestRoleSynonyms);
 
 module.exports = router;
 

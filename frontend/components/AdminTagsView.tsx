@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { 
     MagnifyingGlassIcon, PlusIcon, PencilIcon, TrashIcon, CheckIcon, XMarkIcon, 
     SparklesIcon, TagIcon, BuildingOffice2Icon, CheckCircleIcon, NoSymbolIcon,
@@ -339,28 +339,36 @@ const AdminTagsView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [aiSuggestions, setAiSuggestions] = useState<any[]>([]);
     const [isSuggestModalOpen, setIsSuggestModalOpen] = useState(false);
+    const [isSavingSuggestions, setIsSavingSuggestions] = useState(false);
 
     // AI Chat State
     const [isChatOpen, setIsChatOpen] = useState(false);
     
     // Sort & Filter
-    useEffect(() => {
-        const load = async () => {
-            setLoading(true);
-            setError(null);
-            try {
-                const res = await fetch(`${apiBase}/api/tags`);
-                if (!res.ok) throw new Error('Failed to load tags');
-                const data = await res.json();
-                setTags(data);
-            } catch (err: any) {
-                setError(err.message || 'Load failed');
-            } finally {
-                setLoading(false);
-            }
-        };
-        load();
+    const loadTags = useCallback(async () => {
+        setLoading(true);
+        setError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/tags`);
+            if (!res.ok) throw new Error('Failed to load tags');
+            const data = await res.json();
+            setTags(data);
+        } catch (err: any) {
+            setError(err.message || 'Load failed');
+        } finally {
+            setLoading(false);
+        }
     }, [apiBase]);
+
+    useEffect(() => {
+        loadTags();
+    }, [loadTags]);
+
+    useEffect(() => {
+        const handler = () => loadTags();
+        window.addEventListener('hiro-tags-created', handler);
+        return () => window.removeEventListener('hiro-tags-created', handler);
+    }, [loadTags]);
 
     const filteredTags = useMemo(() => 
         tags.filter(t => 
@@ -429,6 +437,47 @@ const AdminTagsView: React.FC = () => {
             alert(err.message || 'Delete failed');
             setTags(prev);
         }
+    };
+
+    const applyAiSuggestions = async () => {
+        const selectedUpdates = aiSuggestions.filter(s => s._selected !== false);
+        if (!selectedUpdates.length) {
+            setIsSuggestModalOpen(false);
+            return;
+        }
+        setIsSavingSuggestions(true);
+        let firstError: string | null = null;
+        const saved: Tag[] = [];
+        for (const upd of selectedUpdates) {
+            if (!upd.id) {
+                firstError = firstError || 'חסרה מזהה תגית (id) באחת ההמלצות';
+                continue;
+            }
+            const payload = { ...upd };
+            delete (payload as any)._selected;
+            try {
+                const res = await fetch(`${apiBase}/api/tags/${upd.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const updated = await res.json();
+                saved.push(updated);
+            } catch (err: any) {
+                if (!firstError) firstError = err?.message || 'Save failed';
+            }
+        }
+        if (saved.length) {
+            setTags(prev => prev.map(t => {
+                const upd = saved.find(u => u.id === t.id);
+                return upd ? upd : t;
+            }));
+        }
+        setIsSavingSuggestions(false);
+        setSelectedTagIds(new Set());
+        setIsSuggestModalOpen(false);
+        if (firstError) alert(firstError);
     };
 
     // --- Bulk & Import Logic ---
@@ -525,8 +574,9 @@ const AdminTagsView: React.FC = () => {
                 throw new Error(body.message || 'Enrichment failed');
             }
             const data = await res.json();
-            const suggestions = (data.suggestions || []).map((s: any) => ({
+            const suggestions = (data.suggestions || []).map((s: any, idx: number) => ({
                 ...s,
+                id: s.id || selectedTagsList[idx]?.id,
                 _selected: true,
             }));
             setAiSuggestions(suggestions);
@@ -791,28 +841,11 @@ const AdminTagsView: React.FC = () => {
                         <div className="p-4 border-t border-border-default bg-bg-subtle/30 flex justify-end gap-2">
                             <button onClick={() => setIsSuggestModalOpen(false)} className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors">ביטול</button>
                             <button 
-                                onClick={() => {
-                                    const selectedUpdates = aiSuggestions.filter(s => s._selected !== false);
-                                    setTags(prev => prev.map(t => {
-                                        const upd = selectedUpdates.find(u => u.id === t.id);
-                                        if (!upd) return t;
-                                        return {
-                                            ...t,
-                                            displayNameHe: upd.displayNameHe,
-                                            displayNameEn: upd.displayNameEn,
-                                            category: upd.category,
-                                            type: upd.type,
-                                            status: upd.status,
-                                            qualityState: upd.qualityState,
-                                            synonyms: upd.synonyms,
-                                        };
-                                    }));
-                                    setSelectedTagIds(new Set());
-                                    setIsSuggestModalOpen(false);
-                                }}
+                                onClick={applyAiSuggestions}
                                 className="px-5 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition"
+                                disabled={isSavingSuggestions}
                             >
-                                החל נבחרים
+                                {isSavingSuggestions ? 'שומר...' : 'החל נבחרים'}
                             </button>
                         </div>
                     </div>

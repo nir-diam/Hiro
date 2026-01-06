@@ -15,6 +15,10 @@ interface HiroAIChatProps {
     tagsText?: string;
     skipHistory?: boolean;
     initialMessage?: string;
+    chatType?: string; // distinguish chat contexts (e.g., candidate-profile vs admin)
+    systemPrompt?: string; // override system prompt per context
+    contextData?: any; // optional profile context JSON
+    onProfileUpdate?: (patch: any) => void; // optional profile updater callback
 }
 
 const SimpleMarkdownRenderer: React.FC<{ text: string }> = ({ text }) => {
@@ -57,7 +61,18 @@ const SimpleMarkdownRenderer: React.FC<{ text: string }> = ({ text }) => {
 };
 
 
-const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsText, skipHistory, initialMessage }) => {
+const HiroAIChat: React.FC<HiroAIChatProps> = ({
+    isOpen,
+    onClose,
+    userId,
+    tagsText,
+    skipHistory,
+    initialMessage,
+    chatType,
+    systemPrompt,
+    contextData,
+    onProfileUpdate,
+}) => {
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
     const [chatId, setChatId] = useState<string | null>(null);
@@ -68,6 +83,18 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const recognitionRef = useRef<any>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const chatScope = chatType || 'default';
+
+    // Tag suggestions modal state
+    const [tagSuggestions, setTagSuggestions] = useState<any[]>([]);
+    const [isSuggestOpen, setIsSuggestOpen] = useState(false);
+    const [isApplyingSuggestions, setIsApplyingSuggestions] = useState(false);
+    const [selectedTagIdx, setSelectedTagIdx] = useState<Set<number>>(new Set());
+    const [profileSuggestions, setProfileSuggestions] = useState<any[]>([]);
+    const [selectedProfileIdx, setSelectedProfileIdx] = useState<Set<number>>(new Set());
+    const [isProfileSuggestOpen, setIsProfileSuggestOpen] = useState(false);
+    const [isProfileSuggestLoading, setIsProfileSuggestLoading] = useState(false);
 
     // Draggable & Resizable State
     const [position, setPosition] = useState<{ x: number, y: number } | null>(null);
@@ -214,12 +241,11 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
                 return;
             }
             if (!resolvedUserId) return;
-            const apiBase = import.meta.env.VITE_API_BASE || '';
             setIsLoading(true);
             setError(null);
             try {
-                // Try server-side latest
-                const res = await fetch(`${apiBase}/api/chat/user/${resolvedUserId}/latest`);
+                // Try server-side latest (scoped by chatType if backend supports query)
+                const res = await fetch(`${apiBase}/api/chat/user/${resolvedUserId}/latest${chatScope ? `?chatType=${encodeURIComponent(chatScope)}` : ''}`);
                 if (res.ok) {
                     const data = await res.json();
                     const mapped = (data.messages || []).map((m: any) => ({
@@ -227,12 +253,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
                         text: m.text,
                     })) as Message[];
                     setChatId(data.chatId);
-                    localStorage.setItem(`hiroChatId:${resolvedUserId}`, data.chatId);
+                    localStorage.setItem(`hiroChatId:${resolvedUserId}:${chatScope}`, data.chatId);
                     setMessages(mapped);
                     return;
                 }
                 // Fallback to stored chatId
-                const saved = localStorage.getItem(`hiroChatId:${resolvedUserId}`);
+                const saved = localStorage.getItem(`hiroChatId:${resolvedUserId}:${chatScope}`);
                 if (saved) {
                     const res2 = await fetch(`${apiBase}/api/chat/${saved}`);
                     if (res2.ok) {
@@ -255,7 +281,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
             }
         };
         loadHistory();
-    }, [isOpen, resolvedUserId, skipHistory, initialMessage]);
+    }, [isOpen, resolvedUserId, skipHistory, initialMessage, chatType]);
 
     const handleSend = async () => {
         if (!input.trim()) return;
@@ -265,11 +291,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
         setIsLoading(true);
         setError(null);
         const apiBase = import.meta.env.VITE_API_BASE || '';
+        const chatScope = chatType || 'default';
         try {
             const res = await fetch(`${apiBase}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chatId, userId: resolvedUserId, message: input, tagsText }),
+                body: JSON.stringify({ chatId, userId: resolvedUserId, message: input, tagsText, chatType: chatScope, contextData, systemPrompt }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -277,7 +304,48 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
             }
             const data = await res.json();
             setChatId(data.chatId);
-            setMessages(data.messages || []);
+
+            // Extract profile suggestions (any model message with a JSON array)
+            const allModels = (data.messages || []).filter((m: any) => m.role === 'model');
+            let parsedArray: any[] | null = null;
+            for (let i = allModels.length - 1; i >= 0; i--) {
+                const candidate = parseJsonBlock(allModels[i]?.text || '');
+                if (Array.isArray(candidate)) {
+                    parsedArray = candidate;
+                    break;
+                }
+            }
+            if (parsedArray && parsedArray.length) {
+                const cleaned = parsedArray
+                    .map((s: any) => ({
+                        field: s.field,
+                        value: s.value,
+                        reason: s.reason || '',
+                    }))
+                    .filter((s: any) => s.field && s.value);
+                if (cleaned.length) {
+                    setProfileSuggestions(cleaned);
+                    setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
+                    setIsProfileSuggestOpen(true);
+                    setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.' }]);
+                }
+            }
+
+            const cleanedMessages = (data.messages || []).map((m: any) =>
+                m.role === 'model' ? { ...m, text: sanitizeModelText(m.text) } : m
+            );
+            setMessages(cleanedMessages);
+
+            // Parse AI suggestions for tags (expects JSON block with "tags": [...])
+            const lastModel = (data.messages || []).slice().reverse().find((m: any) => m.role === 'model');
+            if (lastModel?.text) {
+                const parsed = parseTagSuggestions(lastModel.text);
+                if (parsed.length) {
+                    setTagSuggestions(parsed);
+                    setSelectedTagIdx(new Set(parsed.map((_, idx) => idx)));
+                    setIsSuggestOpen(true);
+                }
+            }
         } catch (err: any) {
             setError(err.message || 'Chat failed');
         } finally {
@@ -287,12 +355,359 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
         if (textareaRef.current) textareaRef.current.style.height = 'auto'; // Reset height
     };
 
+    const ensureArray = (val: any) => {
+        if (Array.isArray(val)) return val;
+        if (typeof val === 'string') {
+            try {
+                const parsed = JSON.parse(val);
+                if (Array.isArray(parsed)) return parsed;
+                return [val];
+            } catch {
+                return [val];
+            }
+        }
+        return [];
+    };
+
+    const parseJsonBlock = (text: string) => {
+        if (!text) return null;
+        const fenced = text.match(/```json([\s\S]*?)```/);
+        if (fenced) {
+            try { return JSON.parse(fenced[1]); } catch {}
+        }
+        // Try direct JSON parse
+        try { return JSON.parse(text); } catch {}
+        // Try to extract first array/object substring
+        const firstArray = text.indexOf('[');
+        if (firstArray !== -1) {
+            const lastArray = text.lastIndexOf(']');
+            if (lastArray > firstArray) {
+                const candidate = text.slice(firstArray, lastArray + 1);
+                try { return JSON.parse(candidate); } catch {}
+            }
+        }
+        const firstObj = text.indexOf('{');
+        if (firstObj !== -1) {
+            const lastObj = text.lastIndexOf('}');
+            if (lastObj > firstObj) {
+                const candidate = text.slice(firstObj, lastObj + 1);
+                try { return JSON.parse(candidate); } catch {}
+            }
+        }
+        return null;
+    };
+
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             handleSend();
         }
     }
+
+    const cleanName = (val: string) => (val || '').replace(/[*•]/g, '').trim();
+
+    const sanitizeModelText = (text: string) => {
+        if (!text) return '';
+        const trimmed = text.trim();
+        // If it looks like JSON, replace with friendly note
+        if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.includes('```json')) {
+            return 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+        }
+        const withoutFences = text.replace(/```json[\s\S]*?```/g, '').trim();
+        if (withoutFences && withoutFences !== text) return withoutFences || 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+        const withoutBraces = text.replace(/\{[\s\S]*?\}/g, '').trim();
+        if (withoutBraces && withoutBraces !== text) return withoutBraces || 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+        return trimmed || 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+    };
+    const slugifyTagKey = (val: string) => {
+        const slug = (val || '')
+            .toLowerCase()
+            .replace(/[^a-z0-9א-ת]+/gi, '_')
+            .replace(/_{2,}/g, '_')
+            .replace(/^_+|_+$/g, '');
+        return slug || 'tag';
+    };
+
+    const parseTagSuggestions = (text: string) => {
+        // Try JSON first
+        const match = text.match(/```json([\s\S]*?)```/) || text.match(/\{[\s\S]*\}/);
+        if (match) {
+            try {
+                const jsonText = match[1] ? match[1] : match[0];
+                const parsed = JSON.parse(jsonText);
+                const tags = Array.isArray(parsed?.tags) ? parsed.tags : Array.isArray(parsed) ? parsed : [];
+                return tags
+                    .map((t: any) => ({
+                        displayNameHe: cleanName(t.displayNameHe || t.name || t.value || ''),
+                        displayNameEn: cleanName(t.displayNameEn || ''),
+                        category: t.category || '',
+                        type: t.type || 'skill',
+                        synonyms: Array.isArray(t.synonyms) ? t.synonyms : [],
+                        tagKey: slugifyTagKey(t.tagKey || t.displayNameEn || t.displayNameHe || 'tag')
+                    }))
+                    .filter((t: any) => t.displayNameHe || t.displayNameEn);
+            } catch {
+                /* fallthrough to heuristic */
+            }
+        }
+
+        // Heuristic: parse numbered/bulleted lines like "1. Foo (Category) – description"
+        const lines = text.split('\n');
+        // Allow bullets or numbered lines, optional (category), optional dash/description
+        const regex = /^\s*(?:[-*•]|\d+[.)])\s*([^()\n]+?)(?:\s*\(([^)]+)\))?(?:\s*[–—-].*)?$/;
+        const simpleNumbered = /^\s*\d+\.\s*(.+)$/;
+        const parsed: any[] = [];
+        for (const l of lines) {
+            if (l.toLowerCase().includes('טיפ קטן')) continue;
+            const m = l.match(regex);
+            const sn = !m ? l.match(simpleNumbered) : null;
+            let name = '';
+            let category = '';
+            if (m) {
+                name = cleanName(m[1] || '');
+                name = name.split('–')[0].split('—')[0].split('-')[0].trim();
+                category = (m[2] || '').trim();
+            } else if (sn) {
+                const raw = cleanName(sn[1] || '');
+                // split off dash/description and optional parens
+                const dashSplit = raw.split(/[–—-]/)[0].trim();
+                const parenMatch = dashSplit.match(/^(.+?)\s*\(([^)]+)\)/);
+                if (parenMatch) {
+                    name = parenMatch[1].trim();
+                    category = parenMatch[2].trim();
+                } else {
+                    name = dashSplit;
+                }
+            } else {
+                continue;
+            }
+            if (!name || name.length < 2) continue;
+            parsed.push({
+                displayNameHe: name,
+                displayNameEn: '',
+                category,
+                type: 'role',
+                synonyms: [],
+                tagKey: slugifyTagKey(name),
+            });
+        }
+        return parsed;
+    };
+
+    const toggleTagSelection = (idx: number) => {
+        setSelectedTagIdx(prev => {
+            const next = new Set(prev);
+            if (next.has(idx)) next.delete(idx); else next.add(idx);
+            return next;
+        });
+    };
+
+    const applyTagSuggestions = async () => {
+        if (!tagSuggestions.length) {
+            setIsSuggestOpen(false);
+            return;
+        }
+        setIsApplyingSuggestions(true);
+        let firstError: string | null = null;
+        const created: any[] = [];
+        for (let i = 0; i < tagSuggestions.length; i++) {
+            if (!selectedTagIdx.has(i)) continue;
+            const t = tagSuggestions[i];
+            try {
+                const res = await fetch(`${apiBase}/api/tags`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            displayNameHe: t.displayNameHe,
+                            displayNameEn: t.displayNameEn,
+                            category: t.category,
+                            type: t.type || 'skill',
+                            status: 'active',
+                            qualityState: 'verified',
+                            matchable: true,
+                            tagKey: slugifyTagKey(t.tagKey || t.displayNameEn || t.displayNameHe || 'tag'),
+                            synonyms: t.synonyms || [],
+                            domains: t.domains || [],
+                        }),
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const createdTag = await res.json();
+                created.push(createdTag);
+            } catch (err: any) {
+                if (!firstError) firstError = err?.message || 'Failed to create tag';
+            }
+        }
+        setIsApplyingSuggestions(false);
+        setIsSuggestOpen(false);
+        setTagSuggestions([]);
+        setSelectedTagIdx(new Set());
+        if (created.length) {
+            window.dispatchEvent(new CustomEvent('hiro-tags-created', { detail: created }));
+        }
+        if (firstError) alert(firstError);
+        else if (created.length) alert('Tags created successfully.');
+    };
+
+    const requestProfileSuggestions = async (mode: 'default' | 'soft' = 'default') => {
+        if (!contextData) {
+            alert('אין נתוני פרופיל זמינים כרגע.');
+            return;
+        }
+        setIsProfileSuggestLoading(true);
+        setError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chatId,
+                    userId: resolvedUserId,
+                    chatType: chatScope,
+                    contextData,
+                    systemPrompt,
+                    message: mode === 'soft'
+                        ? `נתח את ה-JSON של פרופיל המועמד והצע עד 8 שיפורים קצרים המתמקדים במיומנויות רכות (tags), תקציר מקצועי וניסיון תעסוקתי.\nהחזר אך ורק JSON תקין, ללא טקסט נוסף, ללא Markdown, ללא bullet points.\nמבנה חובה (מערך):\n[\n  { "field": "tags|professionalSummary|workExperience", "value": "string or array", "reason": "string (<=140 chars)" }\n]\nהקפד שהתוויות tags יהיו מערך של מחרוזות. שמור על עברית ותמציתיות. אל תוסיף כלום מעבר ל-JSON.`
+                        : `נתח את ה-JSON של פרופיל המועמד והצע עד 10 שיפורים קצרים בתחומים: תפקיד/כותרת, תקציר מקצועי, ניסיון תעסוקתי, העדפות/תחומי עניין, ציפיות שכר, מיומנויות רכות, מיומנויות טכניות, הערות מועמד, תגיות.\nהחזר אך ורק JSON תקין, ללא טקסט נוסף, ללא Markdown, ללא bullet points.\nמבנה חובה (מערך):\n[\n  { "field": "title|professionalSummary|workExperience|preferences|interests|salaryMin|salaryMax|softSkills|techSkills|candidateNotes|tags|desiredRoles|location|availability", "value": "string or array", "reason": "string (<=140 chars)" }\n]\nאם value הוא מערך – החזר מערך מחרוזות; אם טקסט – מחרוזת בלבד. שמור על עברית ותמציתיות. אל תוסיף כלום מעבר ל-JSON.`
+                }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            const data = await res.json();
+            const allModels = (data.messages || []).filter((m: any) => m.role === 'model');
+            let parsedArray: any[] | null = null;
+            for (let i = allModels.length - 1; i >= 0; i--) {
+                const candidate = parseJsonBlock(allModels[i]?.text || '');
+                if (Array.isArray(candidate)) {
+                    parsedArray = candidate;
+                    break;
+                }
+            }
+            const arr = parsedArray || [];
+            const cleaned = arr
+                .map((s: any) => ({
+                    field: s.field,
+                    value: s.value,
+                    reason: s.reason || '',
+                }))
+                .filter((s: any) => s.field && s.value);
+            if (!cleaned.length) {
+                alert('לא נמצאו הצעות שיפור מהמודל (JSON לא זוהה).');
+                return;
+            }
+            setProfileSuggestions(cleaned);
+            setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
+            setIsProfileSuggestOpen(true);
+            setChatId(data.chatId || chatId);
+            setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.' }]);
+        } catch (e: any) {
+            setError(e.message || 'שגיאה בבקשת הצעות פרופיל');
+        } finally {
+            setIsProfileSuggestLoading(false);
+        }
+    };
+
+    const triggerProfileSuggestions = (emitChat = false, mode: 'default' | 'soft' = 'default') => {
+        if (emitChat) {
+            setMessages(prev => [...prev, { role: 'model', text: 'בודק את הפרופיל ומכין הצעות שיפור...' }]);
+        }
+        requestProfileSuggestions(mode);
+    };
+
+    const toggleProfileSuggestion = (idx: number) => {
+        setSelectedProfileIdx(prev => {
+            const next = new Set(prev);
+            next.has(idx) ? next.delete(idx) : next.add(idx);
+            return next;
+        });
+    };
+
+    const applyProfileSuggestions = () => {
+        if (!onProfileUpdate) {
+            setIsProfileSuggestOpen(false);
+            return;
+        }
+        const current = contextData || {};
+        const patch: any = {};
+
+        const skillNames = (list: any) =>
+            ensureArray(list)
+                .map((v: any) => {
+                    if (typeof v === 'string') return v;
+                    if (v && typeof v === 'object') return v.name || v.value || '';
+                    return '';
+                })
+                .filter(Boolean);
+
+        const mergeStringArray = (field: string, value: any) => {
+            const incomingRaw = ensureArray(value);
+            const existingRaw = patch[field] !== undefined
+                ? ensureArray(patch[field])
+                : ensureArray(current[field]);
+            const incoming =
+                field === 'techSkills' || field === 'softSkills'
+                    ? skillNames(incomingRaw)
+                    : incomingRaw.map((v: any) => (typeof v === 'string' ? v : String(v || ''))).filter(Boolean);
+            const existing =
+                field === 'techSkills' || field === 'softSkills'
+                    ? skillNames(existingRaw)
+                    : existingRaw.map((v: any) => (typeof v === 'string' ? v : String(v || ''))).filter(Boolean);
+            const combined = Array.from(new Set([...existing, ...incoming]));
+            patch[field] = combined;
+            return combined;
+        };
+
+        profileSuggestions.forEach((s, idx) => {
+            if (!selectedProfileIdx.has(idx)) return;
+            const field = s.field;
+            const value = s.value;
+            if (!field || value === undefined || value === null) return;
+
+            switch (field) {
+                case 'tags':
+                case 'softSkills':
+                case 'techSkills':
+                case 'desiredRoles':
+                    mergeStringArray(field, value);
+                    break;
+                case 'workExperience': {
+                    const list = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
+                    if (Array.isArray(value)) {
+                        value.forEach((v: any) => {
+                            if (v && typeof v === 'object') list.push({ ...v, id: v.id || Date.now() + Math.random() });
+                            else if (typeof v === 'string') list.push({ id: Date.now() + Math.random(), title: '', company: '', description: v, startDate: '', endDate: 'Present' });
+                        });
+                    } else if (typeof value === 'string') {
+                        list.push({ id: Date.now() + Math.random(), title: '', company: '', description: value, startDate: '', endDate: 'Present' });
+                    }
+                    patch.workExperience = list;
+                    break;
+                }
+                case 'salaryMin':
+                case 'salaryMax':
+                    patch[field] = Number(value) || 0;
+                    break;
+                default:
+                    patch[field] = value;
+            }
+        });
+
+        // Keep skills object in sync with soft/tech skills
+        const combinedSoft = patch.softSkills || ensureArray(current.softSkills);
+        const combinedTech = patch.techSkills || ensureArray(current.techSkills);
+        patch.skills = {
+            soft: combinedSoft,
+            technical: combinedTech,
+        };
+
+        if (Object.keys(patch).length === 0) {
+            setIsProfileSuggestOpen(false);
+            return;
+        }
+        onProfileUpdate(patch);
+        setIsProfileSuggestOpen(false);
+        setProfileSuggestions([]);
+        setSelectedProfileIdx(new Set());
+        alert('הפרופיל עודכן לפי ההצעות שנבחרו.');
+    };
 
     if (!isOpen || !position) return null;
 
@@ -326,12 +741,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
                     >
                         {isExpanded ? <ArrowsPointingInIcon className="w-5 h-5" /> : <ArrowsPointingOutIcon className="w-5 h-5" />}
                     </button>
-                    <button 
+                        <button
                         onClick={() => { 
                             setMessages([]); 
                             setChatId(null); 
                             setError(null); 
-                            if (resolvedUserId) localStorage.removeItem(`hiroChatId:${resolvedUserId}`);
+                            if (resolvedUserId) localStorage.removeItem(`hiroChatId:${resolvedUserId}:${chatType || 'default'}`);
                         }} 
                         title="אתחול שיחה" 
                         className="p-2 rounded-full text-text-muted hover:bg-bg-hover transition-colors">
@@ -376,8 +791,8 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
             </main>
 
             <footer className="p-3 bg-bg-card border-t border-border-default flex-shrink-0">
-                <div className="flex items-end gap-2">
-                    <div className="relative flex-grow bg-bg-input border border-border-default rounded-2xl shadow-sm focus-within:ring-2 focus-within:ring-primary-500/50 focus-within:border-primary-500 transition-all">
+                <div className="flex items-end gap-2 flex-wrap">
+                    <div className="relative flex-grow bg-bg-input border border-border-default rounded-2xl shadow-sm focus-within:ring-2 focus-within:ring-primary-500/50 focus-within:border-primary-500 transition-all min-w-[220px]">
                         <textarea
                             ref={textareaRef}
                             value={input}
@@ -396,15 +811,158 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({ isOpen, onClose, userId, tagsTe
                             {isListening ? <StopIcon className="w-4 h-4" /> : <MicrophoneIcon className="w-4 h-4" />}
                         </button>
                     </div>
-                    <button 
-                        onClick={handleSend} 
-                        disabled={isLoading || (!input.trim() && !isListening)} 
-                        className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-primary-600 text-white rounded-full hover:bg-primary-700 transition disabled:bg-primary-300 disabled:cursor-not-allowed shadow-md mb-0.5"
-                    >
-                        <PaperAirplaneIcon className="w-5 h-5" />
-                    </button>
+                    <div className="flex items-end gap-2">
+                        <button 
+                            onClick={handleSend} 
+                            disabled={isLoading || (!input.trim() && !isListening)} 
+                            className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-primary-600 text-white rounded-full hover:bg-primary-700 transition disabled:bg-primary-300 disabled:cursor-not-allowed shadow-md mb-0.5"
+                        >
+                            <PaperAirplaneIcon className="w-5 h-5" />
+                        </button>
+                        <button
+                            onClick={() => triggerProfileSuggestions(true)}
+                            disabled={isProfileSuggestLoading || isLoading}
+                            className="px-3 py-2 text-sm font-semibold border border-border-default rounded-lg bg-white hover:bg-bg-subtle text-text-muted disabled:opacity-60"
+                        >
+                            {isProfileSuggestLoading ? 'בודק...' : 'הצעות שיפור לפרופיל'}
+                        </button>
+                        <button
+                            onClick={() => triggerProfileSuggestions(true, 'soft')}
+                            disabled={isProfileSuggestLoading || isLoading}
+                            className="px-3 py-2 text-sm font-semibold border border-border-default rounded-lg bg-white hover:bg-bg-subtle text-text-muted disabled:opacity-60"
+                        >
+                            {isProfileSuggestLoading ? 'בודק...' : 'הצעות מיומנויות רכות'}
+                        </button>
+                    </div>
                 </div>
             </footer>
+        {isProfileSuggestOpen && (
+            <div className="fixed inset-0 bg-black/50 z-[10001] flex items-center justify-center p-4" onClick={() => setIsProfileSuggestOpen(false)}>
+                <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+                    <div className="flex items-center justify-between">
+                        <h3
+                            className="text-lg font-bold text-text-default cursor-pointer"
+                            onClick={() => triggerProfileSuggestions(true)}
+                        >
+                            הצעות לשיפור הפרופיל
+                        </h3>
+                        <button onClick={() => setIsProfileSuggestOpen(false)} className="p-2 rounded-full hover:bg-gray-100">
+                            <XMarkIcon className="w-5 h-5" />
+                        </button>
+                    </div>
+                    <div className="space-y-3 max-h-80 overflow-y-auto">
+                        {profileSuggestions.map((s, idx) => {
+                            const labelMap: Record<string, string> = {
+                                title: 'כותרת/תפקיד',
+                                professionalSummary: 'תקציר מקצועי',
+                                workExperience: 'ניסיון תעסוקתי',
+                                preferences: 'העדפות',
+                                interests: 'תחומי עניין',
+                                salaryMin: 'שכר מינימום',
+                                salaryMax: 'שכר מקסימום',
+                                softSkills: 'מיומנויות רכות',
+                                techSkills: 'מיומנויות טכניות',
+                                candidateNotes: 'הערות מועמד',
+                                tags: 'תגיות',
+                                desiredRoles: 'תפקידים מבוקשים',
+                                location: 'מיקום',
+                                availability: 'זמינות',
+                            };
+                            const displayLabel = labelMap[s.field] || s.field;
+                            const value = s.value;
+                            const isArray = Array.isArray(value);
+                            return (
+                                <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl hover:bg-bg-subtle cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={selectedProfileIdx.has(idx)}
+                                        onChange={() => toggleProfileSuggestion(idx)}
+                                        className="mt-1"
+                                    />
+                                    <div className="space-y-1">
+                                        <div className="font-bold text-text-default">{displayLabel}</div>
+                                        {isArray ? (
+                                            <div className="flex flex-wrap gap-1">
+                                                {(value as any[]).map((v, i) => (
+                                                    <span key={i} className="px-2 py-0.5 bg-bg-subtle border border-border-default rounded-full text-xs text-text-muted">
+                                                        {String(v)}
+                                                    </span>
+                                                ))}
+                                            </div>
+                                        ) : (
+                                            <div className="text-sm text-text-muted break-words">{String(value)}</div>
+                                        )}
+                                        {s.reason && <div className="text-xs text-text-subtle">סיבה: {s.reason}</div>}
+                                    </div>
+                                </label>
+                            );
+                        })}
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2">
+                        <button onClick={() => setIsProfileSuggestOpen(false)} className="px-4 py-2 text-sm font-semibold text-text-muted hover:bg-bg-hover rounded-lg">בטל</button>
+                        <button
+                            onClick={applyProfileSuggestions}
+                            className="px-5 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition"
+                        >
+                            החל הצעות נבחרות
+                        </button>
+                    </div>
+                </div>
+            </div>
+        )}
+            {isSuggestOpen && (
+                <div className="fixed inset-0 bg-black/50 z-[10000] flex items-center justify-center p-4" onClick={() => setIsSuggestOpen(false)}>
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-lg font-bold text-text-default">Tag suggestions from AI</h3>
+                            <button onClick={() => setIsSuggestOpen(false)} className="p-2 rounded-full hover:bg-gray-100">
+                                <XMarkIcon className="w-5 h-5" />
+                            </button>
+                        </div>
+                        {tagSuggestions.length === 0 ? (
+                            <p className="text-sm text-text-muted">No suggestions found.</p>
+                        ) : (
+                            <div className="space-y-3 max-h-80 overflow-y-auto">
+                                {tagSuggestions.map((t, idx) => (
+                                    <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl hover:bg-bg-subtle cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedTagIdx.has(idx)}
+                                            onChange={() => toggleTagSelection(idx)}
+                                            className="mt-1"
+                                        />
+                                        <div className="space-y-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className="font-bold text-text-default">{t.displayNameHe || t.displayNameEn}</span>
+                                                <span className="text-xs text-text-muted">({t.type || 'skill'})</span>
+                                            </div>
+                                            {t.displayNameEn && <div className="text-xs text-text-muted">{t.displayNameEn}</div>}
+                                            {t.category && <div className="text-xs text-text-muted">Category: {t.category}</div>}
+                                            {t.synonyms?.length > 0 && (
+                                                <div className="flex flex-wrap gap-1 text-xs text-text-muted">
+                                                    {t.synonyms.map((s: any, i: number) => (
+                                                        <span key={i} className="px-2 py-0.5 bg-gray-100 rounded-full border">{s.phrase || s}</span>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                        <div className="flex justify-end gap-2 pt-2">
+                            <button onClick={() => setIsSuggestOpen(false)} className="px-4 py-2 text-sm font-semibold text-text-muted hover:bg-bg-hover rounded-lg">Cancel</button>
+                            <button
+                                onClick={applyTagSuggestions}
+                                disabled={isApplyingSuggestions}
+                                className="px-5 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition disabled:bg-primary-300"
+                            >
+                                {isApplyingSuggestions ? 'Saving...' : 'Apply selected'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
             <style>{`
                 @keyframes popup {
                     0% { opacity: 0; transform: scale(0.9) translateY(20px); }

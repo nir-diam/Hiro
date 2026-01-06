@@ -111,6 +111,19 @@ const suggestRoles = async (req, res) => {
   }
 };
 
+const suggestRoleSynonyms = async (req, res) => {
+  try {
+    const { value, existingSynonyms } = req.body;
+    const suggestions = await jobFieldService.suggestRoleSynonyms({
+      roleValue: value,
+      existingSynonyms: existingSynonyms || [],
+    });
+    res.json({ suggestions });
+  } catch (err) {
+    res.status(err.status || 400).json({ message: err.message });
+  }
+};
+
 module.exports = {
   list,
   createCategory,
@@ -124,5 +137,6 @@ module.exports = {
   deleteRole,
   suggestClusters,
   suggestRoles,
+  suggestRoleSynonyms,
 };
 

@@ -14,6 +14,7 @@ const jobRoutes = require('./routes/jobRoutes');
 const tagRoutes = require('./routes/tagRoutes');
 const chatRoutes = require('./routes/chatRoutes');
 const jobFieldRoutes = require('./routes/jobFieldRoutes');
+const candidateRoutes = require('./routes/candidateRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -33,6 +34,7 @@ app.use('/api/jobs', jobRoutes);
 app.use('/api/tags', tagRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/job-fields', jobFieldRoutes);
+app.use('/api/candidates', candidateRoutes);
 
 const start = async () => {
   try {

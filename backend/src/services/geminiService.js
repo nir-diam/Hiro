@@ -6,6 +6,17 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 dotenv.config();
 const MODEL = 'gemini-3-flash-preview';
 
+const extractText = (data) => {
+  if (!data?.candidates?.length) return '';
+  for (const cand of data.candidates) {
+    const parts = cand?.content?.parts || [];
+    for (const p of parts) {
+      if (p?.text) return p.text;
+    }
+  }
+  return '';
+};
+
 const sendChat = async ({ apiKey, systemPrompt, history }) => {
   if (!apiKey) {
     const err = new Error('Gemini API key not configured');
@@ -40,14 +51,12 @@ const sendChat = async ({ apiKey, systemPrompt, history }) => {
   }
 
   const data = await res.json();
-  const candidate = data?.candidates?.[0];
-  const text = candidate?.content?.parts?.[0]?.text || '';
-  if (!text) {
-    const err = new Error('Gemini returned empty response');
-    err.status = 500;
-    throw err;
-  }
-  return text;
+  const text = extractText(data);
+  if (text && text.trim()) return text;
+
+  // Fallback: return a friendly message instead of throwing so UI keeps flowing
+  const safety = data?.promptFeedback ? JSON.stringify(data.promptFeedback) : '';
+  return `לא התקבלה תשובה מהמודל. ${safety ? `הערת מערכת: ${safety}` : 'נסה שוב או נסה לקצר את ההודעה.'}`;
 };
 
 module.exports = { sendChat };

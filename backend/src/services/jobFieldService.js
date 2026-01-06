@@ -108,8 +108,18 @@ const suggestClusters = async (categoryId, { previewOnly = true } = {}) => {
     (c.roles || []).map((r) => `${c.name}::${r.value}`),
   );
 
-  const systemPrompt = `You are a taxonomy expert for job fields. Suggest up to 5 new clusters (sub-domains) that are missing for this category. 
-Return ONLY a JSON array of strings (cluster names), nothing else. Do not include existing clusters. Use Hebrew where relevant.`;
+  const systemPrompt = `You are Hiro, an expert Recruitment Taxonomy Assistant for job fields.
+Your goal is to help the System Admin manage and expand the tags database.
+You have access to a tool called \`createTag\`.
+Use this tool whenever the user explicitly asks to add tags or agrees to your suggestions to add tags.
+GUIDELINES:
+1. **Infer Metadata**: When adding a tag, intelligently guess its \`type\` (e.g., 'skill', 'role', 'industry', 'tool') and a broad \`category\` (e.g., 'Development', 'Marketing').
+2. **Proactive Assistance**: If the user asks for suggestions (e.g., "What skills are needed for a Product Manager?"), list the skills first, and then ask: "Should I add these to the system?".
+3. **Language**: Always converse in Hebrew, but keep technical terms in English if appropriate.
+4. **Context**: You are managing a database of tags for a recruitment system (ATS).
+Example Trigger:
+User: "תוסיף את Python ו-Java"
+Action: Call \`createTag\` twice (once for Python, once for Java) with type='skill'.`;
   const userMessage = `Category: ${category.name}
 Existing clusters: ${existingClusters.join(', ') || 'none'}
 Existing roles: ${existingRoles.join(', ') || 'none'}
@@ -157,9 +167,18 @@ const suggestRoles = async (clusterId, { previewOnly = true } = {}) => {
 
   const existingRoles = (cluster.roles || []).map((r) => r.value);
 
-  const systemPrompt = `You are a taxonomy expert for job roles. Suggest up to 5 missing roles for this cluster. 
-Return ONLY a JSON array of role objects: [{"value":"<role title>","synonyms":["...","..."]}]. 
-Do not include existing roles. Use Hebrew titles where relevant. Keep synonyms short.`;
+  const systemPrompt = `You are Hiro, an expert Recruitment Taxonomy Assistant for job roles.
+Your goal is to help the System Admin manage and expand the tags database.
+You have access to a tool called \`createTag\`.
+Use this tool whenever the user explicitly asks to add tags or agrees to your suggestions to add tags.
+GUIDELINES:
+1. **Infer Metadata**: When adding a tag, intelligently guess its \`type\` (e.g., 'skill', 'role', 'industry', 'tool') and a broad \`category\` (e.g., 'Development', 'Marketing').
+2. **Proactive Assistance**: If the user asks for suggestions (e.g., "What skills are needed for a Product Manager?"), list the skills first, and then ask: "Should I add these to the system?".
+3. **Language**: Always converse in Hebrew, but keep technical terms in English if appropriate.
+4. **Context**: You are managing a database of tags for a recruitment system (ATS).
+Example Trigger:
+User: "תוסיף את Python ו-Java"
+Action: Call \`createTag\` twice (once for Python, once for Java) with type='skill'.`;
 
   const userMessage = `Category: ${cluster.category?.name || ''}
 Cluster: ${cluster.name}
@@ -207,6 +226,54 @@ Existing roles: ${existingRoles.join(', ') || 'none'}`;
   return created;
 };
 
+const suggestRoleSynonyms = async ({ roleValue, existingSynonyms = [] }) => {
+  const apiKey = process.env.GIMINI_KEY
+    || process.env.GEMINI_KEY
+    || process.env.GEMINI_API_KEY
+    || process.env.GOOGLE_API_KEY
+    || process.env.API_KEY;
+
+  const systemPrompt = `Act as a Senior Recruitment Taxonomy Expert.
+Your goal is to enrich a job role with relevant search synonyms, alternative job titles, and common abbreviations.
+
+Target Role: "${roleValue}"
+Current Existing Synonyms (MUST NOT be repeated): ${JSON.stringify(existingSynonyms)}
+
+Directives:
+1. Analyze the "Target Role" deeply (understand the seniority, domain, and specific nuances).
+2. Generate 10-15 high-quality, distinct synonyms.
+3. Languages: Include both Hebrew and English terms commonly used in the local market.
+4. Validation:
+- Exclude generic terms (e.g., just "Manager" is bad for "Product Manager").
+- Exclude any term listed in "Current Existing Synonyms".
+- Remove duplicates.
+5. Format: Return ONLY a raw JSON array of strings. Do not use Markdown formatting (no \`\`\`json).
+Example Output:
+["Product Owner", "PM", "מנהל מוצר", "Head of Product"]`;
+
+  const userMessage = 'Generate synonyms as instructed.';
+
+  const reply = await sendChat({
+    apiKey,
+    systemPrompt,
+    history: [{ role: 'user', text: userMessage }],
+  });
+
+  let parsed = [];
+  try {
+    parsed = JSON.parse(reply);
+    if (!Array.isArray(parsed)) throw new Error('Response is not array');
+  } catch (e) {
+    const err = new Error('Failed to parse AI response');
+    err.status = 400;
+    throw err;
+  }
+
+  return parsed
+    .map((s) => (typeof s === 'string' ? s.trim() : ''))
+    .filter(Boolean);
+};
+
 module.exports = {
   list,
   createCategory,
@@ -220,5 +287,6 @@ module.exports = {
   deleteRole,
   suggestClusters,
   suggestRoles,
+  suggestRoleSynonyms,
 };
 

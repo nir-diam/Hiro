@@ -1,7 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { jobFieldsData, JobCategory, JobFieldType, JobRole } from '../data/jobFieldsData';
 import { XMarkIcon, MagnifyingGlassIcon, ChevronLeftIcon, BriefcaseIcon } from './Icons';
 
 export interface SelectedJobField {
@@ -9,6 +8,10 @@ export interface SelectedJobField {
     fieldType: string;
     role: string;
 }
+
+type JobRole = { id: string | number; value: string; synonyms?: string[] };
+type JobFieldType = { id: string | number; name: string; roles: JobRole[] };
+type JobCategory = { id: string | number; name: string; fieldTypes: JobFieldType[] };
 
 interface JobFieldSelectorProps {
     value?: SelectedJobField | null;
@@ -20,18 +23,42 @@ interface JobFieldSelectorProps {
 const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOpen, setIsModalOpen }) => {
     const [selectedCategory, setSelectedCategory] = useState<JobCategory | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [categories, setCategories] = useState<JobCategory[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const modalRef = useRef<HTMLDivElement>(null);
     const searchInputRef = useRef<HTMLInputElement>(null);
 
-    // Set initial category if not set
+    const authHeaders = () => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    };
+
     useEffect(() => {
-        if (isModalOpen && !selectedCategory && !searchTerm) {
-             setSelectedCategory(jobFieldsData[0]);
-        }
-        if (isModalOpen) {
-            // Focus search on open
-            setTimeout(() => searchInputRef.current?.focus(), 100);
-        }
+        const fetchJobFields = async () => {
+            if (!isModalOpen) return;
+            setIsLoading(true);
+            setError(null);
+            try {
+                const apiBase = import.meta.env.VITE_API_BASE || '';
+                const res = await fetch(`${apiBase}/api/job-fields`, { headers: { ...authHeaders() } });
+                if (!res.ok) throw new Error('Failed to load job fields');
+                const data = await res.json();
+                if (Array.isArray(data)) {
+                    setCategories(data);
+                    if (!selectedCategory && data.length) setSelectedCategory(data[0]);
+                } else {
+                    setCategories([]);
+                }
+            } catch (err: any) {
+                setError(err.message || 'שגיאה בטעינת תחומים');
+                setCategories([]);
+            } finally {
+                setIsLoading(false);
+                setTimeout(() => searchInputRef.current?.focus(), 100);
+            }
+        };
+        fetchJobFields();
     }, [isModalOpen]);
 
     useEffect(() => {
@@ -50,7 +77,7 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
     
     const resetState = () => {
         setSearchTerm('');
-        if (!selectedCategory) setSelectedCategory(jobFieldsData[0]);
+        if (!selectedCategory && categories.length) setSelectedCategory(categories[0]);
     };
 
     const handleSelectRole = (role: JobRole, fieldType: JobFieldType, categoryName?: string) => {
@@ -76,7 +103,7 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
         const results: { category: JobCategory; fieldType: JobFieldType; role: JobRole }[] = [];
         const lowerCaseSearch = searchTerm.toLowerCase();
 
-        jobFieldsData.forEach(category => {
+        categories.forEach(category => {
             category.fieldTypes.forEach(fieldType => {
                 fieldType.roles.forEach(role => {
                     const searchableText = [
@@ -93,7 +120,7 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
             });
         });
         return results;
-    }, [searchTerm]);
+    }, [searchTerm, categories]);
 
     if (!isModalOpen) return null;
 
@@ -168,7 +195,11 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
                             {/* Sidebar: Categories */}
                             <div className="w-[35%] bg-bg-subtle/40 border-l border-border-default overflow-y-auto custom-scrollbar py-3 px-2 flex flex-col gap-1">
                                 <p className="px-3 py-1 text-[11px] font-bold text-text-subtle uppercase tracking-wider mb-1">קטגוריות</p>
-                                {jobFieldsData.map(category => (
+                                {isLoading ? (
+                                    <div className="text-center text-text-muted py-4">טוען...</div>
+                                ) : error ? (
+                                    <div className="text-center text-red-500 text-sm py-4">{error}</div>
+                                ) : categories.length ? categories.map(category => (
                                     <button 
                                         key={category.name} 
                                         onClick={() => handleSelectCategory(category)} 
@@ -183,12 +214,22 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
                                             <div className="w-1.5 h-1.5 rounded-full bg-primary-500 shadow-sm"></div>
                                         )}
                                     </button>
-                                ))}
+                                )) : (
+                                    <div className="text-center text-text-muted py-4">אין קטגוריות</div>
+                                )}
                             </div>
                             
                             {/* Main Content: Roles */}
                             <div className="w-[65%] overflow-y-auto custom-scrollbar bg-bg-card flex flex-col">
-                                {selectedCategory ? (
+                                {isLoading ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-text-muted">
+                                        <span>טוען תפקידים...</span>
+                                    </div>
+                                ) : error ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-red-500 text-sm">
+                                        {error}
+                                    </div>
+                                ) : selectedCategory ? (
                                     <div className="p-5 pb-8 space-y-6">
                                         <div className="flex items-baseline justify-between border-b border-border-subtle pb-3 sticky top-0 bg-bg-card/95 backdrop-blur-sm z-10">
                                                 <h3 className="font-bold text-text-default text-lg leading-tight">{selectedCategory.name}</h3>

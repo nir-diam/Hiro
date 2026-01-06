@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { XMarkIcon, MagnifyingGlassIcon } from './Icons';
 
 interface TagSelectorModalProps {
@@ -8,21 +8,67 @@ interface TagSelectorModalProps {
   existingTags: string[];
 }
 
-const mockTags = [
-  'ניהול', 'שיווק', 'מכירות', 'PPC', 'אסטרטגיה', 'ניהול צוות', 'React', 'TypeScript', 'Node.js', 'Figma', 'UX', 'UI', 'SQL', 'Python', 'Agile', 'Jira',
-  'ניהול מוצר', 'אנליזת נתונים', 'שירות לקוחות', 'אבטחת איכות', 'DevOps', 'AWS', 'Google Cloud', 'עיצוב גרפי', 'Photoshop', 'Illustrator', 'כתיבת תוכן'
-];
-
 const TagSelectorModal: React.FC<TagSelectorModalProps> = ({ isOpen, onClose, onSave, existingTags }) => {
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedTags, setSelectedTags] = useState<string[]>([]);
+    const [availableTags, setAvailableTags] = useState<string[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-    const availableTags = useMemo(() => {
+    const authHeaders = () => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    };
+
+    useEffect(() => {
+        const fetchTags = async () => {
+            if (!isOpen) return;
+            setIsLoading(true);
+            setError(null);
+            try {
+                const apiBase = import.meta.env.VITE_API_BASE || '';
+                const res = await fetch(`${apiBase}/api/tags`, {
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                });
+                if (!res.ok) throw new Error('Failed to load tags');
+                const data = await res.json();
+                if (!Array.isArray(data)) {
+                    setAvailableTags([]);
+                    return;
+                }
+                const names = data
+                    .map((t: any) => {
+                        if (typeof t === 'string') return t;
+                        const candidate =
+                            t?.displayNameHe ||
+                            t?.displayNameEn ||
+                            t?.tagKey ||
+                            t?.name ||
+                            t?.value ||
+                            t?.id ||
+                            '';
+                        return typeof candidate === 'string' ? candidate : String(candidate || '');
+                    })
+                    .map((v: any) => (typeof v === 'string' ? v.trim() : ''))
+                    .filter((v: any) => v.length > 0);
+                setAvailableTags(names);
+            } catch (err: any) {
+                setError(err.message || 'שגיאה בטעינת תגיות');
+                setAvailableTags([]);
+            } finally {
+                setIsLoading(false);
+            }
+        };
+        fetchTags();
+    }, [isOpen]);
+
+    const filteredTags = useMemo(() => {
         const lowerCaseSearch = searchTerm.toLowerCase();
-        return mockTags.filter(tag => 
-            !existingTags.includes(tag) && tag.toLowerCase().includes(lowerCaseSearch)
-        );
-    }, [searchTerm, existingTags]);
+        return availableTags
+            .map(tag => (typeof tag === 'string' ? tag : ''))
+            .filter(tag => tag.length > 0)
+            .filter(tag => !existingTags.includes(tag) && tag.toLowerCase().includes(lowerCaseSearch));
+    }, [searchTerm, existingTags, availableTags]);
 
     const handleToggleTag = (tag: string) => {
         setSelectedTags(prev => 
@@ -60,21 +106,30 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = ({ isOpen, onClose, on
                     </div>
                 </div>
                 <main className="p-4 overflow-y-auto flex-1">
-                    <div className="flex flex-wrap gap-2">
-                        {availableTags.map(tag => (
-                            <button
-                                key={tag}
-                                onClick={() => handleToggleTag(tag)}
-                                className={`px-3 py-1.5 rounded-full text-sm font-semibold transition-all duration-200 ${
-                                    selectedTags.includes(tag)
-                                        ? 'bg-primary-500 text-white shadow-sm'
-                                        : 'bg-bg-subtle text-text-default hover:bg-bg-hover'
-                                }`}
-                            >
-                                {tag}
-                            </button>
-                        ))}
-                    </div>
+                    {isLoading ? (
+                        <div className="text-center text-text-muted">טוען תגיות...</div>
+                    ) : error ? (
+                        <div className="text-center text-red-500 text-sm">{error}</div>
+                    ) : (
+                        <div className="flex flex-wrap gap-2">
+                            {filteredTags.map(tag => (
+                                <button
+                                    key={tag}
+                                    onClick={() => handleToggleTag(tag)}
+                                    className={`px-3 py-1.5 rounded-full text-sm font-semibold transition-all duration-200 ${
+                                        selectedTags.includes(tag)
+                                            ? 'bg-primary-500 text-white shadow-sm'
+                                            : 'bg-bg-subtle text-text-default hover:bg-bg-hover'
+                                    }`}
+                                >
+                                    {tag}
+                                </button>
+                            ))}
+                            {!filteredTags.length && (
+                                <span className="text-sm text-text-muted">אין תגיות תואמות</span>
+                            )}
+                        </div>
+                    )}
                 </main>
                 <footer className="flex justify-end items-center p-4 bg-bg-subtle border-t border-border-default">
                     <button type="button" onClick={onClose} className="text-text-muted font-semibold py-2 px-5 rounded-lg hover:bg-bg-hover transition">ביטול</button>

@@ -143,9 +143,9 @@ const LoginScreen: React.FC = () => {
 
                   
                         אין לכם חשבון? 
-                          {/* <p className="text-center text-sm text-text-muted mt-6">
+                           <p className="text-center text-sm text-text-muted mt-6">
                         <button onClick={() => navigate('/candidate-portal/signup')} className="font-semibold text-primary-600 hover:underline">הרשמה</button>
-                    </p> */}
+                    </p> 
                     
                     {userType === 'recruiter' && (
                         <div className="mt-8 pt-6 border-t border-border-default text-center">

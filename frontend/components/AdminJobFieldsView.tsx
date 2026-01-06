@@ -175,12 +175,14 @@ interface TaxonomyModalProps {
     initialSynonyms?: string[];
     type: EntityType;
     mode: ModalMode;
+    apiBase: string;
 }
 
-const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, initialValue, initialSynonyms = [], type, mode }) => {
+const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, initialValue, initialSynonyms = [], type, mode, apiBase }) => {
     const [value, setValue] = useState(initialValue);
     const [synonyms, setSynonyms] = useState<string[]>(initialSynonyms);
     const [synonymInput, setSynonymInput] = useState('');
+    const [synonymLoading, setSynonymLoading] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
@@ -219,6 +221,31 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, 
         setSynonyms(synonyms.filter(s => s !== tag));
     };
 
+    const handleAutoSynonyms = async () => {
+        if (!value.trim()) return;
+        setSynonymLoading(true);
+        try {
+            const res = await fetch(`${apiBase}/api/job-fields/ai/suggest-role-synonyms`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ value, existingSynonyms: synonyms }),
+            });
+            if (!res.ok) throw new Error('AI suggestion failed');
+            const data = await res.json();
+            const suggestions: string[] = data.suggestions || [];
+            const unique = suggestions.filter((s) => !synonyms.includes(s));
+            if (unique.length === 0) {
+                alert('No new synonyms were suggested.');
+                return;
+            }
+            setSynonyms(prev => [...prev, ...unique]);
+        } catch (err: any) {
+            alert(err.message || 'AI suggestion failed');
+        } finally {
+            setSynonymLoading(false);
+        }
+    };
+
     const titles = {
         category: { add: 'הוספת קטגוריה', edit: 'עריכת קטגוריה' },
         cluster: { add: 'הוספת קלאסטר', edit: 'עריכת קלאסטר' },
@@ -252,7 +279,7 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, 
                             <label className="block text-sm font-semibold text-text-muted mb-2">
                                 טייטלים ספציפיים לחיפוש (מילים נרדפות)
                             </label>
-                            <div className="flex gap-2 mb-3">
+                            <div className="flex gap-2 mb-3 items-center">
                                 <input 
                                     type="text" 
                                     value={synonymInput}
@@ -267,6 +294,14 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, 
                                     className="bg-bg-subtle border border-border-default hover:bg-bg-hover text-text-default px-3 py-2 rounded-lg text-sm font-semibold"
                                 >
                                     הוסף
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleAutoSynonyms}
+                                    className="bg-primary-50 border border-primary-200 text-primary-700 hover:bg-primary-100 px-3 py-2 rounded-lg text-sm font-semibold"
+                                    disabled={synonymLoading}
+                                >
+                                    {synonymLoading ? 'מייצר...' : 'השלמה אוטומטית עם AI'}
                                 </button>
                             </div>
                             <div className="flex flex-wrap gap-2 min-h-[40px] p-3 bg-bg-subtle/30 rounded-xl border border-border-default/50">
@@ -335,6 +370,7 @@ const AdminJobFieldsView: React.FC = () => {
     const [isRoleSuggestModalOpen, setIsRoleSuggestModalOpen] = useState(false);
     const [aiError, setAiError] = useState<string | null>(null);
     const [isChatOpen, setIsChatOpen] = useState(false);
+    const [aiSynonymTarget, setAiSynonymTarget] = useState<{ value: string; synonyms: string[] } | null>(null);
 
     // --- LOAD DATA ---
     useEffect(() => {
@@ -824,6 +860,7 @@ const AdminJobFieldsView: React.FC = () => {
                 mode={modalState.mode}
                 initialValue={modalState.initialValue}
                 initialSynonyms={modalState.initialSynonyms}
+             apiBase={apiBase}
              />
 
             {/* Cluster suggestions modal */}

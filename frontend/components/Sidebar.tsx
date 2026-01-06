@@ -87,6 +87,15 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         navigate('/p/gidon-shapira');
     };
 
+    const handleLogout = () => {
+        try {
+            localStorage.clear();
+        } catch (e) {
+            console.error('Failed to clear localStorage', e);
+        }
+        navigate('/login');
+    };
+
     // On Desktop: isSidebarOpen determines if it's Expanded (true) or Collapsed/Mini (false)
     // On Mobile: isSidebarOpen determines if the drawer is Visible (true) or Hidden (false)
     const isOpen = isSidebarOpen; 
@@ -533,7 +542,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                              </div>
                         </button>
                         <div className={`mt-2 flex justify-center transition-all duration-300 ${isOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>
-                             <button className="text-xs text-text-subtle hover:text-red-500 flex items-center gap-1 p-1">
+                            <button onClick={handleLogout} className="text-xs text-text-subtle hover:text-red-500 flex items-center gap-1 p-1">
                                  <ArrowTopRightOnSquareIcon className="w-3 h-3"/>
                                  <span>התנתק</span>
                              </button>

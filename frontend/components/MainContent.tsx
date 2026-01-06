@@ -57,6 +57,7 @@ const Tag: React.FC<{ children: React.ReactNode; onRemove: () => void; }> = ({ c
 interface MainContentProps {
     formData: any;
     onFormChange: (updatedData: any) => void;
+    onImmediateSave?: (patch: any) => void;
     onInternalTagsChange?: (tags: string[]) => void;
     viewMode?: 'recruiter' | 'candidate';
 }
@@ -69,7 +70,7 @@ const getLevelText = (level: number): string => {
     return "חלש";
 };
 
-const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInternalTagsChange, viewMode = 'recruiter' }) => {
+const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImmediateSave, onInternalTagsChange, viewMode = 'recruiter' }) => {
     const { t } = useLanguage();
     const summaryId = useId();
     const recruiterNotesId = useId();
@@ -155,33 +156,48 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
     
     // --- Soft Skills Handlers ---
     const handleAddSoftSkill = () => {
-        if (newSoftSkill.trim() && !formData.softSkills.includes(newSoftSkill.trim())) {
-            onFormChange({ ...formData, softSkills: [...formData.softSkills, newSoftSkill.trim()] });
+        const incoming = newSoftSkill.trim();
+        const current = Array.isArray(formData.softSkills) ? formData.softSkills : [];
+        if (incoming && !current.includes(incoming)) {
+            const updated = [...current, incoming];
+            onFormChange({ ...formData, softSkills: updated, skills: { ...(formData.skills || {}), soft: updated, technical: formData.skills?.technical || formData.techSkills || [] } });
+            onImmediateSave?.({ softSkills: updated, skills: { soft: updated, technical: formData.skills?.technical || formData.techSkills || [] } });
             setNewSoftSkill('');
         }
     };
     const handleRemoveSoftSkill = (skillToRemove: string) => {
-        onFormChange({ ...formData, softSkills: formData.softSkills.filter((skill: string) => skill !== skillToRemove) });
+        const current = Array.isArray(formData.softSkills) ? formData.softSkills : [];
+        const updated = current.filter((skill: string) => skill !== skillToRemove);
+        onFormChange({ ...formData, softSkills: updated, skills: { ...(formData.skills || {}), soft: updated, technical: formData.skills?.technical || formData.techSkills || [] } });
+        onImmediateSave?.({ softSkills: updated, skills: { soft: updated, technical: formData.skills?.technical || formData.techSkills || [] } });
     };
 
     // --- Tech Skills Handlers ---
     const handleTechSkillLevelChange = (id: number, newLevel: number) => {
-        const updatedSkills = formData.techSkills.map((skill: any) => 
+        const current = Array.isArray(formData.techSkills) ? formData.techSkills : [];
+        const updatedSkills = current.map((skill: any) => 
             skill.id === id ? { ...skill, level: newLevel, levelText: getLevelText(newLevel) } : skill
         );
-        onFormChange({ ...formData, techSkills: updatedSkills });
+        onFormChange({ ...formData, techSkills: updatedSkills, skills: { ...(formData.skills || {}), technical: updatedSkills, soft: formData.skills?.soft || formData.softSkills || [] } });
+        onImmediateSave?.({ techSkills: updatedSkills, skills: { technical: updatedSkills, soft: formData.skills?.soft || formData.softSkills || [] } });
     };
 
     const handleAddTechSkill = () => {
-        if (newTechSkill.name.trim()) {
-            const newSkill = { ...newTechSkill, id: Date.now(), levelText: getLevelText(newTechSkill.level) };
-            onFormChange({ ...formData, techSkills: [...formData.techSkills, newSkill] });
-            setNewTechSkill({ name: '', level: 50 });
-        }
+        const name = newTechSkill.name.trim();
+        const current = Array.isArray(formData.techSkills) ? formData.techSkills : [];
+        if (!name) return;
+        const newSkill = { ...newTechSkill, name, id: Date.now(), levelText: getLevelText(newTechSkill.level) };
+        const updated = [...current, newSkill];
+        onFormChange({ ...formData, techSkills: updated, skills: { ...(formData.skills || {}), technical: updated, soft: formData.skills?.soft || formData.softSkills || [] } });
+        onImmediateSave?.({ techSkills: updated, skills: { technical: updated, soft: formData.skills?.soft || formData.softSkills || [] } });
+        setNewTechSkill({ name: '', level: 50 });
     };
     
     const handleRemoveTechSkill = (id: number) => {
-        onFormChange({ ...formData, techSkills: formData.techSkills.filter((skill: any) => skill.id !== id) });
+        const current = Array.isArray(formData.techSkills) ? formData.techSkills : [];
+        const updated = current.filter((skill: any) => skill.id !== id);
+        onFormChange({ ...formData, techSkills: updated, skills: { ...(formData.skills || {}), technical: updated, soft: formData.skills?.soft || formData.softSkills || [] } });
+        onImmediateSave?.({ techSkills: updated, skills: { technical: updated, soft: formData.skills?.soft || formData.softSkills || [] } });
     };
     
     const handleWorkExperienceChange = (newExperience: any) => {
@@ -257,7 +273,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
             <div id="work-experience">
                 <AccordionSection title={t('section.work_experience')} icon={<BriefcaseIcon className="w-5 h-5"/>} defaultOpen>
                     <WorkExperienceSection 
-                        experience={formData.workExperience || []}
+                        experience={Array.isArray(formData.workExperience) ? formData.workExperience : []}
                         onExperienceChange={handleWorkExperienceChange}
                     />
                 </AccordionSection>
@@ -268,7 +284,13 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onInt
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <FormSelect label={t('form.employment_type')} name="employmentType" value={formData.employmentType} onChange={handleInputChange}><option>שכיר</option></FormSelect>
                         <FormSelect label={t('form.job_scope')} name="jobScope" value={formData.jobScope} onChange={handleInputChange}><option>מלאה</option></FormSelect>
-                        <FormSelect label={t('form.availability')} name="availability" value={formData.availability} onChange={handleInputChange}><option>מיידי (עד חודש)</option></FormSelect>
+                        <FormSelect label={t('form.availability')} name="availability" value={formData.availability} onChange={handleInputChange}>
+                        <option >בחר</option>
+                            <option value="🟢 מיידי (זמין לעבודה מיד).">🟢 מיידי (זמין לעבודה מיד).</option>
+                            <option value="🟡 חודש הודעה (עובד, מחפש אקטיבית).">🟡 חודש הודעה (עובד, מחפש אקטיבית).</option>
+                            <option value="🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).">🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).</option>
+                            <option value="🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).">🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).</option>
+                        </FormSelect>
                         <FormSelect label={t('form.physical_work')} name="physicalWork" value={formData.physicalWork} onChange={handleInputChange}><option>כן/לא/פיזית מתונה</option></FormSelect>
                     </div>
                 </AccordionSection>

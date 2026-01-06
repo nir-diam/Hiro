@@ -11,8 +11,6 @@ import {
 } from './Icons';
 import MainContent from './MainContent'; 
 import AccordionSection from './AccordionSection';
-// Note: We are switching to 'publicJobsData' for the jobs view to support the request for "heavy text"
-import { publicJobsData, PublicJob } from '../data/publicJobsData'; 
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { JobAlertModalConfig } from './CreateJobAlertModal';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -56,66 +54,6 @@ const upsertWorkExperienceFunctionDeclaration: FunctionDeclaration = {
     required: ['title', 'company'],
   },
 };
-
-// --- MOCK DATA FOR PROFILES ---
-const marketingProfile = {
-    id: 1,
-    profileName: "ניהול שיווק (ראשי)",
-    fullName: "גדעון שפירא",
-    title: "מנהל שיווק דיגיטלי",
-    location: "תל אביב",
-    professionalSummary: 'מנהל שיווק דיגיטלי מנוסה עם למעלה מ-5 שנות ניסיון בהובלת אסטרטגיות צמיחה וקמפיינים מרובי ערוצים. בעל מומחיות עמוקה ב-PPC, SEO, ואנליטיקה.',
-    phone: "054-1234567",
-    email: "gidon.shap@email.com",
-    profilePicture: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80',
-    tags: ['ניהול', 'שיווק דיגיטלי', 'PPC', 'אסטרטגיה', 'ניהול צוות'],
-    desiredRoles: [
-        { value: 'מנהל שיווק', owner: 'candidate' as const },
-        { value: 'מנהל קמפיינים', owner: 'candidate' as const },
-    ],
-    workExperience: [
-        { id: 1, title: 'מנהל שיווק', company: 'בזק', companyField: 'תקשורת', startDate: '2020-01', endDate: '2023-05', description: 'ניהול צוות של 5 עובדים, אחריות על קמפיינים דיגיטליים ותקציב שנתי של 2 מיליון ש"ח. הובלת מהלכי מיתוג מחדש והטמעת מערכות אוטומציה.' },
-        { id: 2, title: 'מנהל קמפיינים PPC', company: 'Wix', companyField: 'הייטק', startDate: '2018-06', endDate: '2019-12', description: 'ניהול קמפיינים בגוגל ופייסבוק בשווקים בינלאומיים. אופטימיזציה יומיומית והפקת דוחות ביצועים להנהלה.' },
-    ],
-    education: [{ id: 1, value: 'תואר ראשון בתקשורת, אוניברסיטת תל אביב (2014-2017)' }],
-    languages: [
-        { id: 1, name: 'עברית', level: 100, levelText: 'שפת אם' },
-        { id: 2, name: 'אנגלית', level: 90, levelText: 'רמה גבוהה מאוד' }
-    ],
-    softSkills: ['עבודת צוות', 'יצירתיות', 'ניהול זמן'],
-    techSkills: [
-        { id: 1, name: 'Google Ads', level: 95, levelText: 'מומחה' },
-        { id: 2, name: 'Google Analytics', level: 90, levelText: 'מומחה' },
-        { id: 3, name: 'HubSpot', level: 80, levelText: 'מתקדם' }
-    ],
-    salaryMin: 18000, salaryMax: 20000,
-    status: "מחפש עבודה", address: "תל אביב", idNumber: "123456789", maritalStatus: "רווק/ה", gender: "זכר", drivingLicense: "יש", mobility: "נייד/ת", birthYear: "1989", birthMonth: "יוני", birthDay: "15", age: "35", employmentType: 'מלאה', jobScope: 'מלאה', availability: 'מיידי', physicalWork: 'לא רלוונטי', recruiterNotes: '', candidateNotes: ''
-};
-
-const productProfile = {
-    ...marketingProfile,
-    id: 2,
-    profileName: "ניהול מוצר (משני)",
-    title: "מנהל מוצר (PM)",
-    professionalSummary: 'מנהל מוצר עם אוריינטציה עסקית וטכנולוגית. ניסיון רב באפיון מערכות, עבודה מול צוותי פיתוח וניהול מפות דרכים (Roadmap).',
-    tags: ['ניהול מוצר', 'אפיון', 'Jira', 'Agile', 'Scrum', 'UX/UI'],
-    desiredRoles: [{ value: 'מנהל מוצר', owner: 'candidate' as const }],
-    workExperience: [
-        { id: 2, title: 'Product Owner', company: 'StartUp Inc', companyField: 'הייטק', startDate: '2018-01', endDate: '2019-12', description: 'אחריות על ה-Backlog, כתיבת User Stories ועבודה צמודה עם הפיתוח.' },
-    ],
-};
-
-// Mock Screening Questionnaires
-const mockScreeningTask = {
-    jobTitle: "מנהל/ת שיווק דיגיטלי - בזק",
-    questions: [
-        { id: 1, text: "מה הניסיון שלך בניהול תקציבי פרסום מעל 100K בחודש?", type: 'text', isMandatory: true },
-        { id: 2, text: "האם יש לך ניסיון בניהול עובדים?", type: 'yes_no', isMandatory: true },
-        { id: 3, text: "ספר לנו בקצרה מדוע אתה מתאים לתפקיד הזה.", type: 'video', isMandatory: true, timeLimit: 60, introText: 'נשמח להכיר אותך מעבר לקורות החיים! יש לך דקה לספר על עצמך.' },
-    ] as ScreeningQuestion[]
-};
-
-const availableProfiles = [marketingProfile, productProfile];
 
 const initialData = {
     id: 0,
@@ -170,6 +108,15 @@ const CandidateSidebar: React.FC<{
         { id: 'favorites', label: `משרות שאהבתי (${favoriteCount})`, icon: BookmarkIcon },
         { id: 'agent', label: 'סוכן חכם', icon: SparklesIcon },
     ];
+
+    const handleLogout = () => {
+        try {
+            localStorage.clear();
+        } catch (e) {
+            console.error('Failed clearing localStorage', e);
+        }
+        window.location.href = '/login';
+    };
 
     return (
         <>
@@ -299,7 +246,10 @@ const CandidateSidebar: React.FC<{
 
                 {/* Footer Actions */}
                 <div className="p-4 border-t border-border-default flex-shrink-0">
-                    <button className="w-full flex items-center gap-3 p-3 text-text-muted hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors text-sm font-medium">
+                    <button
+                        onClick={handleLogout}
+                        className="w-full flex items-center gap-3 p-3 text-text-muted hover:text-red-500 hover:bg-red-50 rounded-xl transition-colors text-sm font-medium"
+                    >
                         <ArrowLeftIcon className="w-5 h-5 transform rotate-180" />
                         התנתקות
                     </button>
@@ -329,7 +279,7 @@ const ProfileLoadingSkeleton = () => (
     </div>
 );
 
-const JobCard: React.FC<{ job: PublicJob; onApply: () => void; isFavorite: boolean; toggleFavorite: () => void }> = ({ job, onApply, isFavorite, toggleFavorite }) => {
+const JobCard: React.FC<{ job: any; onApply: () => void; isFavorite: boolean; toggleFavorite: () => void }> = ({ job, onApply, isFavorite, toggleFavorite }) => {
     const [isExpanded, setIsExpanded] = useState(false);
 
     return (
@@ -625,21 +575,25 @@ const ResumePreviewModal: React.FC<{ isOpen: boolean; onClose: () => void; data:
 // 4. Main View Component
 const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAlertModalConfig) => void }> = ({ openJobAlertModal }) => {
     const locationState = useLocation();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     
     // State
-    const [profiles, setProfiles] = useState(availableProfiles);
-    const [activeProfileId, setActiveProfileId] = useState(1);
+    const [profiles, setProfiles] = useState([initialData]);
+    const [activeProfileId, setActiveProfileId] = useState(initialData.id);
+    const [candidateId, setCandidateId] = useState<string | null>(null);
     const [activeView, setActiveView] = useState('profile');
     const [isSwitching, setIsSwitching] = useState(false);
     const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState(false);
     const [isResumePreviewOpen, setIsResumePreviewOpen] = useState(false);
+    const avatarInputRef = useRef<HTMLInputElement>(null);
+    const resumeInputRef = useRef<HTMLInputElement>(null);
+    const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
     
     // --- State for Pending Tasks (Screening) ---
     const [isScreeningWizardOpen, setIsScreeningWizardOpen] = useState(false);
-    // In real app, pending tasks come from DB.
-    const [pendingTasks, setPendingTasks] = useState([
-        { id: 1, type: 'screening', jobTitle: 'מנהל/ת שיווק דיגיטלי - בזק', data: mockScreeningTask },
-    ]);
+    const [pendingTasks, setPendingTasks] = useState<any[]>([]);
 
     // Derived Active Profile
     const activeProfile = useMemo(() => 
@@ -677,35 +631,296 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     };
 
     // Filtered Jobs Logic
-    const filteredJobs = useMemo(() => {
-        return publicJobsData.filter(job => {
-            const matchesSearch = !jobSearchTerm || 
-                job.title.toLowerCase().includes(jobSearchTerm.toLowerCase()) || 
-                job.company.toLowerCase().includes(jobSearchTerm.toLowerCase()) ||
-                job.description.toLowerCase().includes(jobSearchTerm.toLowerCase());
-            
-            const matchesLocation = !jobFilters.location || job.location.includes(jobFilters.location);
-            const matchesType = !jobFilters.type || job.type === jobFilters.type;
-            
-            // Simple date filtering (mock logic)
-            let matchesDate = true;
-            if (jobFilters.date === 'היום') matchesDate = job.date.includes('שעות') || job.date === 'היום';
-            if (jobFilters.date === 'השבוע') matchesDate = !job.date.includes('חודש');
-
-            return matchesSearch && matchesLocation && matchesType && matchesDate;
-        });
-    }, [jobSearchTerm, jobFilters]);
+    const filteredJobs = useMemo(() => [], [jobSearchTerm, jobFilters]);
 
     // Favorite Jobs Logic
-    const favoriteJobsList = useMemo(() => {
-        return publicJobsData.filter(job => favoriteJobIds.has(job.id));
-    }, [favoriteJobIds]);
+    const favoriteJobsList = useMemo(() => [], [favoriteJobIds]);
+
+    const authHeaders = () => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    };
+
+    const ensureArray = (val: any) => {
+        if (Array.isArray(val)) return val;
+        if (typeof val === 'string') {
+            try {
+                const parsed = JSON.parse(val);
+                if (Array.isArray(parsed)) return parsed;
+                return [val];
+            } catch {
+                return [val];
+            }
+        }
+        return [];
+    };
+
+    const normalizeCandidateData = (data: any) => {
+        const copy = { ...data };
+        copy.tags = ensureArray(copy.tags).map((t: any) => (typeof t === 'string' ? t : String(t?.value || t || ''))).filter(Boolean);
+        copy.desiredRoles = ensureArray(copy.desiredRoles)
+            .map((r: any) => {
+                if (typeof r === 'string') return { value: r };
+                if (r && typeof r === 'object' && r.value) return r;
+                return null;
+            })
+            .filter(Boolean);
+        copy.workExperience = Array.isArray(copy.workExperience) ? copy.workExperience : [];
+        const soft = ensureArray(copy.softSkills || copy.skills?.soft);
+
+        const deriveLevelText = (level: number) => {
+            if (level >= 80) return 'מומחה';
+            if (level >= 60) return 'מתקדם';
+            if (level >= 40) return 'טוב';
+            return 'בסיסי';
+        };
+
+        const normalizeTechSkill = (item: any) => {
+            if (!item) return null;
+            if (typeof item === 'string') {
+                const level = 50;
+                return {
+                    id: Date.now() + Math.random(),
+                    name: item,
+                    level,
+                    levelText: deriveLevelText(level),
+                };
+            }
+            if (typeof item === 'object') {
+                if (item.name) {
+                    const level = typeof item.level === 'number' ? item.level : 50;
+                    return {
+                        ...item,
+                        level,
+                        levelText: item.levelText || deriveLevelText(level),
+                    };
+                }
+                const charKeys = Object.keys(item).filter(k => !isNaN(Number(k)));
+                if (charKeys.length) {
+                    const name = charKeys.sort((a, b) => Number(a) - Number(b)).map(k => item[k]).join('').trim();
+                    const level = typeof item.level === 'number' ? item.level : 50;
+                    return {
+                        id: Date.now() + Math.random(),
+                        name: name || 'מיומנות',
+                        level,
+                        levelText: item.levelText || deriveLevelText(level),
+                    };
+                }
+            }
+            return null;
+        };
+
+        const rawTech = ensureArray(copy.techSkills || copy.skills?.technical);
+        const tech = rawTech
+            .map(normalizeTechSkill)
+            .filter(Boolean);
+
+        copy.softSkills = soft;
+        copy.techSkills = tech;
+        copy.skills = { soft, technical: tech };
+        copy.candidateNotes = copy.candidateNotes ?? copy.internalNotes ?? '';
+        copy.languages = ensureArray(copy.languages);
+        copy.preferences = ensureArray(copy.preferences);
+        copy.interests = ensureArray(copy.interests);
+        copy.candidateNotes = copy.candidateNotes || '';
+        if (copy.salaryMin !== undefined && copy.salaryMin !== null) copy.salaryMin = Number(copy.salaryMin) || 0;
+        if (copy.salaryMax !== undefined && copy.salaryMax !== null) copy.salaryMax = Number(copy.salaryMax) || 0;
+        return copy;
+    };
+
+    const sanitizePayload = (data: any) => {
+        const copy = normalizeCandidateData(data);
+        delete copy.id;
+        delete copy.createdAt;
+        delete copy.updatedAt;
+        copy.skills = {
+            soft: copy.softSkills,
+            technical: copy.techSkills,
+        };
+        copy.workExperience = Array.isArray(copy.workExperience) ? copy.workExperience : [];
+
+        return copy;
+    };
+
+    const getUser = () => {
+        try {
+            const raw = localStorage.getItem('herodata') || localStorage.getItem('herouser') || localStorage.getItem('user');
+            if (!raw) return null;
+            return JSON.parse(raw);
+        } catch (e) {
+            return null;
+        }
+    };
+
+    const loadCandidate = async () => {
+        const user = getUser();
+        if (!user || (!user.id && !user.userId) || !apiBase) return;
+        const idFromUser = user.userId || user.id;
+        setIsSwitching(true);
+        try {
+            const res = await fetch(`${apiBase}/api/candidates/by-user/${idFromUser}`, {
+                headers: { ...authHeaders() },
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setCandidateId(data.id);
+                const normalized = normalizeCandidateData(data);
+                setProfiles([normalized]);
+                setActiveProfileId(data.id);
+                setFormData(normalized);
+                return;
+            }
+            if (res.status === 404) {
+                const payload = {
+                    ...initialData,
+                    fullName: user.email?.split('@')[0] || '',
+                    email: user.email || '',
+                    profileName: initialData.profileName,
+                    userId: idFromUser,
+                };
+                const createRes = await fetch(`${apiBase}/api/candidates`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify(payload),
+                });
+                if (createRes.ok) {
+                    const created = await createRes.json();
+                    setCandidateId(created.id);
+                    const normalizedCreated = normalizeCandidateData(created);
+                    setProfiles([normalizedCreated]);
+                    setActiveProfileId(created.id);
+                    setFormData(normalizedCreated);
+                }
+            }
+        } catch (err) {
+            console.error('Failed to load candidate', err);
+        } finally {
+            setIsSwitching(false);
+        }
+    };
+
+    const ensureCandidateRecord = async (payloadOverride?: any) => {
+        if (!apiBase) return null;
+        if (candidateId) return candidateId;
+        try {
+            const payload = sanitizePayload(payloadOverride || formData);
+            const user = getUser();
+            if (user && (user.userId || user.id)) {
+                payload.userId = user.userId || user.id;
+            }
+            if (!payload.fullName) payload.fullName = 'מועמד חדש';
+            const res = await fetch(`${apiBase}/api/candidates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error('Failed to create candidate');
+            const created = await res.json();
+            setCandidateId(created.id);
+            setProfiles([created]);
+            setActiveProfileId(created.id);
+            setFormData(created);
+            return created.id;
+        } catch (err) {
+            console.error('Failed to ensure candidate record', err);
+            return null;
+        }
+    };
+
+    // Minimal CRC32 for S3 checksum (browser-side)
+    const crc32base64 = async (file: File) => {
+        const table = new Uint32Array(256).map((_, n) => {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+            return c >>> 0;
+        });
+        const buf = new Uint8Array(await file.arrayBuffer());
+        let crc = 0 ^ -1;
+        for (let i = 0; i < buf.length; i++) {
+            crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff];
+        }
+        crc = (crc ^ -1) >>> 0;
+        const bytes = new Uint8Array(4);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, crc);
+        // AWS expects base64 big-endian
+        return btoa(String.fromCharCode(...bytes));
+    };
+
+    const uploadToS3 = async (file: File, type: 'profile' | 'resume') => {
+        if (!apiBase) {
+            alert('API base URL is not configured');
+            return;
+        }
+        const id = await ensureCandidateRecord();
+        if (!id) return;
+
+        try {
+            const folder = type === 'resume' ? 'resumes' : 'profile-pictures';
+            const presignRes = await fetch(`${apiBase}/api/candidates/${id}/upload-url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ fileName: file.name, contentType: file.type, folder }),
+            });
+            if (!presignRes.ok) throw new Error('Failed to get upload URL');
+            const { uploadUrl, key } = await presignRes.json();
+            const urlObj = new URL(uploadUrl);
+            const checksum = urlObj.searchParams.get('x-amz-checksum-crc32');
+            const checksumAlgo = urlObj.searchParams.get('x-amz-sdk-checksum-algorithm');
+            const headers: Record<string, string> = {};
+            if (file.type) headers['Content-Type'] = file.type;
+            if (checksum && checksumAlgo === 'CRC32') {
+                headers['x-amz-checksum-crc32'] = await crc32base64(file);
+                headers['x-amz-sdk-checksum-algorithm'] = 'CRC32';
+            }
+            const putRes = await fetch(uploadUrl, {
+                method: 'PUT',
+                headers: Object.keys(headers).length ? headers : undefined,
+                body: file,
+            });
+            if (!putRes.ok) throw new Error('Upload to S3 failed');
+
+            const attachRes = await fetch(`${apiBase}/api/candidates/${id}/media`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ key, type }),
+            });
+            if (!attachRes.ok) throw new Error('Failed to attach media');
+            const updated = await attachRes.json();
+            handleUpdateProfileData(updated);
+            setCandidateId(updated.id || id);
+        } catch (err) {
+            console.error(err);
+            alert('העלאה נכשלה, נסה שוב.');
+        }
+    };
+
+    const handleAvatarSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            await uploadToS3(file, 'profile');
+            e.target.value = '';
+        }
+    };
+
+    const handleResumeSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (file) {
+            await uploadToS3(file, 'resume');
+            e.target.value = '';
+        }
+    };
 
 
     // Sync formData when profile changes
     useEffect(() => {
         setFormData(activeProfile);
     }, [activeProfile]);
+
+    useEffect(() => {
+        loadCandidate();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // Handlers
     const handleSwitchProfile = (id: number) => {
@@ -732,12 +947,62 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             };
             setProfiles(prev => [...prev, newProfile]);
             handleSwitchProfile(newId);
+            setCandidateId(null);
         }
     };
 
     const handleUpdateProfileData = (newData: any) => {
-        setFormData((prev: any) => ({ ...prev, ...newData }));
-        setProfiles(prev => prev.map(p => p.id === activeProfileId ? { ...p, ...newData } : p));
+        const merged = { ...formData, ...newData };
+        if (merged.id && !candidateId) {
+            setCandidateId(merged.id);
+            setActiveProfileId(merged.id);
+        }
+        const normalized = normalizeCandidateData(merged);
+        setFormData(normalized);
+        setProfiles(prev => prev.map(p => p.id === activeProfileId ? normalized : p));
+        queueSave(normalized);
+    };
+
+    const saveNow = (patch: any) => {
+        const merged = { ...formData, ...patch };
+        const normalized = normalizeCandidateData(merged);
+        setFormData(normalized);
+        setProfiles(prev => prev.map(p => p.id === activeProfileId ? normalized : p));
+        persistProfile(normalized);
+    };
+
+    const persistProfile = async (data: any) => {
+        if (!apiBase) return;
+        const id = await ensureCandidateRecord(data);
+        if (!id) return;
+        setIsSaving(true);
+        setSaveError(null);
+        try {
+            const payload = sanitizePayload(data);
+            const res = await fetch(`${apiBase}/api/candidates/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error('שמירה נכשלה');
+            const updated = await res.json();
+            const normalizedUpdated = normalizeCandidateData(updated);
+            setFormData(normalizedUpdated);
+            setProfiles(prev => prev.map(p => p.id === id ? normalizedUpdated : p));
+            setCandidateId(updated.id || id);
+        } catch (err: any) {
+            setSaveError(err.message || 'שמירה נכשלה');
+            console.error('Save profile failed', err);
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const queueSave = (data: any) => {
+        if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = setTimeout(() => {
+            persistProfile(data);
+        }, 800);
     };
 
     const handleAddTags = (newTags: string[]) => {
@@ -861,140 +1126,173 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     // --- RENDERERS ---
 
-    const renderHeader = () => (
-        <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6 mb-6">
-            <div className="flex flex-col sm:flex-row items-center gap-6">
-                <div className="relative">
-                    <img src={formData.profilePicture} alt="Profile" className="w-28 h-28 rounded-full object-cover ring-4 ring-bg-subtle"/>
-                    <button className="absolute bottom-0 left-0 bg-bg-card p-2 rounded-full shadow-md border border-border-default hover:bg-bg-hover">
-                        <ArrowUpTrayIcon className="w-5 h-5 text-text-muted" />
-                    </button>
-                </div>
-                <div className="flex-1 text-center sm:text-right w-full">
-                    <div className="flex justify-between items-start mb-2">
-                        <EditableField 
-                            value={formData.fullName} 
-                            onSave={(val) => handleUpdateProfileData({ fullName: val })}
-                            className="text-3xl font-extrabold text-text-default inline-block"
-                            placeholder="שם מלא"
-                        />
-                        <button 
-                            onClick={() => setIsResumePreviewOpen(true)}
-                            className="text-text-muted hover:text-primary-600 p-2 rounded-full hover:bg-bg-subtle transition-colors flex items-center gap-2 border border-transparent hover:border-border-default"
-                            title="הורד קורות חיים"
+    const getAvailabilityMeta = (availability?: string | null) => {
+        switch (availability) {
+            case "🟢 מיידי (זמין לעבודה מיד).":
+                return { badgeClass: "bg-green-50 text-green-700", display: availability };
+            case "🟡 חודש הודעה (עובד, מחפש אקטיבית).":
+                return { badgeClass: "bg-yellow-50 text-yellow-700", display: availability };
+            case "🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).":
+                return { badgeClass: "bg-orange-50 text-orange-700", display: availability };
+            case "🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).":
+                return { badgeClass: "bg-red-50 text-red-700", display: availability };
+            default:
+                return null;
+        }
+    };
+
+    const renderHeader = () => {
+        const availabilityMeta = getAvailabilityMeta(formData.availability);
+        return (
+            <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6 mb-6">
+                <div className="flex flex-col sm:flex-row items-center gap-6">
+                    <div className="relative">
+                        <img src={formData.profilePicture} alt="Profile" className="w-28 h-28 rounded-full object-cover ring-4 ring-bg-subtle" />
+                        <button
+                            className="absolute bottom-0 left-0 bg-bg-card p-2 rounded-full shadow-md border border-border-default hover:bg-bg-hover"
+                            onClick={() => avatarInputRef.current?.click()}
                         >
-                            <ArrowDownTrayIcon className="w-5 h-5" />
-                            <span className="text-xs font-semibold hidden sm:inline">הורד קו"ח ({activeProfile.profileName})</span>
+                            <ArrowUpTrayIcon className="w-5 h-5 text-text-muted" />
                         </button>
                     </div>
-
-                    <div className="flex flex-col sm:flex-row items-center sm:items-start gap-2 mb-3 text-lg text-text-muted">
-                        <EditableField 
-                            value={formData.title} 
-                            onSave={(val) => handleUpdateProfileData({ title: val })}
-                            icon={<BriefcaseIcon className="w-5 h-5"/>}
-                            placeholder="כותרת מקצועית"
-                            className="font-medium"
-                        />
-                        <span className="hidden sm:inline text-text-subtle">•</span>
-                        <EditableField 
-                            value={formData.location} 
-                            onSave={(val) => handleUpdateProfileData({ location: val })}
-                            icon={<MapPinIcon className="w-5 h-5"/>}
-                            placeholder="עיר מגורים"
-                        />
-                    </div>
-                    
-                    <div className="mb-4">
-                        <EditableField 
-                            value={formData.professionalSummary} 
-                            onSave={(val) => handleUpdateProfileData({ professionalSummary: val })}
-                            multiline
-                            truncate={true}
-                            placeholder="כתוב תקציר מקצועי קצר..."
-                            className="text-sm text-text-muted leading-relaxed"
-                        />
-                    </div>
-
-                    {/* RESTORED: Tags */}
-                    <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-4 mb-3">
-                        {formData.tags.map((tag: string) => (
-                            <span key={tag} className="flex items-center bg-blue-50 text-blue-700 border border-blue-100 text-xs font-medium px-2 py-1 rounded-full">
-                                {tag}
-                                <button onClick={() => handleRemoveTag(tag)} className="mr-1 text-blue-500 hover:text-blue-900">
-                                    <XMarkIcon className="w-3 h-3"/>
-                                </button>
-                            </span>
-                        ))}
-                        <button 
-                            onClick={() => setIsTagSelectorOpen(true)}
-                            className="flex items-center gap-1 text-xs font-bold text-primary-600 hover:bg-primary-50 px-2 py-1 rounded-full transition-colors"
-                        >
-                            <PlusIcon className="w-3 h-3"/>
-                            הוסף תגית
-                        </button>
-                    </div>
-
-                    {/* RESTORED: Desired Roles */}
-                    <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 mt-2">
-                        <button 
-                            onClick={() => setIsJobFieldSelectorOpen(true)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-primary-50 text-primary-700 text-xs font-bold rounded-full hover:bg-primary-100 transition-colors"
-                        >
-                            <PlusIcon className="w-4 h-4"/> 
-                            <span>הוסף תפקיד</span>
-                        </button>
-                        
-                        {formData.desiredRoles.map((role: any, idx: number) => (
-                            <span key={idx} className="flex items-center gap-1 bg-purple-50 text-purple-700 border border-purple-200 px-3 py-1.5 rounded-full text-xs font-medium">
-                                {role.value}
-                                <button onClick={() => handleRemoveRole(role.value)} className="hover:text-purple-900 rounded-full">
-                                    <XMarkIcon className="w-3 h-3"/>
-                                </button>
-                            </span>
-                        ))}
-                    </div>
-
-                     {/* RESTORED: Join Pool Toggle */}
-                     <div className="mt-6 bg-gradient-to-r from-bg-subtle to-white border border-border-default rounded-xl p-3 flex items-center justify-between shadow-sm">
-                        <div className="flex items-center gap-3">
-                            <div className="bg-white p-2 rounded-full shadow-sm text-primary-600">
-                                <SparklesIcon className="w-5 h-5" />
+                    <div className="flex-1 text-center sm:text-right w-full">
+                        <div className="flex justify-between items-start mb-2">
+                            <div className="flex items-center gap-3 flex-wrap">
+                                <EditableField
+                                    value={formData.fullName}
+                                    onSave={(val) => handleUpdateProfileData({ fullName: val })}
+                                    className="text-3xl font-extrabold text-text-default inline-block"
+                                    placeholder="שם מלא"
+                                />
+                                {availabilityMeta && (
+                                    <span
+                                        className={`flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold ${availabilityMeta.badgeClass}`}
+                                    >
+                                        {availabilityMeta.display}
+                                    </span>
+                                )}
                             </div>
-                            <div className="text-right">
-                                <p className="text-sm font-bold text-primary-800">הצטרף למאגר המועמדים שלנו</p>
-                                <p className="text-xs text-text-muted">וקבל הצעות עבודה רלוונטיות ישירות למייל.</p>
+                            <div className="flex items-center gap-3">
+                                {isSaving && <span className="text-xs text-primary-600 font-semibold">שומר...</span>}
+                                {saveError && <span className="text-xs text-red-500 font-semibold">{saveError}</span>}
+                                <button
+                                    onClick={() => setIsResumePreviewOpen(true)}
+                                    className="text-text-muted hover:text-primary-600 p-2 rounded-full hover:bg-bg-subtle transition-colors flex items-center gap-2 border border-transparent hover:border-border-default"
+                                    title="הורד קורות חיים"
+                                >
+                                    <ArrowDownTrayIcon className="w-5 h-5" />
+                                    <span className="text-xs font-semibold hidden sm:inline">הורד קו"ח ({activeProfile.profileName})</span>
+                                </button>
                             </div>
                         </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" checked={joinCandidatePool} onChange={(e) => setJoinCandidatePool(e.target.checked)} className="sr-only peer" />
-                            <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
-                        </label>
-                    </div>
 
+                        <div className="flex flex-col sm:flex-row items-center sm:items-start gap-2 mb-3 text-lg text-text-muted">
+                            <EditableField
+                                value={formData.title}
+                                onSave={(val) => handleUpdateProfileData({ title: val })}
+                                icon={<BriefcaseIcon className="w-5 h-5" />}
+                                placeholder="כותרת מקצועית"
+                                className="font-medium"
+                            />
+                            <span className="hidden sm:inline text-text-subtle">•</span>
+                            <EditableField
+                                value={formData.location}
+                                onSave={(val) => handleUpdateProfileData({ location: val })}
+                                icon={<MapPinIcon className="w-5 h-5" />}
+                                placeholder="עיר מגורים"
+                            />
+                        </div>
+
+                        <div className="mb-4">
+                            <EditableField
+                                value={formData.professionalSummary}
+                                onSave={(val) => handleUpdateProfileData({ professionalSummary: val })}
+                                multiline
+                                truncate={true}
+                                placeholder="כתוב תקציר מקצועי קצר..."
+                                className="text-sm text-text-muted leading-relaxed"
+                            />
+                        </div>
+
+                        {/* RESTORED: Tags */}
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-4 mb-3">
+                            {(Array.isArray(formData.tags) ? formData.tags : []).map((tag: string) => (
+                                <span key={tag} className="flex items-center bg-blue-50 text-blue-700 border border-blue-100 text-xs font-medium px-2 py-1 rounded-full">
+                                    {tag}
+                                    <button onClick={() => handleRemoveTag(tag)} className="mr-1 text-blue-500 hover:text-blue-900">
+                                        <XMarkIcon className="w-3 h-3" />
+                                    </button>
+                                </span>
+                            ))}
+                            <button
+                                onClick={() => setIsTagSelectorOpen(true)}
+                                className="flex items-center gap-1 text-xs font-bold text-primary-600 hover:bg-primary-50 px-2 py-1 rounded-full transition-colors"
+                            >
+                                <PlusIcon className="w-3 h-3" />
+                                הוסף תגית
+                            </button>
+                        </div>
+
+                        {/* RESTORED: Desired Roles */}
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 mt-2">
+                            <button
+                                onClick={() => setIsJobFieldSelectorOpen(true)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-primary-50 text-primary-700 text-xs font-bold rounded-full hover:bg-primary-100 transition-colors"
+                            >
+                                <PlusIcon className="w-4 h-4" />
+                                <span>הוסף תפקיד</span>
+                            </button>
+
+                            {(Array.isArray(formData.desiredRoles) ? formData.desiredRoles : []).map((role: any, idx: number) => (
+                                <span key={idx} className="flex items-center gap-1 bg-purple-50 text-purple-700 border border-purple-200 px-3 py-1.5 rounded-full text-xs font-medium">
+                                    {role.value}
+                                    <button onClick={() => handleRemoveRole(role.value)} className="hover:text-purple-900 rounded-full">
+                                        <XMarkIcon className="w-3 h-3" />
+                                    </button>
+                                </span>
+                            ))}
+                        </div>
+
+                        {/* RESTORED: Join Pool Toggle */}
+                        <div className="mt-6 bg-gradient-to-r from-bg-subtle to-white border border-border-default rounded-xl p-3 flex items-center justify-between shadow-sm">
+                            <div className="flex items-center gap-3">
+                                <div className="bg-white p-2 rounded-full shadow-sm text-primary-600">
+                                    <SparklesIcon className="w-5 h-5" />
+                                </div>
+                                <div className="text-right">
+                                    <p className="text-sm font-bold text-primary-800">הצטרף למאגר המועמדים שלנו</p>
+                                    <p className="text-xs text-text-muted">וקבל הצעות עבודה רלוונטיות ישירות למייל.</p>
+                                </div>
+                            </div>
+                            <label className="relative inline-flex items-center cursor-pointer">
+                                <input type="checkbox" checked={joinCandidatePool} onChange={(e) => setJoinCandidatePool(e.target.checked)} className="sr-only peer" />
+                                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </div>
-        </div>
-    );
-    
+        );
+    };
+
     // --- PENDING TASKS SECTION (New) ---
     const renderPendingTasks = () => {
         if (pendingTasks.length === 0) return null;
-        
+
         return (
             <div className="mb-6 animate-fade-in">
-                 <h3 className="text-lg font-bold text-text-default mb-3 flex items-center gap-2">
+                <h3 className="text-lg font-bold text-text-default mb-3 flex items-center gap-2">
                     <BellIcon className="w-5 h-5 text-red-500" />
                     משימות ממתינות
                 </h3>
                 <div className="space-y-3">
-                    {pendingTasks.map(task => (
+                    {pendingTasks.map((task) => (
                         <div key={task.id} className="bg-red-50 border border-red-100 rounded-xl p-4 flex items-center justify-between shadow-sm hover:shadow-md transition-shadow">
                             <div>
                                 <h4 className="font-bold text-red-800 text-sm">שאלון סינון למשרה</h4>
                                 <p className="text-xs text-red-600 font-medium">{task.jobTitle}</p>
                             </div>
-                            <button 
+                            <button
                                 onClick={() => handleTaskClick(task)}
                                 className="bg-red-600 text-white text-xs font-bold py-2 px-4 rounded-lg hover:bg-red-700 transition flex items-center gap-2"
                             >
@@ -1009,36 +1307,45 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     };
 
     const renderProfileContent = () => (
-         <>
-             {renderHeader()}
-             
-             {/* Pending Tasks Area */}
-             {renderPendingTasks()}
+        <>
+            {renderHeader()}
 
-             {/* CV & Alerts */}
-            <AccordionSection title="קורות חיים" icon={<DocumentTextIcon className="w-5 h-5"/>} defaultOpen>
+            {/* Pending Tasks Area */}
+            {renderPendingTasks()}
+
+            {/* CV & Alerts */}
+            <AccordionSection title="קורות חיים" icon={<DocumentTextIcon className="w-5 h-5" />} defaultOpen>
                 <div className="flex items-center justify-between p-3 bg-bg-subtle rounded-lg">
                     <div className="font-semibold text-text-default">
                         {formData.fullName ? `CV_${formData.fullName.replace(' ', '_')}.pdf` : 'העלה קובץ'}
                     </div>
                     <div className="flex items-center gap-2">
-                        <button className="p-2 text-text-muted hover:text-primary-600"><ArrowDownTrayIcon className="w-5 h-5"/></button>
-                        <label className="p-2 text-text-muted hover:text-primary-600 cursor-pointer">
-                            <ArrowUpTrayIcon className="w-5 h-5"/>
-                            <input type="file" className="hidden"/>
-                        </label>
+                        <button
+                            className={`p-2 ${formData.resumeUrl ? 'text-text-muted hover:text-primary-600' : 'text-text-subtle cursor-not-allowed'}`}
+                            onClick={() => formData.resumeUrl && window.open(formData.resumeUrl, '_blank')}
+                            disabled={!formData.resumeUrl}
+                        >
+                            <ArrowDownTrayIcon className="w-5 h-5" />
+                        </button>
+                        <button
+                            className="p-2 text-text-muted hover:text-primary-600 cursor-pointer"
+                            onClick={() => resumeInputRef.current?.click()}
+                        >
+                            <ArrowUpTrayIcon className="w-5 h-5" />
+                        </button>
                     </div>
                 </div>
             </AccordionSection>
-            
-            <MainContent 
-                formData={formData} 
+
+            <MainContent
+                formData={formData}
                 onFormChange={handleUpdateProfileData}
+                onImmediateSave={(patch) => saveNow(patch)}
                 viewMode="candidate"
             />
-         </>
+        </>
     );
-    
+
     // Favorites View (REAL DATA from State)
     const renderFavorites = () => (
         <div className="space-y-6">
@@ -1048,48 +1355,53 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             </div>
             {favoriteJobsList.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                     {favoriteJobsList.map(job => (
-                         <div key={job.id} className="relative">
-                             <JobCard 
-                                job={job} 
-                                onApply={() => alert(`Applying to ${job.title}...`)} 
+                    {favoriteJobsList.map((job) => (
+                        <div key={job.id} className="relative">
+                            <JobCard
+                                job={job}
+                                onApply={() => alert(`Applying to ${job.title}...`)}
                                 isFavorite={true}
                                 toggleFavorite={() => toggleFavoriteJob(job.id)}
-                             />
-                         </div>
-                     ))}
+                            />
+                        </div>
+                    ))}
                 </div>
             ) : (
                 <div className="text-center py-12 flex flex-col items-center text-text-muted">
                     <BookmarkIcon className="w-16 h-16 opacity-30 mb-4" />
                     <p className="text-lg font-medium">עדיין לא סימנת משרות בלב.</p>
-                    <button onClick={() => setActiveView('jobs')} className="text-primary-600 font-bold mt-2 hover:underline">עבור למשרות רלוונטיות</button>
+                    <button onClick={() => setActiveView('jobs')} className="text-primary-600 font-bold mt-2 hover:underline">
+                        עבור למשרות רלוונטיות
+                    </button>
                 </div>
             )}
         </div>
     );
-    
+
     // Relevant Jobs View (Real Mock Data with Filters)
     const renderJobs = () => (
         <div className="space-y-6">
-            <JobSearchFilters 
-                searchTerm={jobSearchTerm} 
+            <JobSearchFilters
+                searchTerm={jobSearchTerm}
                 setSearchTerm={setJobSearchTerm}
                 filters={jobFilters}
                 setFilters={setJobFilters}
-                onClear={() => { setJobSearchTerm(''); setJobFilters({ location: '', type: '', date: '' }); }}
+                onClear={() => {
+                    setJobSearchTerm('');
+                    setJobFilters({ location: '', type: '', date: '' });
+                }}
                 resultsCount={filteredJobs.length}
             />
 
             <h2 className="text-xl font-bold text-text-default mb-4">
                 {filteredJobs.length > 0 ? 'משרות רלוונטיות עבורך' : 'לא נמצאו משרות מתאימות'}
             </h2>
-            
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {filteredJobs.map(job => (
-                    <JobCard 
-                        key={job.id} 
-                        job={job} 
+                {filteredJobs.map((job) => (
+                    <JobCard
+                        key={job.id}
+                        job={job}
                         onApply={() => alert(`Applying to ${job.title}...`)}
                         isFavorite={favoriteJobIds.has(job.id)}
                         toggleFavorite={() => toggleFavoriteJob(job.id)}
@@ -1106,19 +1418,17 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 <h1 className="text-3xl font-black text-text-default tracking-tight">הצעות ממעסיקים</h1>
                 <p className="text-text-muted text-lg">מעסיקים שצפו בפרופיל שלך ורוצים ליצור איתך קשר.</p>
             </div>
-            
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                 {/* Mock Offer 1 */}
-                 <div className="bg-white border border-border-default rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
+                {/* Mock Offer 1 */}
+                <div className="bg-white border border-border-default rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex items-start justify-between mb-4">
                         <div className="flex items-center gap-3">
-                             <div className="w-12 h-12 bg-primary-50 text-primary-600 rounded-lg flex items-center justify-center font-bold text-lg">
-                                 B
-                             </div>
-                             <div>
-                                 <h3 className="font-bold text-lg text-text-default">מנהל/ת שיווק</h3>
-                                 <p className="text-sm text-text-muted">בזק בינלאומי</p>
-                             </div>
+                            <div className="w-12 h-12 bg-primary-50 text-primary-600 rounded-lg flex items-center justify-center font-bold text-lg">B</div>
+                            <div>
+                                <h3 className="font-bold text-lg text-text-default">מנהל/ת שיווק</h3>
+                                <p className="text-sm text-text-muted">בזק בינלאומי</p>
+                            </div>
                         </div>
                         <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-bold">חדש</span>
                     </div>
@@ -1126,26 +1436,20 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         שלום גדעון, ראינו את הפרופיל שלך במאגר והתרשמנו מאוד מהניסיון ב-PPC. נשמח לבדוק התאמה למשרה פתוחה אצלנו.
                     </p>
                     <div className="flex gap-3">
-                        <button className="flex-1 bg-primary-600 text-white font-bold py-2 rounded-lg hover:bg-primary-700 transition">
-                            אני מעוניין/ת
-                        </button>
-                        <button className="flex-1 bg-bg-subtle text-text-muted font-bold py-2 rounded-lg hover:bg-bg-hover transition">
-                            לא תודה
-                        </button>
+                        <button className="flex-1 bg-primary-600 text-white font-bold py-2 rounded-lg hover:bg-primary-700 transition">אני מעוניין/ת</button>
+                        <button className="flex-1 bg-bg-subtle text-text-muted font-bold py-2 rounded-lg hover:bg-bg-hover transition">לא תודה</button>
                     </div>
-                 </div>
+                </div>
 
-                  {/* Mock Offer 2 */}
-                 <div className="bg-white border border-border-default rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
+                {/* Mock Offer 2 */}
+                <div className="bg-white border border-border-default rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
                     <div className="flex items-start justify-between mb-4">
                         <div className="flex items-center gap-3">
-                             <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-lg flex items-center justify-center font-bold text-lg">
-                                 W
-                             </div>
-                             <div>
-                                 <h3 className="font-bold text-lg text-text-default">PPC Specialist</h3>
-                                 <p className="text-sm text-text-muted">Wix</p>
-                             </div>
+                            <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-lg flex items-center justify-center font-bold text-lg">W</div>
+                            <div>
+                                <h3 className="font-bold text-lg text-text-default">PPC Specialist</h3>
+                                <p className="text-sm text-text-muted">Wix</p>
+                            </div>
                         </div>
                         <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-full font-bold">לפני יומיים</span>
                     </div>
@@ -1153,11 +1457,9 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         היי, אנחנו מגייסים לצוות ה-Growth ומחפשים אנשים עם רקע כמו שלך. האם רלוונטי?
                     </p>
                     <div className="flex gap-3">
-                         <button className="flex-1 bg-green-100 text-green-700 border border-green-200 font-bold py-2 rounded-lg cursor-default">
-                            אישרת התעניינות
-                        </button>
+                        <button className="flex-1 bg-green-100 text-green-700 border border-green-200 font-bold py-2 rounded-lg cursor-default">אישרת התעניינות</button>
                     </div>
-                 </div>
+                </div>
             </div>
         </div>
     );
@@ -1168,9 +1470,11 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
                 .animate-fade-in { animation: fadeIn 0.4s ease-out; }
             `}</style>
+            <input ref={avatarInputRef} type="file" accept="image/*" className="hidden" onChange={handleAvatarSelected} />
+            <input ref={resumeInputRef} type="file" accept=".pdf,.doc,.docx,image/*" className="hidden" onChange={handleResumeSelected} />
 
-            <CandidateSidebar 
-                activeView={activeView} 
+            <CandidateSidebar
+                activeView={activeView}
                 onViewChange={handleViewChange}
                 activeProfile={activeProfile}
                 profiles={profiles}
@@ -1202,42 +1506,42 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                             {activeView === 'profile' && renderProfileContent()}
                             {activeView === 'jobs' && renderJobs()}
                             {activeView === 'favorites' && renderFavorites()}
-                            {activeView === 'applications' && <CandidateApplicationsView />} 
-                            {activeView === 'offers' && renderOffers()} 
+                            {activeView === 'applications' && <CandidateApplicationsView />}
+                            {activeView === 'offers' && renderOffers()}
                         </div>
                     )}
                 </div>
             </div>
 
             {/* Hidden Print Component */}
-            <PrintableResume data={formData} className="hidden print:block" />
-            
-             {/* PDF Preview Modal */}
-            <ResumePreviewModal 
-                isOpen={isResumePreviewOpen} 
-                onClose={() => setIsResumePreviewOpen(false)} 
-                data={formData} 
-            />
-            
+            <PrintableResume data={formData || initialData} className="hidden print:block" />
+
+            {/* PDF Preview Modal */}
+            <ResumePreviewModal isOpen={isResumePreviewOpen} onClose={() => setIsResumePreviewOpen(false)} data={formData} />
+
             {/* Modals for Tags/Roles */}
             <JobFieldSelector onChange={handleSelectRole} isModalOpen={isJobFieldSelectorOpen} setIsModalOpen={setIsJobFieldSelectorOpen} />
             <TagSelectorModal isOpen={isTagSelectorOpen} onClose={() => setIsTagSelectorOpen(false)} onSave={handleAddTags} existingTags={formData.tags} />
-            
-             <HiroAIChat
+
+            <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
+                chatType="candidate-profile"
+                userId={candidateId || formData.id?.toString()}
+                systemPrompt={`You are Hiro, an expert AI Career Coach and Recruitment Assistant dedicated to helping the candidate "${formData.fullName}".  **Your Goal:** Help the candidate create a "winning profile" to maximize their chances of getting hired. You have direct write-access to their profile data via tools.  **Your Personality:** 1.  **Professional & Encouraging:** Be polite, empathetic, but focus on professional growth. 2.  **Proactive:** Don't just wait for commands. If you see missing fields (like a missing summary or skill), suggest adding them. 3.  **Concise:** Keep your responses short, natural, and action-oriented. 4.  **Language:** Always converse in Hebrew (he-IL).  **Operational Guidelines:** 1.  **Context Awareness:** Use the provided profile JSON to understand their current status. 2.  **Tool Usage:**     - Use \\updateCandidateField\\ for simple text fields (Name, Title, Summary, Phone, Email, Location).     - Use \\upsertWorkExperience\\ to add or fix job history.     - INFER information: If the user says "I worked at Wix as a Dev", map it correctly to the tool arguments without asking unnecessary questions. 3.  **Validation:** If the user provides vague info (e.g., "I do marketing"), ask for specifics ("What kind of marketing? Digital? Content?") before saving.  **Current Profile Context:** ${JSON.stringify(formData || {})};`}
+                contextData={formData}
+                onProfileUpdate={(patch) => saveNow(patch)}
             />
 
             {/* Screening Wizard Modal */}
-             {isScreeningWizardOpen && (
-                <CandidateScreeningWizard 
+            {isScreeningWizardOpen && pendingTasks.length > 0 && (
+                <CandidateScreeningWizard
                     jobTitle={pendingTasks[0].data.jobTitle}
                     questions={pendingTasks[0].data.questions}
                     onClose={() => setIsScreeningWizardOpen(false)}
                     onSubmit={handleScreeningSubmit}
                 />
             )}
-            
         </div>
     );
 };
