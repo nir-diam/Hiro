@@ -1,11 +1,11 @@
 
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, Cog6ToothIcon, DocumentTextIcon } from './Icons';
+import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, Cog6ToothIcon, DocumentTextIcon, BriefcaseIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
-interface Coordinator {
+export interface Coordinator {
   id: number;
   username: string;
   phone: string;
@@ -17,18 +17,21 @@ interface Coordinator {
   isActive: boolean;
   isEmailVerified: boolean;
   isDomainVerified: boolean;
+  // Added fields
+  roleType: 'freelance' | 'employee' | 'owner';
+  vatStatus: 'exempt' | 'liable';
 }
 
 // --- MOCK DATA ---
 export const coordinatorsData: Coordinator[] = [
-  { id: 1, username: 'מיכל', phone: '08-9564396', extension: '368', email: 'michal@humand.co.il', senderName: 'מיכל אלקבץ - מימד אנושי', creationDate: '2025-09-14', lastLogin: '2025-10-21', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 2, username: 'תום גורביץ', phone: '08-8599972', extension: '366', email: 'tom@humand.co.il', senderName: 'תום גורביץ מימד אנושי', creationDate: '2025-07-27', lastLogin: '2025-10-26', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 3, username: 'דיאנה', phone: '073-2674729', extension: '370', email: 'diana@humand.co.il', senderName: 'דיאנה ברודסקי', creationDate: '2025-03-31', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 4, username: 'עדי', phone: '08-6315585', extension: 'x36', email: 'adi@humand.co.il', senderName: 'עדי גורן', creationDate: '2024-05-30', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 5, username: 'מיטל', phone: '', extension: '', email: 'meytal@humand.co.il', senderName: 'מיטל בכלר', creationDate: '2024-05-19', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 6, username: 'עדן', phone: '073-3990281', extension: '', email: 'edens@humand.co.il', senderName: 'עדן סיברובר', creationDate: '2023-05-14', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 7, username: 'גלעד', phone: '054-9444674', extension: '', email: 'gilad@humand.co.il', senderName: 'גלעד בן חיים', creationDate: '2022-05-15', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true },
-  { id: 8, username: 'שרית', phone: '08-6694136', extension: '361', email: 'hr@humand.co.il', senderName: 'שרית בן חיים', creationDate: '2022-05-13', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true },
+  { id: 1, username: 'מיכל', phone: '08-9564396', extension: '368', email: 'michal@humand.co.il', senderName: 'מיכל אלקבץ - מימד אנושי', creationDate: '2025-09-14', lastLogin: '2025-10-21', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'employee', vatStatus: 'exempt' },
+  { id: 2, username: 'תום גורביץ', phone: '08-8599972', extension: '366', email: 'tom@humand.co.il', senderName: 'תום גורביץ מימד אנושי', creationDate: '2025-07-27', lastLogin: '2025-10-26', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'employee', vatStatus: 'exempt' },
+  { id: 3, username: 'דיאנה', phone: '073-2674729', extension: '370', email: 'diana@humand.co.il', senderName: 'דיאנה ברודסקי', creationDate: '2025-03-31', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'freelance', vatStatus: 'exempt' },
+  { id: 4, username: 'עדי', phone: '08-6315585', extension: 'x36', email: 'adi@humand.co.il', senderName: 'עדי גורן', creationDate: '2024-05-30', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'freelance', vatStatus: 'liable' },
+  { id: 5, username: 'מיטל', phone: '', extension: '', email: 'meytal@humand.co.il', senderName: 'מיטל בכלר', creationDate: '2024-05-19', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'employee', vatStatus: 'exempt' },
+  { id: 6, username: 'עדן', phone: '073-3990281', extension: '', email: 'edens@humand.co.il', senderName: 'עדן סיברובר', creationDate: '2023-05-14', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'freelance', vatStatus: 'liable' },
+  { id: 7, username: 'גלעד', phone: '054-9444674', extension: '', email: 'gilad@humand.co.il', senderName: 'גלעד בן חיים', creationDate: '2022-05-15', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'owner', vatStatus: 'exempt' },
+  { id: 8, username: 'שרית', phone: '08-6694136', extension: '361', email: 'hr@humand.co.il', senderName: 'שרית בן חיים', creationDate: '2022-05-13', lastLogin: '2025-11-02', isActive: true, isEmailVerified: true, isDomainVerified: true, roleType: 'employee', vatStatus: 'exempt' },
 ];
 
 const CoordinatorsSettingsView: React.FC = () => {
@@ -136,6 +139,7 @@ const CoordinatorsSettingsView: React.FC = () => {
                         <thead className="text-xs text-text-muted uppercase bg-bg-subtle/80 sticky top-0">
                             <tr>
                                 <th className="p-4">{t('coordinators.col_username')}</th>
+                                <th className="p-4">סיווג</th> {/* New Column */}
                                 <th className="p-4">{t('coordinators.col_phone')}</th>
                                 <th className="p-4">{t('coordinators.col_extension')}</th>
                                 <th className="p-4">{t('coordinators.col_email')}</th>
@@ -155,6 +159,16 @@ const CoordinatorsSettingsView: React.FC = () => {
                         {sortedAndFilteredCoordinators.map(user => (
                             <tr key={user.id} onClick={() => navigate(`/settings/coordinators/${user.id}`)} className="hover:bg-bg-hover cursor-pointer group">
                                 <td className="p-4 font-semibold text-primary-700">{user.username}</td>
+                                <td className="p-4">
+                                     {user.roleType === 'freelance' && (
+                                        <div className="flex flex-col items-start gap-1">
+                                            <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold border bg-green-50 text-green-700 border-green-200">פרילנס</span>
+                                            {user.vatStatus === 'liable' && <span className="text-[10px] text-text-muted">+ מע"מ</span>}
+                                        </div>
+                                     )}
+                                     {user.roleType === 'employee' && <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold border bg-blue-50 text-blue-700 border-blue-200">שכירה</span>}
+                                     {user.roleType === 'owner' && <span className="inline-block px-2 py-0.5 rounded text-[10px] font-bold border bg-purple-50 text-purple-700 border-purple-200">בעלים</span>}
+                                </td>
                                 <td className="p-4 text-text-default">{user.phone}</td>
                                 <td className="p-4 text-text-default">{user.extension}</td>
                                 <td className="p-4 text-text-default">{user.email}</td>

@@ -1,11 +1,17 @@
 
 import React, { useMemo } from 'react';
 import { ArrowLeftIcon } from './Icons';
-import { experienceData } from './IndustryExperienceTable';
 
 interface IndustryExperienceSummaryProps {
   onBack: () => void;
   onShowFullDetails: () => void;
+  experiences?: {
+    title?: string;
+    company?: string;
+    industry?: string;
+    startDate?: string;
+    endDate?: string;
+  }[];
 }
 
 interface SummaryData {
@@ -13,16 +19,24 @@ interface SummaryData {
   companies: string[];
 }
 
-const IndustryExperienceSummary: React.FC<IndustryExperienceSummaryProps> = ({ onBack, onShowFullDetails }) => {
+const IndustryExperienceSummary: React.FC<IndustryExperienceSummaryProps> = ({ onBack, onShowFullDetails, experiences = [] }) => {
   const industrySummary = useMemo<{ [key: string]: SummaryData }>(() => {
     const summary: { [key: string]: SummaryData } = {};
     
-    experienceData.forEach(item => {
-      if (!summary[item.industry]) {
-        summary[item.industry] = { totalYears: 0, companies: [] };
+    experiences.forEach(item => {
+      const key = item.industry || 'אחר';
+      if (!summary[key]) {
+        summary[key] = { totalYears: 0, companies: [] };
       }
-      summary[item.industry].totalYears += item.yearsOfExperience;
-      summary[item.industry].companies.push(item.company);
+      // crude year diff
+      const start = item.startDate ? new Date(item.startDate) : null;
+      const end = item.endDate && item.endDate !== 'Present' ? new Date(item.endDate) : new Date();
+      let years = 1;
+      if (start && end && !isNaN(start.getTime()) && !isNaN(end.getTime())) {
+        years = Math.max(1, Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24 * 365)));
+      }
+      summary[key].totalYears += years;
+      if (item.company) summary[key].companies.push(item.company);
     });
 
     const sortedEntries = Object.entries(summary).sort((
@@ -31,7 +45,7 @@ const IndustryExperienceSummary: React.FC<IndustryExperienceSummaryProps> = ({ o
     ) => b.totalYears - a.totalYears);
     
     return Object.fromEntries(sortedEntries);
-  }, []);
+  }, [experiences]);
 
   const totalExperienceYears = useMemo(() => 
     Object.values(industrySummary).reduce((sum: number, item: SummaryData) => sum + item.totalYears, 0),

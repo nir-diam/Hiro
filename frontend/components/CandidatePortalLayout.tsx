@@ -17,7 +17,11 @@ const CandidatePortalLayout: React.FC = () => {
                     <ArrowLeftIcon className="w-4 h-4" />
                 </Link>
             </header>
-            <main className="flex-1 overflow-y-auto bg-bg-default relative">
+            <main
+                className="flex-1 overflow-y-auto bg-bg-default relative"
+                // Prevent browser scroll anchoring from jumping while React re-renders
+                style={{ overflowAnchor: 'none' } as any}
+            >
                 <div className="min-h-full">
                     <Outlet />
                 </div>

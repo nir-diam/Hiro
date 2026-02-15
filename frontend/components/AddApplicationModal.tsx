@@ -2,54 +2,93 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, BriefcaseIcon, BuildingOffice2Icon, LinkIcon, CalendarDaysIcon, DocumentTextIcon } from './Icons';
 
-interface Application {
-    id: number;
+interface JobOption {
+    id: string;
+    title: string;
+    client?: string;
+}
+
+interface ApplicationFormValues {
+    id?: string;
+    jobId?: string;
     company: string;
     role: string;
     link?: string;
     cvFile?: string;
     date: string;
     notes?: string;
+    status?: string;
 }
 
 interface AddApplicationModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSave: (app: Omit<Application, 'id'>) => void;
-    initialData?: Application | null;
+    onSave: (app: ApplicationFormValues) => void;
+    initialData?: ApplicationFormValues | null;
+    jobs?: JobOption[];
+    isSaving?: boolean;
 }
 
-const AddApplicationModal: React.FC<AddApplicationModalProps> = ({ isOpen, onClose, onSave, initialData }) => {
-    const [formData, setFormData] = useState({
+const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
+    isOpen,
+    onClose,
+    onSave,
+    initialData,
+    jobs = [],
+    isSaving = false,
+}) => {
+    const [formData, setFormData] = useState<ApplicationFormValues>({
+        id: undefined,
+        jobId: '',
         company: '',
         role: '',
         link: '',
-        cvFile: 'שי שני ניהול הפצה', // Default mock file name
+        cvFile: 'שי שני ניהול הפצה',
         date: new Date().toISOString().split('T')[0],
-        notes: ''
+        notes: '',
+        status: 'נשלח',
     });
 
     useEffect(() => {
         if (initialData) {
             setFormData({
+                id: initialData.id,
+                jobId: initialData.jobId || '',
                 company: initialData.company,
                 role: initialData.role,
                 link: initialData.link || '',
                 cvFile: initialData.cvFile || 'שי שני ניהול הפצה',
                 date: initialData.date,
-                notes: initialData.notes || ''
+                notes: initialData.notes || '',
+                status: initialData.status || 'נשלח',
             });
         } else {
             setFormData({
+                id: undefined,
+                jobId: '',
                 company: '',
                 role: '',
                 link: '',
                 cvFile: 'שי שני ניהול הפצה',
                 date: new Date().toISOString().split('T')[0],
-                notes: ''
+                notes: '',
+                status: 'נשלח',
             });
         }
     }, [initialData, isOpen]);
+
+    const handleJobChange = (jobId: string) => {
+        const job = jobs.find((j) => j.id === jobId);
+        setFormData((prev) => {
+            const shouldUpdateRole = !prev.role || prev.jobId !== jobId;
+            return {
+                ...prev,
+                jobId,
+                company: job?.client || prev.company,
+                role: shouldUpdateRole && job?.title ? job.title : prev.role,
+            };
+        });
+    };
 
     if (!isOpen) return null;
 
@@ -74,6 +113,39 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({ isOpen, onClo
                 <form onSubmit={handleSubmit} className="p-8 space-y-6">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                         <div className="space-y-2">
+                            <label className="text-sm font-bold text-text-muted">בחר משרה קיימת</label>
+                            <div className="relative">
+                                <BuildingOffice2Icon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+                                <select
+                                    value={formData.jobId || ''}
+                                    onChange={(e) => handleJobChange(e.target.value)}
+                                    className="w-full bg-bg-input border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 outline-none transition-shadow"
+                                >
+                                    <option value="">אין בחירה / הזן ידנית</option>
+                                    {jobs.map((job) => (
+                                        <option key={job.id} value={job.id}>
+                                            {(job.client ? `${job.client} – ` : '') + job.title}
+                                        </option>
+                                    ))}
+                                </select>
+                            </div>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-sm font-bold text-text-muted">שם חברה</label>
+                            <div className="relative">
+                                <BuildingOffice2Icon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+                                <input
+                                    type="text"
+                                    required
+                                    placeholder="שם החברה..."
+                                    value={formData.company}
+                                    onChange={(e) => setFormData({ ...formData, company: e.target.value })}
+                                    className="w-full bg-bg-input border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 outline-none transition-shadow"
+                                />
+                            </div>
+                        </div>
+                        <div className="space-y-2">
                             <label className="text-sm font-bold text-text-muted">תאריך הגשה</label>
                             <div className="relative">
                                 <CalendarDaysIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
@@ -87,31 +159,16 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({ isOpen, onClo
                             </div>
                         </div>
                         
-                         <div className="space-y-2">
-                            <label className="text-sm font-bold text-text-muted">שם חברה</label>
-                            <div className="relative">
-                                <BuildingOffice2Icon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                <input 
-                                    type="text" 
-                                    required
-                                    placeholder="שם החברה..."
-                                    value={formData.company}
-                                    onChange={e => setFormData({...formData, company: e.target.value})}
-                                    className="w-full bg-bg-input border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 outline-none transition-shadow"
-                                />
-                            </div>
-                        </div>
-
-                         <div className="space-y-2">
+                        <div className="space-y-2">
                             <label className="text-sm font-bold text-text-muted">שם המשרה</label>
                             <div className="relative">
                                 <BriefcaseIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                <input 
-                                    type="text" 
+                                <input
+                                    type="text"
                                     required
                                     placeholder="כותרת התפקיד..."
                                     value={formData.role}
-                                    onChange={e => setFormData({...formData, role: e.target.value})}
+                                    onChange={(e) => setFormData({ ...formData, role: e.target.value })}
                                     className="w-full bg-bg-input border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 outline-none transition-shadow"
                                 />
                             </div>
@@ -160,8 +217,12 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({ isOpen, onClo
                         <button type="button" onClick={onClose} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition-colors">
                             ביטול
                         </button>
-                        <button type="submit" className="px-8 py-2.5 rounded-xl font-bold text-white bg-primary-600 hover:bg-primary-700 shadow-lg shadow-primary-500/20 transition-all">
-                            {initialData ? 'שמור שינויים' : 'שמור הגשה'}
+                        <button
+                            type="submit"
+                            disabled={isSaving}
+                            className="px-8 py-2.5 rounded-xl font-bold text-white bg-primary-600 hover:bg-primary-700 shadow-lg shadow-primary-500/20 transition-all disabled:opacity-70 disabled:cursor-wait"
+                        >
+                            {isSaving ? 'שומר...' : initialData ? 'שמור שינויים' : 'שמור הגשה'}
                         </button>
                     </div>
                 </form>
@@ -171,3 +232,4 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({ isOpen, onClo
 };
 
 export default AddApplicationModal;
+export type { ApplicationFormValues };

@@ -8,11 +8,26 @@ import {
     PaperAirplaneIcon
 } from './Icons';
 import type { Candidate } from './CandidatesListView';
+interface CandidateWithExtras extends Candidate {
+  email?: string;
+  salaryMin?: number;
+  salaryMax?: number;
+  age?: string | number;
+  fullName?: string;
+  professionalSummary?: string;
+  summary?: string;
+  workExperience?: any[];
+  experience?: any[];
+  education?: any[];
+  searchText?: string;
+  cvText?: string;
+  resumeUrl?: string;
+}
 import ResumeViewer from './ResumeViewer';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { TagInput } from './TagInput';
+import { useNavigate } from 'react-router-dom';
 
-// --- TYPES for mock data ---
 type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
 interface MockEvent {
   id: number;
@@ -38,33 +53,61 @@ interface MockDocument {
   uploadDate: string;
 }
 
-// --- MOCK DATA ---
-const mockEvents: MockEvent[] = [
-  { id: 1, type: 'ראיון', title: 'ראיון טכני למשרת Fullstack', date: '2025-08-15T10:00:00' },
-  { id: 2, type: 'תזכורת', title: 'Follow-up לגבי המועמד', date: '2025-08-16T09:00:00' },
-  { id: 3, type: 'פגישה', title: 'שיחת היכרות טלפונית', date: '2025-08-12T14:30:00' },
-];
+const apiBase = (import.meta as any).env?.VITE_API_BASE || '';
 
-const mockJobs: MockJob[] = [
-  { id: 1, jobTitle: 'דרוש/ה מחסנאי/ת למפעל מוביל', company: 'תנובה', status: 'הועבר ללקוח', updatedAt: '14/07/2025' },
-  { id: 2, jobTitle: 'מנהל/ת קמפיינים PPC', company: 'בזק', status: 'הוזמן לראיון', updatedAt: '10/07/2025' },
-  { id: 3, jobTitle: 'מנהל/ת מוצר', company: 'Wix', status: 'לא רלוונטי', updatedAt: '01/07/2025' },
-];
+const getAuthHeaders = () => {
+    if (typeof window === 'undefined') return {};
+    const token = localStorage.getItem('token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+};
 
-const mockDocuments: MockDocument[] = [
-  { id: 1, name: 'Gideon_Shapira_CV.pdf', type: 'קורות חיים', uploadDate: '2025-07-28T14:32:00' },
-  { id: 2, name: 'תעודת_תואר_ראשון.pdf', type: 'תעודה', uploadDate: '2025-07-29T09:15:00' },
-  { id: 3, name: 'צילום_תעודת_זהות.jpg', type: 'מסמך זיהוי', uploadDate: '2025-07-29T09:16:00' },
-];
+const crc32base64 = async (file: File) => {
+    const table = new Uint32Array(256).map((_, n) => {
+        let c = n;
+        for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+        return c >>> 0;
+    });
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let crc = 0 ^ -1;
+    for (let i = 0; i < buf.length; i++) {
+        crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff];
+    }
+    crc = (crc ^ -1) >>> 0;
+    const bytes = new Uint8Array(4);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, crc);
+    return btoa(String.fromCharCode(...bytes));
+};
 
-const mockResumeDataForDrawer = {
-    name: 'גדעון שפירא',
-    contact: 'gidon.shap@email.com 054-4910468',
-    summary: `מנהל שיווק דיגיטלי מנוסה עם למעלה מ-5 שנות ניסיון בהובלת אסטרטגיות צמיחה וקמפיינים מרובי ערוצים. בעל מומחיות עמוקה ב-PPC, SEO, ואנליטיקה, עם יכולת מוכחת בניהול תקציבים, אופטימיזציה של משפכי המרה והובלת צוותים להישגים עסקיים משמעותיים.`,
-    experience: [
-      `2020-2023 מנהל שיווק בבזק. ניהול צוות של 5 עובדים, אחריות על קמפיינים דיגיטליים ותקציב שנתי של 2 מיליון ש"ח.`,
-      `2018-2019 מנהל קמפיינים PPC ב-Wix. ניהול קמפיינים בגוגל ופייסבוק, אופטימיזציה והפקת דוחות.`,
-    ]
+const safeArray = (x: any) => Array.isArray(x) ? x : [];
+
+const formatDateRange = (start?: string, end?: string) => {
+  const s = String(start || '').trim();
+  const e = String(end || '').trim();
+  if (!s && !e) return '';
+  if (s && !e) return s;
+  if (!s && e) return e;
+  return `${s} - ${e}`;
+};
+
+const formatWorkExp = (we: any) => {
+  const range = formatDateRange(we?.startDate, we?.endDate);
+  const title = String(we?.title || '').trim();
+  const company = String(we?.company || '').trim();
+  const desc = String(we?.description || '').trim();
+  const head = [range, title, company].filter(Boolean).join(' · ');
+  if (head && desc) return `${head}\n${desc}`;
+  return head || desc || '';
+};
+
+const formatEdu = (edu: any) => {
+  if (typeof edu === 'string') return edu;
+  if (edu && typeof edu === 'object') {
+    if (typeof edu.value === 'string') return edu.value;
+    const parts = [edu.title, edu.institution, edu.year, edu.description].filter(Boolean);
+    return parts.join(' · ');
+  }
+  return '';
 };
 
 
@@ -124,7 +167,7 @@ const DetailsContent: React.FC<{ candidate: Candidate }> = ({ candidate }) => {
                 <div className="mt-6 bg-bg-subtle p-4 rounded-lg border border-border-default">
                     <h4 className="font-bold text-text-muted mb-2 text-sm">תקציר אחרון (מראיון טלפוני / קו"ח)</h4>
                     <p className="text-sm text-text-default leading-relaxed">
-                        מועמד בעל ניסיון של 5 שנים בניהול שיווק בחברת AllJobs. הראה יכולות מרשימות בניהול קמפיינים והובלת צוות. מתאים מאוד למשרת מנהל/ת שיווק בבזק.
+                        {candidate.professionalSummary || 'אין תקציר זמין.'}
                     </p>
                 </div>
 
@@ -173,12 +216,6 @@ const DetailsContent: React.FC<{ candidate: Candidate }> = ({ candidate }) => {
                     </div>
                 </div>
             </div>
-            
-            {/* Part 2: Resume Viewer */}
-            <div className="space-y-4">
-                <h3 className="text-xl font-bold text-text-default">קורות חיים</h3>
-                <ResumeViewer resumeData={mockResumeDataForDrawer} className="h-[600px]" />
-            </div>
         </div>
     );
 };
@@ -186,17 +223,9 @@ const DetailsContent: React.FC<{ candidate: Candidate }> = ({ candidate }) => {
 
 const EventsContent: React.FC = () => (
     <div className="space-y-3">
-        {mockEvents.map(event => (
-            <div key={event.id} className="flex items-center gap-3 bg-bg-subtle/70 p-3 rounded-lg">
-                <div className={`w-9 h-9 flex-shrink-0 flex items-center justify-center rounded-full ${eventTypeStyles[event.type].bg} ${eventTypeStyles[event.type].text}`}>
-                    {eventTypeStyles[event.type].icon}
-                </div>
-                <div>
-                    <p className="font-semibold text-text-default text-sm">{event.title}</p>
-                    <p className="text-xs text-text-muted">{new Date(event.date).toLocaleString('he-IL', { day: '2-digit', month: 'long', hour: '2-digit', minute: '2-digit' })}</p>
-                </div>
-            </div>
-        ))}
+        <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
+            אין אירועים להצגה (עדיין לא מחובר לשרת).
+        </div>
     </div>
 );
 
@@ -204,50 +233,19 @@ const JobsContent: React.FC = () => (
     <div className="space-y-4">
         <div className="flex justify-between items-center mb-2">
             <h3 className="font-bold text-text-default">תהליכים פעילים והפניות</h3>
-            <span className="text-xs text-text-muted">{mockJobs.length} משרות</span>
+            <span className="text-xs text-text-muted">0 משרות</span>
         </div>
-        {mockJobs.map(job => {
-            const { bg, text, icon } = jobStatusStyles[job.status] || jobStatusStyles['לא רלוונטי'];
-            return (
-                <div key={job.id} className="bg-bg-card border border-border-default shadow-sm p-4 rounded-xl">
-                    <div className="flex justify-between items-start mb-2">
-                        <div>
-                            <p className="font-bold text-primary-700 text-base hover:underline cursor-pointer">{job.jobTitle}</p>
-                            <p className="text-sm text-text-muted font-semibold">{job.company}</p>
-                        </div>
-                         <div className={`flex items-center gap-1.5 text-xs font-bold px-2.5 py-1 rounded-full border ${bg} ${text} border-transparent`}>
-                            {React.cloneElement(icon, { className: 'w-3.5 h-3.5' })}
-                            <span>{job.status}</span>
-                        </div>
-                    </div>
-                    <div className="flex justify-between items-center text-xs text-text-muted mt-3 pt-3 border-t border-border-subtle">
-                        <span>עודכן: {job.updatedAt}</span>
-                        <button className="text-primary-600 hover:underline font-semibold">פרטים נוספים</button>
-                    </div>
-                </div>
-            )
-        })}
+        <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
+            אין תהליכים להצגה (עדיין לא מחובר לשרת).
+        </div>
     </div>
 );
 
 const DocumentsContent: React.FC = () => (
     <div className="space-y-3">
-        {mockDocuments.map(doc => (
-            <div key={doc.id} className="flex items-center gap-3 bg-bg-subtle/70 p-3 rounded-lg hover:bg-bg-hover cursor-pointer border border-border-default">
-                <div className="flex-shrink-0">{getFileIcon(doc.name)}</div>
-                <div className="flex-1">
-                    <p className="font-semibold text-text-default text-sm truncate">{doc.name}</p>
-                    <p className="text-xs text-text-muted">{doc.type} &bull; {new Date(doc.uploadDate).toLocaleDateString('he-IL')}</p>
-                </div>
-                <button className="text-text-subtle hover:text-primary-600">
-                    <ArrowLeftIcon className="w-4 h-4 transform rotate-180" />
-                </button>
-            </div>
-        ))}
-        <button className="w-full py-2.5 border-2 border-dashed border-border-default rounded-lg text-text-muted hover:text-primary-600 hover:border-primary-300 hover:bg-primary-50 transition-all text-sm font-semibold flex items-center justify-center gap-2">
-            <PlusIcon className="w-4 h-4" />
-            העלאת מסמך חדש
-        </button>
+        <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
+            אין מסמכים להצגה (עדיין לא מחובר לשרת).
+        </div>
     </div>
 );
 
@@ -299,6 +297,11 @@ interface CandidateSummaryDrawerProps {
 const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candidate, isOpen, onClose, onViewFullProfile, onOpenMessageModal, viewMode = 'recruiter', isFavorite, onToggleFavorite }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'events' | 'jobs' | 'documents'>('details');
   const titleId = useId();
+  const [fullCandidate, setFullCandidate] = useState<any | null>(null);
+  const [loadingCandidate, setLoadingCandidate] = useState(false);
+  const [candidateError, setCandidateError] = useState<string | null>(null);
+  const [resumeUploadState, setResumeUploadState] = useState({ inProgress: false, message: '' });
+  const navigate = useNavigate();
 
   useEffect(() => {
     if (isOpen) {
@@ -306,21 +309,248 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    let isMounted = true;
+    const load = async () => {
+      if (!isOpen || !candidate?.backendId) {
+        if (isMounted) {
+          setFullCandidate(null);
+          setLoadingCandidate(false);
+          setCandidateError(null);
+        }
+        return;
+      }
+      setLoadingCandidate(true);
+      setCandidateError(null);
+      try {
+        const token = localStorage.getItem('token');
+        const res = await fetch(`${apiBase}/api/candidates/${candidate.backendId}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+          cache: 'no-store',
+        });
+        if (!res.ok) throw new Error(`Failed to load candidate (${res.status})`);
+        const data = await res.json();
+        if (isMounted) setFullCandidate(data);
+      } catch (e: any) {
+        if (isMounted) setCandidateError(e?.message || 'Failed to load candidate');
+      } finally {
+        if (isMounted) setLoadingCandidate(false);
+      }
+    };
+    load();
+    return () => { isMounted = false; };
+  }, [isOpen, candidate?.backendId]);
+
   if (!isOpen || !candidate) return null;
+
+  const mergedCandidate = { ...candidate, ...fullCandidate } as CandidateWithExtras;
+  const contactItems = [
+    mergedCandidate.phone || '',
+    mergedCandidate.email || '',
+    mergedCandidate.address || '',
+  ].filter(Boolean);
+
+  const resumeUrl = String(mergedCandidate.resumeUrl || candidate.resumeUrl || '').trim();
+  const resumeData = {
+    name: String(mergedCandidate.fullName || mergedCandidate.name || '').trim(),
+    contact: contactItems.join(' • '),
+    summary: String(mergedCandidate.professionalSummary || mergedCandidate.summary || ''),
+    experience: safeArray(mergedCandidate.workExperience || mergedCandidate.experience).map(formatWorkExp).filter(Boolean),
+    education: safeArray(mergedCandidate.education).map(formatEdu).filter(Boolean),
+    raw: String(mergedCandidate.searchText || mergedCandidate.cvText || ''),
+    resumeUrl,
+    candidateId: mergedCandidate.backendId || mergedCandidate.id,
+  };
+  const displayTags = safeArray(mergedCandidate.tags);
+  const displayCandidate: CandidateWithExtras = {
+    ...candidate,
+    ...fullCandidate,
+    name: resumeData.name || candidate.name,
+    title: mergedCandidate.title || candidate.title || '',
+    phone: mergedCandidate.phone || candidate.phone || '',
+    address: mergedCandidate.address || candidate.address || '',
+    professionalSummary: resumeData.summary || candidate.professionalSummary || '',
+    tags: displayTags,
+  };
+  const displayPhone = displayCandidate.phone || '';
+  const displayEmail = displayCandidate.email || '';
+  const displayAddress = displayCandidate.address || '';
+
+  const handleDownloadResume = () => {
+    if (resumeUrl) {
+      window.open(resumeUrl, '_blank');
+    } else {
+      alert('אין קובץ קורות חיים להורדה כרגע.');
+    }
+  };
+
+  const handleUploadResume = async (file: File) => {
+    const id = candidate?.backendId || candidate?.id;
+    if (!id) {
+      alert('לא ניתן להעלות קובץ ללא מזהה מועמד.');
+      return;
+    }
+    const folder = 'resumes';
+    const base = apiBase || '';
+    try {
+      setResumeUploadState({ inProgress: true, message: 'מכין העלאה...' });
+      const presignRes = await fetch(`${base}/api/candidates/${id}/upload-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ fileName: file.name, contentType: file.type, folder }),
+      });
+      if (!presignRes.ok) throw new Error('Failed to get upload URL');
+      const { uploadUrl, key } = await presignRes.json();
+      const urlObj = new URL(uploadUrl);
+      const checksum = urlObj.searchParams.get('x-amz-checksum-crc32');
+      const checksumAlgo = urlObj.searchParams.get('x-amz-sdk-checksum-algorithm');
+      const headers: Record<string, string> = {};
+      if (file.type) headers['Content-Type'] = file.type;
+      if (checksum && checksumAlgo === 'CRC32') {
+        headers['x-amz-checksum-crc32'] = await crc32base64(file);
+        headers['x-amz-sdk-checksum-algorithm'] = 'CRC32';
+      }
+      setResumeUploadState({ inProgress: true, message: 'מעלה קובץ...' });
+      const putRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: Object.keys(headers).length ? headers : undefined,
+        body: file,
+      });
+      if (!putRes.ok) throw new Error('Upload to S3 failed');
+      setResumeUploadState({ inProgress: true, message: 'שומר קובץ...' });
+      const attachRes = await fetch(`${base}/api/candidates/${id}/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ key, type: 'resume' }),
+      });
+      if (!attachRes.ok) throw new Error('Failed to attach media');
+      const updated = await attachRes.json();
+      setFullCandidate(updated);
+    } catch (err: any) {
+      console.error('Resume upload failed', err);
+      alert(err?.message || 'העלאת קובץ נכשלה.');
+    } finally {
+      setResumeUploadState({ inProgress: false, message: '' });
+    }
+  };
 
   const handleOpenModal = (mode: 'whatsapp' | 'sms' | 'email') => {
     if (candidate && onOpenMessageModal) {
         onOpenMessageModal({
             mode,
-            candidateName: candidate.name,
-            candidatePhone: candidate.phone,
+            candidateName: resumeData.name || candidate.name,
+            candidatePhone: displayPhone || candidate.phone,
         });
     }
   };
 
-  const renderContent = () => {
+  const renderContent = (candidateResumeData: any) => {
     switch(activeTab) {
-      case 'details': return <DetailsContent candidate={candidate} />;
+      case 'details': {
+        return (
+          <div className="space-y-4">
+            {candidateError && (
+              <div className="bg-red-50 border border-red-200 text-red-800 rounded-lg p-3 text-sm">
+                {candidateError}
+              </div>
+            )}
+            {loadingCandidate && (
+              <div className="bg-bg-subtle/70 border border-border-default rounded-lg p-3 text-sm text-text-muted">
+                טוען נתוני מועמד מהשרת...
+              </div>
+            )}
+            <div className="space-y-8">
+              {/* Reuse existing layout but swap ResumeViewer to real resumeData */}
+              <div>
+                <div className="flex items-center gap-4 mb-6">
+                  <div className="w-20 h-20 flex-shrink-0 flex items-center justify-center bg-primary-100 text-primary-600 rounded-full font-bold text-3xl">
+                    {displayCandidate.avatar}
+                  </div>
+                  <div>
+                    <h3 className="text-2xl font-extrabold text-text-default flex items-center">
+                      {displayCandidate.name} <CheckBadgeIcon className="w-6 h-6 text-secondary-500 mr-2" />
+                    </h3>
+                    <p className="text-text-muted">{displayCandidate.title}</p>
+                  </div>
+                </div>
+
+                <div className="mt-6 bg-bg-subtle p-4 rounded-lg border border-border-default">
+                  <h4 className="font-bold text-text-muted mb-2 text-sm">תקציר (מקו"ח)</h4>
+                  <p className="text-sm text-text-default leading-relaxed">
+                    {mergedCandidate.professionalSummary || 'אין תקציר זמין.'}
+                  </p>
+                </div>
+
+                <div className="mt-6 grid grid-cols-2 gap-x-4 gap-y-6 text-sm">
+                  <div>
+                    <p className="font-semibold text-text-muted">גיל</p>
+                    <p className="font-bold text-text-default">{String(displayCandidate.age || fullCandidate?.age || '') || 'לא צוין'}</p>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-text-muted">כתובת</p>
+                    <a
+                      href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mergedCandidate.address || '')}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-bold text-primary-600 hover:underline"
+                    >
+                      {displayAddress || 'לא צוין'}
+                      {displayAddress || 'לא צוין'}
+                    </a>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-text-muted">ציפיות שכר</p>
+                    <p className="font-bold text-text-default">
+                      {displayCandidate.salaryMin || displayCandidate.salaryMax
+                        ? `${displayCandidate.salaryMin || 0} - ${displayCandidate.salaryMax || 0} ₪`
+                        : 'לא צוין'}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-semibold text-text-muted">לינקדאין</p>
+                    <p className="font-bold text-text-default">לא צוין</p>
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-6 border-t border-border-default space-y-3">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-text-muted font-semibold">סטטוס נוכחי:</span>
+                    <span className="font-bold text-text-default">{displayCandidate.status}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-text-muted font-semibold">פעילות אחרונה:</span>
+                    <span className="font-bold text-text-default">{displayCandidate.lastActivity}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-text-muted font-semibold">מקור גיוס:</span>
+                    <span className="font-bold text-text-default">{displayCandidate.source}</span>
+                  </div>
+                </div>
+
+                <div className="mt-6 pt-6 border-t border-border-default space-y-4">
+                  <div>
+                    <p className="font-semibold text-text-muted text-sm mb-2">תגיות מועמד</p>
+                    <TagInput tags={displayTags} setTags={() => { /* TODO: persist via backend */ }} placeholder="הוסף תגית..." />
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <h3 className="text-xl font-bold text-text-default">קורות חיים</h3>
+                <ResumeViewer
+                  resumeData={candidateResumeData}
+                  resumeFileUrl={resumeUrl}
+                  className="h-[600px]"
+                  onDownloadResume={handleDownloadResume}
+                  onUploadResume={handleUploadResume}
+                  candidateId={mergedCandidate.id || mergedCandidate.backendId}
+                />
+                
+              </div>
+            </div>
+          </div>
+        );
+      }
       case 'events': return <EventsContent />;
       case 'jobs': return <JobsContent />;
       case 'documents': return <DocumentsContent />;
@@ -367,22 +597,30 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
         </nav>
 
         <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-          {renderContent()}
+          {renderContent(resumeData)}
+         
         </div>
 
         <footer className="p-4 bg-bg-subtle border-t border-border-default space-y-4 z-10">
             <div className="flex items-center justify-around">
-                <ActionButton href={`tel:${candidate.phone}`} tooltip="התקשר" icon={<PhoneIcon className="w-6 h-6" />} />
+                <ActionButton href={displayPhone ? `tel:${displayPhone}` : undefined} tooltip="התקשר" icon={<PhoneIcon className="w-6 h-6" />} />
                 <ActionButton icon={<EnvelopeIcon className="w-6 h-6" />} tooltip="שלח מייל" onClick={() => handleOpenModal('email')} />
                 <ActionButton icon={<ChatBubbleBottomCenterTextIcon className="w-6 h-6" />} tooltip="שלח SMS" onClick={() => handleOpenModal('sms')} />
                 <ActionButton icon={<WhatsappIcon className="w-6 h-6" />} tooltip="שלח Whatsapp" onClick={() => handleOpenModal('whatsapp')} />
             </div>
-            {onViewFullProfile && (
-                <button onClick={() => candidate && onViewFullProfile(candidate.id)} className="w-full flex items-center justify-center gap-2 bg-primary-600 text-white font-semibold py-3 px-4 rounded-lg hover:bg-primary-700 transition shadow-sm">
+            {    <button
+                    onClick={() => {
+                        if (!candidate) return;
+                        const id = candidate.backendId || candidate.id;
+                        if (!id) return;
+                        navigate(`/candidates/${id}`);
+                        onClose();
+                    }}
+                    className="w-full flex items-center justify-center gap-2 bg-primary-600 text-white font-semibold py-3 px-4 rounded-lg hover:bg-primary-700 transition shadow-sm"
+                >
                     <span>צפה בפרופיל המלא</span>
-                    <ArrowLeftIcon className="w-5 h-5" />
-                </button>
-            )}
+                    <ArrowLeftIcon className="w-5 h-5 text-primary-700 rotate-180" />
+                </button>}
         </footer>
         <style>{`
             @keyframes slideIn {

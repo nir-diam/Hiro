@@ -1,4 +1,5 @@
 const jobFieldService = require('../services/jobFieldService');
+const jobFieldEmbeddingService = require('../services/jobFieldEmbeddingService');
 
 const list = async (_req, res) => {
   const data = await jobFieldService.list();
@@ -8,6 +9,7 @@ const list = async (_req, res) => {
 const createCategory = async (req, res) => {
   try {
     const row = await jobFieldService.createCategory(req.body.name);
+    jobFieldEmbeddingService.scheduleCategoryEmbedding(row);
     res.status(201).json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -17,6 +19,7 @@ const createCategory = async (req, res) => {
 const updateCategory = async (req, res) => {
   try {
     const row = await jobFieldService.updateCategory(req.params.id, req.body.name);
+    jobFieldEmbeddingService.scheduleCategoryEmbedding(row);
     res.json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -35,6 +38,7 @@ const deleteCategory = async (req, res) => {
 const createCluster = async (req, res) => {
   try {
     const row = await jobFieldService.createCluster({ categoryId: req.body.categoryId, name: req.body.name });
+    jobFieldEmbeddingService.scheduleClusterEmbedding(row);
     res.status(201).json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -44,6 +48,7 @@ const createCluster = async (req, res) => {
 const updateCluster = async (req, res) => {
   try {
     const row = await jobFieldService.updateCluster(req.params.id, req.body.name);
+    jobFieldEmbeddingService.scheduleClusterEmbedding(row);
     res.json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -65,7 +70,9 @@ const createRole = async (req, res) => {
       clusterId: req.body.clusterId,
       value: req.body.value,
       synonyms: req.body.synonyms || [],
+      tagIds: Array.isArray(req.body.tagIds) ? req.body.tagIds : [],
     });
+    jobFieldEmbeddingService.scheduleRoleEmbedding(row);
     res.status(201).json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -77,7 +84,9 @@ const updateRole = async (req, res) => {
     const row = await jobFieldService.updateRole(req.params.id, {
       value: req.body.value,
       synonyms: req.body.synonyms || [],
+      tagIds: Array.isArray(req.body.tagIds) ? req.body.tagIds : [],
     });
+    jobFieldEmbeddingService.scheduleRoleEmbedding(row);
     res.json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -95,7 +104,8 @@ const deleteRole = async (req, res) => {
 
 const suggestClusters = async (req, res) => {
   try {
-    const suggestions = await jobFieldService.suggestClusters(req.body.categoryId, { previewOnly: true });
+    const previewOnly = req.body.previewOnly !== false;
+    const suggestions = await jobFieldService.suggestClusters(req.body.categoryId, { previewOnly });
     res.json({ suggestions });
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -104,7 +114,8 @@ const suggestClusters = async (req, res) => {
 
 const suggestRoles = async (req, res) => {
   try {
-    const suggestions = await jobFieldService.suggestRoles(req.body.clusterId, { previewOnly: true });
+    const previewOnly = req.body.previewOnly !== false;
+    const suggestions = await jobFieldService.suggestRoles(req.body.clusterId, { previewOnly });
     res.json({ suggestions });
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message });
@@ -124,6 +135,25 @@ const suggestRoleSynonyms = async (req, res) => {
   }
 };
 
+const generateRoleSynonyms = async (req, res) => {
+  try {
+    const result = await jobFieldService.generateRoleSynonyms(req.params.id);
+    res.json(result);
+  } catch (err) {
+    res.status(err.status || 400).json({ message: err.message || 'Failed to generate synonyms' });
+  }
+};
+
+const rebuildEmbeddings = async (_req, res) => {
+  try {
+    await jobFieldEmbeddingService.rebuildAllEmbeddings();
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[jobFieldController.rebuildEmbeddings]', err);
+    res.status(500).json({ message: 'Failed to rebuild job field embeddings' });
+  }
+};
+
 module.exports = {
   list,
   createCategory,
@@ -138,5 +168,7 @@ module.exports = {
   suggestClusters,
   suggestRoles,
   suggestRoleSynonyms,
+  generateRoleSynonyms,
+  rebuildEmbeddings,
 };
 

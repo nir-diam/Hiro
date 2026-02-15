@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon } from './Icons';
 import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal from './ReReferModal';
-import { type Job, jobsData } from './JobsView';
+import { type Job } from './JobsView';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { useLanguage } from '../context/LanguageContext';
 
@@ -149,6 +149,9 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
     const [reReferModal, setReReferModal] = useState<{ isOpen: boolean; referral: ActiveReferral | null }>({ isOpen: false, referral: null });
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
+    const [jobCatalogLoading, setJobCatalogLoading] = useState(false);
     
     // Filters & Sorting
     const [startDate, setStartDate] = useState('');
@@ -166,6 +169,27 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
     useEffect(() => {
         applyDatePreset('month');
     }, []);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        let isActive = true;
+        setJobCatalogLoading(true);
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/jobs`);
+                if (!res.ok) throw new Error('Failed to load jobs');
+                const data = await res.json();
+                if (isActive) {
+                    setJobCatalog(Array.isArray(data) ? data : []);
+                }
+            } catch (err) {
+                console.error('[ReferralsView] failed to load jobs', err);
+            } finally {
+                if (isActive) setJobCatalogLoading(false);
+            }
+        })();
+        return () => { isActive = false; };
+    }, [apiBase]);
     
     // Update visible columns if language changes
     useEffect(() => {
@@ -298,15 +322,55 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
         setActiveReferrals(prev => prev.map(r => r.id === reReferModal.referral?.id ? { ...r, status: data.nextStatus as Status, notes: data.notes } : r));
     };
 
-    const handleOpenJobDrawer = (jobTitle: string) => {
-         const job = jobsData.find(j => j.title === jobTitle);
+    const buildFallbackJob = (jobTitle: string, clientName: string): Job => ({
+        id: Date.now(),
+        title: jobTitle,
+        client: clientName,
+        field: 'לא צויין',
+        role: 'לא צויין',
+        priority: 'רגילה',
+        clientType: 'כללי',
+        city: 'לא צויין',
+        region: 'לא צויין',
+        gender: 'לא משנה',
+        mobility: false,
+        licenseType: 'לא צויין',
+        postingCode: '',
+        validityDays: 30,
+        recruitingCoordinator: 'מערכת',
+        accountManager: 'מערכת',
+        salaryMin: 0,
+        salaryMax: 0,
+        ageMin: 18,
+        ageMax: 65,
+        openPositions: 1,
+        status: 'טיוטה',
+        associatedCandidates: 0,
+        waitingForScreening: 0,
+        activeProcess: 0,
+        openDate: new Date().toISOString(),
+        recruiter: 'מערכת',
+        location: 'לא צויין',
+        jobType: 'לא צויין',
+        description: 'פרטי משרה לא זמינים',
+        requirements: [],
+        rating: 0,
+        healthProfile: 'standard',
+    });
+
+    const handleOpenJobDrawer = (jobTitle: string, clientName: string) => {
+         const job = jobCatalog.find(j => j.title === jobTitle);
         const jobMap: {[key: string]: number} = { 'מפתח/ת Fullstack בכיר/ה': 2, 'מנהל/ת מוצר לחטיבת הפינטק': 7, 'מעצב/ת UX/UI': 3 }
-        const fallbackJob = jobsData.find(j => j.id === (jobMap[jobTitle] || 1));
+        const fallbackJob = jobCatalog.find(j => j.id === (jobMap[jobTitle] || 1));
 
         if (job || fallbackJob) {
             setSelectedJob(job || fallbackJob || null);
             setIsDrawerOpen(true);
+            return;
         }
+
+        setSelectedJob(buildFallbackJob(jobTitle, clientName));
+        setIsDrawerOpen(true);
     };
 
     // Calculate Stats
@@ -329,7 +393,7 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                     {referral.status}
                 </button>
             );
-            case 'jobTitle': return <button onClick={(e) => { e.stopPropagation(); handleOpenJobDrawer(referral.jobTitle) }} className="font-semibold text-primary-700 hover:underline text-right">{referral.jobTitle}</button>;
+            case 'jobTitle': return <button onClick={(e) => { e.stopPropagation(); handleOpenJobDrawer(referral.jobTitle, referral.clientName) }} className="font-semibold text-primary-700 hover:underline text-right">{referral.jobTitle}</button>;
             case 'clientName': return <button onClick={(e) => handleClientClick(e, referral.clientId)} className="font-semibold text-text-default hover:text-primary-700 hover:underline">{referral.clientName}</button>;
             case 'candidateName': return <span className="font-bold text-text-default">{referral.candidateName}</span>;
             case 'referralDate': return <span className="text-text-muted text-sm">{new Date(referral.referralDate).toLocaleDateString('he-IL')}</span>;
@@ -480,7 +544,7 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                                 onToggleDetails={() => toggleRow(referral.id)} 
                                 isExpanded={expandedRowId === referral.id} 
                                 onStatusClick={handleOpenStatusModal}
-                                onJobTitleClick={() => handleOpenJobDrawer(referral.jobTitle)}
+                                onJobTitleClick={() => handleOpenJobDrawer(referral.jobTitle, referral.clientName)}
                                 onClientClick={(e) => handleClientClick(e, referral.clientId)}
                             />
                         ))}

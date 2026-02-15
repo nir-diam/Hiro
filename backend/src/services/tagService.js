@@ -1,5 +1,45 @@
+const { Op } = require('sequelize');
 const Tag = require('../models/Tag');
-const { sendChat } = require('./geminiService');
+const TagHistory = require('../models/TagHistory');
+const CandidateTag = require('../models/CandidateTag');
+const tagEmbeddingService = require('./tagEmbeddingService');
+const { sendSingleTurnChat } = require('./geminiService');
+const promptService = require('./promptService');
+
+const cleanupPendingCorrections = async (values = [], options = {}) => {
+  const terms = Array.from(
+    new Set(
+      (Array.isArray(values) ? values : [])
+        .map((value) => (value || '').toString().trim())
+        .filter(Boolean),
+    ),
+  );
+  if (!terms.length) return;
+  const filter = {
+    status: 'pending',
+    [Op.or]: [
+      { displayNameHe: { [Op.in]: terms } },
+      { displayNameEn: { [Op.in]: terms } },
+      { tagKey: { [Op.in]: terms } },
+    ],
+  };
+  const excludeIds = Array.isArray(options.excludeIds) ? options.excludeIds.map(String) : [];
+  if (excludeIds.length) {
+    filter.id = { [Op.notIn]: excludeIds };
+  }
+  const pending = await Tag.findAll({
+    where: filter,
+    attributes: ['id'],
+  });
+  const ids = pending.map((entry) => entry.id);
+  if (!ids.length) return;
+  await CandidateTag.destroy({
+    where: { tag_id: { [Op.in]: ids } },
+  });
+  await Tag.destroy({
+    where: { id: { [Op.in]: ids } },
+  });
+};
 
 const list = async () => Tag.findAll();
 
@@ -13,17 +53,135 @@ const getById = async (id) => {
   return tag;
 };
 
-const create = async (payload) => Tag.create(payload);
+const normalizeSynonyms = (synonyms) => {
+  if (!Array.isArray(synonyms)) return [];
+  return synonyms
+    .map((syn, i) => {
+      const normalized = typeof syn === 'string' ? { phrase: syn } : syn || {};
+      const phrase = normalized.phrase || (typeof syn === 'string' ? syn : '');
+      if (!phrase) return null;
+      const language = normalized.language || (/[a-zA-Z]/.test(phrase) ? 'en' : 'he');
+      const priority = Number.isFinite(normalized.priority)
+        ? normalized.priority
+        : Math.max(1, 5 - i);
 
-const update = async (id, payload) => {
+      return {
+        id: normalized.id || `syn_${Date.now()}_${i}_${Math.random().toString(36).substr(2, 5)}`,
+        phrase,
+        language,
+        type: normalized.type || 'synonym',
+        priority,
+      };
+    })
+    .filter(Boolean);
+};
+
+const applyAudit = (payload = {}, options = {}) => {
+  const actor = options.actingUser || payload.updatedBy || payload.createdBy || 'system';
+  if (!payload.source) {
+    payload.source = options.source || 'manual';
+  }
+  if (!payload.createdBy) {
+    payload.createdBy = options.createdBy || actor;
+  }
+  payload.updatedBy = options.updatedBy || actor;
+};
+
+const recordTagHistory = async ({ tagId, action, actor, before, after }) => {
+  if (!tagId) return;
+  try {
+    await TagHistory.create({
+      tagId,
+      action,
+      actor: actor || 'system',
+      changes: {
+        ...(before ? { before } : {}),
+        ...(after ? { after } : {}),
+      },
+    });
+  } catch (err) {
+    console.error('[tagService] failed to record tag history', err?.message || err);
+  }
+};
+
+const normalizeTagKey = (value) => {
+  return (value || '')
+    .toString()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_+|_+$/g, '');
+};
+
+const create = async (payload, options = {}) => {
+  if (!payload.tagKey) {
+    payload.tagKey = normalizeTagKey(payload.displayNameEn || payload.displayNameHe || 'tag');
+  }
+  applyAudit(payload, options);
+  if (payload.synonyms) {
+    payload.synonyms = normalizeSynonyms(payload.synonyms);
+  }
+  const created = await Tag.create(payload);
+  await recordTagHistory({
+    tagId: created.id,
+    action: 'create',
+    actor: payload.createdBy || options.actingUser,
+    after: created.get({ plain: true }),
+  });
+  tagEmbeddingService.scheduleTagEmbedding(created);
+  return created;
+};
+
+const update = async (id, payload, options = {}) => {
   const tag = await getById(id);
+  const beforeState = tag.get({ plain: true });
+  if (payload.tagKey === '' || (!payload.tagKey && (payload.displayNameEn || payload.displayNameHe))) {
+    payload.tagKey = normalizeTagKey(payload.displayNameEn || payload.displayNameHe || tag.tagKey);
+  }
+  applyAudit(payload, options);
+  if (payload.synonyms) {
+    payload.synonyms = normalizeSynonyms(payload.synonyms);
+  }
+  await cleanupPendingCorrections(
+    [
+      payload.tagKey,
+      payload.displayNameHe,
+      payload.displayNameEn,
+      ...(payload.synonyms || []).map((syn) => syn.phrase),
+      ...(payload.aliases || tag.aliases || []),
+    ],
+    { excludeIds: [id] },
+  );
+
   await tag.update(payload);
+  await recordTagHistory({
+    tagId: tag.id,
+    action: 'update',
+    actor: payload.updatedBy || options.actingUser,
+    before: beforeState,
+    after: tag.get({ plain: true }),
+  });
+
+  tagEmbeddingService.scheduleTagEmbedding(tag);
   return tag;
 };
 
 const remove = async (id) => {
   const tag = await getById(id);
   await tag.destroy();
+};
+
+let tagPromptTemplate = null;
+
+const loadTagPromptTemplate = async () => {
+  try {
+    const prompt = await promptService.getById('tag_ai_enriched');
+    tagPromptTemplate = prompt?.template || null;
+  } catch (err) {
+    console.warn('[tagService] tag_ai_enriched prompt missing', err?.message || err);
+    tagPromptTemplate = null;
+  }
+  return tagPromptTemplate;
 };
 
 const enrichSuggestions = async (tagsPayload = []) => {
@@ -34,7 +192,7 @@ const enrichSuggestions = async (tagsPayload = []) => {
     || process.env.GOOGLE_API_KEY
     || process.env.API_KEY;
 
-  const systemPrompt = `You are a top-tier recruitment taxonomy expert.
+  const defaultPrompt = `You are a top-tier recruitment taxonomy expert.
 I will provide a list of Tag Names (in Hebrew).
 For each tag, generate a detailed JSON object that strictly matches the following structure:
 
@@ -50,16 +208,21 @@ For each tag, generate a detailed JSON object that strictly matches the followin
     - "type": "synonym" or "alias" or "abbreviation".
     - "priority": Integer 1-5 (5 is highest match).
 
-Input List: \${JSON.stringify(tagNames)}
+Input List: ${JSON.stringify(tagsPayload.map(t => t.displayNameHe || t.tagKey))}
 
 Return ONLY the JSON Array of objects. No markdown formatting.`;
 
+  const template = await loadTagPromptTemplate();
+  const systemPrompt = template
+    ? template.replace('{JSON}', JSON.stringify(tagsPayload.map(t => t.displayNameHe || t.tagKey)))
+    : defaultPrompt;
+
   const userMessage = `Input tags (JSON): ${JSON.stringify(tagsPayload)}`;
 
-  const reply = await sendChat({
+  const reply = await sendSingleTurnChat({
     apiKey,
     systemPrompt,
-    history: [{ role: 'user', text: userMessage }],
+    message: userMessage,
   });
 
   let parsed = [];
@@ -74,29 +237,7 @@ Return ONLY the JSON Array of objects. No markdown formatting.`;
 
   return parsed.map((s) => {
     const orig = tagsPayload.find((t) => t.id === s.id) || {};
-
-    const mappedSynonyms = Array.isArray(s.synonyms)
-      ? s.synonyms
-          .map((syn, i) => {
-            const normalized = typeof syn === 'string' ? { phrase: syn } : syn || {};
-            const phrase = normalized.phrase || (typeof syn === 'string' ? syn : '');
-            if (!phrase) return null;
-            const language = normalized.language || (/[a-zA-Z]/.test(phrase) ? 'en' : 'he');
-            const priorityFromModel = Number(normalized.priority);
-            const priority =
-              Number.isFinite(priorityFromModel) && priorityFromModel >= 1 && priorityFromModel <= 5
-                ? priorityFromModel
-                : Math.max(1, 5 - i); // fallback: descending relevance by order
-            return {
-              id: normalized.id || `syn_${Date.now()}_${i}`,
-              phrase,
-              language,
-              type: normalized.type || 'synonym',
-              priority,
-            };
-          })
-          .filter(Boolean)
-      : orig.synonyms || [];
+    const mappedSynonyms = normalizeSynonyms(s.synonyms || orig.synonyms);
 
     // If the model returned identical priorities for all synonyms, re-rank by order to avoid flat scores.
     if (mappedSynonyms.length > 1) {
@@ -110,16 +251,19 @@ Return ONLY the JSON Array of objects. No markdown formatting.`;
 
     return {
       id: s.id || orig.id,
+      tagKey: s.tagKey || orig.tagKey || (s.displayNameEn || s.displayNameHe || 'tag').toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_'),
       displayNameHe: s.displayNameHe || orig.displayNameHe,
       displayNameEn: s.displayNameEn || orig.displayNameEn,
       category: s.category || orig.category,
       type: s.type || orig.type,
+      descriptionHe: s.descriptionHe || orig.descriptionHe,
+      domains: s.domains || orig.domains || [],
       status: s.status || orig.status,
       qualityState: s.qualityState || orig.qualityState,
       matchable: orig.matchable,
       usageCount: orig.usageCount,
-      lastUsed: orig.lastUsed,
-      source: orig.source,
+      lastUsedAt: orig.lastUsedAt,
+      source: s.source || orig.source || 'ai',
       synonyms: mappedSynonyms,
     };
   });

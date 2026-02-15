@@ -1,87 +1,211 @@
 
-import React, { useState } from 'react';
-import { PlusIcon, PencilIcon, TrashIcon, LinkIcon, DocumentTextIcon, MagnifyingGlassIcon } from './Icons';
-import AddApplicationModal from './AddApplicationModal';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { PlusIcon, PencilIcon, TrashIcon, DocumentTextIcon, MagnifyingGlassIcon } from './Icons';
+import AddApplicationModal, { type ApplicationFormValues } from './AddApplicationModal';
 
-interface Application {
-    id: number;
+interface JobOption {
+    id: string;
+    title: string;
+    client?: string;
+}
+
+interface ApplicationRecord {
+    id: string;
+    candidateId: string;
+    jobId?: string | null;
     company: string;
     role: string;
     status: string;
-    date: string;
-    link?: string;
-    cvFile?: string;
-    notes?: string;
+    applicationDate?: string | null;
+    link?: string | null;
+    cvFile?: string | null;
+    notes?: string | null;
+    job?: JobOption | null;
+    date?: string;
 }
 
-const initialApplications: Application[] = [
-    { id: 1, company: 'טכנולוגיות מתקדמות בע"מ', role: 'סגן.ית מנהל הפצה', status: 'נשלח', date: '2025-12-23', link: 'https://...', cvFile: 'שי שני ניהול הפצה', notes: '-' },
-    { id: 2, company: 'בזק', role: 'מנהל שיווק', status: 'ראיון', date: '2025-12-20', link: 'https://...', cvFile: 'שי שני שיווק', notes: 'נשלח דרך אתר החברה' },
-    { id: 3, company: 'Wix', role: 'Product Manager', status: 'התקבל', date: '2025-12-18', link: '', cvFile: 'שי שני אנגלית', notes: 'ראיון טלפוני עבר בהצלחה' },
-];
+interface CandidateApplicationsViewProps {
+    candidateId?: string | null;
+}
 
-const CandidateApplicationsView: React.FC = () => {
-    const [applications, setApplications] = useState<Application[]>(initialApplications);
+const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ candidateId }) => {
+    const [applications, setApplications] = useState<ApplicationRecord[]>([]);
+    const [jobs, setJobs] = useState<JobOption[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [editingApp, setEditingApp] = useState<Application | null>(null);
+    const [editingApp, setEditingApp] = useState<ApplicationFormValues | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
 
-    const handleAdd = (appData: any) => {
-        const newApp: Application = {
-            ...appData,
-            id: editingApp ? editingApp.id : Date.now(),
-            status: editingApp ? editingApp.status : 'נשלח'
-        };
+    const formatApplications = useCallback((items: ApplicationRecord[]) => {
+        return items.map((app) => ({
+            ...app,
+            date: app.applicationDate
+                ? app.applicationDate.slice(0, 10)
+                : app.date || new Date().toISOString().slice(0, 10),
+        }));
+    }, []);
 
-        if (editingApp) {
-            setApplications(prev => prev.map(app => app.id === editingApp.id ? newApp : app));
-        } else {
-            setApplications(prev => [newApp, ...prev]);
+    const loadJobs = useCallback(async () => {
+        try {
+            const res = await fetch('/api/jobs');
+            if (!res.ok) throw new Error('Failed to load jobs');
+            const payload = await res.json();
+            if (!Array.isArray(payload)) return;
+            setJobs(
+                payload.map((job) => ({
+                    id: job.id,
+                    title: job.title || '',
+                    client: job.client || '',
+                })),
+            );
+        } catch (err) {
+            console.error('[CandidateApplicationsView] loadJobs', err);
         }
-        setEditingApp(null);
-    };
+    }, []);
 
-    const handleEdit = (app: Application) => {
-        setEditingApp(app);
-        setIsModalOpen(true);
-    };
+    const loadApplications = useCallback(async () => {
+        if (!candidateId) return;
+        setIsLoading(true);
+        try {
+            const res = await fetch(`/api/applications?candidateId=${candidateId}`);
+            if (!res.ok) throw new Error('Failed to load applications');
+            const payload = await res.json();
+            if (!Array.isArray(payload)) throw new Error('Invalid application response');
+            setApplications(formatApplications(payload));
+        } catch (err) {
+            console.error('[CandidateApplicationsView] loadApplications', err);
+        } finally {
+            setIsLoading(false);
+        }
+    }, [candidateId, formatApplications]);
 
-    const handleDelete = (id: number) => {
-        if (window.confirm('האם למחוק הגשה זו?')) {
-            setApplications(prev => prev.filter(a => a.id !== id));
+    useEffect(() => {
+        loadJobs();
+    }, [loadJobs]);
+
+    useEffect(() => {
+        loadApplications();
+    }, [loadApplications]);
+
+    const saveApplication = async (formData: ApplicationFormValues) => {
+        if (!candidateId) return;
+        setIsSaving(true);
+        try {
+            const payload = {
+                candidateId,
+                jobId: formData.jobId || null,
+                company: formData.company,
+                role: formData.role,
+                link: formData.link,
+                cvFile: formData.cvFile,
+                notes: formData.notes,
+                status: formData.status || 'נשלח',
+                applicationDate: formData.date,
+            };
+            if (formData.id) {
+                const res = await fetch(`/api/applications/${formData.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error('Failed to update application');
+            } else {
+                const res = await fetch('/api/applications', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error('Failed to save application');
+            }
+            await loadApplications();
+        } catch (err) {
+            console.error('[CandidateApplicationsView] saveApplication', err);
+        } finally {
+            setIsSaving(false);
+            setIsModalOpen(false);
+            setEditingApp(null);
         }
     };
+
+    const handleDelete = async (appId: string) => {
+        if (!window.confirm('האם למחוק הגשה זו?')) return;
+        try {
+            const res = await fetch(`/api/applications/${appId}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Failed to delete application');
+            await loadApplications();
+        } catch (err) {
+            console.error('[CandidateApplicationsView] handleDelete', err);
+        }
+    };
+
+    const filteredApps = useMemo(() => {
+        const term = searchTerm.trim().toLowerCase();
+        if (!term) return applications;
+        return applications.filter((app) => {
+            const company = app.company?.toLowerCase() || '';
+            const role = app.role?.toLowerCase() || '';
+            const jobTitle = app.job?.title?.toLowerCase() || '';
+            return company.includes(term) || role.includes(term) || jobTitle.includes(term);
+        });
+    }, [applications, searchTerm]);
 
     const openNewModal = () => {
+        if (!candidateId) {
+            window.alert('שמור את הפרופיל או בחר מועמד כדי להוסיף הגשות.');
+            return;
+        }
         setEditingApp(null);
         setIsModalOpen(true);
     };
 
-    const filteredApps = applications.filter(app => 
-        app.company.includes(searchTerm) || app.role.includes(searchTerm)
-    );
+    const openEditModal = (app: ApplicationRecord) => {
+        setEditingApp({
+            id: app.id,
+            jobId: app.jobId || '',
+            company: app.company,
+            role: app.role,
+            link: app.link || '',
+            cvFile: app.cvFile || '',
+            date: app.date || new Date().toISOString().slice(0, 10),
+            notes: app.notes || '',
+            status: app.status || 'נשלח',
+        });
+        setIsModalOpen(true);
+    };
+
+    if (!candidateId) {
+        return (
+            <div className="space-y-6 animate-fade-in text-center py-16">
+                <p className="text-lg font-bold text-text-default">
+                    כדי לנהל הגשות, שמור את הפרופיל או בחר מועמד קיים.
+                </p>
+                <p className="text-text-muted">
+                    אין עדיין מזהה מועמד פעיל לשמירת הגשות. חזור לאחר ששמרת את הפרופיל.
+                </p>
+            </div>
+        );
+    }
 
     return (
         <div className="space-y-8 animate-fade-in">
-            {/* Header Area */}
             <div className="text-center space-y-2 py-4">
                 <h1 className="text-3xl font-black text-text-default tracking-tight">פנקס הגשות</h1>
                 <p className="text-text-muted text-lg">נהל/י ועקוב/י אחר כל הגשות המועמדות שלך למשרות במקום אחד.</p>
             </div>
 
-            {/* Actions Bar */}
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div className="relative w-full sm:w-auto sm:min-w-[300px]">
                     <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                    <input 
-                        type="text" 
-                        placeholder="חיפוש לפי חברה או משרה..." 
+                    <input
+                        type="text"
+                        placeholder="חיפוש לפי חברה או משרה..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full bg-bg-card border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent shadow-sm" 
+                        className="w-full bg-bg-card border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 focus:border-transparent shadow-sm"
                     />
                 </div>
-                <button 
+                <button
                     onClick={openNewModal}
                     className="w-full sm:w-auto flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-3 px-6 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20"
                 >
@@ -90,7 +214,6 @@ const CandidateApplicationsView: React.FC = () => {
                 </button>
             </div>
 
-            {/* Table Card */}
             <div className="bg-bg-card border border-border-default rounded-2xl shadow-sm overflow-hidden">
                 <div className="overflow-x-auto">
                     <table className="w-full text-right">
@@ -107,12 +230,25 @@ const CandidateApplicationsView: React.FC = () => {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
-                            {filteredApps.length > 0 ? (
+                            {isLoading ? (
+                                <tr>
+                                    <td colSpan={8} className="px-6 py-12 text-center text-text-muted">
+                                        טוען הגשות...
+                                    </td>
+                                </tr>
+                            ) : filteredApps.length > 0 ? (
                                 filteredApps.map((app) => (
                                     <tr key={app.id} className="group hover:bg-bg-subtle/30 transition-colors text-sm">
                                         <td className="px-6 py-4 font-mono text-text-default">{app.date}</td>
                                         <td className="px-6 py-4 font-bold text-text-default">{app.company}</td>
-                                        <td className="px-6 py-4 text-text-default">{app.role}</td>
+                                        <td className="px-6 py-4 text-text-default">
+                                            {app.role}
+                                            {app.job?.title && app.job.title !== app.role ? (
+                                                <div className="text-xs text-text-muted mt-1">
+                                                    ({app.job.title})
+                                                </div>
+                                            ) : null}
+                                        </td>
                                         <td className="px-6 py-4">
                                             <span className="px-2 py-1 bg-primary-50 text-primary-700 rounded-md text-xs font-bold">
                                                 {app.status}
@@ -120,7 +256,12 @@ const CandidateApplicationsView: React.FC = () => {
                                         </td>
                                         <td className="px-6 py-4">
                                             {app.link ? (
-                                                <a href={app.link} target="_blank" rel="noreferrer" className="text-primary-600 hover:text-primary-800 font-medium hover:underline flex items-center gap-1">
+                                                <a
+                                                    href={app.link}
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    className="text-primary-600 hover:text-primary-800 font-medium hover:underline flex items-center gap-1"
+                                                >
                                                     פתח לינק
                                                 </a>
                                             ) : (
@@ -131,19 +272,19 @@ const CandidateApplicationsView: React.FC = () => {
                                             {app.cvFile && <DocumentTextIcon className="w-4 h-4 text-text-subtle" />}
                                             {app.cvFile || '-'}
                                         </td>
-                                        <td className="px-6 py-4 text-text-muted max-w-xs truncate" title={app.notes}>
+                                        <td className="px-6 py-4 text-text-muted max-w-xs truncate" title={app.notes || ''}>
                                             {app.notes || '-'}
                                         </td>
                                         <td className="px-6 py-4">
                                             <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                <button 
-                                                    onClick={() => handleEdit(app)}
+                                                <button
+                                                    onClick={() => openEditModal(app)}
                                                     className="p-2 rounded-lg text-primary-600 hover:bg-primary-50 transition-colors"
                                                     title="ערוך"
                                                 >
                                                     <PencilIcon className="w-4 h-4" />
                                                 </button>
-                                                <button 
+                                                <button
                                                     onClick={() => handleDelete(app.id)}
                                                     className="p-2 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
                                                     title="מחק"
@@ -166,13 +307,13 @@ const CandidateApplicationsView: React.FC = () => {
                 </div>
             </div>
 
-            <AddApplicationModal 
+            <AddApplicationModal
                 isOpen={isModalOpen}
                 onClose={() => setIsModalOpen(false)}
-                // @ts-ignore
-                onSave={handleAdd}
-                // @ts-ignore
+                onSave={saveApplication}
                 initialData={editingApp}
+                jobs={jobs}
+                isSaving={isSaving}
             />
         </div>
     );

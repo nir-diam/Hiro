@@ -2,16 +2,24 @@
 // data/jobFieldsData.ts
 
 export interface JobRole {
+  id?: string;
   value: string;
   synonyms: string[];
+  tags?: {
+    id?: string;
+    tagKey?: string;
+    label?: string;
+  }[];
 }
 
 export interface JobFieldType {
+  id?: string;
   name: string;
   roles: JobRole[];
 }
 
 export interface JobCategory {
+  id?: string;
   name: string;
   fieldTypes: JobFieldType[];
 }

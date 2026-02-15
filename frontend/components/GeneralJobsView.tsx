@@ -3,7 +3,7 @@ import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MagnifyingGlassIcon, MapPinIcon, BriefcaseIcon, TagIcon, FunnelIcon, BookmarkIcon, BellIcon, XMarkIcon, ClockIcon, CheckCircleIcon, SparklesIcon, ArrowLeftIcon, UserCircleIcon, BuildingOffice2Icon, CalendarDaysIcon, WalletIcon, PaperAirplaneIcon, ChevronDownIcon } from './Icons';
 import JobDetailsDrawer from './JobDetailsDrawer';
-import { Job, jobsData as allJobsData } from './JobsView';
+import { Job } from './JobsView';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { JobAlertModalConfig } from './CreateJobAlertModal';
 import ApplyModal from './ApplyModal';
@@ -23,131 +23,192 @@ interface EnrichedJob extends Job {
 }
 
 const mockJobsData: EnrichedJob[] = [
-    { ...allJobsData[0], workModel: 'hybrid', isPromoted: true } as EnrichedJob, 
-    { ...allJobsData[1], workModel: 'office', isPromoted: false } as EnrichedJob, 
-    { ...allJobsData[2], workModel: 'remote', isPromoted: true } as EnrichedJob,
-    { ...allJobsData[3], workModel: 'hybrid', isPromoted: false } as EnrichedJob,
-    { ...allJobsData[5], workModel: 'office', isPromoted: false } as EnrichedJob, // Data Analyst
-    { ...allJobsData[4], workModel: 'hybrid', isPromoted: false } as EnrichedJob, // QA
-].map((job, index) => {
-    // Correcting data to match screenshots
-    switch(index) {
-        case 0: 
-            job.client = 'Google'; 
-            job.title = 'מפתח/ת Frontend בכיר/ה'; 
-            job.description = `**תיאור המשרה**
-בוא/י להצטרף לצוות שלנו ולעבוד על טכנולוגיות ווב מהשורה הראשונה. אנחנו מחפשים מפתח/ת עם ניסיון שיעזור/תעזור לנו לבנות את הדור הבא של המוצרים של Google.
-
-**תחומי אחריות**
-• פיתוח פיצ'רים מורכבים ב-React.
-• הובלת תהליכי Code Review ושיפור ארכיטקטורה.
-• עבודה צמודה עם מעצבים ומנהלי מוצר.
-
-**דרישות**
-• ניסיון של 5 שנים לפחות עם React, Redux, ו-JavaScript מודרני (ES6+).
-• ידע מעמיק ב-TypeScript וארכיטקטורה מבוססת קומפוננטות.
-• ניסיון עם GraphQL, Next.js, ו-Server-Side Rendering - יתרון.
-• היכרות עם ספריות בדיקה כמו Jest ו-React Testing Library.`;
-            job.tags = ['React', 'TypeScript', 'GraphQL'];
-            job.postedDate = 'לפני יומיים';
-            job.logo = 'https://upload.wikimedia.org/wikipedia/commons/2/2f/Google_2015_logo.svg';
-            job.experienceRequired = '5+ שנים';
-            job.jobType = 'משרה מלאה';
-            job.location = 'תל אביב';
-            break;
-        case 1: 
-            job.client = 'Facebook';
-            job.title = 'מנהל/ת שיווק';
-            job.description = `**תיאור המשרה**
-בוא/י להוביל את קמפייני השיווק שלנו ולהצמיח את בסיס המשתמשים במגוון פלטפורמות. התפקיד כולל אחריות על אסטרטגיה, ניהול תקציב והובלת צוות.
-
-**דרישות**
-• ניסיון של 3-5 שנים בשיווק ברשתות חברתיות ואסטרטגיית תוכן.
-• יכולות אנליטיות חזקות ושליטה בכלי אנליטיקה.
-• רקורד מוכח של קמפיינים מוצלחים וגיוס משתמשים.
-• ניסיון בניהול תקציב שיווק וצוות קטן.`;
-            job.tags = ['Social Media', 'Marketing', 'PPC'];
-            job.postedDate = 'לפני 5 ימים';
-            job.logo = 'https://upload.wikimedia.org/wikipedia/commons/5/51/Facebook_f_logo_%282019%29.svg';
-            job.experienceRequired = '3-5 שנים';
-            job.jobType = 'משרה מלאה';
-            job.location = 'תל אביב';
-            break;
-        case 2: 
-            job.client = 'Wix';
-            job.title = 'מעצב/ת UX/UI';
-            job.description = `**תיאור המשרה**
-בוא/י לעצב ממשקי משתמש יפים ואינטואיטיביים עבור מיליוני המשתמשים שלנו ברחבי העולם. הצטרפ/י לצוות דינמי של מעצבים שמעצבים את עתיד הרשת.
-
-**דרישות**
-• תיק עבודות מרשים המציג את הכישורים שלך.
-• שליטה ב-Figma, Sketch וכלי עיצוב נוספים.
-• ניסיון במחקר משתמשים, Wireframing ו-Prototyping.
-• יכולת ליצור ולתחזק Design System.`;
-            job.tags = ['UI', 'UX', 'Figma'];
-            job.postedDate = 'לפני שבוע';
-            job.logo = 'https://cdn-assets-cloud.frontify.com/s3/frontify-cloud-files-us/eyJwYXRoIjoiZnJvbnRpZnlcL2FjY291bnRzXC8xZlwvMTk0MjMzXC9wcm9qZWN0c1wvMjc5NTgxXC9hc3NldHNcL2I2XC8zNzg4MjM0XC82YjE5YjEwMjgyYWQ2ZmFkYjYwZTdjMjg0Mjg2MTE0ZC0xNTg0MDMyMTE1LnN2ZyJ9:frontify:L6d-5I852K4sZqtg1fBnCEa-2wQ6aQo0432p5Lut0o4?width=256';
-            job.experienceRequired = '2+ שנים';
-            job.jobType = 'משרה חלקית';
-            job.location = 'חיפה';
-            break;
-        case 3: 
-            job.client = 'Playtika';
-            job.title = 'אנליסט/ית נתונים';
-            job.location = 'הרצליה';
-            job.description = `**תיאור המשרה**
-ניתוח מאגרי נתונים גדולים ומורכבים כדי לספק תובנות עסקיות שיניעו החלטות בסטודיו המשחקים שלנו.
-
-**דרישות**
-• ניסיון של 3 שנים לפחות כאנליסט/ית נתונים, עדיפות לתעשיית הגיימינג או המובייל.
-• שליטה מעולה ב-SQL וניסיון עם מחסני נתונים גדולים (BigQuery, Redshift וכו').
-• ניסיון עם כלי ויזואליזציה BI כמו Tableau או Looker.
-• ידע סטטיסטי וניסיון עם Python או R - יתרון משמעותי.`;
-            job.tags = ['SQL', 'Tableau', 'Python'];
-            job.postedDate = 'לפני 3 שעות';
-            job.logo = 'https://playtika.com/wp-content/uploads/2021/01/logo.svg';
-            job.experienceRequired = '3+ שנים';
-            job.jobType = 'משרה מלאה';
-            break;
-        case 4:
-            job.client = 'תמנב';
-            job.title = 'נציג/ת מכירות שטח';
-            job.location = 'אזור המרכז';
-            job.description = `**תיאור המשרה**
-אנחנו מחפשים נציג/ת מכירות שטח עם אנרגיה ורעב להצלחה, שיצטרף/תצטרף לצוות הצומח שלנו וינהל/תנהל את פעילות המכירות באזור המרכז.
-
-**דרישות**
-• ניסיון מוכח של 1-2 שנים במכירות שטח (עדיפות ל-B2B).
-• יכולות תקשורת, ניהול משא ומתן ויחסי אנוש מעולים.
-• יכולת עבודה עצמאית ועמידה ביעדי מכירות.
-• רישיון נהיגה בתוקף - חובה.`;
-            job.tags = ['מכירות שטח', 'B2B'];
-            job.postedDate = 'היום';
-            job.logo = 'https://www.tmnv.co.il/images/logo_tmnv.png';
-            job.experienceRequired = '1-2 שנים';
-            job.jobType = 'משרה מלאה';
-            break;
-        case 5:
-            job.client = 'אלביט מערכות';
-            job.title = 'בודק/ת תוכנה QA';
-            job.location = 'חיפה';
-            job.description = `**תיאור המשרה**
-הצטרפ/י לצוות ה-QA שלנו כדי להבטיח את האיכות והאמינות של המערכות הביטחוניות המתקדמות שלנו. התפקיד כולל בדיקות ידניות, כתיבת מסמכי בדיקה ועבודה צמודה עם צוותי הפיתוח.
-
-**דרישות**
-• ניסיון של שנתיים לפחות בבדיקות תוכנה ידניות.
-• ניסיון בכתיבת מסמכי STD, STP, ו-STR.
-• היכרות עם מתודולוגיות בדיקה ומחזור חיים של באגים.
-• ניסיון עם מערכות ניהול באגים כמו Jira - יתרון.`;
-            job.tags = ['QA', 'Manual Testing', 'Jira'];
-            job.postedDate = 'אתמול';
-            job.logo = 'https://elbitsystems.com/media/Elbit-Systems-Logo_5-29.jpg';
-            job.experienceRequired = '2+ שנים';
-            job.jobType = 'משרה מלאה';
-            break;
-    }
-    return job;
-});
+    {
+        id: 1,
+        title: 'מפתח/ת Frontend בכיר/ה',
+        client: 'Google',
+        field: 'פיתוח',
+        role: 'Senior Frontend Engineer',
+        priority: 'קריטית',
+        clientType: 'Enterprise',
+        city: 'תל אביב',
+        region: 'מרכז',
+        gender: 'לא משנה',
+        mobility: true,
+        licenseType: 'B',
+        postingCode: 'GO101',
+        validityDays: 60,
+        recruitingCoordinator: 'דנה כהן',
+        accountManager: 'ישראל ישראלי',
+        salaryMin: 22000,
+        salaryMax: 28000,
+        ageMin: 27,
+        ageMax: 45,
+        openPositions: 2,
+        status: 'פתוחה',
+        associatedCandidates: 18,
+        waitingForScreening: 4,
+        activeProcess: 3,
+        description: 'פיתוח ממשקים חזקים תוך שימוש ב-React, TypeScript ו-GraphQL.',
+        requirements: ['React', 'TypeScript', 'GraphQL'],
+        tags: ['React', 'TypeScript', 'GraphQL'],
+        postedDate: 'לפני יומיים',
+        logo: 'https://upload.wikimedia.org/wikipedia/commons/2/2f/Google_2015_logo.svg',
+        workModel: 'hybrid',
+        experienceRequired: '5+ שנים',
+        jobType: 'משרה מלאה',
+        location: 'תל אביב',
+        isPromoted: true
+    },
+    {
+        id: 2,
+        title: 'מנהל/ת שיווק מוצר',
+        client: 'Meta',
+        field: 'שיווק',
+        role: 'Product Marketing Manager',
+        priority: 'דחופה',
+        clientType: 'Hi-Tech',
+        city: 'תל אביב',
+        region: 'מרכז',
+        gender: 'לא משנה',
+        mobility: true,
+        licenseType: 'B',
+        postingCode: 'ME202',
+        validityDays: 45,
+        recruitingCoordinator: 'אביב לוי',
+        accountManager: 'מיכל בר',
+        salaryMin: 18000,
+        salaryMax: 23000,
+        ageMin: 25,
+        ageMax: 40,
+        openPositions: 1,
+        status: 'פתוחה',
+        associatedCandidates: 14,
+        waitingForScreening: 6,
+        activeProcess: 2,
+        description: 'ניהול קמפיינים מורכבים בשווקים גלובליים.',
+        requirements: ['Marketing', 'Campaigns', 'Strategy'],
+        tags: ['Marketing', 'Campaigns', 'PPC'],
+        postedDate: 'לפני 5 ימים',
+        logo: 'https://upload.wikimedia.org/wikipedia/commons/5/51/Facebook_f_logo_%282019%29.svg',
+        workModel: 'office',
+        experienceRequired: '3-5 שנים',
+        jobType: 'משרה מלאה',
+        location: 'תל אביב',
+        isPromoted: false
+    },
+    {
+        id: 3,
+        title: 'מעצב/ת UX/UI',
+        client: 'Wix',
+        field: 'עיצוב',
+        role: 'UX/UI Designer',
+        priority: 'רגילה',
+        clientType: 'Startup',
+        city: 'חיפה',
+        region: 'צפון',
+        gender: 'נקבה',
+        mobility: false,
+        licenseType: 'אין',
+        postingCode: 'WI303',
+        validityDays: 30,
+        recruitingCoordinator: 'יעל שחר',
+        accountManager: 'ישראל ישראלי',
+        salaryMin: 18000,
+        salaryMax: 21000,
+        ageMin: 24,
+        ageMax: 38,
+        openPositions: 1,
+        status: 'מוקפאת',
+        associatedCandidates: 6,
+        waitingForScreening: 0,
+        activeProcess: 1,
+        description: 'עיצוב חוויות למוצר גלובלי.',
+        requirements: ['Figma', 'UX Research'],
+        tags: ['UI', 'UX', 'Figma'],
+        postedDate: 'לפני שבוע',
+        logo: 'https://cdn-assets-cloud.frontify.com/s3/frontify-cloud-files-us/eyJwYXRoIjoiZnJvbnRpZnlcL2FjY291bnRzXC8xZlwvMTk0MjMzXC9wcm9qZWN0c1wvMjc5NTgxXC9hc3NldHNcL2I2XC8zNzg4MjM0XC82YjE5YjEwMjgyYWQ2ZmFkYjYwZTdjMjg0Mjg2MTE0ZC0xNTg0MDMyMTE1LnN2ZyJ9:frontify:L6d-5I852K4sZqtg1fBnCEa-2wQ6aQo0432p5Lut0o4?width=256',
+        workModel: 'remote',
+        experienceRequired: '2+ שנים',
+        jobType: 'משרה חלקית',
+        location: 'חיפה',
+        isPromoted: true
+    },
+    {
+        id: 4,
+        title: 'אנליסט/ית נתונים',
+        client: 'Playtika',
+        field: 'אנליזה',
+        role: 'Data Analyst',
+        priority: 'קריטית',
+        clientType: 'Enterprise',
+        city: 'הרצליה',
+        region: 'שרון',
+        gender: 'לא משנה',
+        mobility: true,
+        licenseType: 'B',
+        postingCode: 'PL404',
+        validityDays: 60,
+        recruitingCoordinator: 'דנה כהן',
+        accountManager: 'שרית בן חיים',
+        salaryMin: 20000,
+        salaryMax: 26000,
+        ageMin: 26,
+        ageMax: 45,
+        openPositions: 2,
+        status: 'פתוחה',
+        associatedCandidates: 12,
+        waitingForScreening: 8,
+        activeProcess: 4,
+        description: 'ניתוח נתונים למוצרי משחקים.',
+        requirements: ['SQL', 'Python', 'BI'],
+        tags: ['SQL', 'Tableau', 'Python'],
+        postedDate: 'לפני 3 שעות',
+        logo: 'https://playtika.com/wp-content/uploads/2021/01/logo.svg',
+        workModel: 'office',
+        experienceRequired: '3+ שנים',
+        jobType: 'משרה מלאה',
+        location: 'הרצליה',
+        isPromoted: false
+    },
+    {
+        id: 5,
+        title: 'נציג/ת מכירות שטח',
+        client: 'תמנב',
+        field: 'מכירות',
+        role: 'Field Sales Representative',
+        priority: 'דחופה',
+        clientType: 'Retail',
+        city: 'רחובות',
+        region: 'מרכז',
+        gender: 'לא משנה',
+        mobility: true,
+        licenseType: 'C1',
+        postingCode: 'TM505',
+        validityDays: 40,
+        recruitingCoordinator: 'אביב לוי',
+        accountManager: 'אביב לוי',
+        salaryMin: 11000,
+        salaryMax: 13000,
+        ageMin: 21,
+        ageMax: 60,
+        openPositions: 6,
+        status: 'פתוחה',
+        associatedCandidates: 7,
+        waitingForScreening: 5,
+        activeProcess: 2,
+        description: 'ניהול מבצעי מכירות שטח בצפון הארץ.',
+        requirements: ['מכירות שטח', 'B2B'],
+        tags: ['מכירות שטח', 'B2B'],
+        postedDate: 'היום',
+        logo: 'https://www.tmnv.co.il/images/logo_tmnv.png',
+        workModel: 'hybrid',
+        experienceRequired: '1-2 שנים',
+        jobType: 'משרה מלאה',
+        location: 'מרכז',
+        isPromoted: false
+    },
+];
 
 
 const JobListItem: React.FC<{ job: EnrichedJob; onClick: () => void; isActive: boolean; isSaved: boolean; onSave: (e: React.MouseEvent) => void }> = ({ job, onClick, isActive, isSaved, onSave }) => {

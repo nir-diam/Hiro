@@ -1,19 +1,69 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { jobFieldsData, JobCategory, JobFieldType, JobRole } from '../data/jobFieldsData';
 import { 
     PlusIcon, PencilIcon, TrashIcon, ChevronLeftIcon, MagnifyingGlassIcon, 
     SparklesIcon, ListBulletIcon, FolderIcon, TagIcon, NoSymbolIcon, Squares2X2Icon, XMarkIcon
 } from './Icons';
+import { GoogleGenAI, FunctionDeclaration, Type, Chat } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
+
+// --- AI TOOLS DEFINITIONS ---
+
+const addCategoryTool: FunctionDeclaration = {
+    name: 'addCategory',
+    parameters: {
+        type: Type.OBJECT,
+        description: 'Add a new main category to the taxonomy.',
+        properties: {
+            name: { type: Type.STRING, description: 'The name of the new category (e.g., "Cyber Security").' }
+        },
+        required: ['name']
+    }
+};
+
+const addClusterTool: FunctionDeclaration = {
+    name: 'addCluster',
+    parameters: {
+        type: Type.OBJECT,
+        description: 'Add a new cluster (sub-domain) to an existing category.',
+        properties: {
+            categoryName: { type: Type.STRING, description: 'The exact name of the parent category.' },
+            clusterName: { type: Type.STRING, description: 'The name of the new cluster.' }
+        },
+        required: ['categoryName', 'clusterName']
+    }
+};
+
+const addRoleTool: FunctionDeclaration = {
+    name: 'addRole',
+    parameters: {
+        type: Type.OBJECT,
+        description: 'Add a new job role to a specific cluster.',
+        properties: {
+            categoryName: { type: Type.STRING, description: 'The exact name of the parent category.' },
+            clusterName: { type: Type.STRING, description: 'The exact name of the parent cluster.' },
+            roleName: { type: Type.STRING, description: 'The name of the role (e.g., "Junior Pentester").' },
+            synonyms: { 
+                type: Type.ARRAY, 
+                items: { type: Type.STRING },
+                description: 'List of synonyms for this role.' 
+            }
+        },
+        required: ['categoryName', 'clusterName', 'roleName']
+    }
+};
 
 // Helper types for UI state
 type Status = 'active' | 'draft' | 'deprecated';
 type ModalMode = 'add' | 'edit';
 type EntityType = 'category' | 'cluster' | 'role';
 
-type JobRole = { id: string; value: string; synonyms: string[]; };
-type JobFieldType = { id: string; name: string; roles: JobRole[]; };
-type JobCategory = { id: string; name: string; fieldTypes: JobFieldType[]; };
+interface TagOption {
+    id: string;
+    tagKey: string;
+    label: string;
+}
 
 interface AdminColumnProps {
     title: string;
@@ -28,11 +78,10 @@ interface AdminColumnProps {
     aiTooltip?: string;
     emptyStateText: string;
     isActive?: boolean;
-    loadingBanner?: React.ReactNode;
 }
 
 const AdminColumn: React.FC<AdminColumnProps> = ({ 
-    title, subtitle, icon, children, onAdd, searchTerm, onSearchChange, count, aiAction, aiTooltip, emptyStateText, isActive = true, loadingBanner
+    title, subtitle, icon, children, onAdd, searchTerm, onSearchChange, count, aiAction, aiTooltip, emptyStateText, isActive = true 
 }) => (
     <div className={`flex-1 flex flex-col min-w-0 bg-white border-l border-border-default first:border-l-0 last:rounded-l-xl first:rounded-r-xl h-full shadow-sm transition-opacity duration-200 ${isActive ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
         {/* Header */}
@@ -83,7 +132,6 @@ const AdminColumn: React.FC<AdminColumnProps> = ({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar bg-bg-subtle/10">
-            {loadingBanner}
             {count > 0 ? children : (
                 <div className="h-full flex flex-col items-center justify-center text-text-muted text-center p-4">
                     <div className="mb-2 p-3 bg-bg-subtle rounded-full opacity-50">{icon}</div>
@@ -170,105 +218,162 @@ const ListItem: React.FC<{
 interface TaxonomyModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSave: (value: string, synonyms?: string[]) => void;
+    onSave: (value: string, tags?: TagOption[]) => void;
     initialValue: string;
-    initialSynonyms?: string[];
     type: EntityType;
     mode: ModalMode;
+    targetId?: string;
     apiBase: string;
+    availableTags: TagOption[];
+    initialTags?: TagOption[];
+    onTagCreated?: (tag: TagOption) => void;
 }
 
-const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, initialValue, initialSynonyms = [], type, mode, apiBase }) => {
+const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
+    isOpen,
+    onClose,
+    onSave,
+    initialValue,
+    type,
+    mode,
+    apiBase,
+    availableTags,
+    initialTags = [],
+    onTagCreated,
+}) => {
     const [value, setValue] = useState(initialValue);
-    const [synonyms, setSynonyms] = useState<string[]>(initialSynonyms);
-    const [synonymInput, setSynonymInput] = useState('');
-    const [synonymLoading, setSynonymLoading] = useState(false);
+    const [selectedTags, setSelectedTags] = useState<TagOption[]>(initialTags);
+    const [tagInput, setTagInput] = useState('');
+    const [isSavingTag, setIsSavingTag] = useState(false);
+    const [tagError, setTagError] = useState<string | null>(null);
     const inputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         if (isOpen) {
             setValue(initialValue);
-            setSynonyms(initialSynonyms);
-            setSynonymInput('');
+            setSelectedTags(initialTags || []);
+            setTagInput('');
+            setTagError(null);
             setTimeout(() => inputRef.current?.focus(), 100);
         }
-    }, [isOpen, initialValue, initialSynonyms]);
+    }, [isOpen, initialValue, initialTags]);
+
+    const matchingTags = useMemo(() => {
+        const query = tagInput.trim().toLowerCase();
+        if (!query) return availableTags;
+        return availableTags
+            .filter((tag) => (tag.label || tag.tagKey || '').toLowerCase().includes(query))
+            .slice(0, 50);
+    }, [availableTags, tagInput]);
 
     if (!isOpen) return null;
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!value.trim()) return;
-        onSave(value, synonyms);
+        onSave(value.trim(), selectedTags);
         onClose();
     };
 
-    const handleAddSynonym = () => {
-        if (synonymInput.trim() && !synonyms.includes(synonymInput.trim())) {
-            setSynonyms([...synonyms, synonymInput.trim()]);
-            setSynonymInput('');
+    const datalistId = `${type}-tag-options`;
+
+    const handleAddTag = async () => {
+        const trimmed = tagInput.trim();
+        if (!trimmed || isSavingTag) return;
+
+        const lowerTrim = trimmed.toLowerCase();
+        if (selectedTags.some((tag) => (tag.tagKey || tag.label || '').toLowerCase() === lowerTrim)) {
+            setTagError('תגית זו כבר מסומנת');
+            return;
         }
-    };
 
-    const handleKeyDownSynonym = (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            handleAddSynonym();
+        const existing = availableTags.find(
+            (tag) =>
+                (tag.tagKey || '').toLowerCase() === lowerTrim ||
+                (tag.label || '').toLowerCase() === lowerTrim,
+        );
+
+        if (existing) {
+            setSelectedTags((prev) => [...prev, existing]);
+            setTagInput('');
+            setTagError(null);
+            return;
         }
-    };
 
-    const removeSynonym = (tag: string) => {
-        setSynonyms(synonyms.filter(s => s !== tag));
-    };
-
-    const handleAutoSynonyms = async () => {
-        if (!value.trim()) return;
-        setSynonymLoading(true);
+        setIsSavingTag(true);
+        setTagError(null);
         try {
-            const res = await fetch(`${apiBase}/api/job-fields/ai/suggest-role-synonyms`, {
+            const response = await fetch(`${apiBase}/api/tags`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ value, existingSynonyms: synonyms }),
+                body: JSON.stringify({ tagKey: trimmed, displayNameHe: trimmed }),
             });
-            if (!res.ok) throw new Error('AI suggestion failed');
-            const data = await res.json();
-            const suggestions: string[] = data.suggestions || [];
-            const unique = suggestions.filter((s) => !synonyms.includes(s));
-            if (unique.length === 0) {
-                alert('No new synonyms were suggested.');
-                return;
+            if (!response.ok) {
+                const payload = await response.text();
+                throw new Error(payload || 'הוספת תגית נכשלה');
             }
-            setSynonyms(prev => [...prev, ...unique]);
-        } catch (err: any) {
-            alert(err.message || 'AI suggestion failed');
+            const created = await response.json();
+            const newTag: TagOption = {
+                id: created.id,
+                tagKey: created.tagKey,
+                label: created.displayNameHe || created.displayNameEn || created.tagKey || trimmed,
+            };
+            onTagCreated?.(newTag);
+            setSelectedTags((prev) => [...prev, newTag]);
+            setTagInput('');
+        } catch (error: any) {
+            setTagError(error?.message || 'שגיאה ביצירת תגית');
         } finally {
-            setSynonymLoading(false);
+            setIsSavingTag(false);
         }
+    };
+
+    const handleKeyDownTag = (e: React.KeyboardEvent) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleAddTag();
+        }
+    };
+
+    const removeTag = (id: string) => {
+        setSelectedTags((prev) => prev.filter((tag) => tag.id !== id));
+    };
+
+    const handleSelectTagOption = (tag: TagOption) => {
+        if (selectedTags.some((existing) => existing.id === tag.id)) {
+            setTagError('תגית זו כבר מסומנת');
+            return;
+        }
+        setSelectedTags((prev) => [...prev, tag]);
+        setTagInput('');
+        setTagError(null);
     };
 
     const titles = {
         category: { add: 'הוספת קטגוריה', edit: 'עריכת קטגוריה' },
         cluster: { add: 'הוספת קלאסטר', edit: 'עריכת קלאסטר' },
-        role: { add: 'הוספת תפקיד', edit: 'עריכת תפקיד' }
+        role: { add: 'הוספת תפקיד', edit: 'עריכת תפקיד' },
     };
 
     return (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-            <div className="bg-bg-card rounded-2xl shadow-xl border border-border-default w-full max-w-lg overflow-hidden animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="bg-bg-card rounded-2xl shadow-xl border border-border-default w-full max-w-lg overflow-hidden animate-fade-in" onClick={(e) => e.stopPropagation()}>
                 <div className="flex justify-between items-center p-4 border-b border-border-default bg-bg-subtle/30">
                     <h3 className="font-bold text-lg text-text-default">{titles[type][mode]}</h3>
-                    <button onClick={onClose} className="p-1 rounded-full text-text-muted hover:bg-bg-hover"><XMarkIcon className="w-5 h-5"/></button>
+                    <button onClick={onClose} className="p-1 rounded-full text-text-muted hover:bg-bg-hover">
+                        <XMarkIcon className="w-5 h-5" />
+                    </button>
                 </div>
                 <form onSubmit={handleSubmit} className="p-6">
                     <div className="mb-4">
                         <label className="block text-sm font-semibold text-text-muted mb-2">
                             {type === 'role' ? 'שם התפקיד (ראשי)' : type === 'cluster' ? 'שם הקלאסטר' : 'שם הקטגוריה'}
                         </label>
-                        <input 
+                        <input
                             ref={inputRef}
-                            type="text" 
+                            type="text"
                             value={value}
-                            onChange={e => setValue(e.target.value)}
+                            onChange={(e) => setValue(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-xl p-3 text-base focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all outline-none"
                             placeholder="הקלד שם..."
                         />
@@ -276,49 +381,101 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, 
 
                     {type === 'role' && (
                         <div className="mb-6">
-                            <label className="block text-sm font-semibold text-text-muted mb-2">
-                                טייטלים ספציפיים לחיפוש (מילים נרדפות)
-                            </label>
-                            <div className="flex gap-2 mb-3 items-center">
-                                <input 
-                                    type="text" 
-                                    value={synonymInput}
-                                    onChange={e => setSynonymInput(e.target.value)}
-                                    onKeyDown={handleKeyDownSynonym}
-                                    className="flex-1 bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
-                                    placeholder="הוסף מילה נרדפת ולחץ אנטר..."
-                                />
-                                <button 
-                                    type="button" 
-                                    onClick={handleAddSynonym}
-                                    className="bg-bg-subtle border border-border-default hover:bg-bg-hover text-text-default px-3 py-2 rounded-lg text-sm font-semibold"
-                                >
-                                    הוסף
-                                </button>
+                            <div className="flex justify-between items-center mb-2">
+                                <label className="block text-sm font-semibold text-text-muted">תגיות</label>
                                 <button
                                     type="button"
-                                    onClick={handleAutoSynonyms}
-                                    className="bg-primary-50 border border-primary-200 text-primary-700 hover:bg-primary-100 px-3 py-2 rounded-lg text-sm font-semibold"
-                                    disabled={synonymLoading}
+                                    disabled
+                                    className="flex items-center gap-1.5 text-[11px] font-bold px-2 py-1 rounded-full border border-border-default bg-gray-100 text-gray-400 cursor-not-allowed"
+                                    title="העשרה אוטומטית לא זמינה זמנית"
                                 >
-                                    {synonymLoading ? 'מייצר...' : 'השלמה אוטומטית עם AI'}
+                                    <SparklesIcon className="w-3 h-3" />
+                                    מושבתת
                                 </button>
                             </div>
-                            <div className="flex flex-wrap gap-2 min-h-[40px] p-3 bg-bg-subtle/30 rounded-xl border border-border-default/50">
-                                {synonyms.length === 0 && <span className="text-xs text-text-subtle italic">אין מילים נרדפות</span>}
-                                {synonyms.map(syn => (
-                                    <span key={syn} className="flex items-center gap-1 bg-white border border-border-default px-2 py-1 rounded-md text-xs font-medium text-text-default shadow-sm animate-fade-in">
-                                        {syn}
-                                        <button type="button" onClick={() => removeSynonym(syn)} className="hover:text-red-500"><XMarkIcon className="w-3 h-3"/></button>
-                                    </span>
-                                ))}
+
+                            <div className="flex gap-2 mb-2 flex-wrap">
+                                <input
+                                    value={tagInput}
+                                    onChange={(e) => setTagInput(e.target.value)}
+                                    onKeyDown={handleKeyDownTag}
+                                    className="flex-1 min-w-[220px] bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
+                                    placeholder="הקלד או בחר תגית..."
+                                />
+                                <button
+                                    type="button"
+                                    onClick={handleAddTag}
+                                    disabled={!tagInput.trim() || isSavingTag}
+                                    className="text-sm font-semibold bg-primary-600 text-white px-4 py-2 rounded-lg shadow-sm hover:bg-primary-700 disabled:bg-primary-300 disabled:cursor-not-allowed transition-colors"
+                                >
+                                    {isSavingTag ? 'שומר...' : 'הוסף'}
+                                </button>
+                            </div>
+                            {tagError && <p className="text-[11px] text-red-600 mb-2">{tagError}</p>}
+
+                            <div
+                                className="bg-white border border-border-default rounded-xl shadow-inner overflow-hidden mb-2 transition-all"
+                                style={{
+                                    maxHeight: tagInput.trim() ? '180px' : '320px',
+                                }}
+                            >
+                                <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
+                                    {matchingTags.length === 0 ? (
+                                        <div className="p-3 text-xs text-text-muted">לא נמצאו תגיות תואמות</div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 p-2 text-xs">
+                                            {matchingTags.map((tag) => (
+                                                <button
+                                                    key={tag.id}
+                                                    type="button"
+                                                    onClick={() => handleSelectTagOption(tag)}
+                                                    className="w-full text-left rounded-lg px-3 py-2 hover:bg-bg-hover transition-colors text-text-default flex justify-between items-center"
+                                                >
+                                                    <span>{tag.label}</span>
+                                                    <span className="text-[10px] text-text-muted">{tag.tagKey}</span>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="flex flex-wrap gap-2 min-h-[60px] p-3 bg-bg-subtle/30 rounded-xl border border-border-default/50 max-h-[140px] overflow-y-auto custom-scrollbar">
+                                {selectedTags.length === 0 ? (
+                                    <span className="text-xs text-text-muted italic">אין תגיות שנבחרו</span>
+                                ) : (
+                                    selectedTags.map((tag) => (
+                                        <span
+                                            key={tag.id}
+                                            className="flex items-center gap-2 bg-white border border-border-default px-3 py-1 rounded-full text-xs font-medium text-text-default shadow-sm"
+                                        >
+                                            {tag.label}
+                                            <button
+                                                type="button"
+                                                onClick={() => removeTag(tag.id)}
+                                                className="text-text-subtle hover:text-red-500"
+                                            >
+                                                <XMarkIcon className="w-3 h-3" />
+                                            </button>
+                                        </span>
+                                    ))
+                                )}
                             </div>
                         </div>
                     )}
 
                     <div className="flex justify-end gap-3 pt-2 border-t border-border-default mt-4">
-                        <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors">ביטול</button>
-                        <button type="submit" className="px-6 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors"
+                        >
+                            ביטול
+                        </button>
+                        <button
+                            type="submit"
+                            className="px-6 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all"
+                        >
                             {mode === 'add' ? 'הוסף' : 'שמור שינויים'}
                         </button>
                     </div>
@@ -328,12 +485,17 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({ isOpen, onClose, onSave, 
     );
 };
 
+interface Message {
+    role: 'user' | 'model';
+    text: string;
+}
+
 const AdminJobFieldsView: React.FC = () => {
-    const apiBase = import.meta.env.VITE_API_BASE || '';
     // --- STATE ---
-    const [data, setData] = useState<JobCategory[]>([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState<string | null>(null);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [data, setData] = useState<JobCategory[]>(jobFieldsData);
+    const [fetchError, setFetchError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
     
     // Selection
     const [selectedCategory, setSelectedCategory] = useState<JobCategory | null>(null);
@@ -347,6 +509,13 @@ const AdminJobFieldsView: React.FC = () => {
     // UI Feedback
     const [aiLoading, setAiLoading] = useState<string | null>(null);
 
+    // AI Chat State
+    const [isChatOpen, setIsChatOpen] = useState(false);
+    const [chatMessages, setChatMessages] = useState<Message[]>([]);
+    const [chatSession, setChatSession] = useState<Chat | null>(null);
+    const [isChatLoading, setIsChatLoading] = useState(false);
+    const [chatError, setChatError] = useState<string | null>(null);
+
     // Modal State
     const [modalState, setModalState] = useState<{
         isOpen: boolean;
@@ -354,7 +523,8 @@ const AdminJobFieldsView: React.FC = () => {
         mode: ModalMode;
         initialValue: string;
         initialSynonyms?: string[];
-        targetId?: string; // used for identifying what to edit/delete (using name as ID here for simplicity)
+        initialTags?: TagOption[];
+        targetId?: string; 
     }>({
         isOpen: false,
         type: 'category',
@@ -362,65 +532,350 @@ const AdminJobFieldsView: React.FC = () => {
         initialValue: ''
     });
 
-    // AI suggestion modal state (clusters)
-    const [clusterSuggestions, setClusterSuggestions] = useState<{ name: string; selected: boolean }[]>([]);
-    const [isClusterSuggestModalOpen, setIsClusterSuggestModalOpen] = useState(false);
-    // AI suggestion modal state (roles)
-    const [roleSuggestions, setRoleSuggestions] = useState<{ value: string; synonyms: string[]; selected: boolean }[]>([]);
-    const [isRoleSuggestModalOpen, setIsRoleSuggestModalOpen] = useState(false);
-    const [aiError, setAiError] = useState<string | null>(null);
-    const [isChatOpen, setIsChatOpen] = useState(false);
-    const [aiSynonymTarget, setAiSynonymTarget] = useState<{ value: string; synonyms: string[] } | null>(null);
+    const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
+    const handleTagCreated = (tag: TagOption) => {
+        setAvailableTags((prev) => (prev.some((item) => item.id === tag.id) ? prev : [...prev, tag]));
+    };
 
-    // --- LOAD DATA ---
+    // --- HELPERS ---
+const normalizeRole = (role: any): JobRole => ({
+    id: role.id,
+    value: role.value,
+    synonyms: Array.isArray(role.synonyms) ? role.synonyms : [],
+    tags: Array.isArray(role.tags)
+        ? role.tags.map((tag: any) => ({
+              id: tag.id,
+              tagKey: tag.tagKey,
+              label: tag.displayNameHe || tag.displayNameEn || tag.tagKey,
+          }))
+        : [],
+});
+
+const normalizeTagOption = (tag: any): TagOption => ({
+    id: tag.id,
+    tagKey: tag.tagKey,
+    label: tag.displayNameHe || tag.displayNameEn || tag.tagKey || 'תגית',
+});
+
+    const normalizeCluster = (cluster: any): JobFieldType => ({
+        id: cluster.id,
+        name: cluster.name,
+        roles: (cluster.roles || []).map(normalizeRole),
+    });
+
+    const normalizeCategory = (category: any): JobCategory => ({
+        id: category.id,
+        name: category.name,
+        fieldTypes: (category.fieldTypes || category.clusters || []).map(normalizeCluster),
+    });
+
+    const loadJobFields = async () => {
+        setIsLoading(true);
+        setFetchError(null);
+        try {
+            const response = await fetch(`${apiBase}/api/job-fields`);
+            if (!response.ok) {
+                throw new Error('נכשל בשאילתא לקטגוריות');
+            }
+            const payload = await response.json();
+            if (Array.isArray(payload)) {
+                const normalized = payload.map(normalizeCategory);
+                setData(normalized);
+            }
+        } catch (err: any) {
+            setFetchError(err.message || 'אירעה שגיאה בטעינת הנתונים');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
     useEffect(() => {
-        const load = async () => {
-            setLoading(true);
-            setError(null);
+        loadJobFields();
+    }, []);
+
+    useEffect(() => {
+        let canceled = false;
+        const fetchTags = async () => {
             try {
-                const res = await fetch(`${apiBase}/api/job-fields`);
-                if (!res.ok) throw new Error('טעינת טקסונומיה נכשלה');
-                const json = await res.json();
-                setData(json);
-            } catch (e: any) {
-                setError(e.message || 'שגיאה בטעינה');
-            } finally {
-                setLoading(false);
+                const response = await fetch(`${apiBase}/api/tags`);
+                if (!response.ok) throw new Error('לא ניתן לטעון תגיות');
+                const payload = await response.json();
+                if (Array.isArray(payload) && !canceled) {
+                    const filtered = payload.filter((tag) => tag.status !== 'deprecated' && tag.status !== 'archived');
+                    setAvailableTags(filtered.map(normalizeTagOption));
+                }
+            } catch (err) {
+                console.error('Failed to load tags', err);
             }
         };
-        load();
+        fetchTags();
+        return () => {
+            canceled = true;
+        };
     }, [apiBase]);
 
-    const refetch = async () => {
-        try {
-            const res = await fetch(`${apiBase}/api/job-fields`);
-            if (res.ok) {
-                const json = await res.json();
-                setData(json);
-                return json as JobCategory[];
+    const jobFieldsContext = useMemo(() => ({
+        categories: data.map((category) => ({
+            id: category.id,
+            name: category.name,
+            fieldTypes: (category.fieldTypes || []).map(cluster => ({
+                id: cluster.id,
+                name: cluster.name,
+                roles: (cluster.roles || []).map(role => ({
+                    id: role.id,
+                    value: role.value,
+                    synonyms: role.synonyms || [],
+                })),
+            })),
+        })),
+    }), [data]);
+
+    // --- CHAT LOGIC ---
+
+    const applyJobFieldSuggestions = useCallback(
+        async (_patch: any, meta: { suggestions?: any[] } = {}) => {
+            const suggestions = Array.isArray(meta.suggestions) ? meta.suggestions : [];
+            if (!suggestions.length) return;
+            setIsLoading(true);
+            let mutated = false;
+            const findCategoryByName = (name?: string) => {
+                if (!name) return null;
+                const normalized = name.toLowerCase();
+                return data.find((cat) => cat.name.toLowerCase() === normalized);
+            };
+            const ensureStringArray = (value: any) => {
+                if (Array.isArray(value)) return value.map((v) => String(v || '').trim()).filter(Boolean);
+                if (typeof value === 'string') return [value.trim()].filter(Boolean);
+                return [];
+            };
+            try {
+                for (const suggestion of suggestions) {
+                    if (!suggestion.field) continue;
+                    const field = suggestion.field;
+                    const proposed = suggestion.proposedValue ?? suggestion.value;
+                    if (!proposed) continue;
+                    const target = suggestion.currentValue || suggestion.categoryName || suggestion.clusterName;
+                    if (field === 'category') {
+                        await fetch(`${apiBase}/api/job-fields/categories`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name: String(proposed).trim() }),
+                        });
+                        mutated = true;
+                    } else if (field === 'cluster') {
+                        const category = findCategoryByName(target) || selectedCategory;
+                        if (!category?.id) continue;
+                        await fetch(`${apiBase}/api/job-fields/clusters`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ categoryId: category.id, name: String(proposed).trim() }),
+                        });
+                        mutated = true;
+                    } else if (field === 'role') {
+                        const clusterName = target || selectedCluster?.name;
+                        const category =
+                            findCategoryByName(suggestion.categoryName) ||
+                            (selectedCategory && selectedCategory.name === suggestion.categoryName ? selectedCategory : null);
+                        const cluster =
+                            category?.fieldTypes?.find((cl) => cl.name.toLowerCase() === (clusterName || '').toLowerCase()) ||
+                            selectedCluster;
+                        if (!cluster?.id) continue;
+                        const synonyms = ensureStringArray(suggestion.synonyms || suggestion.proposedSynonyms);
+                        await fetch(`${apiBase}/api/job-fields/roles`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                clusterId: cluster.id,
+                                value: String(proposed).trim(),
+                                synonyms,
+                            }),
+                        });
+                        mutated = true;
+                    } else if (field === 'synonym') {
+                        const roleName = (target || suggestion.roleName || '').trim();
+                        if (!roleName) continue;
+                        const cluster =
+                            selectedCluster ||
+                            (selectedCategory?.fieldTypes || []).find((cl) =>
+                                cl.roles.some((r) => r.value.toLowerCase() === roleName.toLowerCase()),
+                            );
+                        const role =
+                            cluster?.roles?.find((r) => r.value.toLowerCase() === roleName.toLowerCase()) || null;
+                        if (!cluster?.id || !role?.id) continue;
+                        const newSyns = Array.from(new Set([...ensureStringArray(role.synonyms), ...ensureStringArray(proposed)]));
+                        await fetch(`${apiBase}/api/job-fields/roles/${role.id}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                value: role.value,
+                                synonyms: newSyns,
+                            }),
+                        });
+                        mutated = true;
+                    }
+                }
+                if (mutated) {
+                    await loadJobFields();
+                }
+            } catch (err: any) {
+                alert(err.message || 'החלת ההצעות נכשלה');
+            } finally {
+                setIsLoading(false);
             }
-        } catch {
-            // ignore
-        }
-        return null;
+        },
+        [apiBase, data, selectedCategory, selectedCluster, loadJobFields],
+    );
+
+    const initializeChat = () => {
+        if (chatSession) return;
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const categoriesSnapshot = data.map(c => c.name).join(', ');
+        
+        const systemInstruction = `You are a taxonomy expert assistant for the "Hiro" recruitment system.
+        You can help the user organize job fields, categories, and roles.
+        You have WRITE access to the taxonomy tree via function calls.
+        
+        Current Categories: ${categoriesSnapshot}
+        
+        If the user asks to add something, verify where it should go, then use the appropriate tool.
+        If they ask for advice, provide it.
+        Be professional and concise. Answer in Hebrew.`;
+
+        const session = ai.chats.create({
+            model: 'gemini-3-flash-preview',
+            config: {
+                systemInstruction,
+                tools: [{ functionDeclarations: [addCategoryTool, addClusterTool, addRoleTool] }]
+            }
+        });
+
+        setChatSession(session);
+        setChatMessages([{ role: 'model', text: 'היי, אני עוזר הטקסונומיה שלך. אני יכול לעזור לך להוסיף קטגוריות, קלאסטרים ותפקידים באופן אוטומטי. מה תרצה לעשות?' }]);
     };
 
-    const reselectByIds = (categoryId?: string, clusterId?: string, sourceData?: JobCategory[]) => {
-        if (!categoryId) return;
-        const pool = sourceData || data;
-        const cat = pool.find(c => c.id === categoryId);
-        if (cat) {
-            setSelectedCategory(cat);
-            if (clusterId) {
-                const cl = cat.fieldTypes.find(cl => cl.id === clusterId);
-                if (cl) setSelectedCluster(cl);
+    const handleOpenChat = () => {
+        initializeChat();
+        setIsChatOpen(true);
+    };
+
+    const handleSendMessage = async (input: string) => {
+        if (!input.trim() || isChatLoading || !chatSession) return;
+        setChatMessages(prev => [...prev, { role: 'user', text: input }]);
+        setIsChatLoading(true);
+        setChatError(null);
+
+        try {
+            const response = await chatSession.sendMessage({ message: input });
+            
+            if (response.functionCalls) {
+                for (const fc of response.functionCalls) {
+                    
+                    if (fc.name === 'addCategory') {
+                        const { name } = fc.args as any;
+                        if (!data.some(c => c.name === name)) {
+                            const newCategory: JobCategory = { name, fieldTypes: [] };
+                            setData(prev => [...prev, newCategory]);
+                            // Set as selected to show the user
+                            setSelectedCategory(newCategory);
+                            setSelectedCluster(null);
+                            
+                            const toolRes = await chatSession.sendMessage({ message: `Success: Category "${name}" added.` });
+                            setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `הוספתי את הקטגוריה "${name}".` }]);
+                        } else {
+                             const toolRes = await chatSession.sendMessage({ message: `Error: Category "${name}" already exists.` });
+                             setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `הקטגוריה "${name}" כבר קיימת.` }]);
+                        }
+                    }
+
+                    if (fc.name === 'addCluster') {
+                        const { categoryName, clusterName } = fc.args as any;
+                        const categoryIndex = data.findIndex(c => c.name === categoryName);
+                        
+                        if (categoryIndex !== -1) {
+                            const category = data[categoryIndex];
+                            if (!category.fieldTypes.some(cl => cl.name === clusterName)) {
+                                const newCluster: JobFieldType = { name: clusterName, roles: [] };
+                                const updatedCategory = { ...category, fieldTypes: [...category.fieldTypes, newCluster] };
+                                
+                                setData(prev => {
+                                    const newData = [...prev];
+                                    newData[categoryIndex] = updatedCategory;
+                                    return newData;
+                                });
+                                setSelectedCategory(updatedCategory);
+                                setSelectedCluster(newCluster);
+
+                                const toolRes = await chatSession.sendMessage({ message: `Success: Cluster "${clusterName}" added to "${categoryName}".` });
+                                setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `הוספתי את הקלאסטר "${clusterName}" תחת "${categoryName}".` }]);
+                            } else {
+                                 const toolRes = await chatSession.sendMessage({ message: `Error: Cluster "${clusterName}" already exists in "${categoryName}".` });
+                                 setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `הקלאסטר כבר קיים.` }]);
+                            }
+                        } else {
+                             const toolRes = await chatSession.sendMessage({ message: `Error: Category "${categoryName}" not found.` });
+                             setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `לא מצאתי את הקטגוריה "${categoryName}".` }]);
+                        }
+                    }
+
+                    if (fc.name === 'addRole') {
+                        const { categoryName, clusterName, roleName, synonyms } = fc.args as any;
+                        
+                        // Find indexes
+                        const catIdx = data.findIndex(c => c.name === categoryName);
+                        if (catIdx !== -1) {
+                            const cat = data[catIdx];
+                            const clustIdx = cat.fieldTypes.findIndex(c => c.name === clusterName);
+                            
+                            if (clustIdx !== -1) {
+                                const cluster = cat.fieldTypes[clustIdx];
+                                if (!cluster.roles.some(r => r.value === roleName)) {
+                                    const newRole: JobRole = { value: roleName, synonyms: synonyms || [] };
+                                    const updatedCluster = { ...cluster, roles: [...cluster.roles, newRole] };
+                                    
+                                    const updatedCategory = {
+                                        ...cat,
+                                        fieldTypes: cat.fieldTypes.map((cl, i) => i === clustIdx ? updatedCluster : cl)
+                                    };
+
+                                    setData(prev => {
+                                        const newData = [...prev];
+                                        newData[catIdx] = updatedCategory;
+                                        return newData;
+                                    });
+                                    setSelectedCategory(updatedCategory);
+                                    setSelectedCluster(updatedCluster);
+
+                                    const toolRes = await chatSession.sendMessage({ message: `Success: Role "${roleName}" added.` });
+                                    setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `הוספתי את התפקיד "${roleName}".` }]);
+                                } else {
+                                     const toolRes = await chatSession.sendMessage({ message: `Error: Role exists.` });
+                                     setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `התפקיד כבר קיים.` }]);
+                                }
+                            } else {
+                                 const toolRes = await chatSession.sendMessage({ message: `Error: Cluster not found.` });
+                                 setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `לא מצאתי את הקלאסטר.` }]);
+                            }
+                        } else {
+                             const toolRes = await chatSession.sendMessage({ message: `Error: Category not found.` });
+                             setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || `לא מצאתי את הקטגוריה.` }]);
+                        }
+                    }
+                }
+            } else {
+                setChatMessages(prev => [...prev, { role: 'model', text: response.text || "סליחה, לא הבנתי." }]);
             }
+        } catch (e) {
+            console.error(e);
+            setChatError("אירעה שגיאה בתקשורת עם השרת.");
+        } finally {
+            setIsChatLoading(false);
         }
     };
+
 
     // --- HANDLERS ---
     const handleSelectCategory = (category: JobCategory) => {
-        if (selectedCategory?.id === category.id) return;
+        if (selectedCategory?.name === category.name) return;
         setSelectedCategory(category);
         setSelectedCluster(null); // Reset lower levels
     };
@@ -431,207 +886,272 @@ const AdminJobFieldsView: React.FC = () => {
 
     // --- MODAL TRIGGERS ---
     const openAddModal = (type: EntityType) => {
-        setModalState({ isOpen: true, type, mode: 'add', initialValue: '', initialSynonyms: [] });
+        setModalState({ isOpen: true, type, mode: 'add', initialValue: '', initialSynonyms: [], initialTags: [] });
     };
 
-    const openEditModal = (type: EntityType, displayName: string, currentSynonyms?: string[], id?: string) => {
-        setModalState({ 
-            isOpen: true, 
-            type, 
-            mode: 'edit', 
-            initialValue: displayName, 
+    const openEditModal = (
+        type: EntityType,
+        targetId: string | undefined,
+        currentName: string,
+        currentSynonyms?: string[],
+        currentTags: TagOption[] = [],
+    ) => {
+        setModalState({
+            isOpen: true,
+            type,
+            mode: 'edit',
+            initialValue: currentName,
             initialSynonyms: currentSynonyms || [],
-            targetId: id || displayName 
+            initialTags: currentTags,
+            targetId,
         });
     };
 
     // --- CRUD OPERATIONS ---
-    const handleModalSave = async (value: string, synonyms: string[] = []) => {
-        const { type, mode, targetId } = modalState;
+    const handleModalSave = async (value: string, tags: TagOption[] = []) => {
+        const { type, mode, targetId, initialSynonyms } = modalState;
+        if (!value.trim()) return;
+        const headers = { 'Content-Type': 'application/json' };
+        const tagIds = tags.map((tag) => tag.id).filter(Boolean);
+        const synonyms = initialSynonyms || [];
+
         try {
             if (mode === 'add') {
                 if (type === 'category') {
-                    const res = await fetch(`${apiBase}/api/job-fields/categories`, {
+                    const response = await fetch(`${apiBase}/api/job-fields/categories`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers,
                         body: JSON.stringify({ name: value }),
                     });
-                    const created = await res.json();
-                    if (res.ok) {
-                        setData(prev => [...prev, { id: created.id, name: created.name, fieldTypes: [] }]);
-                        return;
-                    }
-                    throw new Error(created.message || 'יצירה נכשלה');
-                } else if (type === 'cluster' && selectedCategory) {
-                    const res = await fetch(`${apiBase}/api/job-fields/clusters`, {
+                    if (!response.ok) throw new Error('הוספת הקטגוריה נכשלה');
+                    const created = normalizeCategory(await response.json());
+                    setData(prev => [...prev, created]);
+                    setSelectedCategory(created);
+                    setSelectedCluster(null);
+                } else if (type === 'cluster') {
+                    if (!selectedCategory?.id) throw new Error('בחר קטגוריה ראשית קודם');
+                    const response = await fetch(`${apiBase}/api/job-fields/clusters`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers,
                         body: JSON.stringify({ categoryId: selectedCategory.id, name: value }),
                     });
-                    const created = await res.json();
-                    if (res.ok) {
-                        const newCluster = { id: created.id, name: created.name, roles: [] };
-                        setData(prev => prev.map(c => c.id === selectedCategory.id ? { ...c, fieldTypes: [...c.fieldTypes, newCluster] } : c));
-                        setSelectedCategory(prev => prev ? { ...prev, fieldTypes: [...prev.fieldTypes, newCluster] } : prev);
-                        return;
-                    }
-                    throw new Error(created.message || 'יצירה נכשלה');
-                } else if (type === 'role' && selectedCluster && selectedCategory) {
-                    const res = await fetch(`${apiBase}/api/job-fields/roles`, {
+                    if (!response.ok) throw new Error('הוספת הקלאסטר נכשלה');
+                    const created = normalizeCluster(await response.json());
+                    setData(prev => prev.map(cat => cat.id === selectedCategory.id ? { ...cat, fieldTypes: [...cat.fieldTypes, created] } : cat));
+                    setSelectedCategory(prev => prev ? { ...prev, fieldTypes: [...prev.fieldTypes, created] } : prev);
+                    setSelectedCluster(created);
+                } else if (type === 'role') {
+                    if (!selectedCluster?.id || !selectedCategory) throw new Error('בחר קלאסטר קודם');
+                    const response = await fetch(`${apiBase}/api/job-fields/roles`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ clusterId: selectedCluster.id, value, synonyms }),
+                        headers,
+                        body: JSON.stringify({ clusterId: selectedCluster.id, value, synonyms, tagIds }),
                     });
-                    const created = await res.json();
-                    if (res.ok) {
-                        const newRole = { id: created.id, value: created.value, synonyms: created.synonyms || [] };
-                        setData(prev => prev.map(c => c.id === selectedCategory.id ? { ...c, fieldTypes: c.fieldTypes.map(cl => cl.id === selectedCluster.id ? { ...cl, roles: [...cl.roles, newRole] } : cl) } : c));
-                        setSelectedCluster(prev => prev ? { ...prev, roles: [...prev.roles, newRole] } : prev);
-                        const fresh = await refetch();
-                        if (fresh) reselectByIds(selectedCategory.id, selectedCluster.id, fresh);
-                        return;
-                    }
-                    throw new Error(created.message || 'יצירה נכשלה');
+                    if (!response.ok) throw new Error('הוספת התפקיד נכשלה');
+                    const created = normalizeRole(await response.json());
+                    const updatedCluster = { ...selectedCluster, roles: [...selectedCluster.roles, created] };
+                    const updatedCategory = {
+                        ...selectedCategory,
+                        fieldTypes: selectedCategory.fieldTypes.map(ft => ft.id === selectedCluster.id ? updatedCluster : ft),
+                    };
+                    setData(prev => prev.map(cat => cat.id === selectedCategory.id ? updatedCategory : cat));
+                    setSelectedCategory(updatedCategory);
+                    setSelectedCluster(updatedCluster);
                 }
             } else if (mode === 'edit' && targetId) {
                 if (type === 'category') {
-                    const res = await fetch(`${apiBase}/api/job-fields/categories/${targetId}`, {
+                    const response = await fetch(`${apiBase}/api/job-fields/categories/${targetId}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers,
                         body: JSON.stringify({ name: value }),
                     });
-                    if (res.ok) {
-                        setData(prev => prev.map(c => c.id === targetId ? { ...c, name: value } : c));
-                        setSelectedCategory(prev => prev && prev.id === targetId ? { ...prev, name: value } : prev);
-                        const fresh = await refetch();
-                        if (fresh) reselectByIds(targetId, selectedCluster?.id, fresh);
-                        return;
+                    if (!response.ok) throw new Error('שינוי הקטגוריה נכשל');
+                    const updated = normalizeCategory(await response.json());
+                    setData(prev => prev.map(cat => cat.id === targetId ? { ...cat, name: updated.name } : cat));
+                    if (selectedCategory?.id === targetId) {
+                        setSelectedCategory(prev => prev ? { ...prev, name: updated.name } : prev);
                     }
-                    throw new Error('עדכון נכשלה');
                 } else if (type === 'cluster') {
-                    const res = await fetch(`${apiBase}/api/job-fields/clusters/${targetId}`, {
+                    const response = await fetch(`${apiBase}/api/job-fields/clusters/${targetId}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers,
                         body: JSON.stringify({ name: value }),
                     });
-                    if (res.ok) {
-                        const fresh = await refetch();
-                        if (fresh) reselectByIds(selectedCategory?.id, targetId, fresh);
-                        return;
+                    if (!response.ok) throw new Error('שינוי הקלאסטר נכשל');
+                    const updated = normalizeCluster(await response.json());
+                    setData(prev => prev.map(cat => ({
+                        ...cat,
+                        fieldTypes: cat.fieldTypes.map(ft => ft.id === targetId ? { ...ft, name: updated.name } : ft),
+                    })));
+                    if (selectedCategory) {
+                        const updatedCategory = {
+                            ...selectedCategory,
+                            fieldTypes: selectedCategory.fieldTypes.map(ft => ft.id === targetId ? { ...ft, name: updated.name } : ft),
+                        };
+                        setSelectedCategory(updatedCategory);
+                        if (selectedCluster?.id === targetId) {
+                            setSelectedCluster(prev => prev ? { ...prev, name: updated.name } : prev);
+                        }
                     }
-                    throw new Error('עדכון נכשלה');
                 } else if (type === 'role') {
-                    const res = await fetch(`${apiBase}/api/job-fields/roles/${targetId}`, {
+                    const response = await fetch(`${apiBase}/api/job-fields/roles/${targetId}`, {
                         method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ value, synonyms }),
+                        headers,
+                        body: JSON.stringify({ value, synonyms, tagIds }),
                     });
-                    if (res.ok && selectedCategory && selectedCluster) {
-                        const fresh = await refetch();
-                        if (fresh) reselectByIds(selectedCategory.id, selectedCluster.id, fresh);
-                        return;
+                    if (!response.ok) throw new Error('שינוי התפקיד נכשל');
+                    const updated = normalizeRole(await response.json());
+                    setData(prev => prev.map(cat => ({
+                        ...cat,
+                        fieldTypes: cat.fieldTypes.map(ft => ({
+                            ...ft,
+                            roles: ft.roles.map(r => r.id === targetId ? updated : r),
+                        })),
+                    })));
+                    if (selectedCategory && selectedCluster) {
+                        const updatedCluster = {
+                            ...selectedCluster,
+                            roles: selectedCluster.roles.map(r => r.id === targetId ? updated : r),
+                        };
+                        const updatedCategory = {
+                            ...selectedCategory,
+                            fieldTypes: selectedCategory.fieldTypes.map(ft => ft.id === selectedCluster.id ? updatedCluster : ft),
+                        };
+                        setSelectedCategory(updatedCategory);
+                        setSelectedCluster(updatedCluster);
                     }
-                    throw new Error('עדכון נכשלה');
                 }
             }
-            // Fallback full refresh if no branch matched
-            await refetch();
-        } catch (e: any) {
-            console.error(e);
-            alert(e.message || 'שמירה נכשלה');
+        } catch (err: any) {
+            window.alert(err.message || 'הפעולה נכשלה');
         }
     };
 
-    const handleDelete = async (type: EntityType, id: string, displayName: string) => {
-        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את "${displayName}"?`)) return;
+    const handleDelete = async (type: EntityType, id?: string, name?: string) => {
+        if (!id) {
+            window.alert('נדרש מזהה למחיקה');
+            return;
+        }
+        if (!window.confirm(`האם אתה בטוח שברצונך למחוק את "${name || 'הפריט'}"?`)) return;
         try {
+            const endpoint = type === 'category' ? 'categories' : type === 'cluster' ? 'clusters' : 'roles';
+            const response = await fetch(`${apiBase}/api/job-fields/${endpoint}/${id}`, {
+                method: 'DELETE',
+            });
+            if (!response.ok) throw new Error('המחיקה נכשלה');
+
             if (type === 'category') {
-                await fetch(`${apiBase}/api/job-fields/categories/${id}`, { method: 'DELETE' });
-                setData(prev => prev.filter(c => c.id !== id));
+                setData(prev => prev.filter(cat => cat.id !== id));
                 if (selectedCategory?.id === id) {
                     setSelectedCategory(null);
                     setSelectedCluster(null);
                 }
             } else if (type === 'cluster') {
-                await fetch(`${apiBase}/api/job-fields/clusters/${id}`, { method: 'DELETE' });
-                setData(prev => prev.map(c => ({
-                    ...c,
-                    fieldTypes: c.fieldTypes.filter(cl => cl.id !== id),
+                const categoryWithCluster = data.find(cat => cat.fieldTypes.some(ft => ft.id === id));
+                setData(prev => prev.map(cat => ({
+                    ...cat,
+                    fieldTypes: cat.fieldTypes.filter(ft => ft.id !== id),
                 })));
-                if (selectedCategory) {
-                    const updatedCategory = {
-                        ...selectedCategory,
-                        fieldTypes: selectedCategory.fieldTypes.filter(cl => cl.id !== id),
-                    };
-                    setSelectedCategory(updatedCategory);
+                if (selectedCluster?.id === id) {
+                    setSelectedCluster(null);
                 }
-                if (selectedCluster?.id === id) setSelectedCluster(null);
-            } else if (type === 'role' && selectedCategory && selectedCluster) {
-                await fetch(`${apiBase}/api/job-fields/roles/${id}`, { method: 'DELETE' });
-                const updatedCluster = {
-                    ...selectedCluster,
-                    roles: selectedCluster.roles.filter(r => r.id !== id),
-                };
-                const updatedCategory = {
-                    ...selectedCategory,
-                    fieldTypes: selectedCategory.fieldTypes.map(cl => cl.id === selectedCluster.id ? updatedCluster : cl),
-                };
-                setData(prev => prev.map(c => c.id === selectedCategory.id ? updatedCategory : c));
-                setSelectedCluster(updatedCluster);
-                setSelectedCategory(updatedCategory);
+                if (categoryWithCluster && selectedCategory?.id === categoryWithCluster.id) {
+                    setSelectedCategory(prev => prev ? {
+                        ...prev,
+                        fieldTypes: prev.fieldTypes.filter(ft => ft.id !== id),
+                    } : prev);
+                }
+            } else if (type === 'role') {
+                const categoryWithRole = data.find(cat => cat.fieldTypes.some(ft => ft.roles.some(r => r.id === id)));
+                const clusterWithRole = categoryWithRole?.fieldTypes.find(ft => ft.roles.some(r => r.id === id));
+                setData(prev => prev.map(cat => ({
+                    ...cat,
+                    fieldTypes: cat.fieldTypes.map(ft => ({
+                        ...ft,
+                        roles: ft.id === clusterWithRole?.id ? ft.roles.filter(r => r.id !== id) : ft.roles,
+                    })),
+                })));
+                if (selectedCluster?.id === clusterWithRole?.id) {
+                    setSelectedCluster(prev => prev ? {
+                        ...prev,
+                        roles: prev.roles.filter(r => r.id !== id),
+                    } : prev);
+                }
+                if (selectedCategory?.id === categoryWithRole?.id && selectedCluster?.id === clusterWithRole?.id) {
+                    setSelectedCategory(prev => prev ? {
+                        ...prev,
+                        fieldTypes: prev.fieldTypes.map(ft => ft.id === clusterWithRole?.id ? {
+                            ...ft,
+                            roles: ft.roles.filter(r => r.id !== id),
+                        } : ft),
+                    } : prev);
+                }
             }
-        } catch (e) {
-            console.error(e);
-            alert('מחיקה נכשלה');
+        } catch (err: any) {
+            window.alert(err.message || 'המחיקה נכשלה');
         }
     };
 
-    // --- AI SIMULATION ---
     const handleAiSuggestClusters = async () => {
-        if (!selectedCategory) return;
+        if (!selectedCategory?.id) return;
         setAiLoading('cluster');
-        setAiError(null);
         try {
-            const res = await fetch(`${apiBase}/api/job-fields/ai/suggest-clusters`, {
+            const response = await fetch(`${apiBase}/api/job-fields/ai/suggest-clusters`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ categoryId: selectedCategory.id }),
+                body: JSON.stringify({ categoryId: selectedCategory.id, previewOnly: false }),
             });
-            if (!res.ok) throw new Error('הצעה נכשלה');
-            const data = await res.json();
-            const suggestions = (data.suggestions || []).map((s: any) => ({ name: s.name, selected: true }));
-            setClusterSuggestions(suggestions);
-            setIsClusterSuggestModalOpen(true);
-        } catch (e: any) {
-            console.error(e);
-            setAiError(e.message || 'הצעה נכשלה');
+            if (!response.ok) throw new Error('הצעת קלאסטרים נכשלה');
+            const payload = await response.json();
+            const suggestions = Array.isArray(payload?.suggestions) ? payload.suggestions : [];
+            if (!suggestions.length) {
+                window.alert('לא נמצאו קלאסטרים חדשים');
+                return;
+            }
+            const normalized = suggestions.map(normalizeCluster);
+            const updatedCategory = {
+                ...selectedCategory,
+                fieldTypes: [...selectedCategory.fieldTypes, ...normalized],
+            };
+            setData(prev => prev.map(cat => cat.id === selectedCategory.id ? updatedCategory : cat));
+            setSelectedCategory(updatedCategory);
+            setSelectedCluster(normalized[0] ?? null);
+        } catch (err: any) {
+            window.alert(err.message || 'הצעת קלאסטרים נכשלה');
         } finally {
             setAiLoading(null);
         }
     };
 
     const handleAiSuggestRoles = async () => {
-        if (!selectedCluster || !selectedCategory) return;
+        if (!selectedCategory?.id || !selectedCluster?.id) return;
         setAiLoading('role');
-        setAiError(null);
         try {
-            const res = await fetch(`${apiBase}/api/job-fields/ai/suggest-roles`, {
+            const response = await fetch(`${apiBase}/api/job-fields/ai/suggest-roles`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ clusterId: selectedCluster.id }),
+                body: JSON.stringify({ clusterId: selectedCluster.id, previewOnly: false }),
             });
-            if (!res.ok) throw new Error('הצעה נכשלה');
-            const data = await res.json();
-            const suggestions = (data.suggestions || []).map((s: any) => ({
-                value: s.value,
-                synonyms: s.synonyms || [],
-                selected: true,
-            }));
-            setRoleSuggestions(suggestions);
-            setIsRoleSuggestModalOpen(true);
-        } catch (e: any) {
-            console.error(e);
-            setAiError(e.message || 'הצעה נכשלה');
+            if (!response.ok) throw new Error('הצעת תפקידים נכשלה');
+            const payload = await response.json();
+            const suggestions = Array.isArray(payload?.suggestions) ? payload.suggestions : [];
+            if (!suggestions.length) {
+                window.alert('לא נמצאו תפקידים חדשים');
+                return;
+            }
+            const normalized = suggestions.map(normalizeRole);
+            const updatedCluster = { ...selectedCluster, roles: [...selectedCluster.roles, ...normalized] };
+            const updatedCategory = selectedCategory ? {
+                ...selectedCategory,
+                fieldTypes: selectedCategory.fieldTypes.map(ft => ft.id === selectedCluster.id ? updatedCluster : ft),
+            } : null;
+            if (updatedCategory) {
+                setData(prev => prev.map(cat => cat.id === updatedCategory.id ? updatedCategory : cat));
+                setSelectedCategory(updatedCategory);
+            }
+            setSelectedCluster(updatedCluster);
+        } catch (err: any) {
+            window.alert(err.message || 'הצעת תפקידים נכשלה');
         } finally {
             setAiLoading(null);
         }
@@ -655,22 +1175,25 @@ const AdminJobFieldsView: React.FC = () => {
         );
     }, [selectedCluster, searchRole]);
 
+    const clusterDisplayCount = filteredClusters.length || (aiLoading === 'cluster' ? 1 : 0);
+    const roleDisplayCount = filteredRoles.length || (aiLoading === 'role' ? 1 : 0);
+
 
     // --- RENDER ---
-    if (loading) {
-        return (
-            <div className="flex items-center justify-center h-full py-12">
-                <div className="text-center text-text-muted">
-                    טוען טקסונומיה...
-                </div>
-            </div>
-        );
-    }
-
     return (
-        <div className="flex flex-col h-full bg-bg-subtle/30 -m-6 p-6">
+        <div className="flex flex-col h-full bg-bg-subtle/30 -m-6 p-6 relative">
             
             {/* Header */}
+            {fetchError && (
+                <div className="mb-4 px-4 py-3 rounded-2xl bg-red-50 border border-red-100 text-red-700 text-sm">
+                    {fetchError}
+                </div>
+            )}
+            {isLoading && (
+                <div className="mb-4 px-4 py-3 rounded-2xl bg-primary-50 border border-primary-100 text-primary-700 text-sm">
+                    טוען קטגוריות מהשרת...
+                </div>
+            )}
             <div className="flex items-start justify-between mb-6">
                 <div>
                     <h1 className="text-2xl font-black text-text-default flex items-center gap-3">
@@ -706,12 +1229,6 @@ const AdminJobFieldsView: React.FC = () => {
                 </div>
             </div>
 
-            {error && (
-                <div className="mb-4 p-3 rounded-lg bg-red-50 text-red-700 border border-red-200">
-                    {error}
-                </div>
-            )}
-
             {/* Main Columns Container */}
             <div className="flex-grow flex gap-0 h-[65vh] rounded-2xl shadow-lg border border-border-default bg-white overflow-hidden">
                 
@@ -729,12 +1246,12 @@ const AdminJobFieldsView: React.FC = () => {
                     >
                         {filteredCategories.map(cat => (
                             <ListItem 
-                                key={cat.id}
+                                key={cat.id || cat.name}
                                 title={cat.name}
                                 subtitle={`${cat.fieldTypes.length} קלאסטרים`}
                                 isSelected={selectedCategory?.id === cat.id}
                                 onClick={() => handleSelectCategory(cat)}
-                                onEdit={() => openEditModal('category', cat.name, [], cat.id)}
+                                onEdit={() => openEditModal('category', cat.id, cat.name)}
                                 onDelete={() => handleDelete('category', cat.id, cat.name)}
                                 status="active"
                             />
@@ -751,36 +1268,21 @@ const AdminJobFieldsView: React.FC = () => {
                         onAdd={() => openAddModal('cluster')}
                         searchTerm={searchCluster}
                         onSearchChange={setSearchCluster}
-                        count={filteredClusters.length}
+                        count={clusterDisplayCount}
                         aiAction={handleAiSuggestClusters}
                         aiTooltip={aiLoading === 'cluster' ? 'חושב...' : 'הצע קלאסטרים חסרים (AI)'}
                         emptyStateText={selectedCategory ? "אין קלאסטרים בקטגוריה זו. צור חדש או השתמש ב-AI." : "בחר קטגוריה לצפייה"}
                         isActive={!!selectedCategory}
-                        loadingBanner={aiLoading === 'cluster' ? (
-                            <div className="p-3 mb-2 rounded-lg border border-purple-100 bg-purple-50 text-xs text-purple-700 flex flex-col gap-2 text-center">
-                                <div className="flex items-center justify-center gap-2">
-                                    <span className="w-2 h-2 bg-purple-500 rounded-full animate-ping"></span>
-                                    <span>🤖 AI מנתח את הקטגוריה ובונה קלאסטרים...</span>
-                                </div>
-                                <div className="text-[11px] text-purple-600 animate-pulse">ממתין לתוצאות...</div>
-                            </div>
-                        ) : null}
                     >
-                        {aiLoading === 'cluster' && (
-                            <div className="p-3 mb-2 rounded-lg border border-purple-100 bg-purple-50 text-xs text-purple-700 flex items-center gap-2">
-                                <span className="w-2 h-2 bg-purple-500 rounded-full animate-ping"></span>
-                                <span>🤖 AI מנתח את הקטגוריה ובונה קלאסטרים...</span>
-                            </div>
-                        )}
                         {aiLoading === 'cluster' && <div className="p-4 text-center text-xs text-purple-600 animate-pulse">🤖 AI מנתח את הקטגוריה ובונה קלאסטרים...</div>}
                         {filteredClusters.map(cluster => (
                             <ListItem 
-                                key={cluster.id}
+                                key={cluster.id || cluster.name}
                                 title={cluster.name}
                                 subtitle={`${cluster.roles.length} תפקידים`}
                                 isSelected={selectedCluster?.id === cluster.id}
                                 onClick={() => handleSelectCluster(cluster)}
-                                onEdit={() => openEditModal('cluster', cluster.name, [], cluster.id)}
+                                onEdit={() => openEditModal('cluster', cluster.id, cluster.name)}
                                 onDelete={() => handleDelete('cluster', cluster.id, cluster.name)}
                                 status="active"
                             />
@@ -797,42 +1299,31 @@ const AdminJobFieldsView: React.FC = () => {
                         onAdd={() => openAddModal('role')}
                         searchTerm={searchRole}
                         onSearchChange={setSearchRole}
-                        count={filteredRoles.length}
+                        count={roleDisplayCount}
                         aiAction={handleAiSuggestRoles}
                         aiTooltip={aiLoading === 'role' ? 'חושב...' : 'השלם תפקידים חסרים לקלאסטר (AI)'}
                         emptyStateText={selectedCluster ? "אין תפקידים בקלאסטר זה. צור ידנית או השתמש ב-AI." : "בחר קלאסטר לצפייה"}
                         isActive={!!selectedCluster}
-                        loadingBanner={aiLoading === 'role' ? (
-                            <div className="p-3 mb-2 rounded-lg border border-purple-100 bg-purple-50 text-xs text-purple-700 flex flex-col gap-2 text-center">
-                                <div className="flex items-center justify-center gap-2">
-                                    <span className="w-2 h-2 bg-purple-500 rounded-full animate-ping"></span>
-                                    <span>🤖 AI סורק את השוק ומוסיף תפקידים רלוונטיים...</span>
-                                </div>
-                                <div className="text-[11px] text-purple-600 animate-pulse">ממתין לתוצאות...</div>
-                            </div>
-                        ) : null}
                     >
-                        {aiLoading === 'role' && (
-                            <div className="p-3 mb-2 rounded-lg border border-purple-100 bg-purple-50 text-xs text-purple-700 flex flex-col gap-2 text-center">
-                                <div className="flex items-center justify-center gap-2">
-                                    <span className="w-2 h-2 bg-purple-500 rounded-full animate-ping"></span>
-                                    <span>🤖 AI סורק את השוק ומוסיף תפקידים רלוונטיים...</span>
-                                </div>
-                                <div className="text-[11px] text-purple-600 animate-pulse">ממתין לתוצאות...</div>
-                            </div>
-                        )}
+                        {aiLoading === 'role' && <div className="p-4 text-center text-xs text-purple-600 animate-pulse">🤖 AI סורק את השוק ומוסיף תפקידים רלוונטיים...</div>}
                         {filteredRoles.map(role => (
-                            <ListItem 
-                                key={role.id}
-                                title={role.value}
-                                subtitle={role.synonyms.length > 0 ? role.synonyms.join(', ') : 'ללא מילים נרדפות'}
-                                isSelected={false}
-                                onClick={() => {}}
-                                onEdit={() => openEditModal('role', role.value, role.synonyms, role.id)}
-                                onDelete={() => handleDelete('role', role.id, role.value)}
-                                status="active"
-                                badgeCount={role.synonyms.length > 0 ? role.synonyms.length : undefined}
-                            />
+                        <ListItem 
+                            key={role.id || role.value}
+                            title={role.value}
+                            subtitle={
+                                role.tags && role.tags.length > 0
+                                    ? role.tags.map(tag => tag.label).join(', ')
+                                    : role.synonyms.length > 0
+                                        ? role.synonyms.join(', ')
+                                        : 'ללא תגיות'
+                            }
+                            isSelected={false}
+                            onClick={() => {}}
+                            onEdit={() => openEditModal('role', role.id, role.value, role.synonyms, role.tags)}
+                            onDelete={() => handleDelete('role', role.id, role.value)}
+                            status="active"
+                            badgeCount={role.tags && role.tags.length > 0 ? role.tags.length : undefined}
+                        />
                         ))}
                     </AdminColumn>
                 </div>
@@ -852,176 +1343,42 @@ const AdminJobFieldsView: React.FC = () => {
              </div>
              
              {/* Edit/Add Modal */}
-             <TaxonomyModal 
-                isOpen={modalState.isOpen}
-                onClose={() => setModalState(prev => ({...prev, isOpen: false}))}
-                onSave={handleModalSave}
-                type={modalState.type}
-                mode={modalState.mode}
-                initialValue={modalState.initialValue}
-                initialSynonyms={modalState.initialSynonyms}
-             apiBase={apiBase}
+            <TaxonomyModal 
+               isOpen={modalState.isOpen}
+               onClose={() => setModalState(prev => ({...prev, isOpen: false}))}
+               onSave={handleModalSave}
+               type={modalState.type}
+               mode={modalState.mode}
+               initialValue={modalState.initialValue}
+               initialTags={modalState.initialTags}
+               availableTags={availableTags}
+               onTagCreated={handleTagCreated}
+               targetId={modalState.targetId}
+               apiBase={apiBase}
              />
 
-            {/* Cluster suggestions modal */}
-            {isClusterSuggestModalOpen && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-xl border border-border-default w-full max-w-lg overflow-hidden">
-                        <div className="flex justify-between items-center p-4 border-b border-border-default bg-bg-subtle/30">
-                            <div>
-                                <h3 className="font-bold text-lg text-text-default">הצעות לקלאסטרים חדשים</h3>
-                                <p className="text-sm text-text-muted">בחר אילו להוסיף לקטגוריה {selectedCategory?.name}</p>
-                            </div>
-                            <button onClick={() => setIsClusterSuggestModalOpen(false)} className="p-1 rounded-full text-text-muted hover:bg-bg-hover">
-                                <XMarkIcon className="w-5 h-5"/>
-                            </button>
-                        </div>
-                        <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto">
-                            {clusterSuggestions.length === 0 && (
-                                <div className="text-text-muted text-sm text-center py-6">אין הצעות חדשות</div>
-                            )}
-                            {clusterSuggestions.map((s, idx) => (
-                                <label key={idx} className="flex items-center gap-3 p-3 border border-border-default rounded-lg hover:bg-bg-subtle/40 cursor-pointer">
-                                    <input 
-                                        type="checkbox" 
-                                        checked={s.selected} 
-                                        onChange={(e) => setClusterSuggestions(prev => prev.map((item, i) => i === idx ? { ...item, selected: e.target.checked } : item))}
-                                    />
-                                    <span className="font-semibold text-text-default">{s.name}</span>
-                                </label>
-                            ))}
-                            {aiError && <div className="text-sm text-red-600">{aiError}</div>}
-                        </div>
-                        <div className="flex justify-end gap-2 p-4 border-t border-border-default bg-bg-subtle/20">
-                            <button 
-                                onClick={() => setIsClusterSuggestModalOpen(false)} 
-                                className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors"
-                            >
-                                ביטול
-                            </button>
-                            <button 
-                                onClick={async () => {
-                                    if (!selectedCategory) return;
-                                    const selected = clusterSuggestions.filter(s => s.selected);
-                                    for (const s of selected) {
-                                        const res = await fetch(`${apiBase}/api/job-fields/clusters`, {
-                                            method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ categoryId: selectedCategory.id, name: s.name }),
-                                        });
-                                        if (res.ok) {
-                                            const created = await res.json();
-                                            const newCluster = { id: created.id, name: created.name, roles: [] };
-                                            setData(prev => prev.map(c => c.id === selectedCategory.id ? { ...c, fieldTypes: [...c.fieldTypes, newCluster] } : c));
-                                            setSelectedCategory(prev => prev ? { ...prev, fieldTypes: [...prev.fieldTypes, newCluster] } : prev);
-                                        }
-                                    }
-                                    setIsClusterSuggestModalOpen(false);
-                                }} 
-                                className="px-5 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-60"
-                                disabled={clusterSuggestions.every(s => !s.selected)}
-                            >
-                                הוסף נבחרים
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Role suggestions modal */}
-            {isRoleSuggestModalOpen && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-                    <div className="bg-white rounded-2xl shadow-xl border border-border-default w-full max-w-lg overflow-hidden">
-                        <div className="flex justify-between items-center p-4 border-b border-border-default bg-bg-subtle/30">
-                            <div>
-                                <h3 className="font-bold text-lg text-text-default">הצעות לתפקידים חדשים</h3>
-                                <p className="text-sm text-text-muted">בחר אילו להוסיף לקלאסטר {selectedCluster?.name}</p>
-                            </div>
-                            <button onClick={() => setIsRoleSuggestModalOpen(false)} className="p-1 rounded-full text-text-muted hover:bg-bg-hover">
-                                <XMarkIcon className="w-5 h-5"/>
-                            </button>
-                        </div>
-                        <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto">
-                            {roleSuggestions.length === 0 && (
-                                <div className="text-text-muted text-sm text-center py-6">אין הצעות חדשות</div>
-                            )}
-                            {roleSuggestions.map((s, idx) => (
-                                <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-lg hover:bg-bg-subtle/40 cursor-pointer">
-                                    <input 
-                                        type="checkbox" 
-                                        checked={s.selected} 
-                                        onChange={(e) => setRoleSuggestions(prev => prev.map((item, i) => i === idx ? { ...item, selected: e.target.checked } : item))}
-                                    />
-                                    <div className="flex flex-col gap-1">
-                                        <span className="font-semibold text-text-default">{s.value}</span>
-                                        {s.synonyms?.length > 0 && (
-                                            <span className="text-xs text-text-muted">מילים נרדפות: {s.synonyms.join(', ')}</span>
-                                        )}
-                                    </div>
-                                </label>
-                            ))}
-                            {aiError && <div className="text-sm text-red-600">{aiError}</div>}
-                        </div>
-                        <div className="flex justify-end gap-2 p-4 border-t border-border-default bg-bg-subtle/20">
-                            <button 
-                                onClick={() => setIsRoleSuggestModalOpen(false)} 
-                                className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg transition-colors"
-                            >
-                                ביטול
-                            </button>
-                            <button 
-                                onClick={async () => {
-                                    if (!selectedCluster || !selectedCategory) return;
-                                    const selected = roleSuggestions.filter(s => s.selected);
-                                    for (const s of selected) {
-                                        const res = await fetch(`${apiBase}/api/job-fields/roles`, {
-                                            method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
-                                            body: JSON.stringify({ clusterId: selectedCluster.id, value: s.value, synonyms: s.synonyms || [] }),
-                                        });
-                                        if (res.ok) {
-                                            const created = await res.json();
-                                            const newRole = { id: created.id, value: created.value, synonyms: created.synonyms || [] };
-                                            setData(prev => prev.map(c => c.id === selectedCategory.id ? {
-                                                ...c,
-                                                fieldTypes: c.fieldTypes.map(cl => cl.id === selectedCluster.id ? { ...cl, roles: [...cl.roles, newRole] } : cl),
-                                            } : c));
-                                            setSelectedCluster(prev => prev ? { ...prev, roles: [...prev.roles, newRole] } : prev);
-                                        }
-                                    }
-                                    const fresh = await refetch();
-                                    if (fresh) reselectByIds(selectedCategory.id, selectedCluster.id, fresh);
-                                    setIsRoleSuggestModalOpen(false);
-                                }} 
-                                className="px-5 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-60"
-                                disabled={roleSuggestions.every(s => !s.selected)}
-                            >
-                                הוסף נבחרים
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* Floating AI consult button */}
-            <div className="fixed bottom-8 left-8 z-40">
+             {/* Hiro AI Floating Button */}
+             <div className="fixed bottom-8 left-8 z-40">
                 <button
+                    onClick={handleOpenChat}
                     className="w-14 h-14 bg-primary-600 text-white rounded-2xl shadow-2xl flex items-center justify-center hover:bg-primary-700 transition-all transform hover:scale-110 hover:rotate-3 group"
                     title="התייעץ עם Hiro AI על מבנה הטקסונומיה"
-                    onClick={() => setIsChatOpen(true)}
                 >
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-7 h-7 group-hover:animate-pulse">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
-                    </svg>
+                    <SparklesIcon className="w-7 h-7 group-hover:animate-pulse" />
                 </button>
             </div>
-
+            
             <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
-                tagsText={data.map(c => `${c.name} (${c.fieldTypes.length} אשכולים, ${c.fieldTypes.reduce((acc, cl) => acc + (cl.roles?.length || 0), 0)} תפקידים)`).join(', ')}
-                skipHistory
-                initialMessage={`אני כאן כדי לעזור לך לנהל ולעדכן את עץ המשרות (הטקסונומיה) במסך הזה.\n\nמה אפשר לעשות כאן?\n1. להוסיף קטגוריה (תחום ראשי).\n2. להוסיף אשכול/קלאסטר בתוך קטגוריה.\n3. להוסיף תפקידים עם מילים נרדפות בתוך אשכול.\n4. להתייעץ היכן למקם תפקיד חדש כדי שהגיוס יהיה אפקטיבי.\n\nאיך מתחילים? ספר לי מה תרצה להוסיף. לדוגמה: "אני רוצה להוסיף את התפקיד מומחה SEO תחת שיווק דיגיטלי" או "צריך לפתוח קטגוריה חדשה לבנייה". מה תרצה לעשות עכשיו?`}
+                messages={chatMessages}
+                isLoading={isChatLoading}
+                error={chatError}
+                onSendMessage={handleSendMessage}
+                onReset={() => { setChatSession(null); setChatMessages([]); initializeChat(); }}
+                chatType="job-fields"
+                onProfileUpdate={applyJobFieldSuggestions}
+                contextData={jobFieldsContext}
             />
         </div>
     );

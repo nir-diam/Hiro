@@ -19,7 +19,18 @@ interface HiroAIChatProps {
     systemPrompt?: string; // override system prompt per context
     contextData?: any; // optional profile context JSON
     onProfileUpdate?: (patch: any) => void; // optional profile updater callback
+    allowTagCreation?: boolean;
 }
+
+const INSTRUCTION_PROMPT_KEYWORDS = [
+    'נתח את ה-JSON',
+    'החזר אך ורק JSON תקין',
+];
+
+const isInstructionPrompt = (message: any) => {
+    if (!message || message.role !== 'user' || typeof message.text !== 'string') return false;
+    return INSTRUCTION_PROMPT_KEYWORDS.every(keyword => message.text.includes(keyword));
+};
 
 const SimpleMarkdownRenderer: React.FC<{ text: string }> = ({ text }) => {
     const html = useMemo(() => {
@@ -66,12 +77,14 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     onClose,
     userId,
     tagsText,
+    allowTagCreation = true,
     skipHistory,
     initialMessage,
     chatType,
     systemPrompt,
     contextData,
     onProfileUpdate,
+    page,
 }) => {
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
@@ -95,6 +108,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     const [selectedProfileIdx, setSelectedProfileIdx] = useState<Set<number>>(new Set());
     const [isProfileSuggestOpen, setIsProfileSuggestOpen] = useState(false);
     const [isProfileSuggestLoading, setIsProfileSuggestLoading] = useState(false);
+    const [profileSuggestPosition, setProfileSuggestPosition] = useState<{ x: number; y: number } | null>(null);
+    const [isProfileSuggestDragging, setIsProfileSuggestDragging] = useState(false);
+    const [profileSuggestDragOffset, setProfileSuggestDragOffset] = useState({ x: 0, y: 0 });
+    const [profileIntent, setProfileIntent] = useState<string>('');
+    const [suggestionEdits, setSuggestionEdits] = useState<Record<number, string>>({});
+    const [excludedSuggestionItems, setExcludedSuggestionItems] = useState<Record<number, Set<string>>>({});
 
     // Draggable & Resizable State
     const [position, setPosition] = useState<{ x: number, y: number } | null>(null);
@@ -165,6 +184,31 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             window.removeEventListener('mouseup', handleMouseUp);
         };
     }, [isDragging, dragOffset]);
+
+    useEffect(() => {
+        const handleProfileMouseMove = (e: MouseEvent) => {
+            if (isProfileSuggestDragging) {
+                setProfileSuggestPosition({
+                    x: e.clientX - profileSuggestDragOffset.x,
+                    y: e.clientY - profileSuggestDragOffset.y,
+                });
+            }
+        };
+
+        const handleProfileMouseUp = () => {
+            setIsProfileSuggestDragging(false);
+        };
+
+        if (isProfileSuggestDragging) {
+            window.addEventListener('mousemove', handleProfileMouseMove);
+            window.addEventListener('mouseup', handleProfileMouseUp);
+        }
+
+        return () => {
+            window.removeEventListener('mousemove', handleProfileMouseMove);
+            window.removeEventListener('mouseup', handleProfileMouseUp);
+        };
+    }, [isProfileSuggestDragging, profileSuggestDragOffset]);
 
     // Speech Recognition Setup
     useEffect(() => {
@@ -244,14 +288,10 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             setIsLoading(true);
             setError(null);
             try {
-                // Try server-side latest (scoped by chatType if backend supports query)
                 const res = await fetch(`${apiBase}/api/chat/user/${resolvedUserId}/latest${chatScope ? `?chatType=${encodeURIComponent(chatScope)}` : ''}`);
                 if (res.ok) {
                     const data = await res.json();
-                    const mapped = (data.messages || []).map((m: any) => ({
-                        role: m.role === 'model' ? 'model' : 'user',
-                        text: m.text,
-                    })) as Message[];
+                    const mapped = prepareMessagesForDisplay(data.messages || []);
                     setChatId(data.chatId);
                     localStorage.setItem(`hiroChatId:${resolvedUserId}:${chatScope}`, data.chatId);
                     setMessages(mapped);
@@ -263,16 +303,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                     const res2 = await fetch(`${apiBase}/api/chat/${saved}`);
                     if (res2.ok) {
                         const data2 = await res2.json();
-                        const mapped2 = (data2.messages || []).map((m: any) => ({
-                            role: m.role === 'model' ? 'model' : 'user',
-                            text: m.text,
-                        })) as Message[];
+                        const mapped2 = prepareMessagesForDisplay(data2.messages || []);
                         setChatId(saved);
                         setMessages(mapped2);
                         return;
                     }
                 }
-                // Otherwise start empty
                 setMessages([]);
             } catch (e: any) {
                 setError(e.message || 'שגיאה בטעינת היסטוריה');
@@ -304,46 +340,70 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             }
             const data = await res.json();
             setChatId(data.chatId);
+            if (resolvedUserId) {
+                localStorage.setItem(`hiroChatId:${resolvedUserId}:${chatScope}`, data.chatId);
+            }
 
             // Extract profile suggestions (any model message with a JSON array)
-            const allModels = (data.messages || []).filter((m: any) => m.role === 'model');
+            const lastModelForProposals = (data.messages || [])
+                .slice()
+                .reverse()
+                .find((m: any) => m.role === 'model');
             let parsedArray: any[] | null = null;
-            for (let i = allModels.length - 1; i >= 0; i--) {
-                const candidate = parseJsonBlock(allModels[i]?.text || '');
-                if (Array.isArray(candidate)) {
-                    parsedArray = candidate;
-                    break;
-                }
+            let candidateIntent = '';
+            if (lastModelForProposals?.text) {
+                const candidate = parseJsonBlock(lastModelForProposals.text);
+                parsedArray = extractProposalArray(candidate);
+                candidateIntent = candidate?.intent || '';
+            }
+            if (!parsedArray || !parsedArray.length) {
+                setProfileSuggestions([]);
+                setProfileIntent('');
+                setSelectedProfileIdx(new Set());
+                setIsProfileSuggestOpen(false);
             }
             if (parsedArray && parsedArray.length) {
                 const cleaned = parsedArray
-                    .map((s: any) => ({
-                        field: s.field,
-                        value: s.value,
-                        reason: s.reason || '',
-                    }))
-                    .filter((s: any) => s.field && s.value);
+                    .map((s: any) => normalizeProposalSuggestion(s))
+                    .filter((s: any) => s && (s.field || s.tool) && s.value);
                 if (cleaned.length) {
                     setProfileSuggestions(cleaned);
                     setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
                     setIsProfileSuggestOpen(true);
+                    setProfileIntent(candidateIntent);
                     setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.' }]);
                 }
             }
+            if ((!parsedArray || !parsedArray.length) && chatScope === 'company-profile' && lastModelForProposals?.text) {
+                const companies = extractCompanyListFromText(lastModelForProposals.text);
+                if (companies.length) {
+                    const cleaned = companies.map((name, index) => ({
+                        tool: 'createOrganization',
+                        value: { name, mainField: 'נדל"ן' },
+                        reason: 'הוספת חברה לפי בקשת המשתמש',
+                        id: `company-suggestion-${index}-${name}`,
+                    }));
+                    setProfileSuggestions(cleaned);
+                    setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
+                    setIsProfileSuggestOpen(true);
+                    setProfileIntent('createOrganization');
+                    setMessages(prev => [...prev, { role: 'model', text: 'הצעות לחברות חדשות מוכנות – בחר מה להוסיף.' }]);
+                }
+            }
 
-            const cleanedMessages = (data.messages || []).map((m: any) =>
-                m.role === 'model' ? { ...m, text: sanitizeModelText(m.text) } : m
-            );
+            const cleanedMessages = prepareMessagesForDisplay(data.messages || []);
             setMessages(cleanedMessages);
 
             // Parse AI suggestions for tags (expects JSON block with "tags": [...])
-            const lastModel = (data.messages || []).slice().reverse().find((m: any) => m.role === 'model');
-            if (lastModel?.text) {
-                const parsed = parseTagSuggestions(lastModel.text);
-                if (parsed.length) {
-                    setTagSuggestions(parsed);
-                    setSelectedTagIdx(new Set(parsed.map((_, idx) => idx)));
-                    setIsSuggestOpen(true);
+            if (allowTagCreation) {
+                const lastModelForTags = (data.messages || []).slice().reverse().find((m: any) => m.role === 'model');
+                if (lastModelForTags?.text) {
+                    const parsed = parseTagSuggestions(lastModelForTags.text);
+                    if (parsed.length) {
+                        setTagSuggestions(parsed);
+                        setSelectedTagIdx(new Set(parsed.map((_, idx) => idx)));
+                        setIsSuggestOpen(true);
+                    }
                 }
             }
         } catch (err: any) {
@@ -369,6 +429,24 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
         return [];
     };
 
+const extractCompanyListFromText = (text: string) => {
+    if (!text) return [];
+    const lines = text.split('\n');
+    const companies: string[] = [];
+    const candidatePattern = /(?:[*\-•]|\d+\.)\s*(?:\*\*([^*]+)\*\*|([^*]+))(?:\:|–|—|-)?/;
+    for (const raw of lines) {
+        const trimmed = raw.trim();
+        if (!trimmed) continue;
+        const match = trimmed.match(candidatePattern);
+        if (!match) continue;
+        const name = (match[1] || match[2] || '').trim();
+        if (!name) continue;
+        if (name.length < 2 || name.length > 60) continue;
+        companies.push(name.replace(/["']/g, '').trim());
+    }
+    return Array.from(new Set(companies));
+    };
+
     const parseJsonBlock = (text: string) => {
         if (!text) return null;
         const fenced = text.match(/```json([\s\S]*?)```/);
@@ -386,16 +464,67 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                 try { return JSON.parse(candidate); } catch {}
             }
         }
-        const firstObj = text.indexOf('{');
-        if (firstObj !== -1) {
-            const lastObj = text.lastIndexOf('}');
-            if (lastObj > firstObj) {
-                const candidate = text.slice(firstObj, lastObj + 1);
-                try { return JSON.parse(candidate); } catch {}
-            }
+    const firstObj = text.indexOf('{');
+    if (firstObj !== -1) {
+        const lastObj = text.lastIndexOf('}');
+        if (lastObj > firstObj) {
+            const candidate = text.slice(firstObj, lastObj + 1);
+            try { return JSON.parse(candidate); } catch {}
         }
-        return null;
+    }
+    return null;
+};
+
+const extractProposalArray = (candidate: any): any[] | null => {
+    if (!candidate) return null;
+    if (Array.isArray(candidate)) return candidate;
+    if (Array.isArray(candidate.proposals)) return candidate.proposals;
+    if (Array.isArray(candidate.updates)) return candidate.updates;
+    return null;
+};
+
+const normalizeProposalSuggestion = (proposal: any) => {
+    if (!proposal || typeof proposal !== 'object') return null;
+    const valueCandidate = proposal.proposedValue ?? proposal.value ?? proposal.organization ?? null;
+    const basisValue = valueCandidate === null ? undefined : valueCandidate;
+    if (basisValue === undefined) return null;
+
+    const extractFieldFromPath = (path?: string) => {
+        if (!path || typeof path !== 'string') return undefined;
+        return path.replace(/^\//, '').split('/')[0];
     };
+
+    const normalized: any = {
+        reason: proposal.reason || proposal.title || 'הצעה למידע מעודכן',
+    };
+
+    if (proposal.tool) {
+        normalized.tool = proposal.tool;
+        normalized.value = basisValue;
+    }
+
+    const pathField = extractFieldFromPath(proposal.path);
+    if (pathField) {
+        normalized.field = pathField;
+        normalized.value = basisValue;
+    }
+
+    if (!normalized.field && normalized.tool === 'upsertWorkExperience') {
+        normalized.field = 'workExperience';
+    }
+
+    if (!normalized.field && proposal.field) {
+        normalized.field = proposal.field;
+        normalized.value = basisValue;
+    }
+
+    if (!normalized.field && normalized.tool === 'createOrganization') {
+        normalized.value = proposal.organization || basisValue;
+    }
+
+    if (!normalized.field && !normalized.tool) return null;
+    return normalized;
+};
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -409,15 +538,29 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     const sanitizeModelText = (text: string) => {
         if (!text) return '';
         const trimmed = text.trim();
-        // If it looks like JSON, replace with friendly note
-        if (trimmed.startsWith('{') || trimmed.startsWith('[') || trimmed.includes('```json')) {
-            return 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+        try {
+            const parsed = JSON.parse(trimmed);
+            if (Array.isArray(parsed) || Array.isArray(parsed?.proposals) || Array.isArray(parsed?.updates)) {
+                return 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+            }
+            if (typeof parsed?.message === 'string' && parsed.message.trim().length > 0) {
+                return parsed.message;
+            }
+        } catch {
+            // not pure json
         }
         const withoutFences = text.replace(/```json[\s\S]*?```/g, '').trim();
-        if (withoutFences && withoutFences !== text) return withoutFences || 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+        if (withoutFences && withoutFences !== text) return withoutFences;
         const withoutBraces = text.replace(/\{[\s\S]*?\}/g, '').trim();
-        if (withoutBraces && withoutBraces !== text) return withoutBraces || 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
-        return trimmed || 'הצעות שיפור מוכנות – בדוק את חלון ההצעות.';
+        if (withoutBraces && withoutBraces !== text) return withoutBraces;
+        return trimmed;
+    };
+    const prepareMessagesForDisplay = (messages: any[]) => {
+        return (messages || [])
+            .filter((m: any) => !isInstructionPrompt(m))
+            .map((m: any) => (
+                m.role === 'model' ? { ...m, text: sanitizeModelText(m.text) } : { role: 'user', text: m.text }
+            )) as Message[];
     };
     const slugifyTagKey = (val: string) => {
         const slug = (val || '')
@@ -442,6 +585,8 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                         displayNameEn: cleanName(t.displayNameEn || ''),
                         category: t.category || '',
                         type: t.type || 'skill',
+                        descriptionHe: t.descriptionHe || '',
+                        domains: Array.isArray(t.domains) ? t.domains : [],
                         synonyms: Array.isArray(t.synonyms) ? t.synonyms : [],
                         tagKey: slugifyTagKey(t.tagKey || t.displayNameEn || t.displayNameHe || 'tag')
                     }))
@@ -453,12 +598,31 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
 
         // Heuristic: parse numbered/bulleted lines like "1. Foo (Category) – description"
         const lines = text.split('\n');
+        
+        // Forbidden keywords that indicate conversational or summary text, not tags
+        const forbiddenKeywords = [
+            'סיכום', 'כותרת', 'מיקום', 'מילות מפתח', 'הצעה', 'טיפ', 'הנה', 
+            'איך להמשיך', 'ייבוא רשימה', 'היררכיה', 'תחום עיסוק', 'מיומנויות',
+            'בכירות', 'סוג משרה', 'שפות', 'כישורים רכים', 'עולם המכירות',
+            'עולם ה-Product', 'תגיות מערכת', 'הסמכות', 'עולם התפעול', 'כללי שיום',
+            'Naming Conventions', 'Hierarchy', 'Strategic Tags', 'Parsing', 'Process Tags',
+            'שורת סיכום', 'מילות מפתח חזקות'
+        ];
+
         // Allow bullets or numbered lines, optional (category), optional dash/description
         const regex = /^\s*(?:[-*•]|\d+[.)])\s*([^()\n]+?)(?:\s*\(([^)]+)\))?(?:\s*[–—-].*)?$/;
         const simpleNumbered = /^\s*\d+\.\s*(.+)$/;
         const parsed: any[] = [];
         for (const l of lines) {
-            if (l.toLowerCase().includes('טיפ קטן')) continue;
+            const trimmedLine = l.trim();
+            if (!trimmedLine) continue;
+
+            // Skip lines that look like headers (end with colon or are too long)
+            if (trimmedLine.endsWith(':') || trimmedLine.endsWith('：')) continue;
+            
+            // Skip lines containing forbidden keywords
+            if (forbiddenKeywords.some(k => trimmedLine.includes(k))) continue;
+
             const m = l.match(regex);
             const sn = !m ? l.match(simpleNumbered) : null;
             let name = '';
@@ -481,7 +645,11 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             } else {
                 continue;
             }
-            if (!name || name.length < 2) continue;
+
+            // Final filter for quality
+            if (!name || name.length < 2 || name.length > 50) continue;
+            if (name.includes(':')) continue; // Double check for embedded colons
+
             parsed.push({
                 displayNameHe: name,
                 displayNameEn: '',
@@ -503,6 +671,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     };
 
     const applyTagSuggestions = async () => {
+        if (!allowTagCreation) return;
         if (!tagSuggestions.length) {
             setIsSuggestOpen(false);
             return;
@@ -522,12 +691,13 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                             displayNameEn: t.displayNameEn,
                             category: t.category,
                             type: t.type || 'skill',
-                            status: 'active',
-                            qualityState: 'verified',
+                            status: 'draft',
+                            qualityState: 'initial_detection',
                             matchable: true,
                             tagKey: slugifyTagKey(t.tagKey || t.displayNameEn || t.displayNameHe || 'tag'),
                             synonyms: t.synonyms || [],
                             domains: t.domains || [],
+                            descriptionHe: t.descriptionHe || '',
                         }),
                 });
                 if (!res.ok) throw new Error(await res.text());
@@ -572,28 +742,28 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             });
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
-            const allModels = (data.messages || []).filter((m: any) => m.role === 'model');
+            const lastModel = (data.messages || [])
+                .slice()
+                .reverse()
+                .find((m: any) => m.role === 'model');
             let parsedArray: any[] | null = null;
-            for (let i = allModels.length - 1; i >= 0; i--) {
-                const candidate = parseJsonBlock(allModels[i]?.text || '');
-                if (Array.isArray(candidate)) {
-                    parsedArray = candidate;
-                    break;
-                }
+            let candidateIntent = '';
+            if (lastModel?.text) {
+                const candidate = parseJsonBlock(lastModel.text);
+                parsedArray = extractProposalArray(candidate);
+                candidateIntent = candidate?.intent || '';
             }
             const arr = parsedArray || [];
             const cleaned = arr
-                .map((s: any) => ({
-                    field: s.field,
-                    value: s.value,
-                    reason: s.reason || '',
-                }))
-                .filter((s: any) => s.field && s.value);
+                .map((s: any) => normalizeProposalSuggestion(s))
+                .filter((s: any) => s && (s.field || s.tool) && s.value);
             if (!cleaned.length) {
                 alert('לא נמצאו הצעות שיפור מהמודל (JSON לא זוהה).');
                 return;
             }
             setProfileSuggestions(cleaned);
+            setSuggestionEdits({});
+            setProfileIntent(candidateIntent);
             setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
             setIsProfileSuggestOpen(true);
             setChatId(data.chatId || chatId);
@@ -612,6 +782,58 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
         requestProfileSuggestions(mode);
     };
 
+    const formatSuggestionValue = (value: any) => {
+        if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
+            try {
+                return JSON.stringify(value, null, 2);
+            } catch {
+                return String(value);
+            }
+        }
+        return value !== undefined && value !== null ? String(value) : '';
+    };
+
+    const arrayFieldsWithChips = new Set(['tags', 'softSkills', 'techSkills']);
+
+    const normalizeSuggestionItemLabel = (item: any) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object') return item.name || item.value || item.label || JSON.stringify(item);
+        return String(item);
+    };
+
+    const filterSuggestionValue = (field: string | undefined, value: any, idx: number) => {
+        if (!field || !arrayFieldsWithChips.has(field) || !Array.isArray(value)) return value;
+        const excluded = excludedSuggestionItems[idx];
+        if (!excluded || excluded.size === 0) return value;
+        return value.filter((item: any) => {
+            const label = normalizeSuggestionItemLabel(item);
+            return !excluded.has(label);
+        });
+    };
+
+    const handleExcludeSuggestionItem = (idx: number, value: string) => {
+        setExcludedSuggestionItems(prev => {
+            const next = { ...prev };
+            const existing = new Set(next[idx] || []);
+            existing.add(value);
+            next[idx] = existing;
+            return next;
+        });
+    };
+
+    const parseSuggestionEdit = (text: string, original: any) => {
+        if (Array.isArray(original) || (typeof original === 'object' && original !== null)) {
+            try {
+                const parsed = JSON.parse(text);
+                if (Array.isArray(original) && Array.isArray(parsed)) return parsed;
+                if (typeof parsed === 'object' && parsed !== null) return parsed;
+            } catch {
+                return original;
+            }
+        }
+        return text;
+    };
+
     const toggleProfileSuggestion = (idx: number) => {
         setSelectedProfileIdx(prev => {
             const next = new Set(prev);
@@ -627,6 +849,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
         }
         const current = contextData || {};
         const patch: any = {};
+        const creationRequests: any[] = [];
 
         const skillNames = (list: any) =>
             ensureArray(list)
@@ -655,38 +878,48 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             return combined;
         };
 
+        const selectedProfileSuggestions: any[] = [];
         profileSuggestions.forEach((s, idx) => {
             if (!selectedProfileIdx.has(idx)) return;
             const field = s.field;
             const value = s.value;
+            const editValue = suggestionEdits[idx];
+            const actualValue = editValue !== undefined ? parseSuggestionEdit(editValue, value) : value;
+            const filteredValue = filterSuggestionValue(field, actualValue, idx);
+            const normalizedValue = field && arrayFieldsWithChips.has(field) ? filteredValue : actualValue;
+            if (s.tool === 'createOrganization') {
+                if (actualValue) creationRequests.push({ tool: 'createOrganization', value: actualValue });
+                return;
+            }
             if (!field || value === undefined || value === null) return;
+            selectedProfileSuggestions.push({ ...s, value: normalizedValue });
 
             switch (field) {
                 case 'tags':
                 case 'softSkills':
                 case 'techSkills':
                 case 'desiredRoles':
-                    mergeStringArray(field, value);
+                    mergeStringArray(field, normalizedValue);
                     break;
                 case 'workExperience': {
                     const list = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
-                    if (Array.isArray(value)) {
-                        value.forEach((v: any) => {
+                    if (Array.isArray(actualValue)) {
+                        actualValue.forEach((v: any) => {
                             if (v && typeof v === 'object') list.push({ ...v, id: v.id || Date.now() + Math.random() });
                             else if (typeof v === 'string') list.push({ id: Date.now() + Math.random(), title: '', company: '', description: v, startDate: '', endDate: 'Present' });
                         });
-                    } else if (typeof value === 'string') {
-                        list.push({ id: Date.now() + Math.random(), title: '', company: '', description: value, startDate: '', endDate: 'Present' });
+                    } else if (typeof actualValue === 'string') {
+                        list.push({ id: Date.now() + Math.random(), title: '', company: '', description: actualValue, startDate: '', endDate: 'Present' });
                     }
                     patch.workExperience = list;
                     break;
                 }
-                case 'salaryMin':
-                case 'salaryMax':
-                    patch[field] = Number(value) || 0;
+            case 'salaryMin':
+            case 'salaryMax':
+                patch[field] = Number(actualValue) || 0;
                     break;
                 default:
-                    patch[field] = value;
+                patch[field] = actualValue;
             }
         });
 
@@ -698,13 +931,27 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             technical: combinedTech,
         };
 
-        if (Object.keys(patch).length === 0) {
-            setIsProfileSuggestOpen(false);
-            return;
+        const hasPatch = Object.keys(patch).length > 0;
+        const hasSelectedSuggestions = selectedProfileSuggestions.length > 0;
+        if (hasPatch || creationRequests.length > 0 || hasSelectedSuggestions) {
+            // Keep skills object in sync with soft/tech skills
+            const combinedSoft = patch.softSkills || ensureArray(current.softSkills);
+            const combinedTech = patch.techSkills || ensureArray(current.techSkills);
+            patch.skills = {
+                soft: combinedSoft,
+                technical: combinedTech,
+            };
+            onProfileUpdate(patch, { suggestions: selectedProfileSuggestions });
         }
-        onProfileUpdate(patch);
+        creationRequests.forEach((req) => onProfileUpdate(req));
+        if (!Object.keys(patch).length && creationRequests.length === 0) {
+            alert('לא נבחרה אף הצעה לשמירה.');
+        } else {
+            alert('הפרופיל עודכן לפי ההצעות שנבחרו.');
+        }
         setIsProfileSuggestOpen(false);
         setProfileSuggestions([]);
+        setProfileIntent('');
         setSelectedProfileIdx(new Set());
         alert('הפרופיל עודכן לפי ההצעות שנבחרו.');
     };
@@ -741,12 +988,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                     >
                         {isExpanded ? <ArrowsPointingInIcon className="w-5 h-5" /> : <ArrowsPointingOutIcon className="w-5 h-5" />}
                     </button>
-                        <button
+                    <button 
                         onClick={() => { 
                             setMessages([]); 
                             setChatId(null); 
                             setError(null); 
-                            if (resolvedUserId) localStorage.removeItem(`hiroChatId:${resolvedUserId}:${chatType || 'default'}`);
+                            if (resolvedUserId) localStorage.removeItem(`hiroChatId:${resolvedUserId}:${chatScope}`);
                         }} 
                         title="אתחול שיחה" 
                         className="p-2 rounded-full text-text-muted hover:bg-bg-hover transition-colors">
@@ -812,13 +1059,13 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                         </button>
                     </div>
                     <div className="flex items-end gap-2">
-                        <button 
-                            onClick={handleSend} 
-                            disabled={isLoading || (!input.trim() && !isListening)} 
-                            className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-primary-600 text-white rounded-full hover:bg-primary-700 transition disabled:bg-primary-300 disabled:cursor-not-allowed shadow-md mb-0.5"
-                        >
-                            <PaperAirplaneIcon className="w-5 h-5" />
-                        </button>
+                    <button 
+                        onClick={handleSend} 
+                        disabled={isLoading || (!input.trim() && !isListening)} 
+                        className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-primary-600 text-white rounded-full hover:bg-primary-700 transition disabled:bg-primary-300 disabled:cursor-not-allowed shadow-md mb-0.5"
+                    >
+                        <PaperAirplaneIcon className="w-5 h-5" />
+                    </button>
                         <button
                             onClick={() => triggerProfileSuggestions(true)}
                             disabled={isProfileSuggestLoading || isLoading}
@@ -837,15 +1084,50 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                 </div>
             </footer>
         {isProfileSuggestOpen && (
-            <div className="fixed inset-0 bg-black/50 z-[10001] flex items-center justify-center p-4" onClick={() => setIsProfileSuggestOpen(false)}>
-                <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/50 z-[10001] flex items-center justify-center p-4 overflow-hidden pointer-events-none">
+            <div
+                className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 space-y-4 cursor-default"
+                onClick={(e) => e.stopPropagation()}
+                onMouseDown={(e) => {
+                    e.stopPropagation();
+                    if (!profileSuggestPosition) {
+                        const width = 800;
+                        const height = 500;
+                        setProfileSuggestPosition({
+                            x: Math.max(20, window.innerWidth / 2 - width / 2),
+                            y: Math.max(20, window.innerHeight / 2 - height / 2),
+                        });
+                    }
+                    setIsProfileSuggestDragging(true);
+                    setProfileSuggestDragOffset({
+                        x: e.clientX - (profileSuggestPosition?.x || 0),
+                        y: e.clientY - (profileSuggestPosition?.y || 0),
+                    });
+                }}
+                style={{
+                    position: 'absolute',
+                    top: profileSuggestPosition?.y ?? '50%',
+                    left: profileSuggestPosition?.x ?? '50%',
+                    transform: profileSuggestPosition ? 'translate(0, 0)' : 'translate(-50%, -50%)',
+                    cursor: isProfileSuggestDragging ? 'grabbing' : 'grab',
+                    pointerEvents: 'auto',
+                }}
+            >
                     <div className="flex items-center justify-between">
-                        <h3
-                            className="text-lg font-bold text-text-default cursor-pointer"
-                            onClick={() => triggerProfileSuggestions(true)}
-                        >
-                            הצעות לשיפור הפרופיל
-                        </h3>
+                        <div>
+                            <h3
+                                className="text-lg font-bold text-text-default cursor-pointer"
+                                onClick={() => triggerProfileSuggestions(true)}
+                            >
+                                הצעות לשיפור הפרופיל
+                            </h3>
+                            {profileIntent && (
+                                <p className="text-xs text-text-muted">
+                                    {profileIntent === 'createOrganization' && 'יצירת חברה חדשה'}
+                                    {profileIntent === 'update' && 'עדכון חברה קיימת'}
+                                </p>
+                            )}
+                        </div>
                         <button onClick={() => setIsProfileSuggestOpen(false)} className="p-2 rounded-full hover:bg-gray-100">
                             <XMarkIcon className="w-5 h-5" />
                         </button>
@@ -868,35 +1150,66 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                                 location: 'מיקום',
                                 availability: 'זמינות',
                             };
-                            const displayLabel = labelMap[s.field] || s.field;
+                            const displayLabel = s.field
+                                ? labelMap[s.field] || s.field
+                                : s.tool === 'createOrganization'
+                                ? 'צור חברה חדשה'
+                                : 'הצעה';
                             const value = s.value;
                             const isArray = Array.isArray(value);
-                            return (
-                                <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl hover:bg-bg-subtle cursor-pointer">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedProfileIdx.has(idx)}
-                                        onChange={() => toggleProfileSuggestion(idx)}
-                                        className="mt-1"
-                                    />
-                                    <div className="space-y-1">
-                                        <div className="font-bold text-text-default">{displayLabel}</div>
-                                        {isArray ? (
-                                            <div className="flex flex-wrap gap-1">
-                                                {(value as any[]).map((v, i) => (
-                                                    <span key={i} className="px-2 py-0.5 bg-bg-subtle border border-border-default rounded-full text-xs text-text-muted">
-                                                        {String(v)}
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        ) : (
-                                            <div className="text-sm text-text-muted break-words">{String(value)}</div>
-                                        )}
-                                        {s.reason && <div className="text-xs text-text-subtle">סיבה: {s.reason}</div>}
-                                    </div>
-                                </label>
-                            );
-                        })}
+                            const isObject = !isArray && typeof value === 'object' && value !== null;
+                            const editValue = suggestionEdits[idx] ?? formatSuggestionValue(value);
+            const handleEditChange = (next: string) => {
+                setSuggestionEdits(prev => ({ ...prev, [idx]: next }));
+            };
+            const field = s.field;
+            const filteredValue = filterSuggestionValue(field, value, idx);
+            const showChipsOnly = field && arrayFieldsWithChips.has(field);
+            return (
+                <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl cursor-pointer">
+                    <input
+                        type="checkbox"
+                        checked={selectedProfileIdx.has(idx)}
+                        onChange={() => toggleProfileSuggestion(idx)}
+                        className="mt-1"
+                    />
+                    <div className="space-y-1">
+                        <div className="font-bold text-text-default">{displayLabel}</div>
+                        {showChipsOnly ? (
+                            <div className="flex flex-wrap gap-2 mt-2">
+                                {Array.isArray(filteredValue) && filteredValue.length > 0 ? (
+                                    filteredValue.map((item: any, itemIdx: number) => {
+                                        const label = normalizeSuggestionItemLabel(item);
+                                        return (
+                                            <span key={`${idx}-${itemIdx}`} className="flex items-center gap-1 bg-primary-50 text-primary-700 text-xs font-semibold px-2 py-1 rounded-full">
+                                                {label}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleExcludeSuggestionItem(idx, label)}
+                                                    className="text-primary-500 hover:text-primary-700"
+                                                >
+                                                    <XMarkIcon className="w-3 h-3" />
+                                                </button>
+                                            </span>
+                                        );
+                                    })
+                                ) : (
+                                    <span className="text-xs text-text-subtle">אין פריטים</span>
+                                )}
+                            </div>
+                        ) : (
+                            <textarea
+                                className="w-full bg-bg-subtle border border-border-default rounded-lg p-2 text-xs text-text-muted resize-none"
+                                rows={isArray || isObject ? 4 : 2}
+                                value={editValue}
+                                onChange={(e) => handleEditChange(e.target.value)}
+                            />
+                        )}
+                        {s.reason && <div className="text-xs text-text-subtle">סיבה: {s.reason}</div>}
+                    </div>
+                </label>
+            );
+        })}
                     </div>
                     <div className="flex justify-end gap-2 pt-2">
                         <button onClick={() => setIsProfileSuggestOpen(false)} className="px-4 py-2 text-sm font-semibold text-text-muted hover:bg-bg-hover rounded-lg">בטל</button>
@@ -910,7 +1223,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                 </div>
             </div>
         )}
-            {isSuggestOpen && (
+            {allowTagCreation && isSuggestOpen && (
                 <div className="fixed inset-0 bg-black/50 z-[10000] flex items-center justify-center p-4" onClick={() => setIsSuggestOpen(false)}>
                     <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full p-6 space-y-4" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-between">
@@ -924,7 +1237,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                         ) : (
                             <div className="space-y-3 max-h-80 overflow-y-auto">
                                 {tagSuggestions.map((t, idx) => (
-                                    <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl hover:bg-bg-subtle cursor-pointer">
+                            <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl cursor-pointer">
                                         <input
                                             type="checkbox"
                                             checked={selectedTagIdx.has(idx)}
@@ -941,7 +1254,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                                             {t.synonyms?.length > 0 && (
                                                 <div className="flex flex-wrap gap-1 text-xs text-text-muted">
                                                     {t.synonyms.map((s: any, i: number) => (
-                                                        <span key={i} className="px-2 py-0.5 bg-gray-100 rounded-full border">{s.phrase || s}</span>
+                                                        <span key={i} className="px-2 py-0.5 bg-gray-100 rounded-full border">{typeof s === 'string' ? s : s.phrase}</span>
                                                     ))}
                                                 </div>
                                             )}

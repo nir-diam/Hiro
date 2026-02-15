@@ -2,128 +2,36 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Cog6ToothIcon, AvatarIcon, TableCellsIcon, Squares2X2Icon, BuildingOffice2Icon, MapPinIcon, CalendarIcon, BriefcaseIcon } from './Icons';
 
-export const experienceData = [
-  {
-    id: 1,
-    company: 'תנובה',
-    industry: 'תעשייה וייצור',
-    field: 'מזון',
-    yearsOfExperience: 5,
-    yearsAgo: 1,
-    tags: ['ייצור', 'לוגיסטיקה', 'בקרת איכות'],
-    type: 'פרטית',
-    size: '5000+',
-    location: 'רחובות',
-  },
-  {
-    id: 2,
-    company: 'נתיבי הגז הטבעי',
-    industry: 'אנרגיה וסביבה',
-    field: 'תשתיות גז',
-    yearsOfExperience: 3,
-    yearsAgo: 6,
-    tags: ['גז טבעי', 'תשתיות', 'הולכה'],
-    type: 'ממשלתית',
-    size: '11–50',
-    location: 'קיסריה',
-  },
-  {
-    id: 3,
-    company: 'אלביט מערכות',
-    industry: 'תעשייה וייצור',
-    field: 'ביטחוני',
-    yearsOfExperience: 8,
-    yearsAgo: 2,
-    tags: ['פיתוח', 'בקרת איכות', 'אלקטרוניקה'],
-    type: 'ציבורית',
-    size: '10000+',
-    location: 'חיפה',
-  },
-  {
-    id: 4,
-    company: 'בנק הפועלים',
-    industry: 'פיננסים',
-    field: 'בנקאות',
-    yearsOfExperience: 10,
-    yearsAgo: 0,
-    tags: ['שירות לקוחות', 'השקעות', 'אשראי'],
-    type: 'ציבורית',
-    size: '5000+',
-    location: 'תל אביב',
-  },
-  {
-    id: 5,
-    company: 'Wix',
-    industry: 'טכנולוגיה',
-    field: 'פיתוח web',
-    yearsOfExperience: 4,
-    yearsAgo: 3,
-    tags: ['React', 'Node.js', 'UI/UX'],
-    type: 'ציבורית',
-    size: '1001-5000',
-    location: 'תל אביב',
-  },
-  {
-    id: 6,
-    company: 'שופרסל',
-    industry: 'קמעונאות',
-    field: 'סופרמרקטים',
-    yearsOfExperience: 2,
-    yearsAgo: 1,
-    tags: ['מכירות', 'ניהול מלאי', 'שירות'],
-    type: 'ציבורית',
-    size: '10000+',
-    location: 'ראשון לציון',
-  },
-  {
-    id: 7,
-    company: 'משרד החינוך',
-    industry: 'מגזר ציבורי',
-    field: 'חינוך',
-    yearsOfExperience: 7,
-    yearsAgo: 4,
-    tags: ['הוראה', 'ניהול', 'פדגוגיה'],
-    type: 'ממשלתית',
-    size: '10000+',
-    location: 'ירושלים',
-  },
-  {
-    id: 8,
-    company: 'טבע תעשיות פרמצבטיות',
-    industry: 'תעשייה וייצור',
-    field: 'פארמה',
-    yearsOfExperience: 6,
-    yearsAgo: 5,
-    tags: ['מחקר ופיתוח', 'ייצור', 'רגולציה'],
-    type: 'ציבורית',
-    size: '10000+',
-    location: 'פתח תקווה',
-  },
-  {
-    id: 9,
-    company: 'צים',
-    industry: 'תחבורה ולוגיסטיקה',
-    field: 'ספנות',
-    yearsOfExperience: 3,
-    yearsAgo: 8,
-    tags: ['שינוע ימי', 'לוגיסטיקה', 'סחר בינלאומי'],
-    type: 'ציבורית',
-    size: '1001-5000',
-    location: 'חיפה',
-  },
-  {
-    id: 10,
-    company: 'אמדוקס',
-    industry: 'טכנולוגיה',
-    field: 'תקשורת',
-    yearsOfExperience: 9,
-    yearsAgo: 1,
-    tags: ['בילינג', 'CRM', 'טלקום'],
-    type: 'ציבורית',
-    size: '10000+',
-    location: 'רעננה',
-  },
-];
+type ExperienceInput = string | {
+  id?: string | number;
+  title?: string;
+  company?: string;
+  industry?: string;
+  field?: string;
+  yearsOfExperience?: number;
+  yearsAgo?: number;
+  tags?: string[];
+  type?: string;
+  size?: string;
+  startDate?: string;
+  endDate?: string;
+  companyField?: string;
+  description?: string;
+  location?: string;
+};
+
+type ExperienceItem = {
+  id: string;
+  company: string;
+  industry: string;
+  field: string;
+  yearsOfExperience: number;
+  yearsAgo: number;
+  tags: string[];
+  type: string;
+  size: string;
+  description: string;
+};
 
 const allColumns = [
   { id: 'company', header: 'חברה' },
@@ -131,13 +39,12 @@ const allColumns = [
   { id: 'yearsOfExperience', header: 'מס׳ שנים' },
   { id: 'yearsAgo', header: 'לפני כמה שנים' },
   { id: 'tags', header: 'תגיות ניסיון' },
-  { id: 'location', header: 'מיקום' },
   { id: 'field', header: 'תחום עיסוק' },
   { id: 'type', header: 'סוג חברה' },
   { id: 'size', header: 'גודל' },
 ];
 
-const defaultVisibleColumns = ['company', 'industry', 'yearsOfExperience', 'yearsAgo', 'tags', 'location'];
+const defaultVisibleColumns = ['company', 'industry', 'yearsOfExperience', 'yearsAgo', 'tags'];
 
 const ExperienceTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <span className="bg-primary-50 text-primary-700 text-xs font-medium px-2 py-0.5 rounded-md border border-primary-100">
@@ -147,7 +54,7 @@ const ExperienceTag: React.FC<{ children: React.ReactNode }> = ({ children }) =>
 
 const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').slice(0, 2);
 
-const ExperienceCard: React.FC<{ item: typeof experienceData[0] }> = ({ item }) => (
+const ExperienceCard: React.FC<{ item: ExperienceItem }> = ({ item }) => (
     <div className="bg-bg-card rounded-xl border border-border-default shadow-sm p-4 hover:shadow-md transition-all duration-200">
         <div className="flex justify-between items-start mb-3">
             <div className="flex items-center gap-3">
@@ -167,15 +74,15 @@ const ExperienceCard: React.FC<{ item: typeof experienceData[0] }> = ({ item }) 
         <div className="grid grid-cols-2 gap-2 text-sm text-text-muted mb-3">
              <div className="flex items-center gap-1.5">
                  <MapPinIcon className="w-4 h-4 text-text-subtle"/>
-                 <span>{item.location}</span>
+                 <span>{item.field || 'לא צוין'}</span>
              </div>
              <div className="flex items-center gap-1.5">
                  <BriefcaseIcon className="w-4 h-4 text-text-subtle"/>
-                 <span>{item.type}</span>
+                 <span>{item.type || '—'}</span>
              </div>
              <div className="flex items-center gap-1.5">
                  <BuildingOffice2Icon className="w-4 h-4 text-text-subtle"/>
-                 <span>{item.size} עובדים</span>
+                 <span>{item.size ? `${item.size} עובדים` : '—'}</span>
              </div>
              <div className="flex items-center gap-1.5">
                  <CalendarIcon className="w-4 h-4 text-text-subtle"/>
@@ -183,13 +90,15 @@ const ExperienceCard: React.FC<{ item: typeof experienceData[0] }> = ({ item }) 
              </div>
         </div>
 
-        <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-border-subtle">
-            {item.tags.map(tag => <ExperienceTag key={tag}>{tag}</ExperienceTag>)}
+        {item.description && (
+            <div className="mt-3 pt-3 border-t border-border-subtle">
+                <p className="text-sm text-text-muted leading-relaxed">{item.description}</p>
         </div>
+        )}
     </div>
 );
 
-const IndustryExperienceTable: React.FC = () => {
+const IndustryExperienceTable: React.FC<{ experiences?: ExperienceInput[] }> = ({ experiences = [] }) => {
   const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
   const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -224,8 +133,44 @@ const IndustryExperienceTable: React.FC = () => {
     return <span className="text-text-subtle">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
   };
 
+  const normalizedData: ExperienceItem[] = useMemo(() => {
+    const nowYear = new Date().getFullYear();
+    return experiences.map((exp, idx) => {
+      if (typeof exp === 'string') {
+        return {
+          id: (idx + 1).toString(),
+          company: exp.slice(0, 40) || 'חברה',
+          industry: 'לא צוין',
+          field: '',
+          yearsOfExperience: 1,
+          yearsAgo: 0,
+          tags: [],
+          type: '',
+          size: '',
+          location: '',
+        };
+      }
+      const sy = exp.startDate ? new Date(exp.startDate).getFullYear() : undefined;
+      const ey = exp.endDate && exp.endDate !== 'Present' ? new Date(exp.endDate).getFullYear() : nowYear;
+      const years = sy && ey ? Math.max(1, ey - sy + 1) : (exp.yearsOfExperience || 1);
+      const yearsAgo = ey ? Math.max(0, nowYear - ey) : (exp.yearsAgo || 0);
+      return {
+        id: (exp.id || idx + 1).toString(),
+        company: exp.company || exp.title || 'חברה',
+      industry: exp.companyField || exp.industry || 'לא צוין',
+        field: exp.field || '',
+        yearsOfExperience: years,
+        yearsAgo: yearsAgo,
+        tags: Array.isArray(exp.tags) ? exp.tags : [],
+        type: exp.type || '',
+        size: exp.size || '',
+      description: exp.description || '',
+      };
+    });
+  }, [experiences]);
+
   const sortedData = useMemo(() => {
-    let sortableItems = [...experienceData];
+    let sortableItems = [...normalizedData];
     if (sortConfig !== null) {
         sortableItems.sort((a, b) => {
             const aVal = (a as any)[sortConfig.key];
@@ -237,7 +182,7 @@ const IndustryExperienceTable: React.FC = () => {
         });
     }
     return sortableItems;
-  }, [sortConfig]);
+  }, [sortConfig, normalizedData]);
 
   const handleColumnToggle = (columnId: string) => {
     setVisibleColumns(prev =>
@@ -266,7 +211,7 @@ const IndustryExperienceTable: React.FC = () => {
       setDraggingColumn(null);
   };
 
-  const renderCellContent = (item: typeof experienceData[0], columnId: string) => {
+  const renderCellContent = (item: ExperienceItem, columnId: string) => {
       switch (columnId) {
           case 'company':
               return (
@@ -279,9 +224,9 @@ const IndustryExperienceTable: React.FC = () => {
               );
           case 'tags':
               return (
-                  <div className="flex flex-wrap gap-1 max-w-xs">
-                      {item.tags.map(tag => <ExperienceTag key={tag}>{tag}</ExperienceTag>)}
-                  </div>
+                  <p className="text-sm leading-relaxed text-text-default max-w-[260px] whitespace-pre-line">
+                      {item.description || '—'}
+                  </p>
               );
           case 'yearsOfExperience':
               return <span className="font-bold text-primary-600">{item.yearsOfExperience}</span>;
@@ -299,7 +244,7 @@ const IndustryExperienceTable: React.FC = () => {
         
         <div className="flex justify-between items-center mb-4 px-1">
             <div className="text-sm text-text-muted">
-                נמצאו <span className="font-bold text-text-default">{experienceData.length}</span> רשומות
+                נמצאו <span className="font-bold text-text-default">{normalizedData.length}</span> רשומות
             </div>
             <div className="flex items-center gap-2">
                  <div className="flex items-center bg-bg-subtle p-1 rounded-lg border border-border-subtle">

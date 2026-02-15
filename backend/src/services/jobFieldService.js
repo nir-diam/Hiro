@@ -1,7 +1,16 @@
 const JobCategory = require('../models/JobCategory');
 const JobCluster = require('../models/JobCluster');
 const JobRole = require('../models/JobRole');
+const Tag = require('../models/Tag');
 const { sendChat } = require('./geminiService');
+const promptService = require('./promptService');
+const jobFieldEmbeddingService = require('./jobFieldEmbeddingService');
+
+const ROLE_TAG_INCLUDE = {
+  model: Tag,
+  as: 'tags',
+  through: { attributes: [] },
+};
 
 const list = async () => {
   const categories = await JobCategory.findAll({
@@ -10,7 +19,12 @@ const list = async () => {
       model: JobCluster,
       as: 'clusters',
       order: [['name', 'ASC']],
-      include: [{ model: JobRole, as: 'roles', order: [['value', 'ASC']] }],
+      include: [{
+        model: JobRole,
+        as: 'roles',
+        order: [['value', 'ASC']],
+        include: [ROLE_TAG_INCLUDE],
+      }],
     }],
   });
 
@@ -29,12 +43,17 @@ const list = async () => {
   }));
 };
 
-const createCategory = async (name) => JobCategory.create({ name });
+const createCategory = async (name) => {
+  const row = await JobCategory.create({ name });
+  jobFieldEmbeddingService.scheduleCategoryEmbedding(row);
+  return row;
+};
 const updateCategory = async (id, name) => {
   const row = await JobCategory.findByPk(id);
   if (!row) throw Object.assign(new Error('Category not found'), { status: 404 });
   row.name = name;
   await row.save();
+  jobFieldEmbeddingService.scheduleCategoryEmbedding(row);
   return row;
 };
 const deleteCategory = async (id) => {
@@ -42,12 +61,17 @@ const deleteCategory = async (id) => {
   if (!deleted) throw Object.assign(new Error('Category not found'), { status: 404 });
 };
 
-const createCluster = async ({ categoryId, name }) => JobCluster.create({ categoryId, name });
+const createCluster = async ({ categoryId, name }) => {
+  const row = await JobCluster.create({ categoryId, name });
+  jobFieldEmbeddingService.scheduleClusterEmbedding(row);
+  return row;
+};
 const updateCluster = async (id, name) => {
   const row = await JobCluster.findByPk(id);
   if (!row) throw Object.assign(new Error('Cluster not found'), { status: 404 });
   row.name = name;
   await row.save();
+  jobFieldEmbeddingService.scheduleClusterEmbedding(row);
   return row;
 };
 const deleteCluster = async (id) => {
@@ -55,14 +79,24 @@ const deleteCluster = async (id) => {
   if (!deleted) throw Object.assign(new Error('Cluster not found'), { status: 404 });
 };
 
-const createRole = async ({ clusterId, value, synonyms = [] }) => JobRole.create({ clusterId, value, synonyms });
-const updateRole = async (id, { value, synonyms = [] }) => {
+const createRole = async ({ clusterId, value, synonyms = [], tagIds = [] }) => {
+  const row = await JobRole.create({ clusterId, value, synonyms });
+  const normalizedTagIds = Array.isArray(tagIds) ? tagIds.filter(Boolean) : [];
+  await row.setTags(normalizedTagIds);
+  jobFieldEmbeddingService.scheduleRoleEmbedding(row);
+  return JobRole.findByPk(row.id, { include: [ROLE_TAG_INCLUDE] });
+};
+
+const updateRole = async (id, { value, synonyms = [], tagIds = [] }) => {
   const row = await JobRole.findByPk(id);
   if (!row) throw Object.assign(new Error('Role not found'), { status: 404 });
   row.value = value;
   row.synonyms = synonyms;
   await row.save();
-  return row;
+  jobFieldEmbeddingService.scheduleRoleEmbedding(row);
+  const normalizedTagIds = Array.isArray(tagIds) ? tagIds.filter(Boolean) : [];
+  await row.setTags(normalizedTagIds);
+  return JobRole.findByPk(row.id, { include: [ROLE_TAG_INCLUDE] });
 };
 const deleteRole = async (id) => {
   const deleted = await JobRole.destroy({ where: { id } });
@@ -90,7 +124,57 @@ const parseJsonArray = (text) => {
       /* ignore */
     }
   }
+
+  // Fallback: treat lines as simple list entries
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-\d.\)\s]+/, '').trim())
+    .filter(Boolean);
+  if (lines.length) return lines;
+
   throw Object.assign(new Error('Failed to parse AI JSON response'), { status: 400 });
+};
+
+const buildPromptText = (template, replacements = {}) => {
+  let text = template || '';
+  Object.entries(replacements).forEach(([key, value]) => {
+    const pattern = new RegExp(`{{${key}}}`, 'g');
+    text = text.replace(pattern, value ?? '');
+  });
+  return text;
+};
+
+const parseSynonymArray = (text) => {
+  if (!text) return [];
+  try {
+    const parsed = JSON.parse(text);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean);
+    }
+  } catch {
+    // continue to fallback lines
+  }
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-•\d.\)]\s*/, ''))
+    .filter(Boolean);
+};
+
+const extractRoleLines = (lines) => {
+  if (!lines.length) return [];
+  const normalizedLines = lines.map(line => (typeof line === 'string' ? line : ''));
+  const startIndex = normalizedLines.findIndex((line) => /הצעות|roles/i.test(line));
+  const trimmed = startIndex >= 0 ? normalizedLines.slice(startIndex + 1) : normalizedLines;
+  return trimmed
+    .map(line => line.replace(/\*\*/g, '').trim())
+    .filter((line) => {
+      if (!line) return false;
+      const lower = line.toLowerCase();
+      if (lower.includes('שלום') || lower.includes('זהו') || lower.includes('מערכת')) return false;
+      if (lower.includes('ללא מילים נרדפות')) return false;
+      if (lower.includes('הצעות') && !line.match(/\(\s*\S+/)) return false;
+      return true;
+    });
 };
 
 const suggestClusters = async (categoryId, { previewOnly = true } = {}) => {
@@ -126,13 +210,13 @@ Existing roles: ${existingRoles.join(', ') || 'none'}
 Return JSON array of new cluster names.`;
 
   const reply = await sendChat({
-    apiKey: process.env.GIMINI_KEY
+    apiKey: process.env.GEMINI_API_KEY
       || process.env.GEMINI_KEY
-      || process.env.GEMINI_API_KEY
+      || process.env.GIMINI_KEY
       || process.env.GOOGLE_API_KEY
       || process.env.API_KEY,
     systemPrompt,
-    history: [{ role: 'user', text: userMessage }],
+    message: userMessage,
   });
 
   const suggestions = parseJsonArray(reply)
@@ -185,19 +269,20 @@ Cluster: ${cluster.name}
 Existing roles: ${existingRoles.join(', ') || 'none'}`;
 
   const reply = await sendChat({
-    apiKey: process.env.GIMINI_KEY
+    apiKey: process.env.GEMINI_API_KEY
       || process.env.GEMINI_KEY
-      || process.env.GEMINI_API_KEY
+      || process.env.GIMINI_KEY
       || process.env.GOOGLE_API_KEY
       || process.env.API_KEY,
     systemPrompt,
-    history: [{ role: 'user', text: userMessage }],
+    message: userMessage,
   });
 
-  const suggestions = parseJsonArray(reply)
-    .map((s) => {
-      if (typeof s === 'string') return { value: s.trim(), synonyms: [] };
-      return { value: s?.value || s?.title || '', synonyms: Array.isArray(s?.synonyms) ? s.synonyms : [] };
+  const rawLines = parseJsonArray(reply);
+  const roleLines = extractRoleLines(rawLines);
+  const suggestions = roleLines
+    .map((line) => {
+      return { value: line, synonyms: [] };
     })
     .filter((s) => s.value);
 
@@ -274,6 +359,63 @@ Example Output:
     .filter(Boolean);
 };
 
+const generateRoleSynonyms = async (roleId) => {
+  const role = await JobRole.findByPk(roleId, {
+    include: [{
+      model: JobCluster,
+      as: 'cluster',
+      include: [{ model: JobCategory, as: 'category' }],
+    }],
+  });
+  if (!role) throw Object.assign(new Error('Role not found'), { status: 404 });
+
+  const cluster = role.cluster;
+  const category = cluster?.category;
+  const promptRecord = await promptService.getById('job_categories_synonyms_ai_completed');
+  const systemPrompt = buildPromptText(promptRecord.template, {
+    role_value: role.value || '',
+    cluster_name: cluster?.name || '',
+    category_name: category?.name || '',
+    existing_synonyms: JSON.stringify(role.synonyms || []),
+  });
+
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.GEMINI_KEY ||
+    process.env.GIMINI_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.API_KEY;
+  if (!apiKey) {
+    const err = new Error('Gemini API key not configured');
+    err.status = 500;
+    throw err;
+  }
+
+  const reply = await sendChat({
+    apiKey,
+    systemPrompt,
+    message: `Generate search-specific synonyms for "${role.value}".`,
+  });
+
+  const candidates = parseSynonymArray(reply);
+  const existingSet = new Set((role.synonyms || []).map((value) => (value || '').trim().toLowerCase()));
+  const newSynonyms = [];
+  for (const candidate of candidates) {
+    const trimmed = (candidate || '').trim();
+    if (!trimmed) continue;
+    if (existingSet.has(trimmed.toLowerCase())) continue;
+    if (newSynonyms.some((item) => item.toLowerCase() === trimmed.toLowerCase())) continue;
+    newSynonyms.push(trimmed);
+    if (newSynonyms.length >= 10) break;
+  }
+  if (!newSynonyms.length) {
+    return { id: role.id, value: role.value, synonyms: role.synonyms || [] };
+  }
+  role.synonyms = [...(role.synonyms || []), ...newSynonyms];
+  await role.save();
+  return { id: role.id, value: role.value, synonyms: role.synonyms || [] };
+};
+
 module.exports = {
   list,
   createCategory,
@@ -288,5 +430,6 @@ module.exports = {
   suggestClusters,
   suggestRoles,
   suggestRoleSynonyms,
+  generateRoleSynonyms,
 };
 

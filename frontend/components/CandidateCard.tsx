@@ -5,15 +5,15 @@ import { Candidate } from './CandidatesListView';
 
 interface CandidateCardProps {
     candidate: Candidate;
-    onViewProfile: (id: number) => void;
-    onOpenSummary: (id: number) => void;
+    onViewProfile: () => void;
+    onOpenSummary: (candidate: Candidate) => void;
     missingFields: string[];
     isFavorite: boolean;
     onToggleFavorite: (id: number) => void;
     selectionMode?: boolean;
     isSelected?: boolean;
     onSelect?: (id: number) => void;
-    onScoreClick?: (e: React.MouseEvent, id: number) => void; // Added prop
+    onScoreClick?: (e: React.MouseEvent, id: number) => void;
 }
 
 const statusStyles: { [key: string]: string } = {
@@ -24,7 +24,7 @@ const statusStyles: { [key: string]: string } = {
   'נדחה': 'bg-gray-50 text-gray-600 border-gray-100',
 };
 
-// Simplified ScoreCircle - Just triggers the click
+// Score Circle Component
 const ScoreCircle: React.FC<{ score: number; onClick: (e: React.MouseEvent) => void }> = ({ score, onClick }) => {
     let colorClass = 'text-gray-500 border-gray-200 bg-gray-50';
     if (score >= 90) colorClass = 'text-green-600 border-green-200 bg-green-50';
@@ -43,22 +43,71 @@ const ScoreCircle: React.FC<{ score: number; onClick: (e: React.MouseEvent) => v
     );
 };
 
-// Simple Avatar Component
-const Avatar: React.FC<{ initials: string; size?: number }> = ({ initials, size = 48 }) => (
-    <div 
-        className="rounded-full bg-primary-100 flex items-center justify-center text-primary-700 font-bold border-2 border-white shadow-sm"
-        style={{ width: size, height: size, fontSize: size * 0.4 }}
-    >
-        {initials}
-    </div>
-);
+// Avatar Component - Supports Image or Initials Fallback
+const Avatar: React.FC<{ initials: string; size?: number; imageUrl?: string }> = ({ initials, size = 48, imageUrl }) => {
+    if (imageUrl) {
+        return (
+            <img 
+                src={imageUrl} 
+                alt={initials} 
+                className="rounded-full border-2 border-white shadow-sm object-cover"
+                style={{ width: size, height: size }}
+            />
+        );
+    }
+    return (
+        <div 
+            className="rounded-full bg-primary-100 flex items-center justify-center text-primary-700 font-bold border-2 border-white shadow-sm"
+            style={{ width: size, height: size, fontSize: size * 0.4 }}
+        >
+            {initials}
+        </div>
+    );
+};
+
+// Compact Experience Bar - Updated to Brand Colors
+const CompactExperienceBar: React.FC<{ industries: { label: string; percentage: number }[] }> = ({ industries }) => {
+    if (!industries || industries.length === 0) return null;
+
+    // Strict Brand Palette: Primary, Gray, Dark Primary
+    const brandPalette = ['bg-primary-500', 'bg-gray-300', 'bg-primary-800'];
+    
+    // Take only top 3 industries
+    const displayIndustries = industries.slice(0, 3);
+
+    return (
+        <div className="w-full mt-3 mb-1">
+             <div className="flex h-1.5 w-full rounded-full overflow-hidden bg-bg-subtle">
+                {displayIndustries.map((ind, i) => (
+                    <div 
+                        key={i} 
+                        className={`h-full ${brandPalette[i % brandPalette.length]}`} 
+                        style={{ width: `${ind.percentage}%` }}
+                        title={`${ind.label}: ${ind.percentage}%`}
+                    />
+                ))}
+            </div>
+             <div className="flex justify-between items-center mt-1">
+                 <span className="text-[10px] text-text-subtle font-medium truncate max-w-[50%]">
+                     {displayIndustries[0]?.label}
+                 </span>
+                 {displayIndustries.length > 1 && (
+                     <span className="text-[10px] text-text-subtle font-medium truncate max-w-[50%] text-left">
+                        {displayIndustries[1]?.label}
+                     </span>
+                 )}
+            </div>
+        </div>
+    );
+};
+
 
 const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile, onOpenSummary, missingFields, isFavorite, onToggleFavorite, selectionMode, isSelected, onSelect, onScoreClick }) => {
     const hasMissingFields = missingFields.length > 0;
 
     return (
         <div 
-            onClick={() => selectionMode && onSelect ? onSelect(candidate.id) : onOpenSummary(candidate.id)} 
+            onClick={() => selectionMode && onSelect ? onSelect(candidate.id) : onOpenSummary(candidate)} 
             className={`bg-bg-card rounded-xl border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-lg hover:-translate-y-0.5 transition-all duration-200 flex flex-col h-full relative group ${isSelected ? 'ring-2 ring-primary-500 border-primary-500 bg-primary-50/10' : ''}`}
         >
              {/* Selection / Favorite Action */}
@@ -81,14 +130,15 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
             {/* Header: Avatar + Name */}
             <div className="flex items-start gap-3 mb-3">
                 <div className="flex-shrink-0 pt-1">
+                     {/* Pass imageUrl if it exists in candidate object (currently mocking via initials logic) */}
                      <Avatar initials={candidate.avatar} />
                 </div>
                 
-                <div className="flex-1 min-w-0 pr-6"> {/* pr-6 to avoid overlap with favorite button */}
+                <div className="flex-1 min-w-0 pr-6">
                     <div className="flex items-center gap-1.5 mb-0.5">
                         <h3 
                             className="font-bold text-lg text-text-default hover:text-primary-600 transition-colors truncate"
-                            onClick={(e) => { e.stopPropagation(); onViewProfile(candidate.id); }}
+                            onClick={(e) => { e.stopPropagation(); onViewProfile(); }}
                             title={candidate.name}
                         >
                             {candidate.name}
@@ -106,7 +156,7 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
             </div>
 
             {/* Status Badge + Match Score Row */}
-            <div className="flex justify-between items-center mb-4">
+            <div className="flex justify-between items-center mb-2">
                 <span className={`inline-block text-xs font-semibold px-2.5 py-1 rounded-md border ${statusStyles[candidate.status] || 'bg-gray-100 text-gray-800 border-gray-200'}`}>
                     {candidate.status}
                 </span>
@@ -118,6 +168,11 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
                     />
                 </div>
             </div>
+
+            {/* Industry Profile Bar (New Design) */}
+            {candidate.industryAnalysis && candidate.industryAnalysis.industries.length > 0 && (
+                <CompactExperienceBar industries={candidate.industryAnalysis.industries} />
+            )}
 
             {/* Info Grid (Location, Last Active, Source) */}
             <div className="grid grid-cols-2 gap-y-2 gap-x-1 text-xs text-text-muted mt-auto mb-4 border-t border-border-subtle pt-3">

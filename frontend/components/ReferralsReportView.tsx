@@ -10,7 +10,7 @@ import {
 import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal from './ReReferModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
-import { type Job, jobsData as allJobsData } from './JobsView';
+import { type Job } from './JobsView';
 
 // --- TYPES ---
 type ReferralStatus = 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'נדחה' | 'התקבל לעבודה' | 'פעיל';
@@ -301,9 +301,34 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     const navigate = useNavigate();
     const today = new Date();
     const thirtyDaysAgo = new Date(new Date().setDate(today.getDate() - 30));
+    const apiBase = import.meta.env.VITE_API_BASE || '';
 
     // Data State
     const [referrals, setReferrals] = useState<Referral[]>(referralsData);
+    const [jobs, setJobs] = useState<Job[]>([]);
+    const [loadingJobs, setLoadingJobs] = useState(false);
+    useEffect(() => {
+        if (!apiBase) return;
+        let active = true;
+        setLoadingJobs(true);
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/jobs`);
+                if (!res.ok) throw new Error('Failed to fetch jobs');
+                const payload = await res.json();
+                if (active) {
+                    setJobs(Array.isArray(payload) ? payload : []);
+                }
+            } catch (err) {
+                console.error('[ReferralsReportView] failed to load jobs', err);
+            } finally {
+                if (active) setLoadingJobs(false);
+            }
+        })();
+        return () => {
+            active = false;
+        };
+    }, [apiBase]);
     
     // Filters State
     const [filters, setFilters] = useState({
@@ -442,9 +467,9 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     };
 
     const handleOpenJobDrawer = (jobTitle: string) => {
-         const job = allJobsData.find(j => j.title === jobTitle);
-         const jobMap: {[key: string]: number} = { 'מפתח/ת Fullstack בכיר/ה': 2, 'מנהל/ת מוצר לחטיבת הפינטק': 7, 'מעצב/ת UX/UI': 3 }
-         const fallbackJob = allJobsData.find(j => j.id === (jobMap[jobTitle] || 1));
+         const job = jobs.find(j => j.title === jobTitle);
+         const jobMap: {[key: string]: number} = { 'מפתח/ת Fullstack בכיר/ה': 2, 'מנהל/ת מוצר לחטיבת הפינטק': 7, 'מעצב/ת UX/UI': 3 };
+         const fallbackJob = jobs.find(j => j.id === (jobMap[jobTitle] || 1));
          if (job || fallbackJob) {
             setSelectedJob(job || fallbackJob || null);
             setIsDrawerOpen(true);

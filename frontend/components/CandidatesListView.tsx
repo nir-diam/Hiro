@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
     PlusIcon, MagnifyingGlassIcon, Cog6ToothIcon, AvatarIcon, ChevronDownIcon, ArrowPathIcon,
@@ -18,6 +18,7 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import { useLanguage } from '../context/LanguageContext';
+import { deriveLocalCandidateId } from '../utils/candidateId';
 
 type Operator = 'AND' | 'OR' | 'NOT';
 
@@ -31,7 +32,8 @@ interface ComplexFilterRule {
 }
 
 export interface Candidate {
-  id: number;
+  id: number; // local numeric id for UI
+  backendId?: string; // actual id from backend
   name: string;
   avatar: string;
   title: string;
@@ -51,13 +53,20 @@ export interface Candidate {
   field?: string;
   sector?: string;
   companySize?: string;
+  // Enhanced fields for display
+  professionalSummary?: string;
   industryAnalysis?: {
-      industries: { label: string; percentage: number }[];
+      industries: { label: string; percentage: number; color: string }[];
       smartTags?: {
           domains: string[];
-          orgDNA: { label: string; subLabel: string; icon?: React.ReactNode };
+          orgDNA: {
+              label: string;
+              subLabel: string;
+              icon?: any;
+          }
       };
   };
+  resumeUrl?: string;
 }
 
 export const candidatesData: Candidate[] = [
@@ -82,11 +91,16 @@ export const candidatesData: Candidate[] = [
       field: 'ייצור מזון ומשקאות',
       sector: 'פרטי',
       companySize: '200-1000',
+      professionalSummary: 'מנהל שיווק מנוסה עם התמחות בטרנספורמציה דיגיטלית והובלת צוותים גלובליים.',
       industryAnalysis: {
           industries: [
-              { label: 'מסחר וקמעונאות', percentage: 60 },
-              { label: 'טכנולוגיה ושירותים', percentage: 40 },
-          ]
+              { label: 'קמעונאות', percentage: 60, color: 'bg-primary-500' },
+              { label: 'טכנולוגיה', percentage: 40, color: 'bg-secondary-400' },
+          ],
+          smartTags: {
+              domains: ['שיווק', 'אסטרטגיה'],
+              orgDNA: { label: 'Enterprise', subLabel: 'ארגון גדול' }
+          }
       }
   },
   { 
@@ -110,10 +124,11 @@ export const candidatesData: Candidate[] = [
       field: 'ייצור שבבים', 
       sector: 'ציבורי', 
       companySize: '1000+',
+      professionalSummary: 'מפתחת מוכשרת עם 5 שנות ניסיון בבניית מערכות SaaS מורכבות בסביבת ענן.',
       industryAnalysis: {
           industries: [
-              { label: 'הייטק (SaaS)', percentage: 80 },
-              { label: 'פינטק', percentage: 20 },
+              { label: 'הייטק (SaaS)', percentage: 80, color: 'bg-purple-500' },
+              { label: 'פינטק', percentage: 20, color: 'bg-indigo-400' },
           ]
       }
   },
@@ -137,11 +152,12 @@ export const candidatesData: Candidate[] = [
       field: 'עיצוב', 
       sector: 'פרטי', 
       companySize: '51-200',
+      professionalSummary: 'מעצב מוצר יצירתי המתמחה בחווית משתמש למובייל ועיצוב ממשקים נקיים.',
       industryAnalysis: {
           industries: [
-              { label: 'דיגיטל', percentage: 50 },
-              { label: 'פרסום', percentage: 30 },
-              { label: 'הייטק', percentage: 20 },
+              { label: 'דיגיטל', percentage: 50, color: 'bg-orange-500' },
+              { label: 'פרסום', percentage: 30, color: 'bg-yellow-400' },
+              { label: 'הייטק', percentage: 20, color: 'bg-red-400' },
           ]
       }
   }, 
@@ -166,29 +182,30 @@ export const candidatesData: Candidate[] = [
       field: 'QA', 
       sector: 'ציבורי', 
       companySize: '1000+',
+      professionalSummary: 'בודקת תוכנה יסודית עם רקע חזק במתודולוגיות בדיקה ומערכות מידע.',
       industryAnalysis: {
           industries: [
-              { label: 'ביטחוני', percentage: 70 },
-              { label: 'בנקאות', percentage: 30 },
+              { label: 'ביטחוני', percentage: 70, color: 'bg-slate-600' },
+              { label: 'בנקאות', percentage: 30, color: 'bg-slate-400' },
           ]
       }
   }, 
-  { id: 5, name: 'מזרחי אבי', avatar: 'מא', title: 'מנהל מוצר', status: 'ראיון HR', lastActivity: '16:30 25/05/2025', source: 'GotFriends', tags: [], internalTags: [], matchScore: 25, address: 'באר שבע', phone: '058-5678901', industry: 'הייטק', field: 'ניהול מוצר', sector: 'פרטי', companySize: '51-200' }, 
-  { id: 6, name: 'יוסי לוי', avatar: 'יל', title: 'אנליסט נתונים', status: 'חדש', lastActivity: '10:15 24/05/2025', source: 'JobMaster', tags: ['SQL', 'Excel', 'ניתוח נתונים'], internalTags: [], matchScore: 78, address: 'רמת גן', phone: '054-6789012', industry: 'פיננסים', field: 'Data', sector: 'פרטי', companySize: '200-1000' },
-  { id: 7, name: 'רינה כהן', avatar: 'רכ', title: 'מנהלת פרויקטים', status: 'ראיון HR', lastActivity: '09:00 23/05/2025', source: 'חבר מביא חבר', tags: ['Agile', 'Jira', 'ניהול פרויקטים'], internalTags: [], matchScore: 88, address: 'הרצליה', phone: '052-7890123', industry: 'הייטק', field: 'פרויקטים', sector: 'פרטי', companySize: '51-200' },
-  { id: 8, name: 'משה פרץ', avatar: 'מפ', title: 'מהנדס QA', status: 'עבר בדיקה ראשונית', lastActivity: '15:45 22/05/2025', source: 'Ethosia', tags: ['Automation', 'Java', 'Selenium'], internalTags: [], matchScore: 95, address: 'פתח תקווה', phone: '053-8901234', industry: 'תעשייה וייצור', field: 'אלקטרוניקה', sector: 'ציבורי', companySize: '1000+' },
-  { id: 9, name: 'שרה כץ', avatar: 'שכ', title: 'מעבת גרפית', status: 'חדש', lastActivity: '12:10 21/05/2025', source: 'LinkedIn', tags: ['Photoshop', 'Illustrator', 'Branding'], internalTags: [], matchScore: 72, address: 'גבעתיים', phone: '050-9012345', industry: 'פרסום ומדיה', field: 'עיצוב גרפי', sector: 'פרטי', companySize: '1-50' },
-  { id: 10, name: 'אבי שביט', avatar: 'אש', title: 'מנהל מכירות', status: 'בבדיקה', lastActivity: '11:05 20/05/2025', source: 'GotFriends', tags: ['מכירות B2B', 'ניהול מו"מ', 'Salesforce'], internalTags: [], matchScore: 81, address: 'ראשון לציון', phone: '058-0123456', industry: 'תחבורה ולוגיסטיקה', field: 'לוגיסטיקה ושינוע', sector: 'פרטי', companySize: '200-1000' },
-  { id: 11, name: 'תמר דהן', avatar: 'תד', title: 'רכזת גיוס', status: 'חדש', lastActivity: '17:30 19/05/2025', source: 'AllJobs', tags: ['גיוס טכנולוגי', 'Sourcing', 'ראיונות'], internalTags: [], matchScore: 68, address: 'חולון', phone: '054-1234568', industry: 'משאבי אנוש', field: 'גיוס', sector: 'פרטי', companySize: '51-200' },
-  { id: 12, name: 'דוד ביטון', avatar: 'דב', title: 'מהנדס DevOps', status: 'עבר בדיקה ראשונית', lastActivity: '14:20 18/05/2025', source: 'חבר מביא חבר', tags: ['AWS', 'Kubernetes', 'CI/CD'], internalTags: [], matchScore: 93, address: 'נס ציונה', phone: '052-2345679', industry: 'תעשייה וייצור', field: 'ייצור שבבים', sector: 'ציבורי', companySize: '1000+' },
-  { id: 13, name: 'נועה פרידמן', avatar: 'נפ', title: 'מנהלת מוצר', status: 'חדש', lastActivity: '10:00 17/05/2025', source: 'JobMaster', tags: ['Product Strategy', 'UX', 'Agile'], internalTags: [], matchScore: 86, address: 'כפר סבא', phone: '053-3456780', industry: 'הייטק', field: 'ניהול מוצר', sector: 'פרטי', companySize: '200-1000' },
-  { id: 14, name: 'איתי גולן', avatar: 'אג', title: 'נציג תמיכה טכנית', status: 'ראיון HR', lastActivity: '08:45 16/05/2025', source: 'LinkedIn', tags: ['Support', 'Zendesk', 'Customer Service'], internalTags: [], matchScore: 79, address: 'רעננה', phone: '050-4567891', industry: 'שירותים', field: 'תמיכה טכנית', sector: 'פרטי', companySize: '1-50' },
-  { id: 15, name: 'הילה אזולאי', avatar: 'הא', title: 'מנהלת חשבונות', status: 'עבר בדיקה ראשונית', lastActivity: '16:00 15/05/2025', source: 'AllJobs', tags: ['סוג 3', 'Priority', 'דוחות כספיים'], internalTags: [], matchScore: 90, address: 'בת ים', phone: '058-5678902', industry: 'פיננסים', field: 'הנהלת חשבונות', sector: 'פרטי', companySize: '51-200' },
-  { id: 16, name: 'יונתן כהן', avatar: 'יכ', title: 'מנהל פרויקטים', status: 'חדש', lastActivity: '14/05/2025', source: 'AllJobs', tags: ['Project Management', 'Agile'], internalTags: [], matchScore: 82, address: 'אשדוד', phone: '054-9876543', industry: 'תשתיות', field: 'בנייה', sector: 'ממשלתי', companySize: '1000+' },
-  { id: 17, name: 'מיכל לוי', avatar: 'מל', title: 'אנליסטית BI', status: 'בבדיקה', lastActivity: '13/05/2025', source: 'LinkedIn', tags: ['BI', 'SQL', 'Tableau'], internalTags: [], matchScore: 89, address: 'נתניה', phone: '052-8765432', industry: 'הייטק', field: 'Data', sector: 'פרטי', companySize: '200-1000' },
-  { id: 18, name: 'אמיר חדד', avatar: 'אח', title: 'איש מכירות', status: 'חדש', lastActivity: '12:05/2025', source: 'חבר מביא חבר', tags: ['מכירות', 'שירות לקוחות'], internalTags: [], matchScore: 70, address: 'רחובות', phone: '053-7654321', industry: 'תחבורה ולוגיסטיקה', field: 'הפצה ושרשרת אספקה', sector: 'פרטי', companySize: '200-1000' },
-  { id: 19, name: 'רוני פרץ', avatar: 'רפ', title: 'מפתחת Frontend', status: 'ראיון HR', lastActivity: '11/05/2025', source: 'JobMaster', tags: ['React', 'CSS', 'HTML'], internalTags: [], matchScore: 91, address: 'תל אביב', phone: '050-6543210', industry: 'הייטק', field: 'פיתוח תוכנה', sector: 'פרטי', companySize: '51-200' },
-  { id: 20, name: 'דניאל ישראלי', avatar: 'די', title: 'מנהל רשת', status: 'עבר בדיקה ראשונית', lastActivity: '10:05/2025', source: 'Ethosia', tags: ['Windows Server', 'Networking'], internalTags: [], matchScore: 85, address: 'באר שבע', phone: '058-5432109', industry: 'הייטק', field: 'IT', sector: 'ציבורי', companySize: '1000+' },
+  { id: 5, name: 'מזרחי אבי', avatar: 'מא', title: 'מנהל מוצר', status: 'ראיון HR', lastActivity: '16:30 25/05/2025', source: 'GotFriends', tags: [], internalTags: [], matchScore: 25, address: 'באר שבע', phone: '058-5678901', industry: 'הייטק', field: 'ניהול מוצר', sector: 'פרטי', companySize: '51-200', professionalSummary: 'מנהל מוצר מנוסה בהובלת מוצרי B2B משלב הרעיון ועד להשקה.', industryAnalysis: { industries: [{ label: 'הייטק', percentage: 100, color: 'bg-blue-500' }] } }, 
+  { id: 6, name: 'יוסי לוי', avatar: 'יל', title: 'אנליסט נתונים', status: 'חדש', lastActivity: '10:15 24/05/2025', source: 'JobMaster', tags: ['SQL', 'Excel', 'ניתוח נתונים'], internalTags: [], matchScore: 78, address: 'רמת גן', phone: '054-6789012', industry: 'פיננסים', field: 'Data', sector: 'פרטי', companySize: '200-1000', professionalSummary: 'אנליסט נתונים עם יכולות אנליטיות גבוהות ושליטה בכלי BI מתקדמים.', industryAnalysis: { industries: [{ label: 'פיננסים', percentage: 60, color: 'bg-green-600' }, { label: 'ביטוח', percentage: 40, color: 'bg-green-400' }] } },
+  { id: 7, name: 'רינה כהן', avatar: 'רכ', title: 'מנהלת פרויקטים', status: 'ראיון HR', lastActivity: '09:00 23/05/2025', source: 'חבר מביא חבר', tags: ['Agile', 'Jira', 'ניהול פרויקטים'], internalTags: [], matchScore: 88, address: 'הרצליה', phone: '052-7890123', industry: 'הייטק', field: 'פרויקטים', sector: 'פרטי', companySize: '51-200', professionalSummary: 'מנהלת פרויקטים מוסמכת PMP עם ניסיון בהובלת פרויקטים חוצי ארגון.', industryAnalysis: { industries: [{ label: 'הייטק', percentage: 80, color: 'bg-purple-500' }, { label: 'טלקום', percentage: 20, color: 'bg-pink-400' }] } },
+  { id: 8, name: 'משה פרץ', avatar: 'מפ', title: 'מהנדס QA', status: 'עבר בדיקה ראשונית', lastActivity: '15:45 22/05/2025', source: 'Ethosia', tags: ['Automation', 'Java', 'Selenium'], internalTags: [], matchScore: 95, address: 'פתח תקווה', phone: '053-8901234', industry: 'תעשייה וייצור', field: 'אלקטרוניקה', sector: 'ציבורי', companySize: '1000+', professionalSummary: 'מהנדס בדיקות מנוסה המתמחה באוטומציה ובדיקות עומסים למערכות מורכבות.', industryAnalysis: { industries: [{ label: 'אלקטרוניקה', percentage: 100, color: 'bg-blue-600' }] } },
+  { id: 9, name: 'שרה כץ', avatar: 'שכ', title: 'מעבת גרפית', status: 'חדש', lastActivity: '12:10 21/05/2025', source: 'LinkedIn', tags: ['Photoshop', 'Illustrator', 'Branding'], internalTags: [], matchScore: 72, address: 'גבעתיים', phone: '050-9012345', industry: 'פרסום ומדיה', field: 'עיצוב גרפי', sector: 'פרטי', companySize: '1-50', professionalSummary: 'מעצבת גרפית יצירתית עם תשוקה למיתוג ועיצוב פרינט ודיגיטל.', industryAnalysis: { industries: [{ label: 'פרסום', percentage: 50, color: 'bg-yellow-500' }, { label: 'דפוס', percentage: 50, color: 'bg-orange-500' }] } },
+  { id: 10, name: 'אבי שביט', avatar: 'אש', title: 'מנהל מכירות', status: 'בבדיקה', lastActivity: '11:05 20/05/2025', source: 'GotFriends', tags: ['מכירות B2B', 'ניהול מו"מ', 'Salesforce'], internalTags: [], matchScore: 81, address: 'ראשון לציון', phone: '058-0123456', industry: 'תחבורה ולוגיסטיקה', field: 'לוגיסטיקה ושינוע', sector: 'פרטי', companySize: '200-1000', professionalSummary: 'מנהל מכירות כריזמטי עם רקורד מוכח בהגדלת מכירות ופתיחת שווקים חדשים.', industryAnalysis: { industries: [{ label: 'לוגיסטיקה', percentage: 70, color: 'bg-indigo-500' }, { label: 'סחר', percentage: 30, color: 'bg-blue-400' }] } },
+  { id: 11, name: 'תמר דהן', avatar: 'תד', title: 'רכזת גיוס', status: 'חדש', lastActivity: '17:30 19/05/2025', source: 'AllJobs', tags: ['גיוס טכנולוגי', 'Sourcing', 'ראיונות'], internalTags: [], matchScore: 68, address: 'חולון', phone: '054-1234568', industry: 'משאבי אנוש', field: 'גיוס', sector: 'פרטי', companySize: '51-200', professionalSummary: 'רכזת גיוס אנרגטית עם ניסיון בגיוס למגוון תפקידים טכנולוגיים ומטה.', industryAnalysis: { industries: [{ label: 'השמה', percentage: 100, color: 'bg-pink-500' }] } },
+  { id: 12, name: 'דוד ביטון', avatar: 'דב', title: 'מהנדס DevOps', status: 'עבר בדיקה ראשונית', lastActivity: '14:20 18/05/2025', source: 'חבר מביא חבר', tags: ['AWS', 'Kubernetes', 'CI/CD'], internalTags: [], matchScore: 93, address: 'נס ציונה', phone: '052-2345679', industry: 'תעשייה וייצור', field: 'ייצור שבבים', sector: 'ציבורי', companySize: '1000+', professionalSummary: 'מומחה DevOps עם ניסיון רב בבניית תהליכי CI/CD וניהול תשתיות ענן.', industryAnalysis: { industries: [{ label: 'ענן', percentage: 60, color: 'bg-sky-500' }, { label: 'סייבר', percentage: 40, color: 'bg-slate-700' }] } },
+  { id: 13, name: 'נועה פרידמן', avatar: 'נפ', title: 'מנהלת מוצר', status: 'חדש', lastActivity: '10:00 17/05/2025', source: 'JobMaster', tags: ['Product Strategy', 'UX', 'Agile'], internalTags: [], matchScore: 86, address: 'כפר סבא', phone: '053-3456780', industry: 'הייטק', field: 'ניהול מוצר', sector: 'פרטי', companySize: '200-1000', professionalSummary: 'מנהלת מוצר מוכוונת משתמש עם ניסיון בהובלת מוצרים משלב הרעיון ועד לשוק.', industryAnalysis: { industries: [{ label: 'B2C', percentage: 50, color: 'bg-teal-500' }, { label: 'B2B', percentage: 50, color: 'bg-cyan-600' }] } },
+  { id: 14, name: 'איתי גולן', avatar: 'אג', title: 'נציג תמיכה טכנית', status: 'ראיון HR', lastActivity: '08:45 16/05/2025', source: 'LinkedIn', tags: ['Support', 'Zendesk', 'Customer Service'], internalTags: [], matchScore: 79, address: 'רעננה', phone: '050-4567891', industry: 'שירותים', field: 'תמיכה טכנית', sector: 'פרטי', companySize: '1-50', professionalSummary: 'נציג תמיכה טכנית שירותי וסבלני עם יכולת פתרון בעיות טכניות מורכבות.', industryAnalysis: { industries: [{ label: 'תמיכה', percentage: 100, color: 'bg-emerald-500' }] } },
+  { id: 15, name: 'הילה אזולאי', avatar: 'הא', title: 'מנהלת חשבונות', status: 'עבר בדיקה ראשונית', lastActivity: '16:00 15/05/2025', source: 'AllJobs', tags: ['סוג 3', 'Priority', 'דוחות כספיים'], internalTags: [], matchScore: 90, address: 'בת ים', phone: '058-5678902', industry: 'פיננסים', field: 'הנהלת חשבונות', sector: 'פרטי', companySize: '51-200', professionalSummary: 'מנהלת חשבונות סוג 3 מנוסה, דייקנית ואחראית עם שליטה מלאה בתוכנות פיננסיות.', industryAnalysis: { industries: [{ label: 'חשבונאות', percentage: 80, color: 'bg-lime-600' }, { label: 'נדל"ן', percentage: 20, color: 'bg-yellow-600' }] } },
+  { id: 16, name: 'יונתן כהן', avatar: 'יכ', title: 'מנהל פרויקטים', status: 'חדש', lastActivity: '14/05/2025', source: 'AllJobs', tags: ['Project Management', 'Agile'], internalTags: [], matchScore: 82, address: 'אשדוד', phone: '054-9876543', industry: 'תשתיות', field: 'בנייה', sector: 'ממשלתי', companySize: '1000+', professionalSummary: 'מנהל פרויקטים מנוסה בתחום התשתיות, בעל יכולת ניהול תקציבים ולוחות זמנים מורכבים.', industryAnalysis: { industries: [{ label: 'תשתיות', percentage: 70, color: 'bg-orange-600' }, { label: 'בנייה', percentage: 30, color: 'bg-amber-500' }] } },
+  { id: 17, name: 'מיכל לוי', avatar: 'מל', title: 'אנליסטית BI', status: 'בבדיקה', lastActivity: '13/05/2025', source: 'LinkedIn', tags: ['BI', 'SQL', 'Tableau'], internalTags: [], matchScore: 89, address: 'נתניה', phone: '052-8765432', industry: 'הייטק', field: 'Data', sector: 'פרטי', companySize: '200-1000', professionalSummary: 'אנליסטית BI עם תשוקה לנתונים ויכולת להפוך מידע לתובנות עסקיות משמעותיות.', industryAnalysis: { industries: [{ label: 'Data', percentage: 100, color: 'bg-violet-600' }] } },
+  { id: 18, name: 'אמיר חדד', avatar: 'אח', title: 'איש מכירות', status: 'חדש', lastActivity: '12:05/2025', source: 'חבר מביא חבר', tags: ['מכירות', 'שירות לקוחות'], internalTags: [], matchScore: 70, address: 'רחובות', phone: '053-7654321', industry: 'תחבורה ולוגיסטיקה', field: 'הפצה ושרשרת אספקה', sector: 'פרטי', companySize: '200-1000', professionalSummary: 'איש מכירות נמרץ עם ניסיון במכירות שטח וניהול תיקי לקוחות.', industryAnalysis: { industries: [{ label: 'קמעונאות', percentage: 60, color: 'bg-red-500' }, { label: 'רכב', percentage: 40, color: 'bg-gray-500' }] } },
+  { id: 19, name: 'רוני פרץ', avatar: 'רפ', title: 'מפתחת Frontend', status: 'ראיון HR', lastActivity: '11/05/2025', source: 'JobMaster', tags: ['React', 'CSS', 'HTML'], internalTags: [], matchScore: 91, address: 'תל אביב', phone: '050-6543210', industry: 'הייטק', field: 'פיתוח תוכנה', sector: 'פרטי', companySize: '51-200', professionalSummary: 'מפתחת Frontend יצירתית עם עין חדה לעיצוב וחווית משתמש.', industryAnalysis: { industries: [{ label: 'Web', percentage: 90, color: 'bg-sky-500' }, { label: 'Design', percentage: 10, color: 'bg-pink-400' }] } },
+  { id: 20, name: 'דניאל ישראלי', avatar: 'די', title: 'מנהל רשת', status: 'עבר בדיקה ראשונית', lastActivity: '10:05/2025', source: 'Ethosia', tags: ['Windows Server', 'Networking'], internalTags: [], matchScore: 85, address: 'באר שבע', phone: '058-5432109', industry: 'הייטק', field: 'IT', sector: 'ציבורי', companySize: '1000+', professionalSummary: 'מנהל רשת מוסמך עם ניסיון בתחזוקת שרתים ותמיכה במשתמשים בארגונים גדולים.', industryAnalysis: { industries: [{ label: 'IT', percentage: 100, color: 'bg-blue-800' }] } },
 ];
 
 
@@ -201,6 +218,7 @@ const getMissingFields = (candidate: Candidate): string[] => {
     return missing;
 };
 
+// ... (DoubleRangeSlider Component - Unchanged) ...
 const DoubleRangeSlider: React.FC<{
     label: string;
     min: number;
@@ -341,12 +359,139 @@ const DoubleRangeSlider: React.FC<{
 const jobScopeOptions = ['מלאה', 'חלקית', 'משמרות', 'פרילנס'];
 
 interface CandidatesListViewProps {
-    openSummaryDrawer: (candidateId: number) => void;
+    openSummaryDrawer: (candidate: Candidate | number) => void;
     favorites: Set<number>;
     toggleFavorite: (id: number) => void;
 }
 
+// --- NEW COMPONENT FOR MATCH SCORE POPUP ---
+const MatchScoreExplanation: React.FC<{ 
+    candidate: Candidate; 
+    onClose: () => void;
+    position: { x: number, y: number };
+}> = ({ candidate, onClose, position }) => {
+    return (
+        <div 
+            className="fixed z-[1000] w-72 bg-bg-card rounded-xl shadow-2xl border border-border-default p-4 text-right animate-fade-in"
+            style={{ 
+                top: position.y, 
+                left: position.x,
+                transform: 'translate(-50%, -100%)',
+                marginTop: '-12px'
+            }}
+            onClick={e => e.stopPropagation()}
+        >
+            <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default transform rotate-45"></div>
+
+            <div className="flex justify-between items-center mb-3 border-b border-border-subtle pb-2">
+                <div className="flex items-center gap-2">
+                    <SparklesIcon className="w-5 h-5 text-purple-500" />
+                    <span className="font-bold text-sm text-text-default">ניתוח התאמה</span>
+                </div>
+                <button onClick={onClose} className="text-text-muted hover:text-text-default">
+                    <XMarkIcon className="w-4 h-4" />
+                </button>
+            </div>
+
+            <div className="space-y-3 text-xs text-text-default">
+                <p>
+                    <span className="font-bold">ציון: {candidate.matchScore}%</span>
+                </p>
+                {candidate.matchAnalysis ? (
+                    <>
+                        <p className="font-medium text-text-subtle mb-1">
+                            משרה: <span className="text-text-default font-bold">{candidate.matchAnalysis.jobTitle}</span>
+                        </p>
+                        <p className="leading-relaxed bg-bg-subtle p-2 rounded-lg">
+                            {candidate.matchAnalysis.reason}
+                        </p>
+                    </>
+                ) : (
+                    <p className="text-text-muted italic">אין ניתוח זמין למועמד זה.</p>
+                )}
+            </div>
+        </div>
+    );
+};
+
+// --- NEW COMPONENT FOR SMART SEARCH PANEL ---
+const SmartSearchPanel: React.FC<{
+    isOpen: boolean;
+    query: string;
+    onQueryChange: (val: string) => void;
+    jobs: { id: string; title: string }[];
+    jobsLoading: boolean;
+    jobsError: string | null;
+    selectedJobId: string;
+    onJobIdChange: (val: string) => void;
+    onSearch: () => void;
+    onClose: () => void;
+}> = ({ isOpen, query, onQueryChange, jobs, jobsLoading, jobsError, selectedJobId, onJobIdChange, onSearch, onClose }) => {
+    if (!isOpen) return null;
+
+    return (
+        <div className="w-full bg-gradient-to-r from-purple-50 to-blue-50 border-b border-border-default shadow-inner animate-fade-in-down origin-top">
+            <div className="p-4 flex flex-col md:flex-row gap-4 items-start md:items-end">
+                <div className="flex-grow w-full md:w-auto">
+                    <label className="block text-xs font-bold text-purple-700 mb-1.5 flex items-center gap-1">
+                        <SparklesIcon className="w-3 h-3" />
+                        תיאור חופשי של המועמד האידיאלי
+                    </label>
+                    <textarea 
+                        value={query}
+                        onChange={(e) => onQueryChange(e.target.value)}
+                        placeholder="לדוגמה: מחפש מנהל פרויקטים עם ניסיון בבנייה ותשתיות, זמין מיידית מאזור המרכז..."
+                        className="w-full bg-white border border-purple-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-purple-500 focus:border-transparent min-h-[60px] resize-none shadow-sm"
+                    />
+                </div>
+                
+                <div className="w-full md:w-64">
+                    <label className="block text-xs font-bold text-purple-700 mb-1.5">השוואה למשרה (אופציונלי)</label>
+                        <select
+                        value={selectedJobId}
+                        onChange={(e) => onJobIdChange(e.target.value)}
+                        className="w-full bg-white border border-purple-200 rounded-xl p-2.5 text-sm focus:ring-2 focus:ring-purple-500 cursor-pointer shadow-sm"
+                    >
+                        <option value="">בחר משרה להשוואה...</option>
+                        {jobsLoading && <option value="">טוען משרות...</option>}
+                        {jobsError && <option value="">{jobsError}</option>}
+                        {jobs.map(job => (
+                            <option key={job.id} value={job.id}>{job.title}</option>
+                        ))}
+                    </select>
+                </div>
+
+                <div className="flex items-center gap-2 w-full md:w-auto mt-2 md:mt-0">
+                    <button 
+                        onClick={onSearch}
+                        className="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-6 rounded-xl shadow-md transition-all flex-1 md:flex-none flex items-center justify-center gap-2"
+                    >
+                        <SparklesIcon className="w-4 h-4" />
+                        <span>חפש חכם</span>
+                    </button>
+                    <button 
+                        onClick={onClose}
+                        className="bg-white border border-purple-200 text-purple-700 p-2.5 rounded-xl hover:bg-purple-50 transition-colors"
+                        title="סגור חיפוש חכם"
+                    >
+                        <ChevronUpIcon className="w-5 h-5" />
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
 const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite }) => {
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [candidates, setCandidates] = useState<Candidate[]>([]);
+    const [isRemoteLoading, setIsRemoteLoading] = useState(false);
+    const [jobs, setJobs] = useState<{ id: string; title: string }[]>([]);
+    const [jobsLoading, setJobsLoading] = useState(false);
+    const [jobsError, setJobsError] = useState<string | null>(null);
+    const [selectedJobId, setSelectedJobId] = useState('');
+
     const navigate = useNavigate();
     const [searchParamsFromUrl] = useSearchParams();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
@@ -417,13 +562,69 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [isBulkActionsMobileOpen, setIsBulkActionsMobileOpen] = useState(false);
     const [isMoreActionsOpen, setIsMoreActionsOpen] = useState(false);
     
-    // Add state for active tooltip in list view
     const [activeMatchState, setActiveMatchState] = useState<{ id: number, top: number, left: number } | null>(null);
 
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>(null);
     
     const [showNeedsAttention, setShowNeedsAttention] = useState(false);
     const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+
+    // --- NEW SMART SEARCH STATE ---
+    const [isSmartSearchOpen, setIsSmartSearchOpen] = useState(false);
+    const [smartSearchQuery, setSmartSearchQuery] = useState('');
+    const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{ id: number, x: number, y: number } | null>(null);
+
+    const mapCandidate = useCallback((c: any, idx: number): Candidate => {
+        const sourceId = c.id ?? c.userId;
+        const resolvedId = deriveLocalCandidateId(sourceId ?? idx + 1, idx + 1);
+        const backendId = sourceId !== undefined && sourceId !== null ? String(sourceId) : undefined;
+
+        return {
+            id: resolvedId,
+            backendId,
+        name: c.fullName || c.name || 'ללא שם',
+        avatar: (c.fullName || c.name || '??').slice(0, 2),
+        title: c.title || c.professionalSummary || '',
+        status: c.status || 'חדש',
+        lastActivity: c.updatedAt || c.createdAt || '',
+        source: c.source || c.sourceDetail || '',
+        tags: Array.isArray(c.tags) ? c.tags : [],
+        internalTags: Array.isArray(c.internalTags) ? c.internalTags : [],
+        matchScore: Number(c.profileCompleteness || c.matchScore || 0),
+        address: c.address || '',
+        phone: c.phone || '',
+        industry: c.industry || '',
+        field: c.field || '',
+        sector: c.sector || '',
+        companySize: c.companySize || '',
+        professionalSummary: c.professionalSummary || '',
+        industryAnalysis: c.industryAnalysis,
+        resumeUrl: c.resumeUrl || '',
+        };
+    }, []);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        setIsRemoteLoading(true);
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/candidates`);
+                if (!res.ok) throw new Error('failed to load');
+                const data = await res.json();
+                const list =
+                    Array.isArray(data) ? data :
+                    Array.isArray(data?.rows) ? data.rows :
+                    Array.isArray(data?.data) ? data.data :
+                    Array.isArray(data?.rows?.rows) ? data.rows.rows :
+                    [];
+                setCandidates(list.map(mapCandidate));
+            } catch (e) {
+                setCandidates([]);
+            } finally {
+                setIsRemoteLoading(false);
+            }
+        })();
+    }, [apiBase, mapCandidate]);
 
     // Initialize columns state with translations
     const allColumns = useMemo(() => [
@@ -452,8 +653,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         });
     }, [allColumns]);
 
-
-    const requestSort = (key: keyof Candidate) => {
+    // ... (Keep existing sorting/filtering logic and handlers) ...
+     const requestSort = (key: keyof Candidate) => {
         let direction: 'asc' | 'desc' = 'asc';
         if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
             direction = 'desc';
@@ -467,6 +668,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setIsBulkActionsMobileOpen(false);
         setIsMoreActionsOpen(false);
     };
+
+    const getCandidateRouteId = useCallback((candidate: Candidate) => {
+        if (candidate.backendId && candidate.backendId.trim()) {
+            return candidate.backendId;
+        }
+        return String(candidate.id);
+    }, []);
 
     const handleSelect = (id: number) => {
         setSelectedIds(prev => {
@@ -489,16 +697,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
     }, [feedbackMessage]);
     
-    // Close match tooltip when clicking outside
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
-          if (activeMatchState !== null && !(event.target as Element).closest('.match-score-popup')) {
-            setActiveMatchState(null);
+          if (activeMatchScorePopup !== null && !(event.target as Element).closest('.match-score-popup')) {
+            setActiveMatchScorePopup(null);
           }
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, [activeMatchState]);
+    }, [activeMatchScorePopup]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -537,6 +744,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
     }, [searchParamsFromUrl, savedSearches, loadedSearch?.id]);
 
+    useEffect(() => {
+        const tagParam = searchParamsFromUrl.get('tag');
+        if (!tagParam) return;
+        setSearchParams(prev => {
+            if (prev.mainFieldTags.includes(tagParam)) return prev;
+            return { ...prev, mainFieldTags: [...prev.mainFieldTags, tagParam] };
+        });
+    }, [searchParamsFromUrl]);
+
     const handleJobFieldSelect = (selectedField: SelectedJobField | null) => {
         if (selectedField) {
             setSearchParams(prev => ({
@@ -547,6 +763,27 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
         setIsJobFieldSelectorOpen(false);
     };
+
+    const loadJobs = useCallback(async () => {
+        if (!apiBase) return;
+        setJobsLoading(true);
+        setJobsError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/jobs`);
+            if (!res.ok) throw new Error('נכשל בטעינת המשרות');
+            const data = await res.json();
+            const jobList = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
+            setJobs(jobList.map(job => ({ id: job.id, title: job.title || job.name || 'ללא שם' })));
+        } catch (err: any) {
+            setJobsError(err.message || 'הتحميل فشل');
+        } finally {
+            setJobsLoading(false);
+        }
+    }, [apiBase]);
+
+    useEffect(() => {
+        loadJobs();
+    }, [loadJobs]);
 
     const handleSliderChange = (name: string, value: number) => {
         setSearchParams(prev => ({ ...prev, [name]: value }));
@@ -559,6 +796,38 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setIsSaveModalOpen(true);
     };
     
+    const handleJobComparisonSearch = async () => {
+        const job = jobs.find(j => j.id === selectedJobId);
+        const hasQuery = smartSearchQuery.trim().length > 0;
+        if (!job && !hasQuery) {
+            alert('בחר משרה להשוואה מהתפריט או הזן תיאור חכם.');
+            return;
+        }
+        setIsRemoteLoading(true);
+        try {
+            const payloadQuery = [smartSearchQuery.trim(), job?.title].filter(Boolean).join(' | ');
+            const res = await fetch(`${apiBase}/api/candidates/semantic-search`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: payloadQuery }),
+            });
+            if (!res.ok) throw new Error('חיפוש חכם נכשל');
+            const data = await res.json();
+            const list =
+                Array.isArray(data) ? data :
+                Array.isArray(data?.results) ? data.results :
+                Array.isArray(data?.data) ? data.data :
+                [];
+            setCandidates(list.map(mapCandidate));
+            const label = job ? job.title : smartSearchQuery.trim();
+            setFeedbackMessage(`מציג ${list.length} מועמדים דומים ל-${label}`);
+        } catch (err: any) {
+            alert(err.message || 'חיפוש חכם נכשל');
+        } finally {
+            setIsRemoteLoading(false);
+        }
+    };
+
     const handleModalSubmit = () => {
         if (!searchNameToSave.trim()) {
             alert('Please enter a name for the search.');
@@ -655,7 +924,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, []);
 
     const processedCandidates = useMemo(() => {
-        let filtered = candidatesData;
+        const base = candidates;
+        let filtered = base;
 
         if (showNeedsAttention) {
             filtered = filtered.filter(candidate => getMissingFields(candidate).length > 0);
@@ -699,7 +969,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
 
         return sortableItems;
-    }, [searchTerm, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
+    }, [candidates, searchTerm, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
 
     const areAllVisibleSelected = useMemo(() => {
         if (processedCandidates.length === 0) return false;
@@ -750,6 +1020,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setFeedbackMessage(t('candidates.found_count', { count: processedCandidates.length }));
     };
 
+    const handleNameClick = useCallback(
+        (e: React.MouseEvent, candidate: Candidate) => {
+            e.stopPropagation();
+            if (selectionMode) {
+                handleSelect(candidate.id);
+                return;
+            }
+            navigate(`/candidates/${getCandidateRouteId(candidate)}`);
+        },
+        [selectionMode, handleSelect, navigate, getCandidateRouteId],
+    );
+
     // Helper for score circle colors inside the list view (duplicated logic for consistency)
     const getScoreColorClass = (score: number) => {
         if (score >= 90) return 'text-green-600 border-green-200 bg-green-50';
@@ -758,24 +1040,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         return 'text-red-600 border-red-200 bg-red-50';
     };
 
+    // Updated Handler for Match Score Click
     const handleScoreClick = (e: React.MouseEvent, id: number) => {
         e.stopPropagation();
-        if (activeMatchState?.id === id) {
-            setActiveMatchState(null);
+        if (activeMatchScorePopup?.id === id) {
+            setActiveMatchScorePopup(null);
             return;
         }
         const rect = e.currentTarget.getBoundingClientRect();
         // Calculate position relative to viewport, centered horizontally on button
-        setActiveMatchState({
+        setActiveMatchScorePopup({
             id,
-            top: rect.top - 10,
-            left: rect.left + (rect.width / 2)
+            x: rect.left + (rect.width / 2),
+            y: rect.top - 10
         });
     };
 
     // Render logic for the popup based on activeMatchState
-    const activeCandidateForPopup = activeMatchState 
-        ? processedCandidates.find(c => c.id === activeMatchState.id)
+    const activeCandidateForPopup = activeMatchScorePopup 
+        ? processedCandidates.find(c => c.id === activeMatchScorePopup.id)
         : null;
 
     const renderCell = (candidate: Candidate, columnId: string) => {
@@ -786,42 +1069,50 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         switch (columnId) {
             case 'name':
                 return (
-                    <div className="flex items-center gap-3">
-                        {/* Restore Avatar */}
-                        <AvatarIcon initials={candidate.avatar} size={36} fontSize={14} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
-                        <div className="flex flex-col">
-                            <span 
-                                onClick={(e) => { e.stopPropagation(); navigate(`/candidates/${candidate.id}`); }} 
-                                className="font-bold text-text-default hover:text-primary-600 cursor-pointer transition-colors text-base"
-                            >
-                                {candidate.name}
-                            </span>
-                             {/* Keep missing fields warning and favorite button here */}
-                             <div className="flex items-center gap-2 mt-0.5">
-                                {hasMissingFields && (
-                                    <span title={`חסרים פרטים: ${missingFields.join(', ')}`}>
-                                        <ExclamationTriangleIcon className="w-3.5 h-3.5 text-amber-500" />
-                                    </span>
-                                )}
-                                 <button 
-                                    onClick={(e) => { e.stopPropagation(); toggleFavorite(candidate.id); }} 
-                                    className="text-text-subtle hover:text-primary-500 transition-colors"
-                                >
-                                    {isFavorite ? <BookmarkIconSolid className="w-4 h-4 text-primary-500" /> : <BookmarkIcon className="w-4 h-4" />}
-                                </button>
-                            </div>
-                        </div>
+                    <div className="flex flex-col">
+                         <div className="flex items-center gap-3">
+                             <AvatarIcon initials={candidate.avatar} size={36} fontSize={14} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
+                             <div className="flex flex-col">
+                                 <span 
+                                    onClick={(e) => handleNameClick(e, candidate)}
+                                     className="font-bold text-text-default hover:text-primary-600 cursor-pointer transition-colors text-base"
+                                 >
+                                     {candidate.name}
+                                 </span>
+                                 <div className="flex items-center gap-2 mt-0.5">
+                                    {hasMissingFields && (
+                                        <span title={`חסרים פרטים: ${missingFields.join(', ')}`}>
+                                            <ExclamationTriangleIcon className="w-3.5 h-3.5 text-amber-500" />
+                                        </span>
+                                    )}
+                                     <button 
+                                        onClick={(e) => { e.stopPropagation(); toggleFavorite(candidate.id); }} 
+                                        className="text-text-subtle hover:text-primary-500 transition-colors"
+                                    >
+                                        {isFavorite ? <BookmarkIconSolid className="w-4 h-4 text-primary-500" /> : <BookmarkIcon className="w-4 h-4" />}
+                                    </button>
+                                </div>
+                             </div>
+                         </div>
+                         {/* Enhanced Summary Display */}
+                         {candidate.professionalSummary && (
+                            <p className="text-xs text-text-muted mt-2 mr-[48px] line-clamp-2 max-w-[400px] leading-relaxed">
+                                {candidate.professionalSummary}
+                            </p>
+                         )}
                     </div>
                 );
             case 'matchScore':
                  return (
                     <div className="flex items-center justify-center">
-                        <div 
+                         {/* CLICKABLE SCORE CIRCLE */}
+                        <button 
                             onClick={(e) => handleScoreClick(e, candidate.id)}
-                            className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border-2 shadow-sm cursor-pointer ${getScoreColorClass(candidate.matchScore)}`}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border-2 shadow-sm cursor-pointer hover:scale-105 transition-transform ${getScoreColorClass(candidate.matchScore)}`}
+                            title="לחץ להסבר"
                         >
                             {candidate.matchScore}%
-                        </div>
+                        </button>
                     </div>
                  );
             default:
@@ -859,19 +1150,48 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 .animate-fade-in-out {
                     animation: fade-in-out 3s ease-in-out forwards;
                 }
+                @keyframes fade-in-down {
+                     from { opacity: 0; transform: translateY(-10px); }
+                     to { opacity: 1; transform: translateY(0); }
+                }
+                .animate-fade-in-down { animation: fade-in-down 0.2s ease-out forwards; }
             `}</style>
 
             <header className="flex flex-col lg:flex-row items-start lg:items-center gap-3 pb-2">
-                <div className="relative w-full lg:flex-grow">
-                    <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute start-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                    <input 
-                        type="text" 
-                        placeholder={t('candidates.search_placeholder')} 
-                        value={searchTerm} 
-                        onChange={e => setSearchTerm(e.target.value)} 
-                        className="w-full bg-bg-card border border-border-default rounded-xl py-3 ps-10 pe-3 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
-                    />
+                <div className="flex gap-2 w-full lg:flex-grow items-center">
+                    <div className="relative flex-grow">
+                        <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute start-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input 
+                            type="text" 
+                            placeholder={t('candidates.search_placeholder')} 
+                            value={searchTerm} 
+                            onChange={e => setSearchTerm(e.target.value)} 
+                            className="w-full bg-bg-card border border-border-default rounded-xl py-3 ps-10 pe-3 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
+                        />
+                    </div>
+                     {/* SMART SEARCH TOGGLE BUTTON */}
+                    <button 
+                        onClick={() => setIsSmartSearchOpen(!isSmartSearchOpen)}
+                        className={`flex-shrink-0 p-3 rounded-xl border border-border-default transition-all shadow-sm ${isSmartSearchOpen ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-bg-card text-text-muted hover:bg-bg-subtle hover:text-purple-600'}`}
+                        title="חיפוש חכם"
+                    >
+                        <SparklesIcon className="w-5 h-5" />
+                    </button>
                 </div>
+
+                {/* Smart Search Panel */}
+            <SmartSearchPanel 
+                isOpen={isSmartSearchOpen}
+                query={smartSearchQuery}
+                onQueryChange={setSmartSearchQuery}
+                jobs={jobs}
+                jobsLoading={jobsLoading}
+                jobsError={jobsError}
+                selectedJobId={selectedJobId}
+                onJobIdChange={setSelectedJobId}
+                onSearch={() => { handleJobComparisonSearch(); setIsSmartSearchOpen(false); }}
+                onClose={() => setIsSmartSearchOpen(false)}
+            />
 
                 <div className="w-full lg:w-auto flex flex-col sm:flex-row gap-3 lg:items-center lg:flex-shrink-0">
                     <div className="flex flex-wrap gap-2 w-full sm:w-auto flex-grow sm:flex-grow-0">
@@ -934,8 +1254,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 </div>
             </header>
             
+            {/* ... (Keep the Advanced Search Panel code as is) ... */}
             {isAdvancedSearchOpen && (
                  <div className="bg-bg-card rounded-2xl shadow-sm p-3 space-y-3 border border-border-default transition-all duration-300">
+                    {/* ... Same content as before ... */}
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
                         <div className="lg:col-span-2">
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.tags_skills')}</label>
@@ -1252,7 +1574,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
                             {processedCandidates.map(candidate => (
-                                <tr key={candidate.id} onClick={() => selectionMode ? handleSelect(candidate.id) : openSummaryDrawer(candidate.id)} className={`group transition-colors ${selectionMode ? 'cursor-pointer' : ''} ${selectedIds.has(candidate.id) ? 'bg-primary-50' : 'hover:bg-bg-hover'}`}>
+                                <tr key={candidate.id} onClick={() => selectionMode ? handleSelect(candidate.id) : openSummaryDrawer(candidate)} className={`group transition-colors ${selectionMode ? 'cursor-pointer' : ''} ${selectedIds.has(candidate.id) ? 'bg-primary-50' : 'hover:bg-bg-hover'}`}>
                                      {selectionMode && (
                                         <td className="p-4">
                                             <input type="checkbox" checked={selectedIds.has(candidate.id)} onChange={() => handleSelect(candidate.id)} onClick={e => e.stopPropagation()} className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500" />
@@ -1283,7 +1605,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     <CandidateCard 
                                         key={candidate.id} 
                                         candidate={candidate} 
-                                        onViewProfile={(id) => navigate(`/candidates/${id}`)}
+                                        onViewProfile={() => navigate(`/candidates/${getCandidateRouteId(candidate)}`)}
                                         onOpenSummary={selectionMode ? () => {} : openSummaryDrawer}
                                         missingFields={missingFields}
                                         isFavorite={isFavorite}
@@ -1298,54 +1620,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             </main>
 
             {/* Global Match Score Popup - Rendered outside overflow containers */}
-            {activeMatchState && activeCandidateForPopup && (
-                <div 
-                    className="fixed z-[9999] w-72 bg-white rounded-xl shadow-[0_10px_40px_rgba(0,0,0,0.3)] border border-border-default p-4 text-right animate-fade-in match-score-popup"
-                    style={{ 
-                        top: activeMatchState.top, 
-                        left: activeMatchState.left,
-                        transform: 'translate(-50%, -100%)',
-                        marginTop: '-10px'
-                    }}
-                    onClick={e => e.stopPropagation()}
-                >
-                    {/* Arrow */}
-                    <div className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-b border-r border-border-default transform rotate-45"></div>
-
-                    <div className="flex justify-between items-center mb-3 pb-2 border-b border-border-subtle">
-                        <div className="flex items-center gap-2">
-                            <div className="p-1 bg-primary-50 rounded">
-                                <SparklesIcon className="w-4 h-4 text-primary-600" />
-                            </div>
-                            <span className="text-sm font-bold text-gray-900">ניתוח התאמה AI</span>
-                        </div>
-                        <button onClick={() => setActiveMatchState(null)} className="text-text-muted hover:text-text-default">
-                            <XMarkIcon className="w-4 h-4" />
-                        </button>
-                    </div>
-
-                    <div className="space-y-3">
-                        {activeCandidateForPopup.matchAnalysis ? (
-                            <>
-                                <p className="text-xs text-text-subtle font-medium">
-                                    משרה: <span className="text-text-default font-bold">{activeCandidateForPopup.matchAnalysis.jobTitle}</span>
-                                </p>
-                                <p className="text-xs text-text-default leading-relaxed bg-bg-subtle/50 p-2.5 rounded-lg border border-border-subtle">
-                                    {activeCandidateForPopup.matchAnalysis.reason}
-                                </p>
-                            </>
-                        ) : (
-                            <p className="text-xs text-text-muted italic">אין ניתוח זמין למועמד זה.</p>
-                        )}
-                        
-                        <div className="pt-2">
-                             <button className="w-full flex items-center justify-center gap-2 text-primary-600 hover:bg-primary-50 py-1.5 rounded-lg transition-colors text-xs font-bold border border-transparent hover:border-primary-100">
-                                <ArrowPathIcon className="w-3.5 h-3.5" />
-                                <span>חשב מחדש</span>
-                            </button>
-                        </div>
-                    </div>
-                </div>
+            {activeMatchScorePopup && activeCandidateForPopup && (
+                <MatchScoreExplanation 
+                    candidate={activeCandidateForPopup} 
+                    onClose={() => setActiveMatchScorePopup(null)}
+                    position={{ x: activeMatchScorePopup.x, y: activeMatchScorePopup.y }}
+                />
             )}
 
             {isSaveModalOpen && (

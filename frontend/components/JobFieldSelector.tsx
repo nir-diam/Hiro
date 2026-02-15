@@ -55,8 +55,8 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
                 setCategories([]);
             } finally {
                 setIsLoading(false);
-                setTimeout(() => searchInputRef.current?.focus(), 100);
-            }
+            setTimeout(() => searchInputRef.current?.focus(), 100);
+        }
         };
         fetchJobFields();
     }, [isModalOpen]);

@@ -1,9 +1,17 @@
 const chatService = require('../services/chatService');
 
 const sendMessage = async (req, res) => {
-  const { chatId, userId, message, tagsText } = req.body;
+  const { chatId, userId, message, tagsText, chatType, contextData, systemPrompt } = req.body;
   try {
-    const result = await chatService.chat({ chatId, userId, message, tagsText });
+    const result = await chatService.chat({
+      chatId,
+      userId,
+      message,
+      tagsText,
+      chatType,
+      contextData,
+      systemPrompt,
+    });
     res.json(result);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Chat failed' });
@@ -21,7 +29,7 @@ const history = async (req, res) => {
 
 const latestByUser = async (req, res) => {
   try {
-    const data = await chatService.fetchLatestByUser(req.params.userId);
+    const data = await chatService.fetchLatestByUser(req.params.userId, req.query.chatType || 'default');
     if (!data) {
       return res.status(404).json({ message: 'No conversation found' });
     }

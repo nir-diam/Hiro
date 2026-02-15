@@ -117,8 +117,10 @@ const notificationStyles: { [key in NotificationType]: { icon: React.ReactNode; 
     system: { icon: <InformationCircleIcon className="w-5 h-5" />, bg: 'bg-accent-100', text: 'text-accent-600' },
 };
 
-function formatRelativeTime(dateString: string) {
+function formatRelativeTime(dateString?: string) {
+    if (!dateString) return '';
     const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return '';
     return date.toLocaleString('he-IL', {
         day: '2-digit',
         month: '2-digit',
@@ -144,8 +146,9 @@ function getTaskUrgencyState(dueDateStr?: string): 'overdue' | 'soon' | 'future'
 
 function formatDueDate(dueDateStr?: string) {
     if (!dueDateStr) return '';
-    const urgency = getTaskUrgencyState(dueDateStr);
     const date = new Date(dueDateStr);
+    if (Number.isNaN(date.getTime())) return '';
+    const urgency = getTaskUrgencyState(dueDateStr);
     
     if (urgency === 'overdue') {
         const diffTime = Math.abs(new Date().getTime() - date.getTime());
@@ -384,7 +387,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
             <header className="flex flex-col md:flex-row items-center justify-between gap-2 mb-4">
                 <div>
-                    <h1 className="text-2xl font-bold text-text-default">מרכז הודעות</h1>
+                    <h1 className="text-2xl font-bold text-text-default">מרכז עדכונים ומשימות</h1>
                     <p className="text-sm text-text-muted">כל ההתראות, המשימות וההודעות שלך במקום אחד.</p>
                 </div>
                 <button onClick={() => navigate('/candidates')} title="סגור" className="p-2 rounded-full text-text-muted hover:bg-bg-hover">

@@ -2,7 +2,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { XMarkIcon, CheckCircleIcon, UserCircleIcon, MagnifyingGlassIcon, BriefcaseIcon } from './Icons';
-import { jobsData as allJobsData, Job } from './JobsView';
+import { Job } from './JobsView';
 
 interface PurchaseCandidateModalProps {
   isOpen: boolean;
@@ -12,9 +12,12 @@ interface PurchaseCandidateModalProps {
 
 const PurchaseCandidateModal: React.FC<PurchaseCandidateModalProps> = ({ isOpen, onClose, candidate }) => {
     const navigate = useNavigate();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const [isAssigning, setIsAssigning] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [assignedJobId, setAssignedJobId] = useState<number | null>(null);
+    const [jobs, setJobs] = useState<Job[]>([]);
+    const [loadingJobs, setLoadingJobs] = useState(false);
 
     useEffect(() => {
         if (isOpen) {
@@ -25,13 +28,36 @@ const PurchaseCandidateModal: React.FC<PurchaseCandidateModalProps> = ({ isOpen,
         }
     }, [isOpen]);
 
+    useEffect(() => {
+        if (!apiBase) return;
+        let active = true;
+        setLoadingJobs(true);
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/jobs`);
+                if (!res.ok) throw new Error('Failed to load jobs');
+                const payload = await res.json();
+                if (!active) return;
+                setJobs(Array.isArray(payload) ? payload : []);
+            } catch (err) {
+                console.error('[PurchaseCandidateModal] failed to load jobs', err);
+            } finally {
+                if (active) setLoadingJobs(false);
+            }
+        })();
+        return () => {
+            active = false;
+        };
+    }, [apiBase]);
+
     const filteredJobs = useMemo(() => {
-        if (!searchTerm) return allJobsData;
-        return allJobsData.filter(job => 
+        const activeJobs = jobs || [];
+        if (!searchTerm) return activeJobs;
+        return activeJobs.filter(job => 
             job.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
             job.client.toLowerCase().includes(searchTerm.toLowerCase())
         );
-    }, [searchTerm]);
+    }, [searchTerm, jobs]);
 
     const handleAssignJob = (jobId: number) => {
         setAssignedJobId(jobId);
@@ -46,7 +72,7 @@ const PurchaseCandidateModal: React.FC<PurchaseCandidateModalProps> = ({ isOpen,
 
     if (!isOpen || !candidate) return null;
     
-    const assignedJob = assignedJobId ? allJobsData.find(j => j.id === assignedJobId) : null;
+    const assignedJob = assignedJobId ? jobs.find(j => j.id === assignedJobId) : null;
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4" onClick={onClose}>

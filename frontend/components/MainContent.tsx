@@ -1,5 +1,6 @@
 
 import React, { useId, useState } from 'react';
+import { flushSync } from 'react-dom';
 import AccordionSection from './AccordionSection';
 import ContentNavBar from './ContentNavBar';
 import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, SparklesIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon } from './Icons';
@@ -60,7 +61,51 @@ interface MainContentProps {
     onImmediateSave?: (patch: any) => void;
     onInternalTagsChange?: (tags: string[]) => void;
     viewMode?: 'recruiter' | 'candidate';
+    onGenerateExperienceSummary?: () => void;
+    isGeneratingSummary?: boolean;
+    generateSummaryError?: string | null;
 }
+
+const formatCurrency = (value: number | null | undefined) => {
+    if (value === undefined || value === null) return '';
+    if (Number.isNaN(value)) return '';
+    return value.toLocaleString();
+};
+
+const salaryDisplayText = (min?: number | null, max?: number | null) => {
+    const formattedMin = formatCurrency(min);
+    const formattedMax = formatCurrency(max);
+    if (!formattedMin && !formattedMax) return <span className="text-text-muted">לא צוין</span>;
+    if (formattedMin && formattedMax && formattedMin === formattedMax) {
+        return <span className="text-primary-600 text-2xl">{formattedMin} ₪</span>;
+    }
+    return (
+        <>
+            {formattedMin && (
+                <>
+                    <span className="text-text-muted">מ-</span>
+                    <span className="text-primary-600">{formattedMin} ₪</span>
+                </>
+            )}
+            {formattedMin && formattedMax && <span className="text-text-muted">עד-</span>}
+            {formattedMax && <span className="text-primary-600">{formattedMax} ₪</span>}
+        </>
+    );
+};
+
+const formatEducationEntry = (entry: any) => {
+    if (typeof entry === 'string') return entry;
+    if (entry == null) return '';
+    if (Array.isArray(entry)) return entry.join(' • ');
+    if (typeof entry === 'object') {
+        const parts = [];
+        if (entry.degree) parts.push(entry.degree);
+        if (entry.institution) parts.push(entry.institution);
+        if (entry.year) parts.push(entry.year);
+        return parts.filter(Boolean).join(' • ') || JSON.stringify(entry);
+    }
+    return String(entry);
+};
 
 const getLevelText = (level: number): string => {
     if (level >= 90) return "שפת אם / מעולה";
@@ -70,7 +115,21 @@ const getLevelText = (level: number): string => {
     return "חלש";
 };
 
-const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImmediateSave, onInternalTagsChange, viewMode = 'recruiter' }) => {
+const MainContent: React.FC<MainContentProps> = ({
+    formData,
+    onFormChange,
+    onImmediateSave,
+    onInternalTagsChange,
+    viewMode = 'recruiter',
+    onGenerateExperienceSummary,
+    isGeneratingSummary,
+    generateSummaryError,
+}) => {
+    console.log('MainContent render', { 
+        viewMode, 
+        hasOnGenerate: !!onGenerateExperienceSummary, 
+        formDataId: formData?.id 
+    });
     const { t } = useLanguage();
     const summaryId = useId();
     const recruiterNotesId = useId();
@@ -82,10 +141,38 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
     const [editingEducation, setEditingEducation] = useState<{id: number, value: string} | null>(null);
     const [newSoftSkill, setNewSoftSkill] = useState('');
     const [newTechSkill, setNewTechSkill] = useState({ name: '', level: 50 });
+    const getScrollParent = (node: HTMLElement | null): HTMLElement | null => {
+        if (typeof window === 'undefined') return null;
+        let el: HTMLElement | null = node;
+        while (el) {
+            const style = window.getComputedStyle(el);
+            const oy = style.overflowY;
+            if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+            el = el.parentElement;
+        }
+        return (document.scrollingElement as HTMLElement | null) || null;
+    };
+
+    const updateFormPreserveScroll = (next: any, origin?: EventTarget | null) => {
+        const originEl = origin instanceof HTMLElement ? origin : null;
+        const scrollEl =
+            // Prefer the nearest scroll container to the edited input
+            getScrollParent(originEl) ||
+            // Fallback to the recruiter main container if present
+            (typeof document !== 'undefined' ? (document.getElementById('main-scroll-container') as HTMLElement | null) : null);
+
+        const prevTop = scrollEl ? scrollEl.scrollTop : null;
+        flushSync(() => {
+            onFormChange(next);
+        });
+        if (scrollEl && prevTop !== null) {
+            scrollEl.scrollTop = prevTop;
+        }
+    };
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
-        onFormChange({ ...formData, [name]: value });
+        updateFormPreserveScroll({ ...formData, [name]: value }, e.target);
     };
 
     const handleSalaryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -111,7 +198,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
             }
         }
         
-        onFormChange({ ...formData, salaryMin: newMin, salaryMax: newMax });
+        updateFormPreserveScroll({ ...formData, salaryMin: newMin, salaryMax: newMax }, e.target);
     };
 
     // --- Language Handlers ---
@@ -190,7 +277,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
         const updated = [...current, newSkill];
         onFormChange({ ...formData, techSkills: updated, skills: { ...(formData.skills || {}), technical: updated, soft: formData.skills?.soft || formData.softSkills || [] } });
         onImmediateSave?.({ techSkills: updated, skills: { technical: updated, soft: formData.skills?.soft || formData.softSkills || [] } });
-        setNewTechSkill({ name: '', level: 50 });
+            setNewTechSkill({ name: '', level: 50 });
     };
     
     const handleRemoveTechSkill = (id: number) => {
@@ -209,7 +296,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
         <div className="space-y-6">
             {viewMode === 'recruiter' && <ContentNavBar />}
             
-            {viewMode === 'recruiter' && (
+            {(viewMode === 'recruiter' || onGenerateExperienceSummary) && (
                 <div id="summary">
                     <AccordionSection title={t('section.summary')} icon={<ClipboardDocumentCheckIcon className="w-5 h-5"/>} defaultOpen>
                         <label htmlFor={summaryId} className="sr-only">{t('section.summary')}</label>
@@ -217,7 +304,32 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
                             id={summaryId}
                             className="w-full h-32 bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
                             placeholder={t('section.summary_placeholder')}
+                            value={formData.professionalSummary || ''}
+                            onChange={(e) => onFormChange({ ...formData, professionalSummary: e.target.value })}
                         ></textarea>
+                       
+                            <div className="mt-3 flex flex-col gap-1">
+                                <button
+                                onClick={() => {
+                                    console.log('AI summary button clicked (MainContent)');
+                                    onGenerateExperienceSummary?.();
+                                }}
+                                    disabled={isGeneratingSummary}
+                                    type="button"
+                                    aria-live="polite"
+                                    className={`text-xs font-bold px-3 py-1.5 rounded-full border ${
+                                        isGeneratingSummary
+                                            ? 'border-border-default text-text-muted bg-bg-subtle cursor-not-allowed'
+                                            : 'border-primary-500 text-primary-700 hover:bg-primary-50'
+                                    } transition`}
+                                >
+                                    {isGeneratingSummary ? 'מייצר/ת...' : 'כתוב/שכתב ניסיון עם AI'}
+                                </button>
+                                {generateSummaryError && (
+                                    <p className="text-xs text-red-500">{generateSummaryError}</p>
+                                )}
+                            </div>
+                       
                     </AccordionSection>
                 </div>
             )}
@@ -298,18 +410,9 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
             
             <div id="salary">
                 <AccordionSection title={t('section.salary')} icon={<WalletIcon className="w-5 h-5"/>} defaultOpen>
-                     <div className="p-4 space-y-4">
+            <div className="p-4 space-y-4">
                         <div className="flex justify-center items-center text-lg font-bold space-x-4">
-                            {formData.salaryMin === formData.salaryMax ? (
-                                <span className="text-primary-600 text-2xl">{formData.salaryMin.toLocaleString()} ₪</span>
-                            ) : (
-                                <>
-                                    <span className="text-text-muted">מ-</span>
-                                    <span className="text-primary-600">{formData.salaryMin.toLocaleString()} ₪</span>
-                                    <span className="text-text-muted">עד-</span>
-                                    <span className="text-primary-600">{formData.salaryMax.toLocaleString()} ₪</span>
-                                </>
-                            )}
+                            {salaryDisplayText(formData.salaryMin, formData.salaryMax)}
                         </div>
                         <div className="relative h-8 flex items-center">
                             <div className="absolute w-full h-1.5 bg-bg-subtle rounded-full">
@@ -381,32 +484,37 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
                 </AccordionSection>
             </div>
             
+
             <div id="education">
                 <AccordionSection title={t('section.education')} icon={<AcademicCapIcon className="w-5 h-5"/>} defaultOpen>
                      <div className="space-y-3">
-                        {formData.education?.map((edu: any) => (
-                            <div key={edu.id} className="flex items-center justify-between p-2 rounded-lg hover:bg-bg-subtle/50 group">
-                                {editingEducation?.id === edu.id ? (
+                       {formData.education?.map((edu: any, idx: number) => {
+                            const eduId = edu.id ?? idx;
+                            const rawEduValue = edu.value ?? edu;
+                            const eduValue = formatEducationEntry(rawEduValue);
+                            return (
+                            <div key={eduId} className="flex items-center justify-between p-2 rounded-lg hover:bg-bg-subtle/50 group">
+                                {editingEducation?.id === eduId ? (
                                     <input
                                         type="text"
-                                        value={editingEducation.value}
-                                        onChange={(e) => setEditingEducation({ ...editingEducation, value: e.target.value })}
+                                        value={editingEducation?.value ?? ''}
+                                        onChange={(e) => setEditingEducation({ id: eduId, value: e.target.value })}
                                         onBlur={handleUpdateEducation}
                                         onKeyDown={(e) => e.key === 'Enter' && handleUpdateEducation()}
                                         autoFocus
                                         className="w-full bg-bg-input border border-primary-300 text-sm rounded-md p-1.5"
                                     />
                                 ) : (
-                                    <p className="text-sm text-text-muted font-semibold cursor-pointer" onClick={() => setEditingEducation(edu)}>
-                                        {edu.value}
+                                    <p className="text-sm text-text-muted font-semibold cursor-pointer" onClick={() => setEditingEducation({ id: eduId, value: eduValue })}>
+                                        {eduValue}
                                     </p>
                                 )}
                                 <div className="flex items-center opacity-0 group-hover:opacity-100 transition-opacity">
-                                    <button onClick={() => setEditingEducation(edu)} className="p-1.5 text-text-subtle hover:text-primary-600 rounded-full"><PencilIcon className="w-4 h-4"/></button>
-                                    <button onClick={() => handleRemoveEducation(edu.id)} className="p-1.5 text-text-subtle hover:text-red-500 rounded-full"><TrashIcon className="w-4 h-4"/></button>
+                                    <button onClick={() => setEditingEducation({ id: eduId, value: eduValue })} className="p-1.5 text-text-subtle hover:text-primary-600 rounded-full"><PencilIcon className="w-4 h-4"/></button>
+                                    <button onClick={() => handleRemoveEducation(eduId)} className="p-1.5 text-text-subtle hover:text-red-500 rounded-full"><TrashIcon className="w-4 h-4"/></button>
                                 </div>
                             </div>
-                        ))}
+                        )})}
                         <div className="flex items-end gap-2 pt-4 border-t border-border-default">
                             <div className="flex-grow">
                                 <label className="block text-sm font-semibold text-text-muted mb-1">{t('form.add_education')}</label>
@@ -418,40 +526,7 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
                 </AccordionSection>
             </div>
 
-            <div id="skills">
-                <AccordionSection title={t('section.skills')} icon={<TagIcon className="w-5 h-5"/>} defaultOpen>
-                    <p className="font-semibold text-text-default mb-2">{t('form.soft_skills')}</p>
-                    <div className="flex flex-wrap gap-2 mb-4">
-                        {formData.softSkills?.map((skill: string) => <Tag key={skill} onRemove={() => handleRemoveSoftSkill(skill)}>{skill}</Tag>)}
-                    </div>
-                     <div className="flex items-center gap-2">
-                        <input type="text" placeholder="הוסף מיומנות רכה..." value={newSoftSkill} onChange={(e) => setNewSoftSkill(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleAddSoftSkill()} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"/>
-                        <button onClick={handleAddSoftSkill} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">{t('form.add')}</button>
-                    </div>
-                    
-                     <hr className="my-6 border-border-default" />
-                     <p className="font-semibold text-text-default mb-2">{t('form.tech_skills')}</p>
-                    <div className="space-y-4">
-                        {formData.techSkills?.map((skill: any) => (
-                            <div key={skill.id} className="flex items-center gap-4">
-                                <div className="flex-grow">
-                                    <SkillSlider label={skill.name} level={skill.level} levelText={skill.levelText} onChange={(level) => handleTechSkillLevelChange(skill.id, level)} />
-                                </div>
-                                <button onClick={() => handleRemoveTechSkill(skill.id)} className="p-2 text-text-subtle hover:text-red-500 rounded-full hover:bg-red-50">
-                                    <TrashIcon className="w-5 h-5"/>
-                                </button>
-                            </div>
-                        ))}
-                    </div>
-                    <div className="flex items-end gap-2 pt-4 mt-4 border-t border-border-default">
-                        <div className="flex-grow">
-                            <label className="block text-sm font-semibold text-text-muted mb-1">{t('form.add_skill')}</label>
-                            <input type="text" placeholder="לדוגמה: Figma" value={newTechSkill.name} onChange={e => setNewTechSkill(prev => ({ ...prev, name: e.target.value }))} className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5"/>
-                        </div>
-                        <button onClick={handleAddTechSkill} className="bg-primary-100 text-primary-700 font-semibold px-4 py-2.5 rounded-lg hover:bg-primary-200 transition shadow-sm flex-shrink-0">{t('form.add')}</button>
-                    </div>
-                </AccordionSection>
-            </div>
+           
             
             <div id="notes" className="space-y-6">
                 {viewMode === 'recruiter' && formData.candidateNotes && (
@@ -498,12 +573,8 @@ const MainContent: React.FC<MainContentProps> = ({ formData, onFormChange, onImm
             )}
 
 
-            {viewMode === 'recruiter' && (
-                <div className="flex justify-end space-x-3 pt-4">
-                    <button className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition">{t('form.delete_candidate')}</button>
-                    <button className="bg-primary-500 text-white font-semibold py-2 px-6 rounded-lg hover:bg-primary-600 transition shadow-sm">{t('form.save')}</button>
-                </div>
-            )}
+
+            
         </div>
     );
 };

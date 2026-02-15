@@ -1,4 +1,6 @@
+
 import React, { useRef, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { XMarkIcon, MagnifyingGlassIcon } from './Icons';
 import { jobFieldsData } from '../data/jobFieldsData';
 
@@ -24,19 +26,16 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
     const [industrySearchTerm, setIndustrySearchTerm] = useState('');
     const [fieldSearchTerm, setFieldSearchTerm] = useState('');
 
+    // Changed click outside logic: Now using a backdrop div with onClick instead of document listener
+    // This is safer with createPortal and avoids issues with event bubbling order
     useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (popoverRef.current && !popoverRef.current.contains(event.target as Node)) {
+        const handleEsc = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
                 onClose();
             }
         };
-        setTimeout(() => {
-             document.addEventListener('mousedown', handleClickOutside);
-        }, 0);
-       
-        return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
-        };
+        window.addEventListener('keydown', handleEsc);
+        return () => window.removeEventListener('keydown', handleEsc);
     }, [onClose]);
     
     const handleSizeToggle = (size: string) => {
@@ -77,68 +76,117 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
         return category.fieldTypes.filter(field => field.name.toLowerCase().includes(fieldSearchTerm.toLowerCase()));
     }, [filters.industry, fieldSearchTerm]);
 
-    return (
-        <>
-            <div className="md:hidden fixed inset-0 bg-black bg-opacity-40 z-20" onClick={onClose} />
+    // Using Portal to break out of any overflow:hidden containers
+    return createPortal(
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
+            {/* Backdrop */}
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={onClose} />
+            
+            {/* Modal Content */}
             <div
                 ref={popoverRef}
-                className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[95vw] max-w-md z-30
-                           md:absolute md:top-full md:left-0 md:mt-2 md:w-[40rem] md:max-w-[90vw] md:translate-x-0 md:translate-y-0
-                           bg-bg-card rounded-xl shadow-2xl border border-border-default flex flex-col max-h-[80vh] animate-fade-in"
-                style={{'--tw-shadow': '0 25px 50px -12px rgba(0, 0, 0, 0.25)'} as React.CSSProperties}
+                className="relative bg-bg-card rounded-xl shadow-2xl border border-border-default flex flex-col w-full max-w-4xl max-h-[85vh] overflow-hidden animate-fade-in"
+                onClick={e => e.stopPropagation()}
             >
-                <header className="flex justify-between items-center p-4 border-b border-border-default flex-shrink-0">
-                    <h3 className="font-bold text-text-default">סינון לפי רקע תעסוקתי</h3>
-                    <button onClick={onClose} className="p-1 rounded-full hover:bg-bg-hover"><XMarkIcon className="w-5 h-5 text-text-muted" /></button>
+                <header className="flex justify-between items-center p-4 border-b border-border-default flex-shrink-0 bg-bg-subtle/30">
+                    <div>
+                        <h3 className="font-bold text-lg text-text-default">סינון לפי רקע תעסוקתי</h3>
+                        <p className="text-xs text-text-muted">בחר תעשייה, גודל חברה וסקטור לסינון מועמדים</p>
+                    </div>
+                    <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors"><XMarkIcon className="w-5 h-5" /></button>
                 </header>
 
                 <main className="flex-grow overflow-y-auto">
-                    <div className="grid grid-cols-1 md:grid-cols-2 md:divide-x divide-border-default">
-                        {/* Left side: Industry & Field */}
-                        <div className="flex flex-col border-b md:border-b-0">
-                            <h4 className="text-sm font-bold text-text-muted px-4 py-2 bg-bg-subtle border-b border-border-default">תעשייה ותחום</h4>
-                            <div className="flex-grow flex flex-col md:flex-row md:h-[24rem]">
-                                <div className="w-full md:w-1/2 border-b md:border-b-0 md:border-l border-border-default flex flex-col h-56 md:h-auto">
-                                    <div className="p-2 border-b border-border-default flex-shrink-0">
-                                        <div className="relative">
-                                            <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-2 top-1/2 -translate-y-1/2" />
-                                            <input type="text" placeholder="חיפוש תעשייה..." value={industrySearchTerm} onChange={e => setIndustrySearchTerm(e.target.value)} className="w-full bg-bg-input border-border-default rounded-md p-1.5 pr-8 text-sm" />
-                                        </div>
-                                    </div>
-                                    <div className="overflow-y-auto flex-grow custom-scrollbar">
-                                        {filteredIndustries.map(industry => (
-                                            <button key={industry.name} onClick={() => handleIndustrySelect(industry.name)} className={`w-full text-right p-2 text-sm font-medium ${filters.industry === industry.name ? 'bg-primary-100 text-primary-700' : 'hover:bg-bg-hover'}`}>{industry.name}</button>
-                                        ))}
-                                    </div>
-                                </div>
-                                <div className="w-full md:w-1/2 flex flex-col h-56 md:h-auto">
-                                    <div className="p-2 border-b border-border-default flex-shrink-0">
-                                        <div className="relative">
-                                            <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-2 top-1/2 -translate-y-1/2" />
-                                            <input type="text" placeholder="חיפוש תחום..." value={fieldSearchTerm} onChange={e => setFieldSearchTerm(e.target.value)} disabled={!filters.industry} className="w-full bg-bg-input border-border-default rounded-md p-1.5 pr-8 text-sm disabled:bg-bg-subtle" />
-                                        </div>
-                                    </div>
-                                    <div className="overflow-y-auto flex-grow custom-scrollbar md:max-h-[20.5rem]">
-                                        {availableFields.map(field => (
-                                            <button key={field.name} onClick={() => handleFieldSelect(field.name)} className={`w-full text-right p-2 text-sm font-medium ${filters.field === field.name ? 'bg-primary-100 text-primary-700' : 'hover:bg-bg-hover'}`}>{field.name}</button>
-                                        ))}
-                                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-border-default h-full min-h-[400px]">
+                        
+                        {/* Column 1: Industry List */}
+                        <div className="flex flex-col h-full overflow-hidden border-b md:border-b-0">
+                            <div className="p-3 border-b border-border-default bg-bg-subtle/20">
+                                <div className="relative">
+                                    <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+                                    <input 
+                                        type="text" 
+                                        placeholder="חפש תעשייה..." 
+                                        value={industrySearchTerm} 
+                                        onChange={e => setIndustrySearchTerm(e.target.value)} 
+                                        className="w-full bg-bg-input border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500" 
+                                    />
                                 </div>
                             </div>
+                            <div className="overflow-y-auto flex-grow custom-scrollbar p-2 space-y-0.5">
+                                {filteredIndustries.map(industry => (
+                                    <button 
+                                        key={industry.name} 
+                                        onClick={() => handleIndustrySelect(industry.name)} 
+                                        className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-all flex justify-between items-center group ${
+                                            filters.industry === industry.name 
+                                                ? 'bg-primary-50 text-primary-700 font-bold border border-primary-100 shadow-sm' 
+                                                : 'text-text-default hover:bg-bg-hover font-medium border border-transparent'
+                                        }`}
+                                    >
+                                        <span className="truncate">{industry.name}</span>
+                                        {filters.industry === industry.name && <div className="w-1.5 h-1.5 rounded-full bg-primary-500"></div>}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
-                        {/* Right side: Company Size, Sector */}
-                        <div className="p-4 space-y-4">
-                            <div className="md:h-[13.5rem] overflow-y-auto">
-                                <label className="block text-sm font-semibold text-text-muted mb-2">גודל חברה</label>
+
+                        {/* Column 2: Fields List (Dependent on Industry) */}
+                        <div className="flex flex-col h-full overflow-hidden border-b md:border-b-0 bg-bg-subtle/10">
+                            <div className="p-3 border-b border-border-default bg-bg-subtle/20">
+                                <div className="relative">
+                                    <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+                                    <input 
+                                        type="text" 
+                                        placeholder="חפש תחום..." 
+                                        value={fieldSearchTerm} 
+                                        onChange={e => setFieldSearchTerm(e.target.value)} 
+                                        disabled={!filters.industry} 
+                                        className="w-full bg-bg-input border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500 disabled:bg-bg-subtle disabled:opacity-60" 
+                                    />
+                                </div>
+                            </div>
+                            <div className="overflow-y-auto flex-grow custom-scrollbar p-2 space-y-0.5">
+                                {!filters.industry ? (
+                                    <div className="flex flex-col items-center justify-center h-full text-text-muted opacity-60 p-4 text-center">
+                                        <p className="text-sm">בחר תעשייה מימין כדי לראות תחומים</p>
+                                    </div>
+                                ) : availableFields.length === 0 ? (
+                                     <div className="flex flex-col items-center justify-center h-full text-text-muted opacity-60 p-4 text-center">
+                                        <p className="text-sm">לא נמצאו תחומים</p>
+                                    </div>
+                                ) : (
+                                    availableFields.map(field => (
+                                        <button 
+                                            key={field.name} 
+                                            onClick={() => handleFieldSelect(field.name)} 
+                                            className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-all flex justify-between items-center ${
+                                                filters.field === field.name 
+                                                    ? 'bg-white border-primary-200 text-primary-700 font-bold shadow-sm border' 
+                                                    : 'text-text-default hover:bg-white hover:shadow-sm font-medium border border-transparent'
+                                            }`}
+                                        >
+                                            <span className="truncate">{field.name}</span>
+                                            {filters.field === field.name && <div className="w-1.5 h-1.5 rounded-full bg-primary-500"></div>}
+                                        </button>
+                                    ))
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Column 3: Company Properties */}
+                        <div className="flex flex-col h-full overflow-hidden p-5 space-y-6 bg-bg-subtle/5">
+                            <div>
+                                <label className="block text-xs font-bold text-text-muted uppercase mb-3 tracking-wide">גודל חברה</label>
                                 <div className="flex flex-wrap gap-2">
                                     {companySizeOptions.map(size => (
                                         <button
                                             key={size}
                                             onClick={() => handleSizeToggle(size)}
-                                            className={`px-3 py-1.5 text-sm font-medium rounded-full border transition-colors ${
+                                            className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${
                                                 filters.sizes.includes(size)
-                                                    ? 'bg-primary-600 text-white border-primary-600'
-                                                    : 'bg-bg-card border-border-default text-text-default hover:bg-primary-50 hover:border-primary-200'
+                                                    ? 'bg-primary-600 text-white border-primary-600 shadow-md transform scale-105'
+                                                    : 'bg-white text-text-default border-border-default hover:border-primary-300 hover:bg-primary-50'
                                             }`}
                                         >
                                             {size}
@@ -147,36 +195,64 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
                                 </div>
                             </div>
 
-                            <div className="md:h-[10.5rem] overflow-y-auto">
-                                <label className="block text-sm font-semibold text-text-muted mb-2">סקטור</label>
-                                <select name="sectors" value={filters.sectors[0] || ''} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5">
-                                    <option value="">בחר סקטור</option>
+                            <div>
+                                <label className="block text-xs font-bold text-text-muted uppercase mb-3 tracking-wide">סקטור / מגזר</label>
+                                <select 
+                                    name="sectors" 
+                                    value={filters.sectors[0] || ''} 
+                                    onChange={handleFilterChange} 
+                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl p-3 focus:ring-2 focus:ring-primary-500 cursor-pointer"
+                                >
+                                    <option value="">כל הסקטורים</option>
                                     {companySectorOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
                                 </select>
                             </div>
+                            
+                            {/* Selected Summary */}
+                            <div className="mt-auto bg-primary-50 border border-primary-100 rounded-xl p-3 text-xs">
+                                <span className="block font-bold text-primary-800 mb-1">סיכום בחירה:</span>
+                                <div className="space-y-1 text-primary-700">
+                                    {filters.industry && <p>• תעשייה: {filters.industry}</p>}
+                                    {filters.field && <p>• תחום: {filters.field}</p>}
+                                    {filters.sizes.length > 0 && <p>• גודל: {filters.sizes.join(', ')}</p>}
+                                    {filters.sectors.length > 0 && <p>• סקטור: {filters.sectors.join(', ')}</p>}
+                                    {!filters.industry && !filters.sizes.length && !filters.sectors.length && <p className="italic opacity-70">לא נבחרו מסננים</p>}
+                                </div>
+                            </div>
                         </div>
+
                     </div>
                 </main>
 
-                <footer className="flex justify-between items-center p-3 border-t border-border-default flex-shrink-0">
-                    <button onClick={handleClear} className="text-sm font-semibold text-text-muted hover:text-primary-600">נקה הכל</button>
-                    <button onClick={onClose} className="bg-primary-600 text-white font-semibold py-2 px-6 rounded-lg text-sm">החל</button>
+                <footer className="flex justify-between items-center p-4 border-t border-border-default bg-bg-subtle/30 flex-shrink-0">
+                    <button onClick={handleClear} className="text-sm font-bold text-text-muted hover:text-red-500 transition-colors px-2">
+                        נקה הכל
+                    </button>
+                    <div className="flex gap-3">
+                         <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-text-muted hover:bg-bg-hover transition-colors">
+                            ביטול
+                        </button>
+                        <button onClick={onClose} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">
+                            החל סינון
+                        </button>
+                    </div>
                 </footer>
                 <style>{`
                     @keyframes fade-in {
-                        from { opacity: 0; }
-                        to { opacity: 1; }
+                        from { opacity: 0; transform: scale(0.98); }
+                        to { opacity: 1; transform: scale(1); }
                     }
                     .animate-fade-in { 
-                        animation: fade-in 0.2s ease-out forwards;
+                        animation: fade-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
                     }
-                    .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-                    .custom-scrollbar::-webkit-scrollbar-track { background: rgb(var(--color-bg-subtle)); }
-                    .custom-scrollbar::-webkit-scrollbar-thumb { background: rgb(var(--color-border-default)); border-radius: 3px; }
-                    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: rgb(var(--color-text-subtle)); }
+                    .custom-scrollbar::-webkit-scrollbar { width: 5px; }
+                    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+                    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+                    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
                 `}</style>
             </div>
-        </>
+        </div>,
+        document.body
     );
 };
 

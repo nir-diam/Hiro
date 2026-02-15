@@ -28,11 +28,11 @@ const Candidate = sequelize.define(
     birthMonth: DataTypes.STRING,
     birthDay: DataTypes.STRING,
     age: DataTypes.STRING,
+    location: DataTypes.STRING,
     title: DataTypes.STRING,
     professionalSummary: DataTypes.TEXT,
     profilePicture: DataTypes.STRING,
     resumeUrl: DataTypes.STRING,
-    tags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     internalTags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     skills: { type: DataTypes.JSONB, defaultValue: { soft: [], technical: [] } },
     languages: { type: DataTypes.JSONB, defaultValue: [] },
@@ -55,9 +55,12 @@ const Candidate = sequelize.define(
     companySize: DataTypes.STRING,
     field: DataTypes.STRING,
     industry: DataTypes.STRING,
-    embedding: { type: DataTypes.JSONB, defaultValue: [] },
+    // IMPORTANT: DB column is pgvector; do not default to [] (pgvector rejects empty vectors).
+    // Keep nullable; we only set it after we successfully generate an embedding.
+    embedding: { type: DataTypes.JSONB, allowNull: true },
     searchText: DataTypes.TEXT,
     isArchived: { type: DataTypes.BOOLEAN, defaultValue: false },
+    isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   },
   {
     tableName: 'candidates',

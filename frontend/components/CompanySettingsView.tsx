@@ -1,35 +1,50 @@
 
 import React, { useState } from 'react';
-import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon } from './Icons'; // Added TargetIcon
+import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, CalculatorIcon } from './Icons';
 import UsageSettingsTab from './UsageSettingsTab';
 import CompanyTagsSettingsView from './CompanyTagsSettingsView';
 import CustomFieldsSettingsView from './CustomFieldsSettingsView';
 import JobHealthSettingsView from './JobHealthSettingsView';
+import ClientHealthSettingsView from './ClientHealthSettingsView'; // New Import
 import { useLanguage } from '../context/LanguageContext';
 
 
 // Reusable components for this view
-const TabButton: React.FC<{ title: string; isActive: boolean; onClick: () => void; }> = ({ title, isActive, onClick }) => (
+const TabButton: React.FC<{ title: string; isActive: boolean; onClick: () => void; icon?: React.ReactNode }> = ({ title, isActive, onClick, icon }) => (
     <button
         onClick={onClick}
-        className={`py-3 px-6 font-bold text-base transition-all duration-300 ease-in-out border-b-4 ${
+        className={`py-3 px-6 font-bold text-base transition-all duration-300 ease-in-out border-b-4 flex items-center gap-2 ${
             isActive ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'
         }`}
     >
+        {icon}
         {title}
     </button>
 );
 
-const SettingsInput: React.FC<{ label: string; value: string; onChange?: (val: string) => void; type?: string }> = ({ label, value, onChange, type = "text" }) => (
+const SettingsInput: React.FC<{ label: string; value: string; onChange?: (val: string) => void; type?: string; placeholder?: string; subLabel?: string }> = ({ label, value, onChange, type = "text", placeholder, subLabel }) => (
     <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
+        <label className="block text-sm font-semibold text-text-muted mb-1.5">
+            {label}
+            {subLabel && <span className="text-xs font-normal text-text-subtle mr-2">({subLabel})</span>}
+        </label>
         <input 
             type={type}
             value={value} 
             onChange={onChange ? (e) => onChange(e.target.value) : undefined}
             disabled={!onChange}
+            placeholder={placeholder}
             className={`w-full border border-border-default text-text-default font-medium text-sm rounded-lg p-2.5 ${onChange ? 'bg-bg-input focus:ring-primary-500 focus:border-primary-500' : 'bg-bg-subtle/70'}`} 
         />
+    </div>
+);
+
+const FormSelect: React.FC<{ label: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode }> = ({ label, value, onChange, children }) => (
+    <div>
+        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
+        <select value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm">
+            {children}
+        </select>
     </div>
 );
 
@@ -239,10 +254,121 @@ const ParametersTab: React.FC = () => {
     );
 }
 
+const FinanceDefaultsTab: React.FC = () => {
+    const { t } = useLanguage();
+    const [financeSettings, setFinanceSettings] = useState({
+        defaultCommissionType: 'percent', // 'percent' or 'fixed'
+        defaultCommissionValue: 100,
+        defaultPaymentTerms: 'שוטף + 30',
+        currency: 'ILS'
+    });
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+        const { name, value } = e.target;
+        setFinanceSettings(prev => ({ ...prev, [name]: value }));
+    };
+
+    return (
+        <div className="space-y-6 animate-fade-in">
+            <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
+                <h3 className="text-lg font-bold text-text-default mb-4 flex items-center gap-2">
+                    <BanknotesIcon className="w-5 h-5 text-primary-500" />
+                    ברירת מחדל ללקוחות חדשים
+                </h3>
+                <p className="text-sm text-text-muted mb-6">
+                    הגדרות אלו יחולו אוטומטית בעת יצירת לקוח חדש או הוספת עסקה ללקוח ללא הסכם מוגדר.
+                    ניתן לדרוס הגדרות אלו ברמת הלקוח הספציפי.
+                </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div>
+                        <label className="block text-sm font-semibold text-text-muted mb-1.5">מודל עמלה (ברירת מחדל)</label>
+                        <select 
+                            name="defaultCommissionType" 
+                            value={financeSettings.defaultCommissionType} 
+                            onChange={handleChange}
+                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                        >
+                            <option value="percent">אחוז מהשכר (ברוטו)</option>
+                            <option value="fixed">סכום קבוע (Fixed Fee)</option>
+                        </select>
+                    </div>
+
+                    <div>
+                         <label className="block text-sm font-semibold text-text-muted mb-1.5">
+                            {financeSettings.defaultCommissionType === 'percent' ? 'גובה העמלה (%)' : 'סכום העמלה'}
+                         </label>
+                         <div className="relative">
+                            <input 
+                                type="number" 
+                                name="defaultCommissionValue" 
+                                value={financeSettings.defaultCommissionValue} 
+                                onChange={handleChange} 
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                            />
+                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle font-bold">
+                                {financeSettings.defaultCommissionType === 'percent' ? '%' : '₪'}
+                            </span>
+                         </div>
+                    </div>
+
+                     <div>
+                        <label className="block text-sm font-semibold text-text-muted mb-1.5">תנאי תשלום</label>
+                        <select 
+                            name="defaultPaymentTerms" 
+                            value={financeSettings.defaultPaymentTerms} 
+                            onChange={handleChange}
+                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                        >
+                            <option>מיידי</option>
+                            <option>שוטף + 30</option>
+                            <option>שוטף + 45</option>
+                            <option>שוטף + 60</option>
+                            <option>שוטף + 90</option>
+                        </select>
+                    </div>
+
+                    <div>
+                        <label className="block text-sm font-semibold text-text-muted mb-1.5">מטבע</label>
+                        <select 
+                            name="currency" 
+                            value={financeSettings.currency} 
+                            onChange={handleChange}
+                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                        >
+                            <option value="ILS">שקל חדש (₪)</option>
+                            <option value="USD">דולר ($)</option>
+                            <option value="EUR">אירו (€)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex gap-3">
+                <InformationCircleIcon className="w-6 h-6 text-blue-600 flex-shrink-0" />
+                <div>
+                    <h4 className="font-bold text-blue-900 text-sm">כיצד זה משפיע?</h4>
+                    <p className="text-xs text-blue-800 mt-1 leading-relaxed">
+                        כאשר תבצעו "הזנת השמה ידנית" או תפיקו דרישת תשלום ללקוח ללא הגדרות ספציפיות, המערכת תשתמש בערכים אלו לחישוב אוטומטי של סכום החיוב.
+                        <br/>
+                        שינוי כאן לא ישפיע על עסקאות שכבר נוצרו.
+                    </p>
+                </div>
+            </div>
+
+            <div className="flex justify-end pt-4">
+                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">
+                    שמור הגדרות ברירת מחדל
+                </button>
+            </div>
+        </div>
+    );
+};
+
 
 const CompanySettingsView: React.FC = () => {
     const { t } = useLanguage();
-    const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health'>('usage');
+    const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults'>('details');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
 
     const renderContent = () => {
@@ -322,6 +448,10 @@ const CompanySettingsView: React.FC = () => {
                 return <CustomFieldsSettingsView />;
             case 'health':
                 return <JobHealthSettingsView />;
+            case 'client_health':
+                return <ClientHealthSettingsView />;
+            case 'finance_defaults':
+                return <FinanceDefaultsTab />;
             default:
                 return null;
         }
@@ -340,7 +470,9 @@ const CompanySettingsView: React.FC = () => {
                         <TabButton title={t('company_settings.tab_usage')} isActive={activeTab === 'usage'} onClick={() => setActiveTab('usage')} />
                         <TabButton title={t('company_settings.tab_tags')} isActive={activeTab === 'tags'} onClick={() => setActiveTab('tags')} />
                         <TabButton title={t('company_settings.tab_custom_fields')} isActive={activeTab === 'custom_fields'} onClick={() => setActiveTab('custom_fields')} />
-                        <TabButton title={t('company_settings.tab_health')} isActive={activeTab === 'health'} onClick={() => setActiveTab('health')} />
+                        <TabButton title="דופק משרה" isActive={activeTab === 'health'} onClick={() => setActiveTab('health')} icon={<ChartBarIcon className="w-4 h-4"/>}/>
+                        <TabButton title="דופק לקוח" isActive={activeTab === 'client_health'} onClick={() => setActiveTab('client_health')} icon={<ChartBarIcon className="w-4 h-4"/>}/>
+                        <TabButton title="הגדרות כספים" isActive={activeTab === 'finance_defaults'} onClick={() => setActiveTab('finance_defaults')} icon={<BanknotesIcon className="w-4 h-4"/>} />
                     </nav>
                 </div>
             </header>

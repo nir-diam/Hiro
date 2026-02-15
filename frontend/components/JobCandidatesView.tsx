@@ -8,7 +8,6 @@ import {
     MapPinIcon, CheckCircleIcon, FlagIcon, ChevronLeftIcon
 } from './Icons';
 import { mockJobCandidates } from '../data/mockJobData';
-import { jobsData } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
 
 type CandidateStatus = 'חדש' | 'סינון טלפוני' | 'ראיון' | 'הצעה' | 'נדחה';
@@ -84,20 +83,42 @@ const MatchAnalysisPopover: React.FC<{
 };
 
 interface JobCandidatesViewProps {
-    openSummaryDrawer: (candidateId: number) => void;
+    openSummaryDrawer: (candidate: any | number) => void;
     jobId: number;
 }
 
 const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer, jobId }) => {
     const { t } = useLanguage();
     const navigate = useNavigate();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [job, setJob] = useState<{ city?: string; location?: string } | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState('הכל');
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [activePopoverId, setActivePopoverId] = useState<number | null>(null);
-    
-    // Find the current job to get its location
-    const job = jobsData.find(j => j.id === jobId) || jobsData[0];
+
+    useEffect(() => {
+        if (!apiBase || !jobId) return;
+        let active = true;
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/jobs/${jobId}`);
+                if (!res.ok) throw new Error('Failed to load job');
+                const payload = await res.json();
+                if (active) {
+                    setJob({
+                        city: payload?.city,
+                        location: payload?.location,
+                    });
+                }
+            } catch (err) {
+                console.error('[JobCandidatesView] failed to load job', err);
+            }
+        })();
+        return () => {
+            active = false;
+        };
+    }, [apiBase, jobId]);
 
     const filteredCandidates = useMemo(() => {
         return mockJobCandidates
@@ -113,10 +134,11 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
         setActivePopoverId(activePopoverId === id ? null : id);
     };
 
+    const jobAddress = job?.location || job?.city || 'תל אביב';
+
     const handleNavigate = (e: React.MouseEvent, candidateAddress: string) => {
         e.stopPropagation();
         if (!candidateAddress) return;
-        const jobAddress = job.location || "תל אביב";
         const url = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(candidateAddress)}&destination=${encodeURIComponent(jobAddress)}&travelmode=driving`;
         window.open(url, '_blank');
     };
@@ -129,9 +151,9 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                     <span className="text-xs font-bold bg-primary-100 text-primary-700 px-2 py-0.5 rounded-full">
                         {t('job_candidates.active_count', { count: filteredCandidates.length })}
                     </span>
-                    <span className="text-xs text-text-subtle flex items-center gap-1 border-r border-border-default pr-3 mr-1">
+                        <span className="text-xs text-text-subtle flex items-center gap-1 border-r border-border-default pr-3 mr-1">
                         <MapPinIcon className="w-3 h-3" />
-                        {t('job_candidates.location')} {job.city}
+                        {t('job_candidates.location')} {jobAddress}
                     </span>
                 </div>
 
@@ -169,7 +191,7 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                             </thead>
                             <tbody className="divide-y divide-border-subtle overflow-visible">
                                 {filteredCandidates.map(c => (
-                                    <tr key={c.id} onClick={() => openSummaryDrawer(c.id)} className="hover:bg-primary-50/30 cursor-pointer transition-colors group">
+                                    <tr key={c.id} onClick={() => openSummaryDrawer(c)} className="hover:bg-primary-50/30 cursor-pointer transition-colors group">
                                         <td className="p-4">
                                             <div className="flex items-center gap-3">
                                                 <div className="w-9 h-9 rounded-full bg-primary-100 flex items-center justify-center text-primary-700 font-bold border border-primary-200">
@@ -227,7 +249,7 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
                         {filteredCandidates.map(c => (
-                            <div key={c.id} onClick={() => openSummaryDrawer(c.id)} className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group">
+                            <div key={c.id} onClick={() => openSummaryDrawer(c)} className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group">
                                 <div className="flex justify-between items-start mb-4">
                                     <div className="flex items-center gap-3">
                                         <div className="w-12 h-12 rounded-2xl bg-primary-100 flex items-center justify-center text-primary-700 font-bold text-lg border border-primary-200 group-hover:rotate-3 transition-transform">

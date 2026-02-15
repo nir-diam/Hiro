@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon } from './Icons';
+import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
 const AdminLayout: React.FC = () => {
@@ -10,11 +10,19 @@ const AdminLayout: React.FC = () => {
     const navItems = [
         { to: '/admin/clients', label: t('admin.tab_clients'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
         { to: '/admin/companies', label: t('admin.tab_companies_db'), icon: <GlobeAmericasIcon className="w-5 h-5" /> },
-        { to: '/admin/jobs', label: t('admin.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
-        { to: '/admin/candidates', label: t('admin.tab_candidates'), icon: <UserGroupIcon className="w-5 h-5" /> },
         { to: '/admin/company-corrections', label: t('admin.tab_company_corrections'), icon: <WrenchScrewdriverIcon className="w-5 h-5" /> },
+        { to: '/admin/candidates', label: t('admin.tab_candidates'), icon: <UserGroupIcon className="w-5 h-5" /> },
         { to: '/admin/tags', label: t('admin.tab_tags'), icon: <TagIcon className="w-5 h-5" /> },
+        { to: '/admin/tag-corrections', label: 'תיקון תגיות', icon: <TagIcon className="w-5 h-5" /> },
+        { to: '/admin/jobs', label: t('admin.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
         { to: '/admin/job-fields', label: t('admin.tab_job_fields'), icon: <SquaresPlusIcon className="w-5 h-5" /> },
+        { to: '/admin/events', label: 'יומן אירועים', icon: <ShieldCheckIcon className="w-5 h-5" /> },
+        { to: '/admin/business-logic', label: 'חוקים עסקיים', icon: <DocumentTextIcon className="w-5 h-5" /> },
+        { to: '/admin/picklists', label: 'ניהול picklists', icon: <ListBulletIcon className="w-5 h-5" /> },
+        { to: '/admin/help-center', label: 'מרכז עזרה', icon: <DocumentTextIcon className="w-5 h-5" /> },
+        { to: '/admin/settings/prompts', label: 'AI Prompts', icon: <SparklesIcon className="w-5 h-5" /> },
+        { to: '/admin/candidateTags', label: 'תגיות מועמדים', icon: <TagIcon className="w-5 h-5" /> },
+
     ];
 
     return (

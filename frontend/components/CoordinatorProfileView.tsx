@@ -1,10 +1,10 @@
 
-
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
     UserIcon, BriefcaseIcon, LinkIcon, UserGroupIcon, ArrowLeftIcon, 
-    LockClosedIcon, ShieldCheckIcon, PencilIcon, EnvelopeIcon, CheckCircleIcon
+    LockClosedIcon, ShieldCheckIcon, PencilIcon, EnvelopeIcon, CheckCircleIcon,
+    BanknotesIcon // Added icon
 } from './Icons';
 import { coordinatorsData } from './CoordinatorsSettingsView';
 import { useLanguage } from '../context/LanguageContext';
@@ -22,6 +22,20 @@ const FormInput: React.FC<{ label: string; name: string; value: string; onChange
             disabled={disabled}
             className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 disabled:cursor-not-allowed" 
         />
+    </div>
+);
+
+const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode }> = ({ label, name, value, onChange, children }) => (
+    <div>
+        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
+        <select 
+            name={name} 
+            value={value} 
+            onChange={onChange}
+            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500 focus:border-primary-500"
+        >
+            {children}
+        </select>
     </div>
 );
 
@@ -43,8 +57,9 @@ const ToggleSwitch: React.FC<{ label: string; checked: boolean; onChange: (check
 const DetailsTab: React.FC<{ coordinator: any; formData: any; setFormData: any; }> = ({ coordinator, formData, setFormData }) => {
      const { t } = useLanguage();
      
-     const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value, type } = e.target;
+        // @ts-ignore
         const checked = type === 'checkbox' ? e.target.checked : undefined;
         setFormData((prev: any) => ({ ...prev, [name]: checked !== undefined ? checked : value }));
      };
@@ -63,7 +78,76 @@ const DetailsTab: React.FC<{ coordinator: any; formData: any; setFormData: any; 
                      <FormInput label={t('coordinators.col_extension')} name="extension" value={formData.extension || ''} onChange={handleChange} />
                      <FormInput label={t('coordinators.col_sender')} name="senderName" value={formData.senderName || ''} onChange={handleChange} />
                      
-                     <div className="md:col-span-2 pt-2">
+                     <div className="md:col-span-2 border-t border-border-default pt-4 mt-2">
+                        <h4 className="text-sm font-bold text-text-muted mb-3">הגדרות העסקה</h4>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                             <FormSelect label="סוג התקשרות" name="roleType" value={formData.roleType || 'employee'} onChange={handleChange}>
+                                 <option value="employee">שכירה (Employee)</option>
+                                 <option value="freelance">פרילנס (Freelance)</option>
+                                 <option value="owner">בעלים (Owner)</option>
+                             </FormSelect>
+                             
+                             {formData.roleType === 'freelance' && (
+                                <div className="space-y-3">
+                                    {/* VAT Status */}
+                                    <div className="bg-bg-subtle p-3 rounded-lg border border-border-default mt-1">
+                                        <label className="flex items-start gap-3 cursor-pointer">
+                                            <input 
+                                                type="checkbox" 
+                                                name="vatStatus"
+                                                checked={formData.vatStatus === 'liable'} 
+                                                onChange={(e) => setFormData((prev: any) => ({ ...prev, vatStatus: e.target.checked ? 'liable' : 'exempt' }))}
+                                                className="mt-1 w-4 h-4 text-primary-600 rounded border-gray-300 focus:ring-primary-500" 
+                                            />
+                                            <div>
+                                                <span className="text-sm font-bold text-text-default block">עוסק מורשה (דורש תוספת מע"מ)</span>
+                                                <span className="text-xs text-text-muted">סמן רק אם הרכזת חשבונית מס וזכאית לתוספת מע"מ על התשלום.</span>
+                                            </div>
+                                        </label>
+                                    </div>
+
+                                    {/* Default Commission Settings */}
+                                    <div className="bg-bg-subtle p-3 rounded-lg border border-border-default">
+                                        <div className="flex items-center gap-2 mb-2 text-primary-700">
+                                            <BanknotesIcon className="w-4 h-4"/>
+                                            <span className="text-sm font-bold">הגדרת עמלת בסיס (דיפולט)</span>
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <div>
+                                                <select 
+                                                    name="defaultCommissionType" 
+                                                    value={formData.defaultCommissionType || 'percent'} 
+                                                    onChange={handleChange}
+                                                    className="w-full bg-white border border-border-default rounded-md p-2 text-xs focus:ring-primary-500 font-medium"
+                                                >
+                                                    <option value="percent">אחוז מהשכר (%)</option>
+                                                    <option value="fixed">סכום קבוע (₪)</option>
+                                                </select>
+                                            </div>
+                                            <div className="relative">
+                                                <input 
+                                                    type="number" 
+                                                    name="defaultCommissionValue"
+                                                    value={formData.defaultCommissionValue || ''}
+                                                    onChange={handleChange}
+                                                    placeholder={formData.defaultCommissionType === 'fixed' ? '2000' : '30'}
+                                                    className="w-full bg-white border border-border-default rounded-md p-2 pl-6 text-xs font-bold focus:ring-primary-500"
+                                                />
+                                                <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-text-muted font-bold">
+                                                    {formData.defaultCommissionType === 'fixed' ? '₪' : '%'}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <p className="text-[10px] text-text-muted mt-1.5 leading-tight">
+                                            ערך זה יוזן אוטומטית בעת יצירת השמה חדשה עבור הרכזת, אך ניתן לשינוי פרטני בכל עסקה.
+                                        </p>
+                                    </div>
+                                </div>
+                             )}
+                        </div>
+                     </div>
+
+                     <div className="md:col-span-2 pt-2 border-t border-border-default mt-2">
                         <ToggleSwitch 
                             label={t('coordinators.col_active')} 
                             checked={formData.isActive || false} 

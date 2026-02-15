@@ -1,6 +1,8 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const JobCluster = require('./JobCluster');
+const Tag = require('./Tag');
+const JobRoleTag = require('./JobRoleTag');
 
 const JobRole = sequelize.define(
   'JobRole',
@@ -24,6 +26,7 @@ const JobRole = sequelize.define(
       allowNull: false,
       references: { model: JobCluster, key: 'id' },
     },
+    embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {
     tableName: 'job_roles',
@@ -32,6 +35,18 @@ const JobRole = sequelize.define(
 
 JobCluster.hasMany(JobRole, { foreignKey: 'clusterId', as: 'roles', onDelete: 'CASCADE' });
 JobRole.belongsTo(JobCluster, { foreignKey: 'clusterId', as: 'cluster' });
+JobRole.belongsToMany(Tag, {
+  through: JobRoleTag,
+  foreignKey: 'job_role_id',
+  otherKey: 'tag_id',
+  as: 'tags',
+});
+Tag.belongsToMany(JobRole, {
+  through: JobRoleTag,
+  foreignKey: 'tag_id',
+  otherKey: 'job_role_id',
+  as: 'jobRoles',
+});
 
 module.exports = JobRole;
 

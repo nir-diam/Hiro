@@ -64,6 +64,10 @@ const embedCandidateAndSave = async (candidateId, extraText = '') => {
   const doc = buildSearchDocument(candidate, extraText);
   console.log('[embed] candidate', candidateId, 'docSnippet:', doc.slice(0, 400));
   const embedding = await embedText(doc);
+  if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+    console.warn('[embed] skip update due to empty embedding', candidateId);
+    return [];
+  }
   const updatePayload = { embedding };
   if (extraText && extraText.trim()) {
     // persist a truncated version to allow keyword match later
@@ -129,20 +133,34 @@ const searchCandidates = async ({ query, filters = {}, limit = 20 }) => {
     .split(/\s+/)
     .filter(Boolean);
 
-  const scored = filtered.map((c) => {
-    const emb = normalizeEmbedding(c.embedding);
-    const terms = collectTerms(c);
-    return {
-      candidate: c,
-      score: cosineSimilarity(qEmbedding, emb),
+  const scored = [];
+  for (const candidate of filtered) {
+    let emb = normalizeEmbedding(candidate.embedding);
+    if (!emb.length || emb.length !== qEmbedding.length) {
+      try {
+        const rebuilt = await embedCandidateAndSave(candidate.id);
+        emb = normalizeEmbedding(rebuilt);
+      } catch (err) {
+        console.error('[vectorSearch] rebuild candidate embedding failed', candidate.id, err.message || err);
+        continue;
+      }
+    }
+
+    if (!emb.length || emb.length !== qEmbedding.length) continue;
+
+    const terms = collectTerms(candidate);
+    if (!hasKeywordMatch(queryWords, terms)) continue;
+
+    const score = cosineSimilarity(qEmbedding, emb);
+    if (score < 0.30) continue;
+
+    scored.push({
+      candidate,
+      score,
       embLen: emb.length,
       terms,
-    };
-  }).filter((x) =>
-    x.embLen === qEmbedding.length && // only exact-dimension matches
-    hasKeywordMatch(queryWords, x.terms) && // must contain query terms
-    x.score >= 0.30 // basic floor to drop degenerate matches
-  );
+    });
+  }
 
   scored.sort((a, b) => b.score - a.score);
   console.log('[vectorSearch] scored count', scored.length, 'top1 score', scored[0]?.score);

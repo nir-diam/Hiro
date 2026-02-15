@@ -1,53 +1,62 @@
 import React from 'react';
 
-const OriginalResume: React.FC<{ highlighted?: boolean }> = ({ highlighted = false }) => {
-    const Highlight: React.FC<{children: React.ReactNode; color?: string}> = ({children, color = 'yellow'}) => {
-        if (!highlighted) return <>{children}</>;
-        const colorVariants: {[key: string]: string} = {
-            yellow: 'bg-yellow-200 text-yellow-800',
-            purple: 'bg-primary-200 text-primary-800',
-            indigo: 'bg-secondary-200 text-secondary-800',
-        }
-        return <span className={`${colorVariants[color]}`}>{children}</span>;
-    }
+interface OriginalResumeProps {
+    highlighted?: boolean;
+    resumeData: {
+        name: string;
+        contact: string;
+        summary?: string;
+        experience?: string[];
+        education?: string[];
+        resumeUrl?: string;
+    };
+}
+
+const decodeHtmlEntities = (value?: string) => {
+    if (!value) return '';
+    if (typeof window === 'undefined') return value;
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(value, 'text/html');
+    return doc.documentElement.textContent || '';
+};
+
+const OriginalResume: React.FC<OriginalResumeProps> = ({ resumeData }) => {
+    const { name, contact, resumeUrl } = resumeData || {};
+    const isImage = !!(resumeUrl && /\.(png|jpe?g)$/i.test(resumeUrl));
 
     return (
         <div className="p-4 bg-bg-card border border-border-default font-serif text-text-default" style={{direction: 'rtl'}}>
-            <h3 className="text-xl font-bold mb-4 text-center">סלבה דולזארב</h3>
+            <h3 className="text-xl font-bold mb-4 text-center">{name || 'קורות חיים'}</h3>
             <div className="text-center text-sm mb-6 border-b border-border-default pb-4 text-text-muted">
-                <p>כתובת: כרמיאל | טלפון: 054-7526722 | דוא"ל: ani190@walla.com</p>
-                <p>תעודת זהות: 303830756 | מצב משפחתי: נשוי +2 | רישיון נהיגה: פרטי</p>
+                <p>{contact || ''}</p>
             </div>
-
-            <div className="space-y-6">
-                <div>
-                    <h4 className="text-lg font-bold mb-3 border-b-2 border-text-muted inline-block">השכלה</h4>
-                    <ul className="list-none space-y-2 text-sm">
-                        <li>•<span className="font-bold mx-2">2017-2020</span> <Highlight>הנדסאי מכונות בהתמחות ייצור</Highlight> - מכללת עתיד, מעלות.</li>
-                        <li>•<span className="font-bold mx-2">2019</span> קורס מבקרים פנימיים מטעם אלביט מערכות.</li>
-                        <li>•<span className="font-bold mx-2">2013</span> קורס <Highlight color="purple">הנדסת איכות</Highlight> משולבת - אורט בראודה.</li>
-                        <li>•<span className="font-bold mx-2">2005</span> בגרות מלאה, מגמת C.N.C תיכון "עתיד", מעלות.</li>
-                    </ul>
-                </div>
-
-                <div>
-                    <h4 className="text-lg font-bold mb-3 border-b-2 border-text-muted inline-block">ניסיון תעסוקתי</h4>
-                    <ul className="list-none space-y-4 text-sm">
-                        <li>
-                            <p>•<span className="font-bold mx-2">2023 - הווה:</span> <Highlight color="indigo">מבקר איכות</Highlight>, ת.א.ג מדיקל.</p>
-                            <ul className="list-disc list-inside pr-8 mt-1 space-y-1">
-                                <li>בקרת איכות של מוצרים רפואיים.</li>
-                                <li>עבודה עם מערכות ERP ויישום ושיפור תהליכי.</li>
-                            </ul>
-                        </li>
-                         <li>
-                            <p>•<span className="font-bold mx-2">2020-2023:</span> אחראי משמרת, אלפא קוסמטיקה.</p>
-                             <ul className="list-disc list-inside pr-8 mt-1">
-                                <li>ניהול צוות עובדים במשמרת.</li>
-                            </ul>
-                        </li>
-                    </ul>
-                </div>
+            <div className="space-y-4">
+                {resumeUrl ? (
+                    <>
+                        <div className="min-h-[60vh] border border-border-default rounded-2xl overflow-hidden bg-black/5">
+                            {isImage ? (
+                                <img src={resumeUrl} alt="קורות חיים" className="object-contain w-full h-full" />
+                            ) : (
+                                <iframe src={resumeUrl} title="Original resume" className="w-full h-full" />
+                            )}
+                        </div>
+                        <div className="text-center text-xs text-text-muted">
+                            נתקעת?
+                            <a
+                                className="text-primary-600 font-bold underline px-1"
+                                href={resumeUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                            >
+                                הורד את הקובץ המקורי
+                            </a>
+                        </div>
+                    </>
+                ) : (
+                    <div className="text-center text-text-muted text-sm">
+                        אין קובץ קורות חיים להצגה.
+                    </div>
+                )}
             </div>
         </div>
     );

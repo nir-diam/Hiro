@@ -4,7 +4,7 @@ import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, Informat
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import UpdateStatusModal from './UpdateStatusModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
-import { jobsData as allJobsData } from './JobsView';
+import { Job } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
 
 
@@ -176,7 +176,7 @@ const JobInterestCard: React.FC<{ job: JobInterest; onStatusClick: () => void; o
 
 const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask }) => {
     const { t } = useLanguage();
-    const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
+const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
     const [activePopoverId, setActivePopoverId] = useState<number | null>(null);
     const popoverRef = useRef<HTMLDivElement>(null);
     const [recalculatingId, setRecalculatingId] = useState<number | null>(null);
@@ -205,8 +205,37 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewT
     const dragItemIndex = useRef<number | null>(null);
     const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
     const [editingInterest, setEditingInterest] = useState<JobInterest | null>(null);
-    const [selectedJob, setSelectedJob] = useState<any | null>(null);
+    const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
+    const [jobCatalogLoading, setJobCatalogLoading] = useState(false);
+    useEffect(() => {
+        if (!apiBase) {
+            return;
+        }
+        let isActive = true;
+        setJobCatalogLoading(true);
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/jobs`);
+                if (!res.ok) throw new Error('Failed to load jobs');
+                const data = await res.json();
+                if (isActive) {
+                    setJobCatalog(Array.isArray(data) ? data : []);
+                }
+            } catch (err) {
+                console.error('[InterestedInJobs] failed to fetch jobs', err);
+            } finally {
+                if (isActive) {
+                    setJobCatalogLoading(false);
+                }
+            }
+        })();
+        return () => {
+            isActive = false;
+        };
+    }, [apiBase]);
 
 
     // Sorting logic
@@ -328,19 +357,59 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewT
         setEditingInterest(null);
     };
     
+    const buildFallbackJob = (interest: JobInterest): Job => ({
+        id: interest.id,
+        title: interest.jobTitle,
+        client: interest.company,
+        field: interest.industry,
+        role: interest.role,
+        priority: 'רגילה',
+        clientType: 'כללי',
+        city: interest.location,
+        region: 'לא צויין',
+        gender: 'לא משנה',
+        mobility: false,
+        licenseType: 'לא צויין',
+        postingCode: '',
+        validityDays: 30,
+        recruitingCoordinator: 'מערכת',
+        accountManager: 'מערכת',
+        salaryMin: 0,
+        salaryMax: 0,
+        ageMin: 18,
+        ageMax: 65,
+        openPositions: 1,
+        status: 'טיוטה',
+        associatedCandidates: 0,
+        waitingForScreening: 0,
+        activeProcess: 0,
+        openDate: new Date().toISOString(),
+        recruiter: 'מערכת',
+        location: interest.location,
+        jobType: 'לא צויין',
+        description: interest.matchDetails.summary,
+        requirements: [],
+        rating: 0,
+        healthProfile: 'standard',
+    });
+
     const handleOpenJobDrawer = (jobId: number) => {
-        const job = allJobsData.find(j => j.id === jobId);
-        if (job) {
-            setSelectedJob(job);
+        const jobFromCatalog = jobCatalog.find(j => j.id === jobId);
+        if (jobFromCatalog) {
+            setSelectedJob(jobFromCatalog);
             setIsDrawerOpen(true);
-        } else {
-            // Fallback for mock data
-            const interest = jobs.find(i => i.id === jobId);
-             if (interest) {
-                const mockJobDetail = allJobsData.find(j => j.title === interest.jobTitle) || allJobsData[0];
-                setSelectedJob(mockJobDetail);
+            return;
+        }
+        const interest = jobs.find(i => i.id === jobId);
+        if (interest) {
+            const jobByTitle = jobCatalog.find(j => j.title === interest.jobTitle);
+            if (jobByTitle) {
+                setSelectedJob(jobByTitle);
                 setIsDrawerOpen(true);
-             }
+                return;
+            }
+            setSelectedJob(buildFallbackJob(interest));
+            setIsDrawerOpen(true);
         }
     };
 

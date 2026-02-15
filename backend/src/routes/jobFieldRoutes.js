@@ -3,6 +3,7 @@ const controller = require('../controllers/jobFieldController');
 
 const router = express.Router();
 
+router.get('/rebuild-embeddings', controller.rebuildEmbeddings);
 router.get('/', controller.list);
 
 router.post('/categories', controller.createCategory);
@@ -20,6 +21,7 @@ router.delete('/roles/:id', controller.deleteRole);
 router.post('/ai/suggest-clusters', controller.suggestClusters);
 router.post('/ai/suggest-roles', controller.suggestRoles);
 router.post('/ai/suggest-role-synonyms', controller.suggestRoleSynonyms);
+router.post('/roles/:id/ai-synonyms', controller.generateRoleSynonyms);
 
 module.exports = router;
 

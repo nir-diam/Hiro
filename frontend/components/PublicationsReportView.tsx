@@ -1,7 +1,8 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { BriefcaseIcon, UserGroupIcon, MapPinIcon, Cog6ToothIcon, EyeIcon, ChartBarIcon, ArrowPathIcon, DocumentArrowDownIcon, MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon, ChevronDownIcon, CalendarIcon } from './Icons';
+import { BriefcaseIcon, UserGroupIcon, MapPinIcon, Cog6ToothIcon, EyeIcon, ChartBarIcon, ArrowPathIcon, DocumentArrowDownIcon, MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon, ChevronDownIcon, CalendarIcon, XMarkIcon } from './Icons';
 import LocationSelector, { LocationItem } from './LocationSelector';
+import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 
 // --- TYPES ---
 interface JobPublication {
@@ -17,6 +18,7 @@ interface JobPublication {
   jobType: 'מלאה' | 'חלקית' | 'פרילנס' | 'משמרות';
   candidatesCount: number;
   views: number;
+  board: string; // Added board field
 }
 
 // --- HELPER FOR DYNAMIC DATES ---
@@ -27,22 +29,24 @@ const getRelativeDate = (daysAgo: number) => {
 };
 
 // --- ROBUST MOCK DATA ---
+const boardsList = ['AllJobs', 'LinkedIn', 'JobMaster', 'Drushim', 'Facebook', 'Glassdoor'];
+
 const generateMockData = (): JobPublication[] => [
-  { id: 101, company: 'בזק', jobTitle: 'מנהל/ת שיווק דיגיטלי', domain: 'שיווק', role: 'מנהל שיווק', creationDate: getRelativeDate(2), publicationDate: getRelativeDate(1), city: 'תל אביב', region: 'מרכז', jobType: 'מלאה', candidatesCount: 145, views: 2300 },
-  { id: 102, company: 'Wix', jobTitle: 'מפתח/ת Fullstack', domain: 'טכנולוגיה', role: 'מהנדס תוכנה', creationDate: getRelativeDate(5), publicationDate: getRelativeDate(4), city: 'תל אביב', region: 'מרכז', jobType: 'מלאה', candidatesCount: 89, views: 4120 },
-  { id: 103, company: 'Fiverr', jobTitle: 'מעצב/ת UX/UI', domain: 'עיצוב', role: 'מעצב', creationDate: getRelativeDate(10), publicationDate: getRelativeDate(8), city: 'חיפה', region: 'צפון', jobType: 'חלקית', candidatesCount: 42, views: 850 },
-  { id: 104, company: 'אלביט מערכות', jobTitle: 'מהנדס/ת QA', domain: 'טכנולוגיה', role: 'בודק תוכנה', creationDate: getRelativeDate(15), publicationDate: getRelativeDate(14), city: 'חיפה', region: 'צפון', jobType: 'מלאה', candidatesCount: 65, views: 1200 },
-  { id: 105, company: 'תנובה', jobTitle: 'נציג/ת מכירות שטח', domain: 'מכירות', role: 'איש מכירות', creationDate: getRelativeDate(3), publicationDate: getRelativeDate(2), city: 'רחובות', region: 'מרכז', jobType: 'מלאה', candidatesCount: 33, views: 450 },
-  { id: 106, company: 'אל-על', jobTitle: 'ראש/ת צוות BI', domain: 'טכנולוגיה', role: 'אנליסט BI', creationDate: getRelativeDate(20), publicationDate: getRelativeDate(18), city: 'לוד', region: 'מרכז', jobType: 'מלאה', candidatesCount: 12, views: 980 },
-  { id: 107, company: 'מיטב דש', jobTitle: 'אנליסט/ית פיננסי/ת', domain: 'פיננסים', role: 'אנליסט', creationDate: getRelativeDate(7), publicationDate: getRelativeDate(6), city: 'גבעתיים', region: 'מרכז', jobType: 'מלאה', candidatesCount: 55, views: 1500 },
-  { id: 108, company: 'Zap Group', jobTitle: 'מומחה/ית SEO', domain: 'שיווק', role: 'מומחה SEO', creationDate: getRelativeDate(12), publicationDate: getRelativeDate(10), city: 'פתח תקווה', region: 'מרכז', jobType: 'חלקית', candidatesCount: 18, views: 620 },
-  { id: 109, company: 'Nisha', jobTitle: 'רכז/ת גיוס טכנולוגי', domain: 'משאבי אנוש', role: 'רכז גיוס', creationDate: getRelativeDate(1), publicationDate: getRelativeDate(0), city: 'באר שבע', region: 'דרום', jobType: 'מלאה', candidatesCount: 95, views: 1800 },
-  { id: 110, company: 'GotFriends', jobTitle: 'מנהל/ת לקוחות', domain: 'מכירות', role: 'מנהל לקוחות', creationDate: getRelativeDate(4), publicationDate: getRelativeDate(3), city: 'הרצליה', region: 'שרון', jobType: 'מלאה', candidatesCount: 27, views: 500 },
-  { id: 111, company: 'בנק הפועלים', jobTitle: 'יועץ/ת השקעות', domain: 'פיננסים', role: 'יועץ השקעות', creationDate: getRelativeDate(25), publicationDate: getRelativeDate(24), city: 'ירושלים', region: 'ירושלים והסביבה', jobType: 'מלאה', candidatesCount: 105, views: 3200 },
-  { id: 112, company: 'Matrix', jobTitle: 'מיישם/ת סייבר', domain: 'טכנולוגיה', role: 'מומחה סייבר', creationDate: getRelativeDate(6), publicationDate: getRelativeDate(5), city: 'הרצליה', region: 'שרון', jobType: 'מלאה', candidatesCount: 8, views: 900 },
-  { id: 113, company: 'Strauss', jobTitle: 'טכנולוג/ית מזון', domain: 'תעשייה וייצור', role: 'מהנדס מזון', creationDate: getRelativeDate(30), publicationDate: getRelativeDate(28), city: 'אחיהוד', region: 'צפון', jobType: 'מלאה', candidatesCount: 15, views: 400 },
-  { id: 114, company: 'משרד החינוך', jobTitle: 'מורה למתמטיקה', domain: 'חינוך', role: 'מורה', creationDate: getRelativeDate(40), publicationDate: getRelativeDate(38), city: 'חולון', region: 'מרכז', jobType: 'חלקית', candidatesCount: 4, views: 120 },
-  { id: 115, company: 'Super-Pharm', jobTitle: 'רוקח/ת', domain: 'רפואה', role: 'רוקח', creationDate: getRelativeDate(2), publicationDate: getRelativeDate(2), city: 'רעננה', region: 'שרון', jobType: 'משמרות', candidatesCount: 10, views: 250 },
+  { id: 101, company: 'בזק', jobTitle: 'מנהל/ת שיווק דיגיטלי', domain: 'שיווק', role: 'מנהל שיווק', creationDate: getRelativeDate(2), publicationDate: getRelativeDate(1), city: 'תל אביב', region: 'מרכז', jobType: 'מלאה', candidatesCount: 145, views: 2300, board: 'LinkedIn' },
+  { id: 102, company: 'Wix', jobTitle: 'מפתח/ת Fullstack', domain: 'טכנולוגיה', role: 'מהנדס תוכנה', creationDate: getRelativeDate(5), publicationDate: getRelativeDate(4), city: 'תל אביב', region: 'מרכז', jobType: 'מלאה', candidatesCount: 89, views: 4120, board: 'AllJobs' },
+  { id: 103, company: 'Fiverr', jobTitle: 'מעצב/ת UX/UI', domain: 'עיצוב', role: 'מעצב', creationDate: getRelativeDate(10), publicationDate: getRelativeDate(8), city: 'חיפה', region: 'צפון', jobType: 'חלקית', candidatesCount: 42, views: 850, board: 'JobMaster' },
+  { id: 104, company: 'אלביט מערכות', jobTitle: 'מהנדס/ת QA', domain: 'טכנולוגיה', role: 'בודק תוכנה', creationDate: getRelativeDate(15), publicationDate: getRelativeDate(14), city: 'חיפה', region: 'צפון', jobType: 'מלאה', candidatesCount: 65, views: 1200, board: 'Drushim' },
+  { id: 105, company: 'תנובה', jobTitle: 'נציג/ת מכירות שטח', domain: 'מכירות', role: 'איש מכירות', creationDate: getRelativeDate(3), publicationDate: getRelativeDate(2), city: 'רחובות', region: 'מרכז', jobType: 'מלאה', candidatesCount: 33, views: 450, board: 'AllJobs' },
+  { id: 106, company: 'אל-על', jobTitle: 'ראש/ת צוות BI', domain: 'טכנולוגיה', role: 'אנליסט BI', creationDate: getRelativeDate(20), publicationDate: getRelativeDate(18), city: 'לוד', region: 'מרכז', jobType: 'מלאה', candidatesCount: 12, views: 980, board: 'LinkedIn' },
+  { id: 107, company: 'מיטב דש', jobTitle: 'אנליסט/ית פיננסי/ת', domain: 'פיננסים', role: 'אנליסט', creationDate: getRelativeDate(7), publicationDate: getRelativeDate(6), city: 'גבעתיים', region: 'מרכז', jobType: 'מלאה', candidatesCount: 55, views: 1500, board: 'JobMaster' },
+  { id: 108, company: 'Zap Group', jobTitle: 'מומחה/ית SEO', domain: 'שיווק', role: 'מומחה SEO', creationDate: getRelativeDate(12), publicationDate: getRelativeDate(10), city: 'פתח תקווה', region: 'מרכז', jobType: 'חלקית', candidatesCount: 18, views: 620, board: 'Facebook' },
+  { id: 109, company: 'Nisha', jobTitle: 'רכז/ת גיוס טכנולוגי', domain: 'משאבי אנוש', role: 'רכז גיוס', creationDate: getRelativeDate(1), publicationDate: getRelativeDate(0), city: 'באר שבע', region: 'דרום', jobType: 'מלאה', candidatesCount: 95, views: 1800, board: 'AllJobs' },
+  { id: 110, company: 'GotFriends', jobTitle: 'מנהל/ת לקוחות', domain: 'מכירות', role: 'מנהל לקוחות', creationDate: getRelativeDate(4), publicationDate: getRelativeDate(3), city: 'הרצליה', region: 'שרון', jobType: 'מלאה', candidatesCount: 27, views: 500, board: 'LinkedIn' },
+  { id: 111, company: 'בנק הפועלים', jobTitle: 'יועץ/ת השקעות', domain: 'פיננסים', role: 'יועץ השקעות', creationDate: getRelativeDate(25), publicationDate: getRelativeDate(24), city: 'ירושלים', region: 'ירושלים והסביבה', jobType: 'מלאה', candidatesCount: 105, views: 3200, board: 'Drushim' },
+  { id: 112, company: 'Matrix', jobTitle: 'מיישם/ת סייבר', domain: 'טכנולוגיה', role: 'מומחה סייבר', creationDate: getRelativeDate(6), publicationDate: getRelativeDate(5), city: 'הרצליה', region: 'שרון', jobType: 'מלאה', candidatesCount: 8, views: 900, board: 'Glassdoor' },
+  { id: 113, company: 'Strauss', jobTitle: 'טכנולוג/ית מזון', domain: 'תעשייה וייצור', role: 'מהנדס מזון', creationDate: getRelativeDate(30), publicationDate: getRelativeDate(28), city: 'אחיהוד', region: 'צפון', jobType: 'מלאה', candidatesCount: 15, views: 400, board: 'JobMaster' },
+  { id: 114, company: 'משרד החינוך', jobTitle: 'מורה למתמטיקה', domain: 'חינוך', role: 'מורה', creationDate: getRelativeDate(40), publicationDate: getRelativeDate(38), city: 'חולון', region: 'מרכז', jobType: 'חלקית', candidatesCount: 4, views: 120, board: 'AllJobs' },
+  { id: 115, company: 'Super-Pharm', jobTitle: 'רוקח/ת', domain: 'רפואה', role: 'רוקח', creationDate: getRelativeDate(2), publicationDate: getRelativeDate(2), city: 'רעננה', region: 'שרון', jobType: 'משמרות', candidatesCount: 10, views: 250, board: 'Drushim' },
 ];
 
 const mockJobsData = generateMockData();
@@ -51,6 +55,7 @@ const allColumns = [
   { id: 'jobTitle', header: 'שם משרה', width: '20%' },
   { id: 'company', header: 'חברה', width: '15%' },
   { id: 'domain', header: 'תחום', width: '10%' },
+  { id: 'board', header: 'לוח פרסום', width: '10%' }, // Added column def
   { id: 'city', header: 'עיר', width: '10%' },
   { id: 'views', header: 'חשיפות (Views)', width: '10%' },
   { id: 'candidatesCount', header: 'מועמדים', width: '10%' },
@@ -59,7 +64,7 @@ const allColumns = [
 ];
 
 const defaultVisibleColumns = allColumns.map(c => c.id);
-const uniqueDomains = Array.from(new Set(mockJobsData.map(j => j.domain)));
+const uniqueBoards = Array.from(new Set(mockJobsData.map(j => j.board))); // Unique boards for filter
 
 // --- COMPONENTS ---
 
@@ -130,9 +135,8 @@ const JobPublicationCard: React.FC<{ job: JobPublication }> = ({ job }) => (
                     <MapPinIcon className="w-3 h-3" />
                     {job.city}
                  </span>
-                 <span className="flex items-center gap-1">
-                    <BriefcaseIcon className="w-3 h-3" />
-                    {job.jobType}
+                 <span className="flex items-center gap-1 font-bold text-primary-600">
+                    {job.board}
                  </span>
             </div>
             <span className="bg-primary-50 text-primary-700 px-2 py-0.5 rounded-md font-semibold">
@@ -201,6 +205,7 @@ const PublicationsReportView: React.FC = () => {
         endDate: today.toISOString().split('T')[0],
         searchTerm: '',
         domain: '',
+        board: '', 
         locations: [] as LocationItem[]
     });
     
@@ -214,6 +219,7 @@ const PublicationsReportView: React.FC = () => {
     
     // New State for Mobile Toggle
     const [showMobileStats, setShowMobileStats] = useState(false);
+    const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false); // Job Field Selector State
 
     const settingsRef = useRef<HTMLDivElement>(null);
 
@@ -236,6 +242,20 @@ const PublicationsReportView: React.FC = () => {
 
     const handleLocationChange = (newLocations: LocationItem[]) => {
         setFilters(prev => ({ ...prev, locations: newLocations }));
+    };
+
+    const handleJobFieldSelect = (selectedField: SelectedJobField | null) => {
+        if (selectedField) {
+            // Mapping the selected category/role to the domain filter
+            // In a real app, this might filter by category OR role explicitly
+            setFilters(prev => ({ ...prev, domain: selectedField.category })); 
+        }
+        setIsJobFieldSelectorOpen(false);
+    };
+
+    const clearDomainFilter = (e: React.MouseEvent) => {
+        e.stopPropagation();
+        setFilters(prev => ({ ...prev, domain: '' }));
     };
 
     const applyDatePreset = (preset: 'today' | 'week' | 'month' | 'quarter') => {
@@ -271,7 +291,9 @@ const PublicationsReportView: React.FC = () => {
                 job.jobTitle.toLowerCase().includes(filters.searchTerm.toLowerCase()) || 
                 job.company.toLowerCase().includes(filters.searchTerm.toLowerCase());
             
-            const matchesDomain = !filters.domain || job.domain === filters.domain;
+            // Loose matching for domain since job selector might return broad categories
+            const matchesDomain = !filters.domain || job.domain.includes(filters.domain) || filters.domain.includes(job.domain);
+            const matchesBoard = !filters.board || job.board === filters.board; 
             
             const matchesLocation = filters.locations.length === 0 || 
                 filters.locations.some(loc => 
@@ -288,7 +310,7 @@ const PublicationsReportView: React.FC = () => {
 
             const matchesDate = jobDate >= start && jobDate <= end;
 
-            return matchesSearch && matchesDomain && matchesLocation && matchesDate;
+            return matchesSearch && matchesDomain && matchesBoard && matchesLocation && matchesDate;
         });
 
         if (sortConfig) {
@@ -341,6 +363,8 @@ const PublicationsReportView: React.FC = () => {
                 return <span className="font-medium text-text-default">{job.company}</span>;
             case 'domain':
                 return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800">{job.domain}</span>;
+            case 'board': 
+                return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">{job.board}</span>;
             case 'views':
                  return <span className="text-text-muted font-mono">{job.views.toLocaleString()}</span>;
             case 'candidatesCount':
@@ -402,7 +426,7 @@ const PublicationsReportView: React.FC = () => {
                 />
             </div>
 
-            {/* Search & Filters Bar - Changed from Sticky to Static on Mobile to fix "Can't access jobs" issue */}
+            {/* Search & Filters Bar */}
             <div className="bg-bg-card p-3 rounded-2xl border border-border-default shadow-sm lg:sticky lg:top-0 z-20">
                 <div className="flex flex-col lg:flex-row items-center gap-3">
                     
@@ -430,13 +454,37 @@ const PublicationsReportView: React.FC = () => {
                             />
                         </div>
                         
+                        {/* Domain (Field) Selector Button - Replaces native select */}
                          <div className="relative w-full lg:w-40">
-                             <select name="domain" value={filters.domain} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-1 focus:ring-primary-500 outline-none h-[38px]">
-                                <option value="">כל התחומים</option>
-                                {uniqueDomains.map(d => <option key={d} value={d}>{d}</option>)}
-                            </select>
+                             <button
+                                onClick={() => setIsJobFieldSelectorOpen(true)}
+                                className={`w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm flex justify-between items-center h-[38px] focus:ring-1 focus:ring-primary-500 outline-none hover:border-primary-300 transition-colors ${!filters.domain ? 'text-text-muted' : 'text-text-default font-medium'}`}
+                             >
+                                <span className="truncate">{filters.domain || 'כל התחומים'}</span>
+                                {filters.domain ? (
+                                    <div onClick={clearDomainFilter} className="p-0.5 hover:bg-bg-subtle rounded-full text-text-subtle">
+                                        <XMarkIcon className="w-3.5 h-3.5" />
+                                    </div>
+                                ) : (
+                                    <ChevronDownIcon className="w-4 h-4 text-text-subtle flex-shrink-0" />
+                                )}
+                             </button>
                         </div>
                         
+                        {/* Board Filter - Styled like a button for consistency */}
+                        <div className="relative w-full lg:w-40">
+                             <select 
+                                name="board" 
+                                value={filters.board} 
+                                onChange={handleFilterChange} 
+                                className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-1 focus:ring-primary-500 outline-none h-[38px] appearance-none cursor-pointer"
+                             >
+                                <option value="">כל הלוחות</option>
+                                {uniqueBoards.map(b => <option key={b} value={b}>{b}</option>)}
+                            </select>
+                            <ChevronDownIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        </div>
+
                         <div className="w-full lg:w-48">
                             <LocationSelector 
                                 selectedLocations={filters.locations} 
@@ -573,6 +621,13 @@ const PublicationsReportView: React.FC = () => {
                     </div>
                 </div>
             </div>
+            
+             <JobFieldSelector
+                value={null} // Controlled locally if needed, or null for general usage
+                onChange={handleJobFieldSelect}
+                isModalOpen={isJobFieldSelectorOpen}
+                setIsModalOpen={setIsJobFieldSelectorOpen}
+            />
         </div>
     );
 };

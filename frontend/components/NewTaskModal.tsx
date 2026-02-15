@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useRef, useId } from 'react';
 import { XMarkIcon, CalendarDaysIcon, ClockIcon, Microsoft365Icon, OutlookTaskIcon, GoogleCalendarIcon, ClipboardDocumentCheckIcon } from './Icons';
 
@@ -158,7 +159,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
             >
                 <form onSubmit={handleSubmit} className="flex flex-col h-full overflow-hidden">
                     <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0">
-                        <h2 id={titleId} className="text-xl font-bold text-text-default">{isTaskMode ? 'יצירת משימה חדשה' : 'שליחת הודעה / תזכורת'}</h2>
+                        <h2 id={titleId} className="text-xl font-bold text-text-default">יצירת פעילות חדשה (הודעה / משימה)</h2>
                          <button ref={closeButtonRef} type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור">
                             <XMarkIcon className="w-6 h-6" />
                         </button>

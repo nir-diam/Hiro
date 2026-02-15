@@ -19,6 +19,7 @@ const JobCluster = sequelize.define(
       allowNull: false,
       references: { model: JobCategory, key: 'id' },
     },
+    embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {
     tableName: 'job_clusters',

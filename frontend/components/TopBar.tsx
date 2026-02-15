@@ -9,6 +9,7 @@ import {
 import { notificationsData } from './NotificationCenter';
 import { specs } from '../data/specs';
 import SpecDrawer from './SpecDrawer';
+import HelpCenterDrawer from './HelpCenterDrawer';
 
 
 const ActionButton: React.FC<{ children: React.ReactNode; tooltip: string; hasNotification?: boolean; notificationCount?: number; onClick?: () => void; 'aria-expanded'?: boolean; className?: string }> = ({ children, tooltip, hasNotification, notificationCount, onClick, className = '', ...props }) => (
@@ -77,6 +78,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
     const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
     const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
     const [isSpecDrawerOpen, setIsSpecDrawerOpen] = useState(false);
+    const [isHelpCentreOpen, setIsHelpCentreOpen] = useState(false);
     const [shouldCrash, setShouldCrash] = useState(false);
     
     const userMenuRef = useRef<HTMLDivElement>(null);
@@ -159,7 +161,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                         </div>
                     )}
 
-                    <ActionButton tooltip="פנייה לתמיכה" onClick={() => setShouldCrash(true)}>
+                    <ActionButton tooltip="פנייה לתמיכה" onClick={() => setIsHelpCentreOpen(true)}>
                         <QuestionMarkCircleIcon className="w-6 h-6" />
                     </ActionButton>
                     
@@ -184,7 +186,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                         <PaperAirplaneIcon className="w-6 h-6" />
                     </ActionButton>
                     <ActionButton 
-                        tooltip="מרכז הודעות" 
+                        tooltip="מרכז עדכונים ומשימות" 
                         hasNotification={unreadCount > 0} 
                         notificationCount={unreadCount}
                         onClick={() => navigate('/notifications')}
@@ -234,6 +236,10 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                 isOpen={isSpecDrawerOpen} 
                 onClose={() => setIsSpecDrawerOpen(false)} 
                 spec={currentSpec} 
+            />
+            <HelpCenterDrawer
+                isOpen={isHelpCentreOpen}
+                onClose={() => setIsHelpCentreOpen(false)}
             />
         </>
     );

@@ -1,4 +1,5 @@
 
+// ... existing imports
 import React, { useState } from 'react';
 import { useLocation, useSearchParams, useNavigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
@@ -15,9 +16,11 @@ import { useSavedSearches } from './context/SavedSearchesContext';
 import SendMessageModal from './components/SendMessageModal';
 import CreateJobAlertModal from './components/CreateJobAlertModal';
 import { useLanguage } from './context/LanguageContext';
+import { FinanceProvider } from './context/FinanceContext';
+import { PromptProvider } from './context/PromptContext';
 
 
-export type PageType = 'list' | 'profile' | 'new' | 'login' | 'jobs' | 'new-job' | 'clients' | 'new-client' | 'notifications' | 'company-settings' | 'coordinators-settings' | 'coordinator-profile' | 'admin-dashboard' | 'admin-client-form' | 'message-templates' | 'event-types-settings' | 'candidate-pool' | 'job-board';
+export type PageType = 'list' | 'profile' | 'new' | 'login' | 'jobs' | 'new-job' | 'clients' | 'new-client' | 'notifications' | 'company-settings' | 'coordinators-settings' | 'coordinator-profile' | 'admin-dashboard' | 'admin-client-form' | 'message-templates' | 'event-types-settings' | 'candidate-pool' | 'job-board' | 'finance';
 
 const AppContent: React.FC = () => {
     const location = useLocation();
@@ -26,6 +29,7 @@ const AppContent: React.FC = () => {
     const [searchParams] = useSearchParams();
     const { t } = useLanguage();
     
+    // ... (keep existing state hooks) ...
     const { 
         activeView, isMatchingJobs, isScreening, contentAreaRef, 
         handleSetActiveView, handleMatchingClick, handleScreeningClick, 
@@ -42,8 +46,6 @@ const AppContent: React.FC = () => {
     } = useUIState();
 
     const [events, setEvents] = useState<Event[]>(initialEventsData);
-
-    // --- Favorites State (Lifted Up) ---
     const [favorites, setFavorites] = useState<Set<number>>(new Set());
 
     const toggleFavorite = (id: number) => {
@@ -57,8 +59,8 @@ const AppContent: React.FC = () => {
             return newSet;
         });
     };
-    // -----------------------------------
     
+    // Breadcrumbs Logic
     const breadcrumbs = React.useMemo(() => {
         const pathParts = location.pathname.split('/').filter(p => p);
         const crumbs = [{ label: t('breadcrumbs.home'), path: '/dashboard' }];
@@ -66,10 +68,16 @@ const AppContent: React.FC = () => {
         if (pathParts[0] === 'dashboard') {
              crumbs.push({ label: t('breadcrumbs.dashboard'), path: '/dashboard' });
         }
+        if (pathParts[0] === 'finance') {
+             crumbs.push({ label: 'ניהול כספים', path: '/finance/dashboard' });
+             if(pathParts[1] === 'dashboard') crumbs.push({ label: 'לוח בקרה', path: '/finance/dashboard' });
+             if(pathParts[1] === 'invoices') crumbs.push({ label: 'חשבוניות וגבייה', path: '/finance/invoices' });
+             if(pathParts[1] === 'commissions') crumbs.push({ label: 'עמלות רכזות', path: '/finance/commissions' });
+        }
         if (pathParts[0] === 'candidates') {
             crumbs.push({ label: t('breadcrumbs.candidates_list'), path: '/candidates' });
+            // ... existing candidate crumbs logic
             const savedSearchId = searchParams.get('savedSearchId');
-            
             if (pathParts[1] && pathParts[1] !== 'new') {
                 crumbs.push({ label: t('breadcrumbs.candidate_profile'), path: `/candidates/${pathParts[1]}` });
             } else if (savedSearchId) {
@@ -81,6 +89,7 @@ const AppContent: React.FC = () => {
                 crumbs.push({ label: t('breadcrumbs.new_candidate'), path: '/candidates/new' });
             }
         }
+        // ... (Keep existing breadcrumb logic for other routes) ...
          if (pathParts[0] === 'candidate-pool') {
             crumbs.push({ label: t('breadcrumbs.candidate_pool'), path: '/candidate-pool' });
         }
@@ -183,12 +192,10 @@ const AppContent: React.FC = () => {
         closeJobAlertModal();
     };
 
-    // Determine if we should show the main app shell (Sidebar/TopBar)
-    // Pages starting with /p/ (public profile), /login, /candidate-portal, /portal/manager, /post-job
-    // are "standalone" layouts.
     const isStandalonePage = 
         location.pathname.startsWith('/p/') || 
         location.pathname === '/login' || 
+        location.pathname === '/landing' ||
         location.pathname.startsWith('/candidate-portal') ||
         location.pathname.startsWith('/portal/manager') ||
         location.pathname === '/post-job';
@@ -197,59 +204,8 @@ const AppContent: React.FC = () => {
         return (
             <div className="h-screen w-screen overflow-hidden bg-bg-default text-text-default" dir="rtl">
                 <div className="h-full w-full overflow-y-auto">
-                    <AppRoutes 
-                        openSummaryDrawer={openSummaryDrawer}
-                        handleSaveJob={handleSaveJob}
-                        handleSaveClient={handleSaveClient}
-                        setActiveView={setActiveView}
-                        activeView={activeView}
-                        handleSetActiveView={handleSetActiveView}
-                        handleMatchingClick={handleMatchingClick}
-                        handleScreeningClick={handleScreeningClick}
-                        contentAreaRef={contentAreaRef}
-                        isMatchingJobs={isMatchingJobs}
-                        setIsMatchingJobs={setIsMatchingJobs}
-                        isScreening={isScreening}
-                        setIsScreening={setIsScreening}
-                        events={events}
-                        setEvents={setEvents}
-                        onOpenNewTask={openNewTask}
-                        openMessageModal={openMessageModal}
-                        openJobAlertModal={openJobAlertModal}
-                        favorites={favorites}
-                        toggleFavorite={toggleFavorite}
-                    />
-                </div>
-                {/* Global Modals for standalone pages if needed */}
-                {isMessageModalOpen && messageModalConfig && (
-                    <SendMessageModal
-                        isOpen={isMessageModalOpen}
-                        onClose={closeMessageModal}
-                        mode={messageModalConfig.mode}
-                        candidateName={messageModalConfig.candidateName}
-                        candidatePhone={messageModalConfig.candidatePhone}
-                    />
-                )}
-            </div>
-        );
-    }
-
-    return (
-        <div className="flex h-screen bg-bg-default text-text-default" dir="rtl">
-            <Sidebar 
-                isSidebarOpen={isSidebarOpen}
-                onClose={toggleSidebar}
-            />
-            <div className="flex-1 flex flex-col relative overflow-hidden">
-                <TopBar 
-                    breadcrumbs={breadcrumbs} 
-                    onOpenPreferences={openPreferences}
-                    onOpenNewTask={openNewTask}
-                    onToggleSidebar={toggleSidebar}
-                />
-                <div id="main-scroll-container" className="flex-1 overflow-y-auto">
-                    <main className="flex-1 p-3 md:p-6">
-                        <AppRoutes 
+                    <PromptProvider>
+                        <AppRoutes
                             openSummaryDrawer={openSummaryDrawer}
                             handleSaveJob={handleSaveJob}
                             handleSaveClient={handleSaveClient}
@@ -271,41 +227,102 @@ const AppContent: React.FC = () => {
                             favorites={favorites}
                             toggleFavorite={toggleFavorite}
                         />
-                    </main>
+                    </PromptProvider>
                 </div>
+                {isMessageModalOpen && messageModalConfig && (
+                    <SendMessageModal
+                        isOpen={isMessageModalOpen}
+                        onClose={closeMessageModal}
+                        mode={messageModalConfig.mode}
+                        candidateName={messageModalConfig.candidateName}
+                        candidatePhone={messageModalConfig.candidatePhone}
+                    />
+                )}
             </div>
-            {isPreferencesOpen && <PreferencesModal onClose={closePreferences} />}
-            <NewTaskModal 
-                isOpen={isNewTaskOpen} 
-                onClose={closeNewTask} 
-                onSave={handleSaveTask}
-                onOpenCandidateSummary={openSummaryDrawer}
-            />
-            <CandidateSummaryDrawer
-                isOpen={isSummaryDrawerOpen}
-                onClose={closeSummaryDrawer}
-                candidate={summaryCandidate}
-                onViewFullProfile={handleViewFullProfileFromDrawer}
-                onOpenMessageModal={openMessageModal}
-                isFavorite={summaryCandidate ? favorites.has(summaryCandidate.id) : false}
-                onToggleFavorite={toggleFavorite}
-            />
-             {isMessageModalOpen && messageModalConfig && (
-                <SendMessageModal
-                    isOpen={isMessageModalOpen}
-                    onClose={closeMessageModal}
-                    mode={messageModalConfig.mode}
-                    candidateName={messageModalConfig.candidateName}
-                    candidatePhone={messageModalConfig.candidatePhone}
+        );
+    }
+
+    return (
+        <FinanceProvider>
+            <div className="flex h-screen bg-bg-default text-text-default" dir="rtl">
+                <Sidebar 
+                    isSidebarOpen={isSidebarOpen}
+                    onClose={toggleSidebar}
                 />
-            )}
-            <CreateJobAlertModal 
-                isOpen={isJobAlertModalOpen}
-                onClose={closeJobAlertModal}
-                onSave={handleSaveAlert}
-                config={jobAlertModalConfig}
-            />
-        </div>
+                <div className="flex-1 flex flex-col relative overflow-hidden">
+                    <TopBar 
+                        breadcrumbs={breadcrumbs} 
+                        onOpenPreferences={openPreferences}
+                        onOpenNewTask={openNewTask}
+                        onToggleSidebar={toggleSidebar}
+                    />
+                    <div
+                        id="main-scroll-container"
+                        className="flex-1 overflow-y-auto"
+                        // Prevent browser scroll anchoring from jumping while React re-renders
+                        style={{ overflowAnchor: 'none' } as any}
+                    >
+                        <main className="flex-1 p-3 md:p-6">
+                            <PromptProvider>
+                                <AppRoutes 
+                                    openSummaryDrawer={openSummaryDrawer}
+                                    handleSaveJob={handleSaveJob}
+                                    handleSaveClient={handleSaveClient}
+                                    setActiveView={setActiveView}
+                                    activeView={activeView}
+                                    handleSetActiveView={handleSetActiveView}
+                                    handleMatchingClick={handleMatchingClick}
+                                    handleScreeningClick={handleScreeningClick}
+                                    contentAreaRef={contentAreaRef}
+                                    isMatchingJobs={isMatchingJobs}
+                                    setIsMatchingJobs={setIsMatchingJobs}
+                                    isScreening={isScreening}
+                                    setIsScreening={setIsScreening}
+                                    events={events}
+                                    setEvents={setEvents}
+                                    onOpenNewTask={openNewTask}
+                                    openMessageModal={openMessageModal}
+                                    openJobAlertModal={openJobAlertModal}
+                                    favorites={favorites}
+                                    toggleFavorite={toggleFavorite}
+                                />
+                            </PromptProvider>
+                        </main>
+                    </div>
+                </div>
+                {isPreferencesOpen && <PreferencesModal onClose={closePreferences} />}
+                <NewTaskModal 
+                    isOpen={isNewTaskOpen} 
+                    onClose={closeNewTask} 
+                    onSave={handleSaveTask}
+                    onOpenCandidateSummary={openSummaryDrawer}
+                />
+                <CandidateSummaryDrawer
+                    isOpen={isSummaryDrawerOpen}
+                    onClose={closeSummaryDrawer}
+                    candidate={summaryCandidate}
+                    onViewFullProfile={handleViewFullProfileFromDrawer}
+                    onOpenMessageModal={openMessageModal}
+                    isFavorite={summaryCandidate ? favorites.has(summaryCandidate.id) : false}
+                    onToggleFavorite={toggleFavorite}
+                />
+                {isMessageModalOpen && messageModalConfig && (
+                    <SendMessageModal
+                        isOpen={isMessageModalOpen}
+                        onClose={closeMessageModal}
+                        mode={messageModalConfig.mode}
+                        candidateName={messageModalConfig.candidateName}
+                        candidatePhone={messageModalConfig.candidatePhone}
+                    />
+                )}
+                <CreateJobAlertModal 
+                    isOpen={isJobAlertModalOpen}
+                    onClose={closeJobAlertModal}
+                    onSave={handleSaveAlert}
+                    config={jobAlertModalConfig}
+                />
+            </div>
+        </FinanceProvider>
     );
 };
 

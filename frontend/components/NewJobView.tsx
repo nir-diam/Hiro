@@ -1148,6 +1148,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const navigate = useNavigate();
     const { jobId } = useParams<{ jobId: string }>();
     const { t } = useLanguage();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
 
     const [formData, setFormData] = useState(initialJobState);
     const [activeSection, setActiveSection] = useState('general-info');
@@ -1173,6 +1174,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
     // Manual Question Edit State
     const [manualEditState, setManualEditState] = useState<{isOpen: boolean, question: Question | null}>({ isOpen: false, question: null });
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
     const navRef = useRef<HTMLDivElement>(null);
 
@@ -1650,14 +1653,124 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         setFormData(prev => ({ ...prev, locations: newLocations }));
     };
 
-    const handleSaveAndContinue = () => { 
-        onSave(formData); 
-        navigate(`/jobs/${formData.jobId}/publish`);
+    const buildJobPayload = () => {
+        const field = formData.jobField;
+        const cityLocation = formData.locations.find(loc => loc.type === 'city');
+        const baseLocation = cityLocation?.value || formData.locations[0]?.value || 'תל אביב';
+        const genderValue = (() => {
+            const includesMale = formData.gender.includes('male');
+            const includesFemale = formData.gender.includes('female');
+            if (includesMale && !includesFemale) return 'זכר';
+            if (includesFemale && !includesMale) return 'נקבה';
+            return 'לא משנה';
+        })();
+        const requirements = (formData.requirements || '')
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(Boolean);
+        const contactObjects = mockContacts.filter(contact => formData.contacts.includes(contact.id));
+        const recruiterName = mockInternalRecruiters.find(r => formData.assignedRecruiters.includes(r.id))?.name || 'מערכת';
+        const accountManagerName = mockAccountManagers.find(m => formData.assignedAccountManagers.includes(m.id))?.name || 'מערכת';
+
+        return {
+            title: formData.jobTitle || 'משרה חדשה',
+            client: formData.clientName || 'לקוח כללי',
+            field: field?.category || '',
+            role: field?.role || '',
+            priority: formData.priority,
+            clientType: 'כללי',
+            city: baseLocation,
+            region: '',
+            gender: genderValue,
+            mobility: formData.mobility === 'חובה',
+            licenseType: formData.drivingLicense === 'לא חשוב' ? '' : formData.drivingLicense,
+            postingCode: formData.postingCode,
+            validityDays: 30,
+            recruitingCoordinator: recruiterName,
+            accountManager: accountManagerName,
+            salaryMin: formData.salaryMin,
+            salaryMax: formData.salaryMax,
+            ageMin: formData.ageMin,
+            ageMax: formData.ageMax,
+            openPositions: 1,
+            status: formData.status === 'פעילה' ? 'פתוחה' : formData.status,
+            associatedCandidates: 0,
+            waitingForScreening: 0,
+            activeProcess: 0,
+            openDate: new Date().toISOString(),
+            recruiter: recruiterName,
+            location: baseLocation,
+            jobType: Array.isArray(formData.jobType) ? formData.jobType : [formData.jobType],
+            description: formData.jobDescription,
+            requirements,
+            rating: 0,
+            healthProfile: formData.healthProfile,
+            internalNotes: formData.internalNotes,
+            contacts: contactObjects,
+            recruitmentSources: formData.recruitmentSources.map(source => ({
+                id: source.id,
+                name: source.name,
+                status: source.status,
+                alertDays: source.alertDays,
+            })),
+            telephoneQuestions: formData.telephoneQuestions,
+            languages: formData.languages,
+        };
     };
 
-    const handleJustSave = () => {
-        onSave(formData);
-        alert('השינויים נשמרו בהצלחה');
+    const persistJob = async () => {
+        if (isEditing || !apiBase) {
+            return null;
+        }
+        setSaveMessage(null);
+        setIsSaving(true);
+        try {
+            const res = await fetch(`${apiBase}/api/jobs`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildJobPayload()),
+            });
+            if (!res.ok) {
+                const errorBody = await res.json().catch(() => null);
+                throw new Error(errorBody?.message || 'Failed to create job');
+            }
+            const createdJob = await res.json();
+            setSaveMessage('המשרה נוצרה בהצלחה');
+            onSave(createdJob);
+            return createdJob;
+        } catch (err) {
+            const message = (err as Error).message || 'Failed to create job';
+            console.error('[NewJobView] persistJob', err);
+            alert(message);
+            setSaveMessage(`שגיאה: ${message}`);
+            return null;
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const handleSaveAndContinue = async () => {
+        if (isEditing) {
+            onSave(formData);
+            navigate(`/jobs/${formData.jobId}/publish`);
+            return;
+        }
+        const created = await persistJob();
+        if (created) {
+            navigate(`/jobs/${created.id}/publish`);
+        }
+    };
+
+    const handleJustSave = async () => {
+        if (isEditing) {
+            onSave(formData);
+            alert('השינויים נשמרו בהצלחה');
+            return;
+        }
+        const created = await persistJob();
+        if (created) {
+            alert('המשרה נוצרה בהצלחה');
+        }
     };
 
     return (
@@ -1694,7 +1807,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         <SparklesIcon className="w-5 h-5"/>
                         <span>{t('new_job.smart_import')}</span>
                     </button>
-                     <button type="button" onClick={handleSaveAndContinue} className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md">{t('new_job.save_continue')}</button>
+                     <button
+                        type="button"
+                        onClick={handleSaveAndContinue}
+                        disabled={isSaving}
+                        className={`bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
+                    >
+                        {isSaving ? 'שומר...' : t('new_job.save_continue')}
+                    </button>
                 </div>
             </div>
 
@@ -2362,9 +2482,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 <div className="text-xs text-text-muted">
                     * שינויים נשמרים בטיוטה
                 </div>
-                <div className="flex gap-3">
-                    <button type="button" onClick={handleJustSave} className="bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition">
-                        שמור
+                <div className="flex flex-col-reverse gap-2 md:flex-row md:items-center md:gap-3">
+                    {saveMessage && (
+                        <div className="text-xs text-green-600 max-w-sm">
+                            {saveMessage}
+                        </div>
+                    )}
+                    <button
+                        type="button"
+                        onClick={handleJustSave}
+                        disabled={isSaving}
+                        className={`bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
+                    >
+                        {isSaving ? 'שומר...' : 'שמור'}
                     </button>
                     {/* Ensure floating AI button (z-40) is not covered. This bar is z-30. */}
                 </div>

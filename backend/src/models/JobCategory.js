@@ -14,6 +14,7 @@ const JobCategory = sequelize.define(
       allowNull: false,
       unique: true,
     },
+    embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {
     tableName: 'job_categories',

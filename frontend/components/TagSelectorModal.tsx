@@ -111,24 +111,24 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = ({ isOpen, onClose, on
                     ) : error ? (
                         <div className="text-center text-red-500 text-sm">{error}</div>
                     ) : (
-                        <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap gap-2">
                             {filteredTags.map(tag => (
-                                <button
-                                    key={tag}
-                                    onClick={() => handleToggleTag(tag)}
-                                    className={`px-3 py-1.5 rounded-full text-sm font-semibold transition-all duration-200 ${
-                                        selectedTags.includes(tag)
-                                            ? 'bg-primary-500 text-white shadow-sm'
-                                            : 'bg-bg-subtle text-text-default hover:bg-bg-hover'
-                                    }`}
-                                >
-                                    {tag}
-                                </button>
-                            ))}
+                            <button
+                                key={tag}
+                                onClick={() => handleToggleTag(tag)}
+                                className={`px-3 py-1.5 rounded-full text-sm font-semibold transition-all duration-200 ${
+                                    selectedTags.includes(tag)
+                                        ? 'bg-primary-500 text-white shadow-sm'
+                                        : 'bg-bg-subtle text-text-default hover:bg-bg-hover'
+                                }`}
+                            >
+                                {tag}
+                            </button>
+                        ))}
                             {!filteredTags.length && (
                                 <span className="text-sm text-text-muted">אין תגיות תואמות</span>
                             )}
-                        </div>
+                    </div>
                     )}
                 </main>
                 <footer className="flex justify-end items-center p-4 bg-bg-subtle border-t border-border-default">

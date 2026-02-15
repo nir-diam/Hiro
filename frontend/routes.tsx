@@ -1,10 +1,11 @@
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { useRoutes, Navigate, useParams, Outlet } from 'react-router-dom';
+// ... (imports)
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import { useRoutes, Navigate, useParams, Outlet, useNavigate } from 'react-router-dom';
 import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
 
 // Import all page components
-import CandidatesListView, { candidatesData } from './components/CandidatesListView';
+import CandidatesListView, { Candidate } from './components/CandidatesListView';
 import NewCandidateViewV2 from './components/NewCandidateViewV2';
 import JobsView from './components/JobsView';
 import NewJobView from './components/NewJobView';
@@ -14,6 +15,7 @@ import ClientsListView from './components/ClientsListView';
 import NewClientView from './components/NewClientView';
 import ClientProfileView from './components/ClientProfileView';
 import LoginScreen from './components/LoginScreen';
+import LandingPage from './components/LandingPage';
 import NotificationCenter from './components/NotificationCenter';
 import CompanySettingsView from './components/CompanySettingsView';
 import CoordinatorsSettingsView from './components/CoordinatorsSettingsView';
@@ -27,6 +29,8 @@ import AdminClientFormView from './components/AdminClientFormView';
 import MessageTemplatesView from './components/MessageTemplatesView';
 import EventTypesSettingsView from './components/EventTypesSettingsView';
 import RecruitmentSourcesSettingsView from './components/RecruitmentSourcesSettingsView';
+import QuestionnaireBuilderView from './components/QuestionnaireBuilderView'; 
+import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
 import CandidatePoolView from './components/CandidatePoolView';
 import ReferralsReportView from './components/ReferralsReportView';
 import PublicationsReportView from './components/PublicationsReportView';
@@ -37,10 +41,11 @@ import GeneralJobsView from './components/GeneralJobsView';
 import JobScreeningView from './components/JobScreeningView';
 import HiroAIChat from './components/HiroAIChat';
 import { SparklesIcon } from './components/Icons';
+import { generateExperienceSummaryForCandidate } from './services/experienceSummaryService';
 import ContactProfileView from './components/ContactProfileView';
 import CandidatePortalLayout from './components/CandidatePortalLayout';
 import CandidateLoginView from './components/CandidateLoginView';
-import CandidateSignup from './components/CandidateSignup'; // NEW IMPORT
+import CandidateSignup from './components/CandidateSignup';
 import CandidatePublicProfileView from './components/CandidatePublicProfileView';
 import CandidateRegistrationWizard from './components/CandidateRegistrationWizard'; 
 import CandidateOnboardingChat from './components/CandidateOnboardingChat';
@@ -48,10 +53,27 @@ import DashboardView from './components/DashboardView';
 import ExternalJobPostView from './components/ExternalJobPostView';
 import CommunicationCenterView from './components/CommunicationCenterView';
 
+// Finance Components
+import FinanceLayout from './components/FinanceLayout';
+import FinanceDashboard from './components/FinanceDashboard';
+import InvoicesView from './components/InvoicesView';
+import CommissionsView from './components/CommissionsView';
+
+// Settings Layout
+import SettingsLayout from './components/SettingsLayout';
+import AdminSettingsLayout from './components/AdminSettingsLayout';
+
 import AdminCompanyCorrectionsView from './components/AdminCompanyCorrectionsView';
 import AdminTagsView from './components/AdminTagsView';
+import AdminCandidateTagsView from './components/AdminCandidateTagsView';
 import AdminJobFieldsView from './components/AdminJobFieldsView';
 import AdminCompaniesView from './components/AdminCompaniesView';
+import AdminPromptsView from './components/AdminPromptsView';
+import AdminPicklistsView from './components/AdminPicklistsView';
+import AdminTagCorrectionsView from './components/AdminTagCorrectionsView';
+import AdminEventsView from './components/AdminEventsView';
+import AdminHelpCenterView from './components/AdminHelpCenterView';
+import AdminBusinessLogicView from './components/AdminBusinessLogicView';
 
 import ManagerLayout from './components/ManagerLayout';
 import ManagerDashboard from './components/ManagerDashboard';
@@ -67,16 +89,18 @@ import JobMatchingView from './components/JobMatchingView';
 import CandidateScreeningView, { screeningJobsData } from './components/CandidateScreeningView';
 import InterestedInJobs, { jobsData as interestedJobsData } from './components/InterestedInJobs';
 import ReferralsView from './components/ReferralsView';
-import EventsView, { type Event } from './components/EventsView';
+import EventsView, { type Event as EventsViewEvent } from './components/EventsView';
 import DocumentsView from './components/DocumentsView';
 import { MessageModalConfig } from './hooks/useUIState';
 import { JobAlertModalConfig } from './components/CreateJobAlertModal';
+import { deriveLocalCandidateId } from './utils/candidateId';
 
 interface Message {
     role: 'user' | 'model';
     text: string;
 }
 
+// ... (keep tool definitions and interface props) ...
 // 1. הגדרת הפונקציות עבור ה-AI (Tools)
 const updateCandidateFunctionDeclaration: FunctionDeclaration = {
   name: 'updateCandidateField',
@@ -110,7 +134,7 @@ const upsertWorkExperienceFunctionDeclaration: FunctionDeclaration = {
 };
 
 interface AppRoutesProps {
-    openSummaryDrawer: (candidateId: number) => void;
+    openSummaryDrawer: (candidate: Candidate | number) => void;
     handleSaveJob: (jobData: any) => void;
     handleSaveClient: (clientData: any) => void;
     setActiveView: (view: string) => void;
@@ -123,8 +147,8 @@ interface AppRoutesProps {
     setIsMatchingJobs: (val: boolean) => void;
     isScreening: boolean;
     setIsScreening: (val: boolean) => void;
-    events: Event[];
-    setEvents: React.Dispatch<React.SetStateAction<Event[]>>;
+    events: EventsViewEvent[];
+    setEvents: React.Dispatch<React.SetStateAction<EventsViewEvent[]>>;
     onOpenNewTask: () => void;
     openMessageModal: (config: MessageModalConfig) => void;
     openJobAlertModal: (config: JobAlertModalConfig) => void;
@@ -132,97 +156,227 @@ interface AppRoutesProps {
     toggleFavorite: (id: number) => void;
 }
 
-const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
-    // ... (rest of ProfilePageWrapper code remains unchanged)
-    // For brevity, including the existing content below:
-    const { candidateId } = useParams();
-    const numericId = candidateId ? parseInt(candidateId, 10) : 0;
-    
-    const initialData = {
-        id: numericId, 
-        fullName: "גדעון שפירא",
-        title: "מנהל שיווק דיגיטלי",
-        status: "עבר בדיקה ראשונית",
-        phone: "0544910468",
-        email: "gidon.shap@email.com",
-        address: "תל אביב - יפו",
-        idNumber: "",
-        maritalStatus: "-",
-        gender: "זכר",
-        drivingLicense: "-",
-        mobility: "-",
-        birthYear: "1989",
-        birthMonth: "יוני",
-        birthDay: "15",
-        age: "35",
-        employmentType: 'שכיר',
-        jobScope: 'מלאה',
-        availability: 'מיידי (עד חודש)',
-        physicalWork: 'כן/לא/פיזית מתונה',
-        tags: ['חשמל', 'תואר ראשון', 'תואר שני', 'ניהול מערכות מידע', 'יזמות', 'ניהול פרויקט'],
-        internalTags: ['פוטנציאל ניהולי', 'מתאים גם למכירות'],
-        salaryMin: 18000,
-        salaryMax: 20000,
-        recruiterNotes: 'נראה מועמד מבטיח, לתאם שיחה טלפונית בהקדם.',
-        candidateNotes: 'אני מאוד מתעניין בתפקידי ניהול מוצר ופתוח להצעות גם מתחום ה-Fintech.',
-        professionalSummary: 'מנהל שיווק דיגיטלי מנוסה with למעלה מ-5 שנות ניסיון בהובלת אסטרטגיות צמיחה וקמפיינים מרובי ערוצים. בעל מומחיות עמוקה ב-PPC, SEO, ואנליטיקה, עם יכולת מוכחת בניהול תקציבים, אופטימיזציה של משפכי המרה והובלת צוותים להישגים עסקיים משמעותיים.',
-        workExperience: [
-            { id: 1, title: 'מנהל שיווק', company: 'בזק', companyField: 'תקשורת', startDate: '2020-01', endDate: '2023-05', description: 'ניהול צוות של 5 עובדים, אחריות על קמפיינים דיגיטליים ותקציב שנתי של 2 מיליון ש"ח.' },
-            { id: 2, title: 'מנהל קמפיינים PPC', company: 'Wix', companyField: 'הייטק', startDate: '2018-06', endDate: '2019-12', description: 'ניהול קמפיינים בגוגל ופייסבוק, אופטימיזציה והפקת דוחות.' },
-            { id: 3, title: 'מתמחה בשיווק', company: 'AllJobs', companyField: 'גיוס', startDate: '2017-09', endDate: '2018-05', description: 'סיוע לצוות השיווק במשימות השוטפות.' },
+const initialData = {
+    id: 0,
+    fullName: "גדעון שפירא",
+    title: "מנהל שיווק דיגיטלי",
+    status: "עבר בדיקה ראשונית",
+    phone: "0544910468",
+    email: "gidon.shap@email.com",
+    address: "תל אביב - יפו",
+    idNumber: "",
+    maritalStatus: "-",
+    gender: "זכר",
+    drivingLicense: "-",
+    mobility: "-",
+    birthYear: "1989",
+    birthMonth: "יוני",
+    birthDay: "15",
+    age: "35",
+    employmentType: 'שכיר',
+    jobScope: 'מלאה',
+    availability: 'מיידי (עד חודש)',
+    physicalWork: 'כן/לא/פיזית מתונה',
+    tags: ['חשמל', 'תואר ראשון', 'תואר שני', 'ניהול מערכות מידע', 'יזמות', 'ניהול פרויקט'],
+    internalTags: ['פוטנציאל ניהולי', 'מתאים גם למכירות'],
+    salaryMin: 18000,
+    salaryMax: 20000,
+    recruiterNotes: 'נראה מועמד מבטיח, לתאם שיחה טלפונית בהקדם.',
+    candidateNotes: 'אני מאוד מתעניין בתפקידי ניהול מוצר ופתוח להצעות גם מתחום ה-Fintech.',
+    professionalSummary: '',
+    workExperience: [
+        { id: 1, title: 'מנהל שיווק', company: 'בזק', companyField: 'תקשורת', startDate: '2020-01', endDate: '2023-05', description: 'ניהול צוות של 5 עובדים, אחריות על קמפיינים דיגיטליים ותקציב שנתי של 2 מיליון ש"ח.' },
+        { id: 2, title: 'מנהל קמפיינים PPC', company: 'Wix', companyField: 'הייטק', startDate: '2018-06', endDate: '2019-12', description: 'ניהול קמפיינים בגוגל ופייסבוק, אופטימיזציה והפקת דוחות.' },
+        { id: 3, title: 'מתמחה בשיווק', company: 'AllJobs', companyField: 'גיוס', startDate: '2017-09', endDate: '2018-05', description: 'סיוע לצוות השיווק במשימות השוטפות.' },
+    ],
+    languages: [
+        { id: 1, name: 'עברית', level: 100, levelText: 'שפת אם / מעולה' },
+        { id: 2, name: 'אנגלית', level: 90, levelText: 'טוב מאוד' },
+    ],
+    education: [
+        { id: 1, value: '2020-2024 - אוניברסיטת תל אביב, תואר ראשון בתקשורת' },
+        { id: 2, value: '2018 - קורס שיווק דיגיטלי, HackerU' },
+    ],
+    softSkills: ['עבודת צוות', 'ניהול זמן', 'פתרון בעיות'],
+    techSkills: [
+        { id: 1, name: 'Google Ads', level: 85, levelText: 'טוב מאוד' },
+        { id: 2, name: 'פוטושופ', level: 75, levelText: 'טוב מאוד' },
+    ],
+    industryAnalysis: {
+        industries: [
+            { label: 'מסחר וקמעונאות', percentage: 60, color: 'bg-primary-500' },
+            { label: 'טכנולוגיה ושירותים', percentage: 40, color: 'bg-secondary-400' },
         ],
-        languages: [
-            { id: 1, name: 'עברית', level: 100, levelText: 'שפת אם / מעולה' },
-            { id: 2, name: 'אנגלית', level: 90, levelText: 'טוב מאוד' },
-        ],
-        education: [
-            { id: 1, value: '2020-2024 - אוניברסיטת תל אביב, תואר ראשון בתקשורת' },
-            { id: 2, value: '2018 - קורס שיווק דיגיטלי, HackerU' },
-        ],
-        softSkills: ['עבודת צוות', 'ניהול זמן', 'פתרון בעיות'],
-        techSkills: [
-            { id: 1, name: 'Google Ads', level: 85, levelText: 'טוב מאוד' },
-            { id: 2, name: 'פוטושופ', level: 75, levelText: 'טוב מאוד' },
-        ],
-        industryAnalysis: {
-            industries: [
-                { label: 'מסחר וקמעונאות', percentage: 60, color: 'bg-primary-500' },
-                { label: 'טכנולוגיה ושירותים', percentage: 40, color: 'bg-secondary-400' },
-            ],
-            smartTags: {
-                domains: ['שיווק דיגיטלי', 'ניהול'],
-                orgDNA: { label: 'ארגוני Enterprise', subLabel: 'ניסיון בחברות גדולות' }
-            }
+        smartTags: {
+            domains: ['שיווק דיגיטלי', 'ניהול'],
+            orgDNA: { label: 'ארגוני Enterprise', subLabel: 'ניסיון בחברות גדולות' }
         }
+    }
+};
+
+const ensureArray = (value: any, fallback: any[]) => Array.isArray(value) ? value : fallback;
+
+const normalizeCandidatePayload = (payload: any) => ({
+    ...initialData,
+    ...payload,
+    tags: ensureArray(payload?.tags, initialData.tags),
+    internalTags: ensureArray(payload?.internalTags, initialData.internalTags),
+    workExperience: ensureArray(payload?.workExperience, initialData.workExperience),
+    languages: ensureArray(payload?.languages, initialData.languages),
+    education: ensureArray(payload?.education, initialData.education),
+    industryAnalysis: payload?.industryAnalysis || initialData.industryAnalysis,
+    backendId: payload?.id,
+});
+
+const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
+    const params = useParams();
+    const urlId = params.candidateId;
+    const navigate = useNavigate();
+    console.log('ProfilePageWrapper render', { urlId, params });
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [formData, setFormData] = useState<any>(initialData);
+    const [profiles, setProfiles] = useState<any[]>([]);
+    const [activeProfileId, setActiveProfileId] = useState<string | number | null>(null);
+    const [isCandidateLoading, setIsCandidateLoading] = useState(false);
+    const [candidateFetchError, setCandidateFetchError] = useState<string | null>(null);
+    const [isUpdatingCandidate, setIsUpdatingCandidate] = useState(false);
+    const [candidateUpdateMessage, setCandidateUpdateMessage] = useState<string | null>(null);
+
+    const loadProfilesForUser = useCallback(async (userId?: string | number) => {
+        if (!userId || !apiBase) {
+            setProfiles([]);
+            return;
+        }
+        try {
+            const res = await fetch(`${apiBase}/api/candidates/by-user/${userId}`);
+            if (!res.ok) return;
+            const payload = await res.json();
+            const list = Array.isArray(payload) ? payload : payload ? [payload] : [];
+            const normalizedList = list
+                .map(normalizeCandidatePayload)
+                .map(candidate => ({
+                    ...candidate,
+                    backendId: candidate.backendId || candidate.id,
+                }));
+            setProfiles(normalizedList);
+            setActiveProfileId(prev => prev ?? normalizedList[0]?.backendId ?? normalizedList[0]?.id ?? null);
+        } catch (err) {
+            console.error('Failed to load candidate profiles', err);
+        }
+    }, [apiBase]);
+
+    const authHeaders = () => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
     };
 
-    const [formData, setFormData] = useState(initialData);
+    const fetchCandidate = useCallback(async (signal?: AbortSignal, options?: { showLoading?: boolean }) => {
+        if (!urlId) {
+            setCandidateFetchError('מזהה המועמד חסר.');
+            return;
+        }
+            if (!apiBase) {
+                setCandidateFetchError('כתובת ה-API לא מוגדרת.');
+                return;
+            }
+
+        const showLoading = options?.showLoading ?? true;
+        if (showLoading) {
+            setIsCandidateLoading(true);
+            setCandidateFetchError(null);
+        }
+
+            try {
+            const response = await fetch(`${apiBase}/api/candidates/${urlId}`, { signal });
+                if (!response.ok) {
+                    throw new Error('לא ניתן למצוא את המועמד המבוקש.');
+                }
+
+                const payload = await response.json();
+                const normalized = normalizeCandidatePayload(payload);
+                const localId = deriveLocalCandidateId(payload.id ?? payload.userId, 0);
+
+            if (!signal?.aborted) {
+                setFormData({
+                    ...normalized,
+                    id: localId,
+                    backendId: payload.id, // Keep the real UUID
+                });
+                setActiveProfileId(payload.id ?? payload.backendId ?? normalized.backendId ?? null);
+            }
+
+                if (payload.userId) {
+                    void loadProfilesForUser(payload.userId);
+                }
+            } catch (error: any) {
+            if (!signal?.aborted) {
+                    setCandidateFetchError(error.message || 'תקלה בטעינת המועמד.');
+                }
+            } finally {
+            if (!signal?.aborted && showLoading) {
+                    setIsCandidateLoading(false);
+                }
+            }
+    }, [apiBase, loadProfilesForUser, urlId]);
 
     useEffect(() => {
-        const candidateFromList = candidatesData.find(c => c.id === numericId);
-        if (candidateFromList) {
-            setFormData(prev => ({
-                ...prev,
-                id: candidateFromList.id,
-                fullName: candidateFromList.name,
-                title: candidateFromList.title,
-                status: candidateFromList.status,
-                phone: candidateFromList.phone || prev.phone,
-                address: candidateFromList.address || prev.address,
-                tags: candidateFromList.tags,
-                internalTags: candidateFromList.internalTags,
-                industryAnalysis: candidateFromList.industryAnalysis ? {
-                    industries: candidateFromList.industryAnalysis.industries.map((ind: any, i: number) => ({
-                         ...ind,
-                         color: i === 0 ? 'bg-primary-500' : 'bg-secondary-400'
-                    })),
-                    smartTags: candidateFromList.industryAnalysis.smartTags || prev.industryAnalysis.smartTags
-                } : prev.industryAnalysis
-            }));
-        } else {
-            setFormData({ ...initialData, id: numericId });
+        const controller = new AbortController();
+        void fetchCandidate(controller.signal);
+        return () => controller.abort();
+    }, [fetchCandidate]);
+
+    useEffect(() => {
+        const handleCandidateRefresh = (event: Event) => {
+            const customEvent = event as CustomEvent;
+            const detail = customEvent.detail;
+            if (!detail) return;
+            if (!urlId) return;
+            const updatedId = detail.backendId || detail.id || detail.candidateId;
+            if (!updatedId) return;
+            if (String(updatedId) === String(urlId)) {
+                void fetchCandidate(undefined, { showLoading: false });
+            }
+        };
+
+        window.addEventListener('candidate-data-refreshed', handleCandidateRefresh);
+        return () => window.removeEventListener('candidate-data-refreshed', handleCandidateRefresh);
+    }, [fetchCandidate, urlId]);
+
+    const handleSaveCandidate = useCallback(async () => {
+        if (!urlId) {
+            setCandidateUpdateMessage('מזהה המועמד חסר.');
+            return;
         }
-    }, [numericId]);
+        if (!apiBase) {
+            setCandidateUpdateMessage('כתובת ה-API לא מוגדרת.');
+            return;
+        }
+
+        setIsUpdatingCandidate(true);
+        setCandidateUpdateMessage(null);
+
+        try {
+            const response = await fetch(`${apiBase}/api/candidates/${urlId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData),
+            });
+            if (!response.ok) {
+                const errBody = await response.json().catch(() => null);
+                throw new Error(errBody?.message || 'עדכון נכשל.');
+            }
+
+            const payload = await response.json();
+            const normalized = normalizeCandidatePayload(payload);
+            const localId = deriveLocalCandidateId(payload.id ?? payload.userId, formData.id);
+            setFormData({ ...normalized, id: localId, backendId: payload.id });
+            setCandidateUpdateMessage('השינויים נשמרו בהצלחה.');
+        } catch (error: any) {
+            setCandidateUpdateMessage(error?.message || 'עדכון נכשל.');
+        } finally {
+            setIsUpdatingCandidate(false);
+        }
+    }, [apiBase, urlId, formData]);
 
     const mockResumeData = {
         name: formData.fullName,
@@ -231,6 +385,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         experience: formData.workExperience.map(exp => 
              `<b>${exp.title}</b> ב-${exp.company} (${exp.companyField})<br/>${exp.startDate} - ${exp.endDate}<br/>${exp.description}`
         )
+        ,
+    workExperience: formData.workExperience,
+            resumeUrl: formData.resumeUrl || '',
+        candidateId: formData.backendId,
     };
     
     const handleTagsChange = (newTags: string[]) => {
@@ -239,6 +397,108 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     
     const handleInternalTagsChange = (newTags: string[]) => {
         setFormData(prev => ({ ...prev, internalTags: newTags }));
+    };
+
+    const handleProfileSwitch = (profileId: string | number) => {
+        setActiveProfileId(profileId);
+        const target = profiles.find(profile => (profile.backendId || profile.id) === profileId);
+        if (target?.backendId) {
+            navigate(`/candidates/${target.backendId}`);
+        }
+    };
+
+    const handleAddProfile = useCallback(async () => {
+        const name = window.prompt('מה שם הפרופיל החדש?');
+        if (!name || !name.trim()) return;
+        const payload: any = {
+            ...formData,
+            profileName: name.trim(),
+            userId: formData.userId,
+        };
+        delete payload.id;
+        delete payload.backendId;
+        if (!apiBase) return;
+        try {
+            const res = await fetch(`${apiBase}/api/candidates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'Failed to create profile');
+            }
+            const created = await res.json();
+            const normalizedCreated = normalizeCandidatePayload(created);
+            setProfiles(prev => {
+                const next = [...prev.filter(p => p.backendId !== normalizedCreated.backendId), normalizedCreated];
+                return next;
+            });
+            setActiveProfileId(normalizedCreated.backendId ?? normalizedCreated.id);
+            setFormData({ ...normalizedCreated, backendId: created.id });
+            void loadProfilesForUser(formData.userId);
+            navigate(`/candidates/${created.id}`);
+        } catch (err: any) {
+            console.error('Failed to add profile', err);
+        }
+    }, [apiBase, formData, loadProfilesForUser, navigate]);
+
+    const profileOptions = useMemo(() => profiles.map(profile => ({
+        id: profile.backendId || profile.id,
+        profileName: profile.profileName || profile.fullName || 'פרופיל',
+        profilePicture: profile.profilePicture,
+    })), [profiles]);
+
+    const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+    const [generateSummaryError, setGenerateSummaryError] = useState<string | null>(null);
+
+    const handleGenerateExperienceSummary = async () => {
+        const targetId = urlId || formData.backendId; 
+        console.log('handleGenerateExperienceSummary (routes.tsx) clicked', { 
+            urlId, 
+            backendId: formData.backendId,
+            targetId,
+            formDataId: formData.id 
+        });
+        
+        if (isGeneratingSummary) return;
+        if (!targetId || targetId === 'undefined' || targetId === 'null') {
+            console.warn('targetId is missing or invalid in routes.tsx', { urlId, backendId: formData.backendId });
+            setGenerateSummaryError('נא לשמור את המועמד לפני יצירת תקציר.');
+            return;
+        }
+
+        const exp = Array.isArray(formData.workExperience) && formData.workExperience.length > 0 ? formData.workExperience[0] : null;
+        const payload = {
+            title: exp?.title || formData.title || '',
+            company: exp?.company || '',
+            companyField: exp?.companyField || '',
+            description: exp?.description || '',
+        };
+
+        if (!payload.title && !payload.company && !payload.companyField) {
+            setGenerateSummaryError('הוסף תפקיד או חברה לפני שמפעילים את הכתיבה.');
+            return;
+        }
+
+        setIsGeneratingSummary(true);
+        setGenerateSummaryError(null);
+        try {
+            const summary = await generateExperienceSummaryForCandidate(targetId, payload);
+            if (summary) {
+                setFormData((prev: any) => ({ ...prev, professionalSummary: summary }));
+                // Trigger save on backend too
+                await fetch(`${import.meta.env.VITE_API_BASE || ''}/api/candidates/${targetId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ professionalSummary: summary }),
+                });
+            }
+        } catch (err: any) {
+            setGenerateSummaryError(err.message || 'שגיאה ביצירת תיאור ניסיון.');
+        } finally {
+            setIsGeneratingSummary(false);
+        }
     };
 
     const handleFormChange = (updatedData: any) => {
@@ -333,14 +593,27 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         switch (props.activeView) {
             case 'details':
                 return (
-                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
-                        <MainContent 
-                            formData={formData} 
-                            onFormChange={handleFormChange} 
-                            onInternalTagsChange={handleInternalTagsChange} 
-                        />
-                        <ResumeViewer resumeData={mockResumeData} onOpenMessageModal={props.openMessageModal} />
-                    </div>
+                    <>
+                        {candidateFetchError && (
+                            <div className="rounded-lg border border-red-200 bg-red-50 text-sm text-red-700 px-4 py-2 mb-4">
+                                {candidateFetchError}
+                            </div>
+                        )}
+                        {isCandidateLoading && (
+                            <div className="text-xs text-text-subtle mb-2">טוען מידע אודות המועמד...</div>
+                        )}
+                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
+                            <MainContent 
+                                formData={formData} 
+                                onFormChange={handleFormChange} 
+                                onInternalTagsChange={handleInternalTagsChange} 
+                                onGenerateExperienceSummary={handleGenerateExperienceSummary}
+                                isGeneratingSummary={isGeneratingSummary}
+                                generateSummaryError={generateSummaryError}
+                            />
+                            <ResumeViewer resumeData={mockResumeData} onOpenMessageModal={props.openMessageModal} />
+                        </div>
+                    </>
                 );
             case 'jobs':
                 return <InterestedInJobs onOpenNewTask={props.onOpenNewTask} />;
@@ -371,6 +644,13 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 isFavorite={props.favorites.has(formData.id)}
                 onToggleFavorite={() => props.toggleFavorite(formData.id)}
                 hideActions={props.isMatchingJobs || props.isScreening}
+                isSaving={isUpdatingCandidate}
+                onSaveCandidate={handleSaveCandidate}
+                saveStatusMessage={candidateUpdateMessage}
+                profiles={profileOptions}
+                activeProfileId={activeProfileId ?? formData.backendId ?? formData.id}
+                onSwitchProfile={handleProfileSwitch}
+                onAddProfile={handleAddProfile}
             />
             
             <div ref={props.contentAreaRef} className="scroll-mt-32"></div>
@@ -403,7 +683,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
 export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
     const element = useRoutes([
-        { path: '/', element: <Navigate to="/login" replace /> },
+        { path: '/', element: <Navigate to="/dashboard" replace /> },
         { path: '/dashboard', element: <DashboardView /> },
         { path: '/candidates', element: <CandidatesListView openSummaryDrawer={props.openSummaryDrawer} favorites={props.favorites} toggleFavorite={props.toggleFavorite} /> },
         { path: '/candidates/new', element: <NewCandidateViewV2 /> },
@@ -423,14 +703,40 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/clients/:clientId', element: <ClientProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/:clientId/contacts/:contactId', element: <ContactProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/notifications', element: <NotificationCenter onOpenCandidateSummary={props.openSummaryDrawer} /> },
-        { path: '/communications', element: <CommunicationCenterView /> },
+        { path: '/communications', element: <CommunicationCenterView onOpenCandidateSummary={props.openSummaryDrawer} /> },
+        
+        // --- FINANCE ROUTES ---
+        { 
+            path: '/finance', 
+            element: <FinanceLayout />,
+            children: [
+                { index: true, element: <Navigate to="dashboard" replace /> },
+                { path: 'dashboard', element: <FinanceDashboard /> },
+                { path: 'invoices', element: <InvoicesView /> },
+                { path: 'commissions', element: <CommissionsView /> },
+            ] 
+        },
+
+        // --- SETTINGS ROUTES (UPDATED) ---
+        { 
+            path: '/settings', 
+            element: <SettingsLayout />,
+            children: [
+                 { index: true, element: <Navigate to="company" replace /> },
+                 { path: 'company', element: <CompanySettingsView /> },
+                 { path: 'coordinators', element: <CoordinatorsSettingsView /> },
+                 { path: 'coordinators/:coordinatorId', element: <CoordinatorProfileView /> },
+                 { path: 'agreements', element: <AgreementTypesSettingsView /> }, // New Route
+                 { path: 'message-templates', element: <MessageTemplatesView /> },
+                 { path: 'event-types', element: <EventTypesSettingsView /> },
+                 { path: 'recruitment-sources', element: <RecruitmentSourcesSettingsView /> },
+                 { path: 'questionnaires', element: <QuestionnaireBuilderView /> }, 
+            ] 
+        },
+
         { path: '/login', element: <LoginScreen /> },
-        { path: '/settings/company', element: <CompanySettingsView /> },
-        { path: '/settings/coordinators', element: <CoordinatorsSettingsView /> },
-        { path: '/settings/coordinators/:coordinatorId', element: <CoordinatorProfileView /> },
-        { path: '/settings/message-templates', element: <MessageTemplatesView /> },
-        { path: '/settings/event-types', element: <EventTypesSettingsView /> },
-        { path: '/settings/recruitment-sources', element: <RecruitmentSourcesSettingsView /> },
+        { path: '/landing', element: <LandingPage /> }, 
+        
         { path: '/reports/referrals', element: <ReferralsReportView onOpenNewTask={props.onOpenNewTask} onOpenCandidateSummary={props.openSummaryDrawer} /> },
         { path: '/reports/publications', element: <PublicationsReportView /> },
         { path: '/reports/recruitment-sources', element: <RecruitmentSourcesReportView /> },
@@ -450,7 +756,24 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                 { path: 'candidates/:candidateId', element: <AdminCandidateProfileView /> },
                 { path: 'company-corrections', element: <AdminCompanyCorrectionsView /> },
                 { path: 'tags', element: <AdminTagsView /> },
+                { path: 'candidateTags', element: <AdminCandidateTagsView /> },
+                { path: 'picklists', element: <AdminPicklistsView /> },
+                { path: 'help-center', element: <AdminHelpCenterView /> },
+                { path: 'tag-corrections', element: <AdminTagCorrectionsView /> },
+                { path: 'events', element: <AdminEventsView /> },
+                { path: 'business-logic', element: <AdminBusinessLogicView /> },
                 { path: 'job-fields', element: <AdminJobFieldsView /> },
+                {
+                    path: 'settings',
+                    element: <AdminSettingsLayout />,
+                    children: [
+                        { index: true, element: <Navigate to="companies" replace /> },
+                        { path: 'companies', element: <AdminCompanyCorrectionsView /> },
+                        { path: 'tags', element: <AdminTagsView /> },
+                        { path: 'job-fields', element: <AdminJobFieldsView /> },
+                        { path: 'prompts', element: <AdminPromptsView /> },
+                    ],
+                },
             ] 
         },
         {
@@ -467,13 +790,13 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="login" replace /> },
                  { path: 'login', element: <CandidateLoginView /> },
-                 { path: 'signup', element: <CandidateSignup /> }, // New Route
+                 { path: 'signup', element: <CandidateSignup /> }, 
                  { path: 'profile', element: <CandidatePublicProfileView openJobAlertModal={props.openJobAlertModal} /> },
                  { path: 'register', element: <CandidateRegistrationWizard /> },
                  { path: 'onboarding', element: <CandidateOnboardingChat /> } 
             ]
         },
-        { path: '*', element: <Navigate to="/login" replace /> },
+        { path: '*', element: <Navigate to="/dashboard" replace /> },
     ]);
     return element;
 };

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Candidate, candidatesData } from '../components/CandidatesListView';
+import { Candidate } from '../components/CandidatesListView';
 import { JobAlertModalConfig } from '../components/CreateJobAlertModal';
 
 export type MessageMode = 'whatsapp' | 'sms' | 'email';
@@ -30,12 +30,24 @@ export const useUIState = () => {
     const openNewTask = () => setIsNewTaskOpen(true);
     const closeNewTask = () => setIsNewTaskOpen(false);
 
-    const openSummaryDrawer = (candidateId: number) => {
-        const candidate = candidatesData.find(c => c.id === candidateId);
-        if (candidate) {
-            setSummaryCandidate(candidate);
-            setIsSummaryDrawerOpen(true);
-        }
+    const createPlaceholderCandidate = (id: number): Candidate => ({
+        id,
+        backendId: undefined,
+        name: '',
+        avatar: '',
+        title: '',
+        status: '',
+        lastActivity: '',
+        source: '',
+        tags: [],
+        internalTags: [],
+        matchScore: 0,
+    });
+
+    const openSummaryDrawer = (candidateInput: Candidate | number) => {
+        const candidate = typeof candidateInput === 'number' ? createPlaceholderCandidate(candidateInput) : candidateInput;
+        setSummaryCandidate(candidate);
+        setIsSummaryDrawerOpen(true);
     };
 
     const closeSummaryDrawer = () => {

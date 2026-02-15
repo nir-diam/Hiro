@@ -21,11 +21,18 @@ const connectDb = async () => {
   require('../models/Client');
   require('../models/JobPublication');
   require('../models/Tag');
+  require('../models/TagHistory');
   require('../models/Chat');
   require('../models/ChatMessage');
   require('../models/JobCategory');
   require('../models/JobCluster');
   require('../models/JobRole');
+  require('../models/Prompt');
+  require('../models/PromptHistory');
+  require('../models/CandidateApplication');
+  require('../models/OrganizationTmp');
+  require('../models/OrganizationHistory');
+  require('../models/BusinessLogicRule');
 
   await sequelize.sync();
   console.log('PostgreSQL connected & models synced');

@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { PencilIcon, ArrowDownTrayIcon, TrashIcon, ChevronDownIcon, ArrowUpTrayIcon, PinIcon, PaperClipIcon, EyeIcon, CodeBracketIcon, EnvelopeIcon } from './Icons';
 import OriginalResume from './OriginalResume';
 import IndustryExperienceSummary from './IndustryExperienceSummary';
@@ -25,12 +25,20 @@ interface ResumeData {
     contact: string;
     summary: string;
     experience: string[];
+    education?: string[];
+    raw?: string;
+    candidateId?: string;
 }
 
 interface ResumeViewerProps {
     resumeData: ResumeData;
+    resumeFileUrl?: string;
     onOpenMessageModal?: (config: MessageModalConfig) => void;
     className?: string;
+    onDownloadResume?: () => void;
+    onUploadResume?: (file: File) => Promise<void>;
+    onResumeUploaded?: (updated: any) => void;
+    candidateId?: string | null;
 }
 
 // Mock Email Data based on the screenshot provided
@@ -40,102 +48,53 @@ const mockEmailData = {
     to: 'Sarit',
     toEmail: 'humand@app.civi.co.il',
     date: '19/11/2025 08:39',
-    subject: 'הודעת דוא"ל: אורלי חריף - 815297',
+    subject: '',
     content: `
         <div style="font-family: Arial, sans-serif; direction: rtl; text-align: right; color: #333; line-height: 1.5;">
-            <p style="font-weight: bold; margin-bottom: 10px;">Sarit</p>
-            <p>שלום רב,</p>
-            <p>קיבלת קובץ קורות חיים חדש למשרה שפרסמת דרך JobMaster.</p>
-            <p style="margin-top: 15px;">
-                מספר משרה: <strong>9584339</strong> - מחפש.ת להתחיל קריירה בתחום האדמיניסטרציה אבל אין לך ניסיון? זו ההזדמנות שלך! אנחנו, בחברת ...
-            </p>
-            <p style="margin-top: 15px;"><strong>תפקיד:</strong></p>
-            <p><strong>מכתב מקדים (אופציונלי):</strong></p>
-            <p><strong>תשובות לשאלות סינון (אופציונלי):</strong></p>
-            
-            <div style="margin-top: 20px;">
-                <a href="#" id="reply-btn" style="display: inline-block; background-color: #efefef; color: #333; text-decoration: none; padding: 5px 10px; border: 1px solid #ccc; border-radius: 3px; font-size: 12px; font-weight: bold;">השב למועמד/ת</a>
-            </div>
-
-            <p style="margin-top: 20px; font-size: 13px;">
-                מחפשים עוד מועמדים רלוונטיים? מאגר הפרופילים והקורות חיים של JobMaster כולל מאות אלפים מכל התחומים זמינים לגיוס מיידי!
-                <br/>
-                <a href="#" style="color: #0000EE; text-decoration: underline;">לאיתור מועמדים נוספים</a>
-            </p>
-
-            <p style="margin-top: 20px;">
-                בברכה,<br/>
-                צוות JobMaster<br/>
-                טלפון: 03-6343411<br/>
-                <a href="http://www.jobmaster.co.il" style="color: #0000EE;">www.jobmaster.co.il</a>
-            </p>
-            
-            <hr style="border: 0; border-top: 1px solid #ccc; margin: 20px 0;" />
-            
-            <div style="font-size: 12px; color: #666;">
-                דואר זה מיועד אל Sarit<br/>
-                נשלח אל: humand@app.civi.co.il<br/>
-                תאריך: 19-11-2025<br/>
-                JobMaster 2025
-            </div>
-            <p style="font-size: 11px; color: #999; margin-top: 10px;">
-                ג'ובמאסטר בע"מ. ג'ובמאסטר הוא שם מסחרי רשום של ג'ובמאסטר בע"מ. ג'ובמאסטר והלוגו של ג'ובמאסטר הם סימנים מסחריים רשומים של החברה.
-            </p>
+           
         </div>
     `,
     rawContent: `From: jobmaster.co.il <cv@jobmaster.co.il>
 Date: 19/11/2025 08:39
 To: Sarit <humand@app.civi.co.il>
-Subject: הודעת דוא"ל: אורלי חריף - 815297
-
-Sarit
-שלום רב,
-קיבלת קובץ קורות חיים חדש למשרה שפרסמת דרך JobMaster.
-מספר משרה: 9584339 - מחפש.ת להתחיל קריירה בתחום האדמיניסטרציה אבל אין לך ניסיון? זו ההזדמנות שלך! אנחנו, בחברת ...
-
-תפקיד:
-מכתב מקדים (אופציונלי):
-תשובות לשאלות סינון (אופציונלי):
-
-[השב למועמד/ת]
-
-מחפשים עוד מועמדים רלוונטיים? מאגר הפרופילים והקורות חיים של JobMaster כולל מאות אלפים מכל התחומים זמינים לגיוס מיידי!
-לאיתור מועמדים נוספים
-
-בברכה,
-צוות JobMaster
-טלפון: 03-6343411
-www.jobmaster.co.il
-
-----------------------------------------
-דואר זה מיועד אל Sarit
-נשלח אל: humand@app.civi.co.il
-תאריך: 19-11-2025
-JobMaster 2025
-ג'ובמאסטר בע"מ. ג'ובמאסטר הוא שם מסחרי רשום של ג'ובמאסטר בע"מ.`
+Subject: 
+`
 };
 
 
-const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageModal, className = "h-full" }) => {
+const ResumeViewer: React.FC<ResumeViewerProps> = ({
+  resumeData,
+  resumeFileUrl,
+  onOpenMessageModal,
+  className = "h-full",
+  onDownloadResume,
+  onUploadResume,
+  onResumeUploaded,
+  candidateId: candidateIdProp,
+}) => {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'resume' | 'email'>('resume');
   const [tagsHighlighted, setTagsHighlighted] = useState(true);
   const [resumeViewMode, setResumeViewMode] = useState<'parsed' | 'original'>('parsed');
-  const [resumeContentMode, setResumeContentMode] = useState<'resume' | 'summary'>('resume');
+    const [resumeContentMode, setResumeContentMode] = useState<'resume' | 'summary'>('resume');
+    const uploadInputRef = useRef<HTMLInputElement>(null);
   const [emailViewMode, setEmailViewMode] = useState<'formatted' | 'original'>('formatted');
   const [isIndustryModalOpen, setIsIndustryModalOpen] = useState(false);
   const [isPinned, setIsPinned] = useState(false);
   const [copyButtonText, setCopyButtonText] = useState(t('resume.copy_cv'));
+  const [uploading, setUploading] = useState(false);
+  const uploadingLabel = t('resume.uploading') || 'טוען קובץ...';
 
   // Update copyButtonText when language changes
   useEffect(() => {
     setCopyButtonText(t('resume.copy_cv'));
   }, [t]);
 
-  const ActionButton: React.FC<{ title: string; children: React.ReactNode; onClick?: () => void; isActive?: boolean }> = ({ title, children, onClick, isActive = false }) => (
+  const ActionButton: React.FC<{ title: string; children: React.ReactNode; onClick?: () => void; isActive?: boolean; disabled?: boolean }> = ({ title, children, onClick, isActive = false, disabled = false }) => (
     <button
         title={title}
         onClick={onClick}
+        disabled={disabled}
         className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors duration-200 shadow-sm ${
             isActive 
             ? 'bg-primary-600 text-white' 
@@ -146,8 +105,54 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
     </button>
   );
 
-  const finalResumeData = resumeData || { name: '', contact: '', summary: '', experience: [] };
+  const apiBase = import.meta.env.VITE_API_BASE || '';
+  const effectiveResumeUrl = resumeFileUrl || resumeData?.resumeUrl || '';
+  const finalResumeData = resumeData
+      ? { ...resumeData, resumeUrl: effectiveResumeUrl }
+      : { name: '', contact: '', summary: '', experience: [], education: [], resumeUrl: effectiveResumeUrl };
   
+  const getAuthHeaders = () => {
+    if (typeof window === 'undefined') return {};
+    const token = localStorage.getItem('token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const crc32base64 = async (file: File) => {
+    const table = new Uint32Array(256).map((_, n) => {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      return c >>> 0;
+    });
+    const buf = new Uint8Array(await file.arrayBuffer());
+    let crc = 0 ^ -1;
+    for (let i = 0; i < buf.length; i++) {
+      crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff];
+    }
+    crc = (crc ^ -1) >>> 0;
+    const bytes = new Uint8Array(4);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, crc);
+    return btoa(String.fromCharCode(...bytes));
+  };
+
+  const fetchCandidateData = async (id: string) => {
+    const candidateRes = await fetch(`${apiBase}/api/candidates/${id}`, {
+      method: 'GET',
+      headers: { ...getAuthHeaders() },
+    });
+
+    if (!candidateRes.ok) {
+      throw new Error('Failed to refresh candidate data');
+    }
+
+    return candidateRes.json();
+  };
+
+  const dispatchCandidateRefreshedEvent = (candidatePayload: any) => {
+    if (typeof window === 'undefined') return;
+    window.dispatchEvent(new CustomEvent('candidate-data-refreshed', { detail: candidatePayload }));
+  };
+
   const handleToggleView = () => {
     setResumeViewMode(prev => prev === 'parsed' ? 'original' : 'parsed');
   };
@@ -155,6 +160,91 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
   const handleToggleEmailView = () => {
       setEmailViewMode(prev => prev === 'formatted' ? 'original' : 'formatted');
   };
+
+    const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (onUploadResume) {
+      try {
+        await onUploadResume(file);
+        e.target.value = '';
+        return;
+      } catch (err) {
+        console.error('Upload failed', err);
+        alert('העלאת הקובץ נכשלה.');
+        return;
+      }
+    }
+
+    const targetId = candidateIdProp || resumeData.candidateId;
+    if (!targetId) {
+      alert('העלאת קובץ אינה זמינה כרגע.');
+      return;
+    }
+
+    const folder = 'resumes';
+    try {
+      setUploading(true);
+      const presignRes = await fetch(`${apiBase}/api/candidates/${targetId}/upload-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ fileName: file.name, contentType: file.type, folder }),
+      });
+      if (!presignRes.ok) throw new Error('Failed to get upload URL');
+
+      const { uploadUrl, key } = await presignRes.json();
+      const urlObj = new URL(uploadUrl);
+      const checksum = urlObj.searchParams.get('x-amz-checksum-crc32');
+      const checksumAlgo = urlObj.searchParams.get('x-amz-sdk-checksum-algorithm');
+      const headers: Record<string, string> = {};
+      if (file.type) headers['Content-Type'] = file.type;
+      if (checksum && checksumAlgo === 'CRC32') {
+        headers['x-amz-checksum-crc32'] = await crc32base64(file);
+        headers['x-amz-sdk-checksum-algorithm'] = 'CRC32';
+      }
+
+      const putRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: Object.keys(headers).length ? headers : undefined,
+        body: file,
+      });
+      if (!putRes.ok) throw new Error('Upload to S3 failed');
+
+      const attachRes = await fetch(`${apiBase}/api/candidates/${targetId}/media`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ key, type: 'resume' }),
+      });
+      if (!attachRes.ok) throw new Error('Failed to attach media');
+
+      const updated = await attachRes.json();
+      let refreshedCandidate = null;
+      try {
+        refreshedCandidate = await fetchCandidateData(targetId);
+      } catch (refreshError) {
+        console.warn('Could not refresh candidate data', refreshError);
+      }
+      const candidateSource = refreshedCandidate || updated;
+      const candidatePayload = {
+        ...candidateSource,
+        id: targetId,
+        backendId:
+          candidateSource?.backendId || candidateSource?.id || targetId,
+      };
+      onResumeUploaded?.(candidatePayload);
+      dispatchCandidateRefreshedEvent(candidatePayload);
+      e.target.value = '';
+    } catch (err: any) {
+      console.error('Upload failed', err);
+      alert(err?.message || 'העלאת הקובץ נכשלה.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const isDocxPreview = Boolean(finalResumeData.resumeUrl?.match(/\.(doc|docx)$/i));
+  const docxViewerUrl = isDocxPreview ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(finalResumeData.resumeUrl)}` : '';
 
   const handleCopyResume = () => {
     const textToCopy = [
@@ -192,7 +282,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
     }
   };
 
-  const highlightedSummary = finalResumeData.summary.replace(/עבודה עצמאית/g, `<span class="${tagsHighlighted ? 'bg-accent-100/70 px-1 rounded' : ''}">עבודה עצמאית</span>`);
+    const safeSummary = finalResumeData.summary || '';
+    const highlightedSummary = safeSummary.replace(/עבודה עצמאית/g, `<span class="${tagsHighlighted ? 'bg-accent-100/70 px-1 rounded' : ''}">עבודה עצמאית</span>`);
 
 
   return (
@@ -266,9 +357,25 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                         </button>
                     </div>
 
-                    <div className="flex items-center gap-1">
-                        <ActionButton title={t('resume.download')}><ArrowDownTrayIcon className="w-5 h-5"/></ActionButton>
-                        <ActionButton title={t('resume.upload')}><ArrowUpTrayIcon className="w-5 h-5"/></ActionButton>
+        <div className="flex items-center gap-1">
+                        <ActionButton title={t('resume.download')} onClick={() => {
+                            if (onDownloadResume) {
+                                onDownloadResume();
+                            } else if (effectiveResumeUrl) {
+                                window.open(effectiveResumeUrl, '_blank');
+                            } else {
+                                alert('אין קובץ להורדה.');
+                            }
+                        }}><ArrowDownTrayIcon className="w-5 h-5"/></ActionButton>
+                        <ActionButton title={t('resume.upload')} onClick={() => uploadInputRef.current?.click()} disabled={uploading}>
+                            <ArrowUpTrayIcon className="w-5 h-5"/>
+                        </ActionButton>
+                        {uploading && (
+                          <div className="flex items-center gap-1 text-xs font-semibold text-primary-700">
+                            <span className="w-4 h-4 border-2 border-primary-200 border-t-primary-600 rounded-full animate-spin" aria-hidden="true" />
+                            <span>{uploadingLabel}</span>
+                          </div>
+                        )}
                         <ActionButton 
                             title={isPinned ? t('resume.unpin') : t('resume.pin')}
                             onClick={() => setIsPinned(!isPinned)}
@@ -311,15 +418,45 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
                                           ))}
                                       </ul>
                                     </div>
+
+                                    {finalResumeData.education && finalResumeData.education.length > 0 && (
+                                        <div>
+                                            <h3 className="font-bold text-lg text-primary-700 mb-4 border-r-4 border-primary-500 pr-3">{t('section.education')}</h3>
+                                            <ul className="space-y-3">
+                                                {finalResumeData.education.map((edu, idx) => (
+                                                    <li key={idx} className="relative pr-4 border-r border-border-default/50">
+                                                        <div className="absolute -right-1.5 top-2 w-3 h-3 rounded-full bg-secondary-300 border-2 border-white"></div>
+                                                        <div dangerouslySetInnerHTML={{ __html: edu }} />
+                                                    </li>
+                                                ))}
+                                            </ul>
+                                        </div>
+                                    )}
                               </div>
                             ) : (
-                                <OriginalResume highlighted={tagsHighlighted} />
+                                finalResumeData.resumeUrl ? (
+                                    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
+                                        <div className="flex-1 min-h-[60vh] border border-border-default rounded-2xl overflow-hidden bg-black/5">
+                                            <iframe  style={{width: '100%', height: '1000px'}}
+                                                src={isDocxPreview ? docxViewerUrl : finalResumeData.resumeUrl}
+                                                title="Resume preview"
+                                                className="w-full h-full"
+                                            />
+                                        </div>
+                                        <div className="text-center text-xs text-text-muted">
+                                            לא תומך בתצוגה? <a className="text-primary-600 font-bold underline" href={finalResumeData.resumeUrl} target="_blank" rel="noreferrer">הורד את הקובץ המקורי</a>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <OriginalResume highlighted={tagsHighlighted} resumeData={finalResumeData} />
+                                )
                             )
                           )}
                           {resumeContentMode === 'summary' && (
                               <IndustryExperienceSummary 
                                   onBack={() => setResumeContentMode('resume')}
                                   onShowFullDetails={() => setIsIndustryModalOpen(true)} 
+                                  experiences={finalResumeData.experience.map((text) => ({ title: text }))}
                               />
                           )}
                       </div>
@@ -379,7 +516,22 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({ resumeData, onOpenMessageMo
               .custom-scrollbar-modal::-webkit-scrollbar-thumb:hover { background: rgb(var(--color-text-subtle)); }
           `}</style>
       </div>
-      {isIndustryModalOpen && <IndustryExperienceModal onClose={() => setIsIndustryModalOpen(false)} />}
+      {isIndustryModalOpen && (
+        <IndustryExperienceModal
+          onClose={() => setIsIndustryModalOpen(false)}
+          experiences={finalResumeData.workExperience || finalResumeData.experience}
+          candidateName={finalResumeData.name}
+          candidateTitle={finalResumeData.title}
+          candidateSummary={finalResumeData.summary}
+        />
+      )}
+        <input
+            ref={uploadInputRef}
+            type="file"
+        accept=".pdf,.doc,.docx,.dox,.png,.jpg,.jpeg"
+            className="hidden"
+            onChange={handleFileSelected}
+        />
     </>
   );
 };

@@ -1,23 +1,25 @@
 
-import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { 
     PlusIcon, MagnifyingGlassIcon, BuildingOffice2Icon, PencilIcon, TrashIcon, Cog6ToothIcon, BriefcaseIcon, 
     UserGroupIcon, CalendarDaysIcon, XMarkIcon,
     ChevronDownIcon, TableCellsIcon, Squares2X2Icon, ArrowPathIcon, StarIcon, SparklesIcon,
-    FireIcon, ExclamationTriangleIcon, FlagIcon, CheckIcon, WalletIcon, MapPinIcon, UserIcon
+    FireIcon, ExclamationTriangleIcon, FlagIcon, CheckIcon, WalletIcon, MapPinIcon, UserIcon, AdjustmentsHorizontalIcon,
+    CheckCircleIcon, ChevronUpIcon, ArchiveBoxIcon, ChartBarIcon, ClockIcon, RocketLaunchIcon, DocumentTextIcon
 } from './Icons';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import JobStatusModal from './JobStatusModal';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
-import { useLanguage } from '../context/LanguageContext'; // Imported Language Context
+import DateRangeSelector, { DateRange } from './DateRangeSelector';
+import JobsAIAnalysisModal from './JobsAIAnalysisModal'; // New Import
+import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
-// NEW: Health Profile Type
 export type HealthProfile = 'standard' | 'high_volume' | 'executive' | 'disabled';
 
 export interface Job {
@@ -56,25 +58,6 @@ export interface Job {
   healthProfile: HealthProfile; 
 }
 
-// --- MOCK DATA ---
-export const jobsData: Job[] = [
-  { id: 1, title: 'מנהל/ת שיווק דיגיטלי', client: 'בזק', field: 'שיווק', role: 'מנהל שיווק', priority: 'דחופה', clientType: 'Enterprise', city: 'תל אביב', region: 'מרכז', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'BZ101', validityDays: 60, recruitingCoordinator: 'יעל שחר', accountManager: 'ישראל ישראלי', salaryMin: 18000, salaryMax: 22000, ageMin: 28, ageMax: 45, openPositions: 1, status: 'פתוחה', associatedCandidates: 12, waitingForScreening: 0, activeProcess: 3, openDate: '2025-07-15', recruiter: 'דנה כהן', location: 'תל אביב', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 5, healthProfile: 'standard' },
-  { id: 2, title: 'מפתח/ת Fullstack', client: 'Wix', field: 'טכנולוגיה', role: 'מהנדס תוכנה', priority: 'קריטית', clientType: 'Hi-Tech', city: 'תל אביב', region: 'מרכז', gender: 'לא משנה', mobility: false, licenseType: 'B', postingCode: 'WX202', validityDays: 90, recruitingCoordinator: 'אביב לוי', accountManager: 'אביב לוי', salaryMin: 28000, salaryMax: 32000, ageMin: 25, ageMax: 50, openPositions: 3, status: 'פתוחה', associatedCandidates: 25, waitingForScreening: 15, activeProcess: 2, openDate: '2025-07-12', recruiter: 'אביב לוי', location: 'תל אביב', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 4, healthProfile: 'standard' },
-  { id: 3, title: 'מעצב/ת UX/UI', client: 'Fiverr', field: 'עיצוב', role: 'מעצב', priority: 'רגילה', clientType: 'Startup', city: 'חיפה', region: 'צפון', gender: 'נקבה', mobility: true, licenseType: 'אין', postingCode: 'FV303', validityDays: 45, recruitingCoordinator: 'יעל שחר', accountManager: 'ישראל ישראלי', salaryMin: 20000, salaryMax: 25000, ageMin: 24, ageMax: 38, openPositions: 1, status: 'מוקפאת', associatedCandidates: 8, waitingForScreening: 0, activeProcess: 0, openDate: '2025-06-28', recruiter: 'יעל שחר', location: 'חיפה', jobType: 'פרילנס', description: '...', requirements: ['...'], rating: 0, healthProfile: 'standard' },
-  { id: 4, title: 'בודק/ת תוכנה QA', client: 'אלביט מערכות', field: 'טכנולוגיה', role: 'בודק תוכנה', priority: 'רגילה', clientType: 'Defense', city: 'חיפה', region: 'צפון', gender: 'זכר', mobility: true, licenseType: 'B', postingCode: 'EL404', validityDays: 60, recruitingCoordinator: 'דנה כהן', accountManager: 'שרית בן חיים', salaryMin: 15000, salaryMax: 18000, ageMin: 22, ageMax: 40, openPositions: 2, status: 'מאוישת', associatedCandidates: 15, waitingForScreening: 2, activeProcess: 1, openDate: '2025-05-10', recruiter: 'דנה כהן', location: 'חיפה', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 3, healthProfile: 'standard' },
-  { id: 5, title: 'נציג/ת מכירות שטח', client: 'תנובה', field: 'מכירות', role: 'איש מכירות', priority: 'דחופה', clientType: 'Retail', city: 'רחובות', region: 'מרכז', gender: 'לא משנה', mobility: true, licenseType: 'C1', postingCode: 'TN505', validityDays: 30, recruitingCoordinator: 'אביב לוי', accountManager: 'אביב לוי', salaryMin: 10000, salaryMax: 12000, ageMin: 21, ageMax: 99, openPositions: 5, status: 'פתוחה', associatedCandidates: 5, waitingForScreening: 5, activeProcess: 0, openDate: '2025-07-20', recruiter: 'אביב לוי', location: 'אזור המרכז', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 0, healthProfile: 'high_volume' },
-  { id: 6, title: 'Data Analyst', client: 'Playtika', field: 'טכנולוגיה', role: 'אנליסט נתונים', priority: 'דחופה', clientType: 'Hi-Tech', city: 'הרצליה', region: 'שרון', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'PL606', validityDays: 45, recruitingCoordinator: 'יעל שחר', accountManager: 'ישראל ישראלי', salaryMin: 20000, salaryMax: 24000, ageMin: 26, ageMax: 40, openPositions: 1, status: 'פתוחה', associatedCandidates: 18, waitingForScreening: 12, activeProcess: 4, openDate: '2025-07-22', recruiter: 'יעל שחר', location: 'הרצליה', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 2, healthProfile: 'standard' },
-  { id: 7, title: 'Product Manager', client: 'Monday.com', field: 'מוצר', role: 'מנהל מוצר', priority: 'קריטית', clientType: 'Hi-Tech', city: 'תל אביב', region: 'מרכז', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'MD707', validityDays: 90, recruitingCoordinator: 'אביב לוי', accountManager: 'אביב לוי', salaryMin: 30000, salaryMax: 35000, ageMin: 30, ageMax: 50, openPositions: 2, status: 'פתוחה', associatedCandidates: 31, waitingForScreening: 20, activeProcess: 5, openDate: '2025-07-21', recruiter: 'אביב לוי', location: 'תל אביב', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 5, healthProfile: 'executive' },
-  { id: 8, title: 'DevOps Engineer', client: 'Microsoft', field: 'טכנולוגיה', role: 'DevOps', priority: 'רגילה', clientType: 'Enterprise', city: 'הרצליה', region: 'שרון', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'MS808', validityDays: 60, recruitingCoordinator: 'דנה כהן', accountManager: 'שרית בן חיים', salaryMin: 32000, salaryMax: 38000, ageMin: 28, ageMax: 55, openPositions: 1, status: 'מוקפאת', associatedCandidates: 11, waitingForScreening: 0, activeProcess: 0, openDate: '2025-07-10', recruiter: 'דנה כהן', location: 'הרצליה', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 1, healthProfile: 'standard' },
-  { id: 9, title: 'Junior Graphic Designer', client: 'Canva', field: 'עיצוב', role: 'מעצב גרפי', priority: 'רגילה', clientType: 'Startup', city: 'תל אביב', region: 'מרכז', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'CV909', validityDays: 30, recruitingCoordinator: 'יעל שחר', accountManager: 'ישראל ישראלי', salaryMin: 9000, salaryMax: 11000, ageMin: 22, ageMax: 30, openPositions: 1, status: 'פתוחה', associatedCandidates: 45, waitingForScreening: 40, activeProcess: 1, openDate: '2025-07-23', recruiter: 'יעל שחר', location: 'תל אביב', jobType: 'משרה חלקית', description: '...', requirements: ['...'], rating: 3, healthProfile: 'standard' },
-  { id: 10, title: 'HR Manager', client: 'Intel', field: 'משאבי אנוש', role: 'מנהל HR', priority: 'דחופה', clientType: 'Enterprise', city: 'קריית גת', region: 'דרום', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'IN1010', validityDays: 60, recruitingCoordinator: 'אביב לוי', accountManager: 'אביב לוי', salaryMin: 25000, salaryMax: 29000, ageMin: 35, ageMax: 50, openPositions: 1, status: 'מאוישת', associatedCandidates: 22, waitingForScreening: 2, activeProcess: 2, openDate: '2025-05-01', recruiter: 'אביב לוי', location: 'קריית גת', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 4, healthProfile: 'standard' },
-  { id: 11, title: 'מחסנאי/ת מלגזן/ית', client: 'שופרסל', field: 'לוגיסטיקה', role: 'מחסנאי', priority: 'דחופה', clientType: 'Retail', city: 'מודיעין', region: 'מרכז', gender: 'לא משנה', mobility: true, licenseType: 'מלגזה', postingCode: 'SH1111', validityDays: 30, recruitingCoordinator: 'דנה כהן', accountManager: 'שרית בן חיים', salaryMin: 8000, salaryMax: 9000, ageMin: 20, ageMax: 60, openPositions: 4, status: 'פתוחה', associatedCandidates: 7, waitingForScreening: 0, activeProcess: 0, openDate: '2025-07-18', recruiter: 'דנה כהן', location: 'מודיעין', jobType: 'משמרות', description: '...', requirements: ['...'], rating: 2, healthProfile: 'high_volume' },
-  { id: 12, title: 'Copywriter', client: 'Gett', field: 'שיווק', role: 'קופירייטר', priority: 'רגילה', clientType: 'Hi-Tech', city: 'תל אביב', region: 'מרכז', gender: 'לא משנה', mobility: false, licenseType: 'B', postingCode: 'GT1212', validityDays: 45, recruitingCoordinator: 'יעל שחר', accountManager: 'ישראל ישראלי', salaryMin: 12000, salaryMax: 15000, ageMin: 24, ageMax: 35, openPositions: 1, status: 'טיוטה', associatedCandidates: 0, waitingForScreening: 0, activeProcess: 0, openDate: '2025-07-24', recruiter: 'יעל שחר', location: 'תל אביב', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 0, healthProfile: 'standard' },
-  { id: 13, title: 'רכז/ת גיוס טכנולוגי', client: 'Nisha', field: 'משאבי אנוש', role: 'רכז גיוס', priority: 'רגילה', clientType: 'Placement', city: 'באר שבע', region: 'דרום', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'NS1313', validityDays: 60, recruitingCoordinator: 'אביב לוי', accountManager: 'אביב לוי', salaryMin: 11000, salaryMax: 14000, ageMin: 23, ageMax: 40, openPositions: 2, status: 'פתוחה', associatedCandidates: 19, waitingForScreening: 5, activeProcess: 5, openDate: '2025-07-14', recruiter: 'אביב לוי', location: 'באר שבע', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 4, healthProfile: 'standard' },
-  { id: 14, title: 'מנהל/ת חשבונות', client: 'EY', field: 'פיננסים', role: 'מנהל חשבונות', priority: 'רגילה', clientType: 'Enterprise', city: 'תל אביב', region: 'מרכז', gender: 'לא משנה', mobility: false, licenseType: 'B', postingCode: 'EY1414', validityDays: 60, recruitingCoordinator: 'דנה כהן', accountManager: 'שרית בן חיים', salaryMin: 10000, salaryMax: 13000, ageMin: 25, ageMax: 50, openPositions: 1, status: 'מוקפאת', associatedCandidates: 14, waitingForScreening: 0, activeProcess: 1, openDate: '2025-06-15', recruiter: 'דנה כהן', location: 'תל אביב', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 0, healthProfile: 'standard' },
-  { id: 15, title: 'Customer Success Manager', client: 'Rapyd', field: 'שירות לקוחות', role: 'מנהל הצלחת לקוח', priority: 'דחופה', clientType: 'Hi-Tech', city: 'רמת גן', region: 'מרכז', gender: 'לא משנה', mobility: true, licenseType: 'B', postingCode: 'RP1515', validityDays: 45, recruitingCoordinator: 'יעל שחר', accountManager: 'ישראל ישראלי', salaryMin: 18000, salaryMax: 21000, ageMin: 27, ageMax: 45, openPositions: 1, status: 'פתוחה', associatedCandidates: 28, waitingForScreening: 8, activeProcess: 10, openDate: '2025-07-17', recruiter: 'יעל שחר', location: 'רמת גן', jobType: 'קבועה', description: '...', requirements: ['...'], rating: 5, healthProfile: 'standard' },
-];
-
 const statusStyles: { [key in JobStatus]: { text: string; bg: string; border: string; } } = {
   'פתוחה': { text: 'text-green-800', bg: 'bg-green-100', border: 'border-green-200' },
   'מוקפאת': { text: 'text-amber-800', bg: 'bg-amber-100', border: 'border-amber-200' },
@@ -108,16 +91,13 @@ const initialFilters = {
     ageMax: 70,
     positionsMin: 1,
     positionsMax: 20,
-    // NEW: Company Industry/Sector filtering
     companyIndustry: '',
     companySizes: [] as string[],
     companySectors: [] as string[],
-    // Filter for Job Scope
     jobScopes: [] as string[],
 };
 
 // --- HELPER FUNCTIONS ---
-// ... (getJobHealthData same as before)
 const getJobHealthData = (job: Job) => {
     if (job.healthProfile === 'disabled') {
         return { color: 'bg-gray-300', message: 'בקרת בריאות כבויה למשרה זו.', pulse: false };
@@ -171,27 +151,23 @@ const getJobHealthData = (job: Job) => {
 
 
 // --- COMPONENTS ---
-// ... (StarRating, PriorityBadge, HealthTooltip, JobHealthIndicator - reused)
 const StarRating: React.FC<{ rating: number; onRate: (rating: number) => void }> = ({ rating, onRate }) => {
     const [hover, setHover] = useState(0);
 
     return (
-        <div className="flex items-center">
+        <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
             {[...Array(5)].map((_, index) => {
                 const ratingValue = index + 1;
                 return (
                     <button
                         key={index}
                         className="focus:outline-none"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onRate(ratingValue === rating ? 0 : ratingValue);
-                        }}
+                        onClick={() => onRate(ratingValue === rating ? 0 : ratingValue)}
                         onMouseEnter={() => setHover(ratingValue)}
                         onMouseLeave={() => setHover(0)}
                     >
                          <StarIcon 
-                            className={`w-4 h-4 transition-colors duration-200 ${
+                            className={`w-3.5 h-3.5 transition-colors duration-200 ${
                                 ratingValue <= (hover || rating) ? 'text-amber-400 fill-amber-400' : 'text-gray-300'
                             }`} 
                         />
@@ -224,7 +200,7 @@ const PriorityBadge: React.FC<{ priority: Priority; onUpdate: (p: Priority) => v
     const renderBadge = () => {
         if (priority === 'קריטית') {
             return (
-                <div className="flex items-center gap-1.5 text-xs font-bold text-red-600 bg-red-100 px-2 py-1 rounded-full border border-red-200">
+                <div className="flex items-center gap-1.5 text-[10px] font-bold text-red-600 bg-red-100 px-2 py-0.5 rounded-full border border-red-200">
                     <FireIcon className="w-3 h-3" />
                     <span>{t('priority.קריטית')}</span>
                 </div>
@@ -232,26 +208,25 @@ const PriorityBadge: React.FC<{ priority: Priority; onUpdate: (p: Priority) => v
         }
         if (priority === 'דחופה') {
             return (
-                <div className="flex items-center gap-1.5 text-xs font-bold text-orange-600 bg-orange-100 px-2 py-1 rounded-full border border-orange-200">
+                <div className="flex items-center gap-1.5 text-[10px] font-bold text-orange-600 bg-orange-100 px-2 py-0.5 rounded-full border border-orange-200">
                     <ExclamationTriangleIcon className="w-3 h-3" />
                     <span>{t('priority.דחופה')}</span>
                 </div>
             );
         }
-        // For regular, we render a placeholder that reveals on hover
         return (
-            <div className="w-20 h-6 flex items-center justify-center text-text-subtle opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer hover:bg-bg-subtle rounded">
+            <div className="w-6 h-6 flex items-center justify-center text-text-subtle opacity-30 hover:opacity-100 transition-opacity cursor-pointer hover:bg-bg-subtle rounded">
                 <FlagIcon className="w-4 h-4" />
             </div>
         );
     };
 
     return (
-        <div className="relative flex justify-center w-full">
+        <div className="relative flex justify-center">
             <button 
                 ref={buttonRef}
                 onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
-                className="outline-none focus:ring-2 focus:ring-offset-1 focus:ring-primary-300 rounded-full"
+                className="outline-none"
             >
                 {renderBadge()}
             </button>
@@ -288,9 +263,9 @@ const JobHealthIndicator: React.FC<{ job: Job }> = ({ job }) => {
     const { color, message, pulse } = getJobHealthData(job);
     
     return (
-        <div className="group/health relative inline-flex items-center justify-center cursor-help mx-auto w-12 h-8">
+        <div className="group/health relative inline-flex items-center justify-center cursor-help mx-auto w-8 h-8">
             <div className="absolute inset-0 flex items-center justify-center w-full h-full">
-                 <div className={`w-3.5 h-3.5 rounded-full ${color} ${pulse ? 'animate-pulse ring-2 ring-offset-1 ring-red-200' : ''} shadow-sm`}></div>
+                 <div className={`w-3 h-3 rounded-full ${color} ${pulse ? 'animate-pulse ring-2 ring-offset-1 ring-red-200' : ''} shadow-sm`}></div>
             </div>
              <HealthTooltip message={message} />
         </div>
@@ -432,18 +407,134 @@ const DoubleRangeSlider: React.FC<{
     );
 };
 
+// Updated JobCard for Local Use in JobsView
+const JobCard: React.FC<{ 
+    job: Job; 
+    onRate: (rating: number) => void;
+    onUpdatePriority: (p: Priority) => void;
+    onClick: () => void;
+    selectionMode: boolean;
+    isSelected: boolean;
+    onSelect: () => void;
+}> = ({ job, onRate, onUpdatePriority, onClick, selectionMode, isSelected, onSelect }) => {
+    const { t } = useLanguage();
+    const { bg, text } = statusStyles[job.status];
+
+    const handleClick = (e: React.MouseEvent) => {
+        if (selectionMode) {
+            e.stopPropagation();
+            onSelect();
+        } else {
+            onClick();
+        }
+    };
+
+    return (
+        <div 
+            onClick={handleClick}
+            className={`bg-bg-card rounded-xl border p-4 shadow-sm hover:shadow-md transition-all cursor-pointer relative group ${isSelected ? 'border-primary-500 ring-1 ring-primary-500 bg-primary-50/10' : 'border-border-default hover:border-primary-300'}`}
+        >
+            {/* Selection Checkbox (Visible in mode or on hover/selected) */}
+            {selectionMode && (
+                <div className="absolute top-3 left-3 z-10" onClick={e => e.stopPropagation()}>
+                    <input 
+                        type="checkbox" 
+                        checked={isSelected} 
+                        onChange={onSelect}
+                        className="w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                    />
+                </div>
+            )}
+
+            <div className="flex justify-between items-start mb-3 pl-6"> {/* Added padding for checkbox */}
+                <div>
+                    <div className="flex items-center gap-2">
+                         <h3 className="font-bold text-text-default text-base leading-tight truncate max-w-[180px]" title={job.title}>{job.title}</h3>
+                         <PriorityBadge priority={job.priority} onUpdate={onUpdatePriority} />
+                    </div>
+                    <p className="text-xs text-text-muted mt-1">{job.client}</p>
+                </div>
+                <div className="flex flex-col items-end gap-1">
+                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${bg} ${text} border-transparent`}>{t(`status.${job.status}`)}</span>
+                    <JobHealthIndicator job={job} />
+                </div>
+            </div>
+
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-border-subtle">
+                 <StarRating rating={job.rating} onRate={onRate} />
+                 <div className="text-xs text-text-muted flex gap-3">
+                     <span title={t('jobs.col_candidates')}>{job.associatedCandidates} <UserIcon className="w-3 h-3 inline"/></span>
+                     <span title={t('jobs.col_open_date')}>{job.openDate}</span>
+                 </div>
+            </div>
+        </div>
+    );
+};
+
 
 // --- MAIN JOBS VIEW ---
 const JobsView: React.FC = () => {
-    const navigate = useNavigate();
     const { t } = useLanguage();
-    const [jobs, setJobs] = useState<Job[]>(jobsData);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [jobs, setJobs] = useState<Job[]>([]);
+    const [loadingJobs, setLoadingJobs] = useState(false);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [filters, setFilters] = useState(initialFilters);
     
+    const loadJobs = useCallback(async () => {
+        setLoadingJobs(true);
+        try {
+            const res = await fetch(`${apiBase}/api/jobs`);
+            if (!res.ok) throw new Error('Failed to load jobs');
+            const payload = await res.json();
+            setJobs(Array.isArray(payload) ? payload : []);
+        } catch (err) {
+            console.error('[JobsView] loadJobs', err);
+        } finally {
+            setLoadingJobs(false);
+        }
+    }, [apiBase]);
+
+    useEffect(() => {
+        loadJobs();
+    }, [loadJobs]);
+
+    const persistJobUpdate = useCallback(async (id: number, updates: Partial<Job>) => {
+        const res = await fetch(`${apiBase}/api/jobs/${id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updates),
+        });
+        if (!res.ok) throw new Error('Failed to update job');
+        const updated = await res.json();
+        setJobs(prev => prev.map(job => (job.id === updated.id ? updated : job)));
+        return updated;
+    }, [apiBase]);
+
+    const createJobRecord = useCallback(async (payload: Partial<Job>) => {
+        const res = await fetch(`${apiBase}/api/jobs`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error('Failed to create job');
+        const created = await res.json();
+        setJobs(prev => [...prev, created]);
+        return created;
+    }, [apiBase]);
+
+    const deleteJobRecord = useCallback(async (id: number) => {
+        const res = await fetch(`${apiBase}/api/jobs/${id}`, { method: 'DELETE' });
+        if (!res.ok) throw new Error('Failed to delete job');
+        setJobs(prev => prev.filter(job => job.id !== id));
+    }, [apiBase]);
+    
+    // --- New state for Date Range ---
+    const [dateRange, setDateRange] = useState<DateRange | null>(null);
+
     // --- New state for Job Status Modal ---
     const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
     const [jobToEditStatus, setJobToEditStatus] = useState<Job | null>(null);
@@ -453,6 +544,16 @@ const JobsView: React.FC = () => {
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     const [isCompanyFilterOpen, setIsCompanyFilterOpen] = useState(false);
     
+    // --- NEW STATE FOR STATS & SELECTION ---
+    const [showMobileStats, setShowMobileStats] = useState(false);
+    const [selectionMode, setSelectionMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+
+    // --- NEW STATE FOR BULK ACTIONS & AI ---
+    const [activeBulkAction, setActiveBulkAction] = useState<'none' | 'menu' | 'status' | 'priority'>('none');
+    const [isAIAnalysisOpen, setIsAIAnalysisOpen] = useState(false);
+
+
     const allColumns = useMemo(() => [
         { id: 'rating', header: t('jobs.col_rating') },
         { id: 'health', header: t('jobs.col_health') },
@@ -499,14 +600,122 @@ const JobsView: React.FC = () => {
         }
         setSortConfig({ key, direction });
     };
+
+    const getSortIndicator = (key: string) => {
+        if (!sortConfig || sortConfig.key !== key) return null;
+        return <span className="text-primary-500 font-bold ml-1">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
+    };
     
-    const handleRateJob = (jobId: number, newRating: number) => {
-        setJobs(prev => prev.map(j => j.id === jobId ? { ...j, rating: newRating } : j));
+    const handleRateJob = async (jobId: number, newRating: number) => {
+        try {
+            await persistJobUpdate(jobId, { rating: newRating });
+        } catch (err) {
+            alert((err as Error).message || 'Failed to update rating');
+        }
     };
 
-    const handlePriorityUpdate = (jobId: number, newPriority: Priority) => {
-        setJobs(prev => prev.map(j => j.id === jobId ? { ...j, priority: newPriority } : j));
+    const handlePriorityUpdate = async (jobId: number, newPriority: Priority) => {
+        try {
+            await persistJobUpdate(jobId, { priority: newPriority });
+        } catch (err) {
+            alert((err as Error).message || 'Failed to update priority');
+        }
     };
+    
+    // --- Selection Handlers ---
+    const toggleSelectionMode = () => {
+        setSelectionMode(!selectionMode);
+        setSelectedIds(new Set());
+    };
+
+    const handleSelect = (id: number) => {
+        setSelectedIds(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(id)) newSet.delete(id);
+            else newSet.add(id);
+            return newSet;
+        });
+    };
+
+    const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.checked) {
+            // Select visible filtered jobs
+            setSelectedIds(new Set(sortedAndFilteredJobs.map(j => j.id)));
+        } else {
+            setSelectedIds(new Set());
+        }
+    };
+    
+    const handleBulkDelete = async () => {
+        if (!selectedIds.size) return;
+        if (!window.confirm(`האם למחוק ${selectedIds.size} משרות שנבחרו?`)) return;
+        try {
+            await Promise.all(Array.from(selectedIds).map(id => deleteJobRecord(id)));
+            setSelectedIds(new Set());
+        } catch (err) {
+            alert((err as Error).message || 'Bulk delete failed');
+        }
+    };
+
+    const handleCreateJob = async () => {
+        if (!window.confirm('האם ליצור משרה חדשה דיפולטית?')) return;
+        try {
+            const created = await createJobRecord({
+                title: 'משרה חדשה',
+                client: 'לקוח חדש',
+                field: 'כללי',
+                role: 'תפקיד פתוח',
+                priority: 'רגילה',
+                status: 'טיוטה',
+                openDate: new Date().toISOString(),
+                jobType: ['קבועה'],
+                salaryMin: 0,
+                salaryMax: 0,
+                ageMin: 18,
+                ageMax: 99,
+                openPositions: 1,
+                recruiter: 'admin',
+                location: 'לא הוגדר',
+                rating: 0,
+            });
+            if (created) {
+                setSelectedJob(created);
+                setIsDrawerOpen(true);
+            }
+        } catch (err) {
+            alert((err as Error).message || 'Failed to create job');
+        }
+    };
+    
+    // --- Bulk Update Handlers ---
+    const handleBulkUpdate = async (field: keyof Job, value: any) => {
+        if (selectedIds.size === 0) return;
+        try {
+            await Promise.all(Array.from(selectedIds).map(id => persistJobUpdate(id, { [field]: value })));
+            setActiveBulkAction('none');
+            setSelectedIds(new Set());
+        } catch (err) {
+            alert((err as Error).message || 'Bulk update failed');
+        }
+    };
+
+    const handleBulkJobField = async (field: SelectedJobField | null) => {
+        if (!field || selectedIds.size === 0) return;
+        try {
+            await Promise.all(
+                Array.from(selectedIds).map(id =>
+                    persistJobUpdate(id, { field: field.category, role: field.role }),
+                ),
+            );
+            setActiveBulkAction('none');
+            setSelectedIds(new Set());
+        } catch (err) {
+            alert((err as Error).message || 'Bulk job field update failed');
+        } finally {
+            setIsJobFieldSelectorOpen(false);
+        }
+    };
+
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -519,8 +728,12 @@ const JobsView: React.FC = () => {
     }, []);
 
     const openJobDetails = (job: Job) => {
-        setSelectedJob(job);
-        setIsDrawerOpen(true);
+        if (selectionMode) {
+             handleSelect(job.id);
+        } else {
+            setSelectedJob(job);
+            setIsDrawerOpen(true);
+        }
     };
     
     const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -547,22 +760,41 @@ const JobsView: React.FC = () => {
         setIsStatusModalOpen(true);
     };
 
-    const handleSaveStatus = (newStatus: JobStatus, note: string) => {
-        if (jobToEditStatus) {
-            setJobs(prev => prev.map(j => j.id === jobToEditStatus.id ? { ...j, status: newStatus } : j));
+    const handleSaveStatus = async (newStatus: JobStatus, note: string) => {
+        if (!jobToEditStatus) return;
+        try {
+            await persistJobUpdate(jobToEditStatus.id, { status: newStatus });
             console.log(`Updated job ${jobToEditStatus.id} status to ${newStatus}. Note: ${note}`);
+        } catch (err) {
+            alert((err as Error).message || 'Failed to update status');
         }
     };
 
     const handleJobFieldSelect = (selectedField: SelectedJobField | null) => {
-        if (selectedField) {
-            setFilters(prev => ({
-                ...prev,
-                field: selectedField.category, 
-                role: selectedField.role       
-            }));
+        // Check if this was triggered from Bulk Mode or Filter Mode
+        if (activeBulkAction === 'none') {
+             // Filter mode
+            if (selectedField) {
+                setFilters(prev => ({
+                    ...prev,
+                    field: selectedField.category, 
+                    role: selectedField.role       
+                }));
+            }
+        } else {
+            // Bulk Edit mode
+            handleBulkJobField(selectedField);
         }
         setIsJobFieldSelectorOpen(false);
+    };
+
+    const handleDateRangeChange = (range: DateRange | null) => {
+        setDateRange(range);
+        setFilters(prev => ({
+            ...prev,
+            fromDate: range?.from || '',
+            toDate: range?.to || ''
+        }));
     };
     
     const [companyFilterState, setCompanyFilterState] = useState({
@@ -679,26 +911,47 @@ const JobsView: React.FC = () => {
 
     }, [jobs, filters, sortConfig]);
 
-    const stats = useMemo(() => ({
-        total: jobs.length,
-        open: jobs.filter(j => j.status === 'פתוחה').length,
-        frozen: jobs.filter(j => j.status === 'מוקפאת').length,
-        filled: jobs.filter(j => j.status === 'מאוישת').length,
-    }), [jobs]);
+    const stats = useMemo(() => {
+        const activeJobs = jobs.filter(j => j.status === 'פתוחה');
+        
+        // 1. Attention Needed: Jobs with 'critical' priority OR red health indicator
+        const attentionNeeded = activeJobs.filter(j => {
+             const health = getJobHealthData(j);
+             return j.priority === 'קריטית' || health.color === 'bg-red-500';
+        }).length;
+
+        // 2. Bottleneck: Total candidates waiting for screening
+        const totalWaiting = activeJobs.reduce((acc, j) => acc + j.waitingForScreening, 0);
+
+        // 3. Momentum: Jobs with active processes
+        const momentumJobs = activeJobs.filter(j => j.activeProcess > 0).length;
+
+        // 4. Efficiency: Average days open
+        const totalDays = activeJobs.reduce((acc, j) => {
+            const days = Math.ceil((new Date().getTime() - new Date(j.openDate).getTime()) / (1000 * 60 * 60 * 24));
+            return acc + days;
+        }, 0);
+        const avgDays = activeJobs.length ? Math.round(totalDays / activeJobs.length) : 0;
+
+        return { attentionNeeded, totalWaiting, momentumJobs, avgDays };
+    }, [jobs]);
+    
+    // Check if all displayed are selected
+    const areAllVisibleSelected = sortedAndFilteredJobs.length > 0 && sortedAndFilteredJobs.every(j => selectedIds.has(j.id));
 
     const filterOptions = useMemo(() => ({
-        recruiters: [...new Set(jobsData.map(j => j.recruiter))],
-        statuses: [...new Set(jobsData.map(j => j.status as string))] as JobStatus[],
-        fields: [...new Set(jobsData.map(j => j.field))],
-        clients: [...new Set(jobsData.map(j => j.client))],
-        roles: [...new Set(jobsData.map(j => j.role))],
+        recruiters: [...new Set(jobs.map(j => j.recruiter))],
+        statuses: [...new Set(jobs.map(j => j.status as string))] as JobStatus[],
+        fields: [...new Set(jobs.map(j => j.field))],
+        clients: [...new Set(jobs.map(j => j.client))],
+        roles: [...new Set(jobs.map(j => j.role))],
         priorities: ['רגילה', 'דחופה', 'קריטית'],
-        clientTypes: [...new Set(jobsData.map(j => j.clientType))],
+        clientTypes: [...new Set(jobs.map(j => j.clientType))],
         genders: ['זכר', 'נקבה', 'לא משנה'],
         licenseTypes: ['A', 'B', 'C', 'C1', 'אין'],
-        recruitingCoordinators: [...new Set(jobsData.map(j => j.recruitingCoordinator))],
-        accountManagers: [...new Set(jobsData.map(j => j.accountManager))]
-    }), []);
+        recruitingCoordinators: [...new Set(jobs.map(j => j.recruitingCoordinator))],
+        accountManagers: [...new Set(jobs.map(j => j.accountManager))]
+    }), [jobs]);
 
     const handleColumnToggle = (columnId: string) => {
       setVisibleColumns(prev => {
@@ -769,6 +1022,16 @@ const JobsView: React.FC = () => {
     };
 
 
+    const StatCard = ({ title, value, icon, color }: { title: string, value: string | number, icon: any, color: string }) => (
+        <div className="bg-bg-card p-4 rounded-xl border border-border-default flex items-center justify-between shadow-sm">
+             <div>
+                <p className="text-xs text-text-muted font-bold uppercase mb-1">{title}</p>
+                <p className="text-2xl font-black text-text-default">{value}</p>
+             </div>
+             <div className={`p-3 rounded-lg ${color}`}>{icon}</div>
+        </div>
+    );
+
     return (
         <div className="flex flex-col gap-4">
              <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
@@ -779,11 +1042,19 @@ const JobsView: React.FC = () => {
                         <h1 className="text-2xl font-bold text-text-default">{t('jobs.title')}</h1>
                         <p className="text-sm text-text-muted">{t('jobs.subtitle')}</p>
                     </div>
-                    <div className="flex items-center gap-4 w-full md:w-auto">
-                        <div className="text-xs text-text-muted hidden lg:block">
-                            <span className="font-semibold">{t('jobs.total')}:</span> {stats.total} | <span className="font-semibold text-green-600">{t('jobs.open')}:</span> {stats.open} | <span className="font-semibold text-amber-600">{t('jobs.frozen')}:</span> {stats.frozen} | <span className="font-semibold text-text-subtle">{t('jobs.filled')}:</span> {stats.filled}
+                    <div className="flex items-center gap-4 w-full md:w-auto justify-end">
+                        {/* Mobile Stats Toggle */}
+                        <div className="lg:hidden">
+                            <button 
+                                onClick={() => setShowMobileStats(!showMobileStats)}
+                                className="flex items-center gap-2 text-sm font-semibold text-primary-600 bg-primary-50 px-3 py-2 rounded-lg"
+                            >
+                                <ChartBarIcon className="w-4 h-4"/>
+                                {showMobileStats ? 'הסתר מדדים' : 'הצג מדדים'}
+                            </button>
                         </div>
-                        <button onClick={() => navigate('/jobs/new')} className="flex-grow md:flex-grow-0 flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
+                        
+                        <button onClick={handleCreateJob} className="flex-grow md:flex-grow-0 flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
                             <PlusIcon className="w-5 h-5"/>
                             <span>{t('jobs.new_job_btn')}</span>
                         </button>
@@ -791,22 +1062,49 @@ const JobsView: React.FC = () => {
                 </div>
             </header>
             
+            {/* Stats Dashboard */}
+            <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 ${showMobileStats ? 'block' : 'hidden lg:grid'}`}>
+                 <StatCard title="דורש טיפול" value={stats.attentionNeeded} icon={<ExclamationTriangleIcon className="w-5 h-5 text-red-600"/>} color="bg-red-50" />
+                 <StatCard title="ממתינים לסינון" value={stats.totalWaiting} icon={<UserGroupIcon className="w-5 h-5 text-orange-600"/>} color="bg-orange-50" />
+                 <StatCard title="משרות בתנועה" value={stats.momentumJobs} icon={<RocketLaunchIcon className="w-5 h-5 text-green-600"/>} color="bg-green-50" />
+                 <StatCard title="זמן ממוצע לאיוש" value={stats.avgDays} icon={<ClockIcon className="w-5 h-5 text-blue-600"/>} color="bg-blue-50" />
+            </div>
+            
             <div className="bg-bg-card p-3 rounded-xl border border-border-default">
                 <div className="pb-2 -mb-2">
                     <div className="flex flex-wrap items-end gap-3">
-                        <div className="relative flex-grow min-w-[20rem] flex-shrink-0">
+                        <div className="relative flex-grow min-w-[15rem] flex-shrink-0">
                             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                             <input type="text" placeholder={t('jobs.search_placeholder')} name="searchTerm" value={filters.searchTerm} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" />
                         </div>
-                        <FilterSelect placeholder={t('jobs.filter_client')} name="client" value={filters.client} onChange={handleFilterChange} options={filterOptions.clients} className="flex-grow min-w-[10rem] flex-shrink-0" />
+                        <FilterSelect placeholder={t('jobs.filter_client')} name="client" value={filters.client} onChange={handleFilterChange} options={filterOptions.clients} className="flex-grow min-w-[8rem] flex-shrink-0" />
                         <FilterSelect placeholder={t('jobs.filter_status')} name="status" value={filters.status} onChange={handleFilterChange} options={filterOptions.statuses.map(s => t(`status.${s}`))} className="flex-grow min-w-[8rem] flex-shrink-0" />
                         
-                        <button 
-                            onClick={() => setIsJobFieldSelectorOpen(true)}
-                            className="flex-grow min-w-[12rem] flex items-center justify-between gap-2 bg-bg-input border border-border-default text-text-default text-sm rounded-lg py-2.5 px-3 hover:border-primary-300 transition shadow-sm text-right"
+                        {/* Date Range Selector */}
+                        <div className="min-w-[140px]">
+                            <DateRangeSelector 
+                                value={dateRange} 
+                                onChange={handleDateRangeChange} 
+                                placeholder={t('filter.last_updated') || 'תאריכים'}
+                            />
+                        </div>
+
+                        {/* Job Field Button */}
+                        <button
+                            onClick={() => {
+                                // Set bulk action to none to ensure standard filtering
+                                setActiveBulkAction('none');
+                                setIsJobFieldSelectorOpen(true);
+                            }}
+                            className={`flex items-center gap-2 font-semibold py-2.5 px-4 rounded-lg border border-border-default transition-all whitespace-nowrap text-sm ${
+                                filters.field || filters.role
+                                    ? 'bg-primary-100 text-primary-700 border-primary-300'
+                                    : 'bg-bg-input text-text-default hover:border-primary-300'
+                            }`}
+                            title="סינון לפי תחום משרה"
                         >
-                            <span className="truncate">{filters.role || t('jobs.filter_role')}</span>
-                            <BriefcaseIcon className="w-4 h-4 text-text-muted" />
+                            <BriefcaseIcon className="w-4 h-4" />
+                            <span className="hidden xl:inline">{filters.role || filters.field || 'תחום משרה'}</span>
                         </button>
 
                          <div className="relative">
@@ -831,16 +1129,16 @@ const JobsView: React.FC = () => {
                             )}
                         </div>
 
-                        <div className="flex items-center gap-2 flex-grow min-w-[16rem] flex-shrink-0">
-                             <div className="relative w-full">
-                                 <input type="date" name="fromDate" value={filters.fromDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm text-text-muted focus:ring-primary-500 focus:border-primary-300 transition" placeholder="מתאריך" />
-                             </div>
-                             <span className="text-text-muted">-</span>
-                             <div className="relative w-full">
-                                 <input type="date" name="toDate" value={filters.toDate} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm text-text-muted focus:ring-primary-500 focus:border-primary-300 transition" placeholder="עד תאריך" />
-                             </div>
-                         </div>
-                        <div className="flex items-center gap-3 flex-shrink-0">
+                        {/* Selection Mode Toggle */}
+                        <button 
+                            onClick={toggleSelectionMode} 
+                            className={`p-2.5 rounded-lg border transition-all ${selectionMode ? 'bg-primary-100 border-primary-500 text-primary-700' : 'bg-bg-subtle border-border-default text-text-muted hover:border-primary-300'}`}
+                            title="בחירה מרובה"
+                        >
+                            <CheckCircleIcon className="w-5 h-5" />
+                        </button>
+
+                        <div className="flex items-center gap-3 flex-shrink-0 ml-auto">
                             <button onClick={() => setIsAdvancedFilterOpen(!isAdvancedFilterOpen)} className="text-sm font-semibold text-primary-600 bg-primary-100/70 py-2.5 px-4 rounded-lg hover:bg-primary-200 transition flex items-center justify-center gap-1">
                                 <span>{t('candidates.advanced_search')}</span>
                                 <ChevronDownIcon className={`w-4 h-4 transition-transform ${isAdvancedFilterOpen ? 'rotate-180' : ''}`}/>
@@ -941,81 +1239,173 @@ const JobsView: React.FC = () => {
                 )}
             </div>
 
-            <main>
+            {/* Bulk Actions Menu (Floating) */}
+            {selectedIds.size > 0 && (
+                <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-40 bg-bg-card border border-border-default shadow-2xl rounded-full px-6 py-3 flex items-center gap-4 animate-slide-up">
+                    <span className="font-bold text-primary-600 text-sm">{selectedIds.size} משרות נבחרו</span>
+                    <div className="h-6 w-px bg-border-default"></div>
+                    
+                    {/* Bulk Edit Button */}
+                     <div className="relative">
+                        <button 
+                            onClick={() => setActiveBulkAction(activeBulkAction === 'menu' ? 'none' : 'menu')}
+                            className="flex items-center gap-1.5 text-text-default hover:bg-bg-subtle px-3 py-1.5 rounded-lg transition-colors font-bold text-sm"
+                        >
+                            <PencilIcon className="w-4 h-4"/>
+                            שינוי מרוכז
+                        </button>
+                        
+                        {/* Popup Menu */}
+                        {activeBulkAction === 'menu' && (
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-48 bg-white border border-border-default rounded-xl shadow-xl overflow-hidden animate-fade-in">
+                                <button onClick={() => { setActiveBulkAction('status'); }} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle">סטטוס משרה</button>
+                                <button onClick={() => { setActiveBulkAction('none'); setIsJobFieldSelectorOpen(true); }} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle">תחום / תפקיד</button>
+                                <button onClick={() => { setActiveBulkAction('none'); /* Handle location bulk in future */ alert('Coming soon'); }} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle">מיקום</button>
+                                <button onClick={() => setActiveBulkAction('priority')} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle text-text-default">דחיפות</button>
+                            </div>
+                        )}
+
+                        {/* Sub-menu: Status Selection */}
+                        {activeBulkAction === 'status' && (
+                             <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-48 bg-white border border-border-default rounded-xl shadow-xl overflow-hidden animate-fade-in">
+                                {['פתוחה', 'מוקפאת', 'סגורה'].map(status => (
+                                    <button 
+                                        key={status} 
+                                        onClick={() => handleBulkUpdate('status', status)} 
+                                        className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle last:border-0"
+                                    >
+                                        {status}
+                                    </button>
+                                ))}
+                                <button onClick={() => setActiveBulkAction('menu')} className="w-full text-center px-4 py-2 text-xs bg-bg-subtle text-text-muted hover:bg-bg-hover">חזרה</button>
+                            </div>
+                        )}
+
+                        {/* Sub-menu: Priority Selection */}
+                        {activeBulkAction === 'priority' && (
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-3 w-48 bg-white border border-border-default rounded-xl shadow-xl overflow-hidden animate-fade-in">
+                                <button onClick={() => handleBulkUpdate('priority', 'רגילה')} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-gray-400"></span> רגילה
+                                </button>
+                                <button onClick={() => handleBulkUpdate('priority', 'דחופה')} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-orange-500"></span> דחופה
+                                </button>
+                                <button onClick={() => handleBulkUpdate('priority', 'קריטית')} className="w-full text-right px-4 py-3 text-sm hover:bg-bg-hover border-b border-border-subtle flex items-center gap-2">
+                                    <span className="w-2 h-2 rounded-full bg-red-500"></span> קריטית
+                                </button>
+                                <button onClick={() => setActiveBulkAction('menu')} className="w-full text-center px-4 py-2 text-xs bg-bg-subtle text-text-muted hover:bg-bg-hover">חזרה</button>
+                            </div>
+                        )}
+                    </div>
+
+                    {/* AI Analysis Button */}
+                    <button 
+                        onClick={() => setIsAIAnalysisOpen(true)}
+                        className="flex items-center gap-1.5 text-purple-600 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg transition-colors font-bold text-sm border border-purple-200"
+                    >
+                        <SparklesIcon className="w-4 h-4"/>
+                        ניתוח חכם
+                    </button>
+
+                     <button 
+                        onClick={handleBulkDelete} 
+                        className="flex items-center gap-1.5 text-red-600 hover:bg-red-50 px-3 py-1.5 rounded-lg transition-colors font-bold text-sm"
+                    >
+                        <TrashIcon className="w-4 h-4"/>
+                        מחק
+                    </button>
+
+                    <div className="h-6 w-px bg-border-default"></div>
+                    <button onClick={() => setSelectedIds(new Set())} className="p-1 hover:bg-bg-subtle rounded-full text-text-muted">
+                        <XMarkIcon className="w-5 h-5"/>
+                    </button>
+                </div>
+            )}
+
+            <main className="flex-1 overflow-hidden">
                  {sortedAndFilteredJobs.length > 0 ? (
                     viewMode === 'table' ? (
-                        <div className="overflow-x-auto bg-bg-card rounded-lg border border-border-default">
-                            <table className="w-full text-sm text-right min-w-[1000px]">
-                                <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
-                                    <tr>
-                                        {visibleColumns.map((colId, index) => {
-                                            const col = allColumns.find(c => c.id === colId);
-                                            if (!col) return null;
-                                            return (
-                                                <th 
-                                                    key={col.id} 
-                                                    draggable 
-                                                    onClick={() => requestSort(col.id)}
-                                                    onDragStart={() => handleDragStart(index, col.id)} 
-                                                    onDragEnter={() => handleDragEnter(index)} 
-                                                    onDragEnd={handleDragEnd} 
-                                                    onDragOver={(e) => e.preventDefault()} 
-                                                    onDrop={handleDrop} 
-                                                    className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors ${draggingColumn === col.id ? 'dragging' : ''}`}
-                                                    title="לחץ למיון או גרור לשינוי סדר"
-                                                >
-                                                    <div className="flex items-center gap-2">
-                                                        <span>{col.header}</span>
-                                                        {sortConfig?.key === col.id && (
-                                                            <span className="text-text-subtle">
-                                                                {sortConfig.direction === 'asc' ? '▲' : '▼'}
-                                                            </span>
-                                                        )}
-                                                    </div>
+                        <div className="bg-bg-card rounded-2xl border border-border-default overflow-hidden shadow-sm">
+                            <div className="overflow-x-auto">
+                                <table className="w-full text-sm text-right min-w-[1000px]">
+                                    <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default">
+                                        <tr>
+                                            {/* Select Column (Static First) */}
+                                            {selectionMode && (
+                                                <th className="p-4 w-12 text-center bg-bg-subtle">
+                                                     <input 
+                                                        type="checkbox" 
+                                                        onChange={handleSelectAll} 
+                                                        checked={sortedAndFilteredJobs.length > 0 && selectedIds.size === sortedAndFilteredJobs.length}
+                                                        className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                    />
                                                 </th>
-                                            );
-                                        })}
-                                        <th scope="col" className="px-2 py-3 sticky left-0 bg-bg-subtle w-16"></th>
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-border-subtle">
-                                {sortedAndFilteredJobs.map(job => (
-                                    <tr key={job.id} onClick={() => openJobDetails(job)} className="hover:bg-bg-hover cursor-pointer group">
-                                        {visibleColumns.map(colId => (
-                                            <td key={colId} className="p-4 text-text-muted">{renderCell(job, colId)}</td>
+                                            )}
+
+                                            {visibleColumns.map((colId, index) => {
+                                                const col = allColumns.find(c => c.id === colId);
+                                                if(!col) return null;
+                                                return (
+                                                    <th 
+                                                        key={col.id} 
+                                                        draggable 
+                                                        onClick={() => requestSort(col.id)}
+                                                        onDragStart={() => handleDragStart(index, col.id)} 
+                                                        onDragEnter={() => handleDragEnter(index)} 
+                                                        onDragEnd={handleDragEnd} 
+                                                        onDragOver={(e) => e.preventDefault()} 
+                                                        onDrop={handleDrop} 
+                                                        className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors bg-bg-subtle ${draggingColumn === col.id ? 'opacity-50' : ''}`}
+                                                    >
+                                                        <div className="flex items-center gap-1">
+                                                            {col.header} 
+                                                            {getSortIndicator(col.id)}
+                                                        </div>
+                                                    </th>
+                                                );
+                                            })}
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-border-subtle">
+                                        {sortedAndFilteredJobs.map(job => (
+                                            <tr key={job.id} onClick={() => openJobDetails(job)} className={`group hover:bg-bg-hover transition-colors cursor-pointer ${selectedIds.has(job.id) ? 'bg-primary-50/50' : ''}`}>
+                                                 {/* Select Cell (Static First) */}
+                                                {selectionMode && (
+                                                    <td className="p-4 text-center" onClick={e => e.stopPropagation()}>
+                                                         <input 
+                                                            type="checkbox" 
+                                                            checked={selectedIds.has(job.id)}
+                                                            onChange={() => handleSelect(job.id)}
+                                                            className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                        />
+                                                    </td>
+                                                )}
+
+                                                {visibleColumns.map(colId => (
+                                                    <td key={colId} className="p-4">
+                                                        {renderCell(job, colId)}
+                                                    </td>
+                                                ))}
+                                            </tr>
                                         ))}
-                                        <td className="px-2 py-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover transition-colors w-16"></td>
-                                    </tr>
-                                ))}
-                                </tbody>
-                            </table>
+                                    </tbody>
+                                </table>
+                            </div>
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                           {sortedAndFilteredJobs.map(job => (
-                               <div key={job.id} onClick={() => openJobDetails(job)} className="bg-bg-card rounded-lg border border-border-default shadow-sm p-4 cursor-pointer hover:shadow-md transition-shadow">
-                                   <div className="flex justify-between items-start">
-                                       <div>
-                                           <p className="font-semibold text-primary-700">{job.title}</p>
-                                           <p className="text-sm text-text-muted">{job.client}</p>
-                                       </div>
-                                       <div className="flex flex-col items-end gap-1">
-                                           <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${statusStyles[job.status]?.bg} ${statusStyles[job.status]?.text} border ${statusStyles[job.status]?.border || 'border-transparent'}`}>{t(`status.${job.status}`)}</span>
-                                           <JobHealthIndicator job={job} />
-                                       </div>
-                                   </div>
-                                   <div className="mt-4">
-                                       <StarRating rating={job.rating || 0} onRate={(r) => handleRateJob(job.id, r)} />
-                                   </div>
-                                   <div className="mt-2 flex justify-between items-end">
-                                       <div className="text-xs text-text-subtle">
-                                           <p>{t('jobs.col_candidates')}: <span className="font-semibold text-text-muted">{job.associatedCandidates}</span></p>
-                                           <p>{t('jobs.col_open_date')}: {job.openDate}</p>
-                                       </div>
-                                       <p className="text-xs text-text-muted">{t('jobs.col_recruiter')}: {job.recruiter}</p>
-                                   </div>
-                               </div>
-                           ))}
+                            {sortedAndFilteredJobs.map(job => (
+                                <JobCard 
+                                    key={job.id} 
+                                    job={job} 
+                                    onRate={(r) => handleRateJob(job.id, r)}
+                                    onUpdatePriority={(p) => handlePriorityUpdate(job.id, p)}
+                                    onClick={() => openJobDetails(job)}
+                                    selectionMode={selectionMode}
+                                    isSelected={selectedIds.has(job.id)}
+                                    onSelect={() => handleSelect(job.id)}
+                                />
+                            ))}
                         </div>
                     )
                 ) : (
@@ -1026,7 +1416,12 @@ const JobsView: React.FC = () => {
                     </div>
                 )}
             </main>
-            <JobDetailsDrawer job={selectedJob} isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)} />
+            
+            <JobDetailsDrawer
+                job={selectedJob}
+                isOpen={isDrawerOpen}
+                onClose={() => setIsDrawerOpen(false)}
+            />
             
             <JobStatusModal 
                 isOpen={isStatusModalOpen}
@@ -1037,10 +1432,20 @@ const JobsView: React.FC = () => {
             />
 
             <JobFieldSelector
+                value={null}
                 onChange={handleJobFieldSelect}
                 isModalOpen={isJobFieldSelectorOpen}
                 setIsModalOpen={setIsJobFieldSelectorOpen}
             />
+            
+            {/* AI Analysis Modal */}
+            <JobsAIAnalysisModal 
+                isOpen={isAIAnalysisOpen}
+                onClose={() => setIsAIAnalysisOpen(false)}
+                selectedJobs={jobs.filter(j => selectedIds.has(j.id))}
+            />
+
+             <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
         </div>
     );
 };

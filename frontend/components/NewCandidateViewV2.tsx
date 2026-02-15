@@ -1,7 +1,6 @@
 
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { GoogleGenAI, Type } from '@google/genai';
 
 // Import the refactored, reusable components
 import MainContent from './MainContent';
@@ -17,6 +16,7 @@ import {
 import { MessageMode } from '../hooks/useUIState';
 import CVUploadModal from './CVUploadModal';
 import { useLanguage } from '../context/LanguageContext';
+import { generateExperienceSummaryForCandidate } from '../services/experienceSummaryService';
 
 type CreationMode = 'choice' | 'ai_input' | 'ai_result' | 'manual';
 
@@ -62,6 +62,7 @@ const initialResumeState = {
     contact: '',
     summary: 'התוכן יופיע כאן לאחר ניתוח קורות החיים.',
     experience: [],
+    workExperience: [],
 };
 
 const loadingMessages = [
@@ -88,6 +89,7 @@ const NewCandidateViewV2: React.FC = () => {
     const navigate = useNavigate();
     const location = useLocation();
     const { t } = useLanguage();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const [creationMode, setCreationMode] = useState<CreationMode>('choice');
     const [formData, setFormData] = useState<any>(initialCandidateState);
     const [resumeData, setResumeData] = useState<any>(initialResumeState);
@@ -97,69 +99,294 @@ const NewCandidateViewV2: React.FC = () => {
     const [loadingMessage, setLoadingMessage] = useState('');
     const [parsedSummary, setParsedSummary] = useState<string[] | null>(null);
     const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
+    const [aiCandidateId, setAiCandidateId] = useState<string | null>(null);
+    const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
+    const [generateSummaryError, setGenerateSummaryError] = useState<string | null>(null);
+    const [candidateId, setCandidateId] = useState<string | null>(null);
+    useEffect(() => {
+        setResumeData((prev: any) => ({
+            ...prev,
+            candidateId: candidateId || aiCandidateId || prev.candidateId,
+        }));
+    }, [candidateId, aiCandidateId]);
 
-    const applyParsedData = (importedData: any) => {
-        let educationData: any[] = [];
-        if (importedData.education && importedData.education.length > 0) {
-                educationData = importedData.education.map((edu: any, index: number) => ({ 
-                id: index, 
-                value: `${edu.years ? edu.years + ' : ' : ''}${edu.degree || ''}${edu.institution ? ', ' + edu.institution : ''}` 
-            }));
-        } else if (importedData.educationSummary) {
-            educationData = [{ id: 0, value: importedData.educationSummary }];
+    useEffect(() => {
+        const existingId = formData.id || (formData.backendId || null);
+        if (existingId && existingId !== candidateId) {
+            setCandidateId(existingId);
+            setAiCandidateId(existingId);
+        }
+    }, [formData.id, formData.backendId]);
+
+    const getAuthHeaders = () => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    };
+
+    const crc32base64 = async (file: File) => {
+        const table = new Uint32Array(256).map((_, n) => {
+            let c = n;
+            for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+            return c >>> 0;
+        });
+        const buf = new Uint8Array(await file.arrayBuffer());
+        let crc = 0 ^ -1;
+        for (let i = 0; i < buf.length; i++) {
+            crc = (crc >>> 8) ^ table[(crc ^ buf[i]) & 0xff];
+        }
+        crc = (crc ^ -1) >>> 0;
+        const bytes = new Uint8Array(4);
+        const view = new DataView(bytes.buffer);
+        view.setUint32(0, crc);
+        return btoa(String.fromCharCode(...bytes));
+    };
+
+    const ensureCandidateRecord = async () => {
+        if (candidateId) return candidateId;
+        if (!apiBase) {
+            alert('כתובת API חסרה.');
+            return null;
+        }
+        try {
+            const payload = { ...formData };
+            if (!payload.fullName) payload.fullName = 'מועמד חדש';
+            const res = await fetch(`${apiBase}/api/candidates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'הוספת מועמד נכשלה.');
+            }
+            const created = await res.json();
+            setCandidateId(created.id || null);
+            setAiCandidateId(created.id || null);
+            return created.id || null;
+        } catch (err: any) {
+            console.error('Failed to ensure candidate record', err);
+            alert(err?.message || 'שגיאה ביצירת מועמד.');
+            return null;
+        }
+    };
+
+    const uploadResumeFile = async (file: File) => {
+        const id = await ensureCandidateRecord();
+        if (!id) return;
+        const folder = 'resumes';
+        try {
+            const presignRes = await fetch(`${apiBase}/api/candidates/${id}/upload-url`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({ fileName: file.name, contentType: file.type, folder }),
+            });
+            if (!presignRes.ok) throw new Error('Failed to get upload URL');
+            const { uploadUrl, key } = await presignRes.json();
+            const urlObj = new URL(uploadUrl);
+            const checksum = urlObj.searchParams.get('x-amz-checksum-crc32');
+            const checksumAlgo = urlObj.searchParams.get('x-amz-sdk-checksum-algorithm');
+            const headers: Record<string, string> = {};
+            if (file.type) headers['Content-Type'] = file.type;
+            if (checksum && checksumAlgo === 'CRC32') {
+                headers['x-amz-checksum-crc32'] = await crc32base64(file);
+                headers['x-amz-sdk-checksum-algorithm'] = 'CRC32';
+            }
+            const putRes = await fetch(uploadUrl, {
+                method: 'PUT',
+                headers: Object.keys(headers).length ? headers : undefined,
+                body: file,
+            });
+            if (!putRes.ok) throw new Error('Upload to S3 failed');
+            const attachRes = await fetch(`${apiBase}/api/candidates/${id}/media`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({ key, type: 'resume' }),
+            });
+            if (!attachRes.ok) throw new Error('Failed to attach media');
+            const updated = await attachRes.json();
+            handleResumeUploaded(updated);
+        } catch (err: any) {
+            console.error('Resume upload failed', err);
+            alert(err?.message || 'העלאת הקובץ נכשלה.');
+        }
+    };
+
+    const handleResumeUploaded = (updated: any) => {
+        setFormData((prev: any) => ({ ...prev, ...updated }));
+        if (updated.id) {
+            setCandidateId(updated.id);
+            setAiCandidateId(updated.id);
+        }
+        setResumeData((prev: any) => ({
+            ...prev,
+            resumeUrl: updated.resumeUrl || prev.resumeUrl,
+            candidateId: updated.id || prev.candidateId,
+            workExperience: updated.workExperience || prev.workExperience || [],
+        }));
+    };
+
+    const handleGenerateExperienceSummary = async () => {
+        console.log('handleGenerateExperienceSummary (NewCandidate) invoked', { aiCandidateId, formDataId: formData.id });
+        if (isGeneratingSummary) return;
+
+        let targetId = aiCandidateId;
+        if (!targetId) {
+            // Must save candidate record first to get a UUID for the summary endpoint
+            setIsParsing(true);
+            try {
+                const payload = { ...formData };
+                if (!payload.fullName) payload.fullName = 'מועמד חדש';
+                const base = apiBase || '';
+                const res = await fetch(`${base}/api/candidates`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!res.ok) throw new Error('שגיאה ביצירת מועמד ראשוני.');
+                const created = await res.json();
+                setAiCandidateId(created.id);
+                targetId = created.id;
+            } catch (err: any) {
+                setGenerateSummaryError(err.message || 'שגיאה ביצירת מועמד.');
+                return;
+            } finally {
+                setIsParsing(false);
+            }
         }
 
-        const workExperience = importedData.workExperience?.map((exp: any, index: number) => ({
-            id: Date.now() + index,
-            title: exp.title || '',
-            company: exp.company || '',
-            startDate: exp.startDate || '',
-            endDate: exp.endDate || '',
-            description: exp.description || '',
-            companyField: ''
-        })) || [];
+        if (!targetId) return;
 
-        const industryColors = ['bg-purple-500', 'bg-indigo-400', 'bg-blue-400', 'bg-sky-400'];
-        const industries = importedData.industryAnalysis?.industries?.map((ind: any, index: number) => ({
-            label: ind.label,
-            percentage: ind.percentage,
-            color: industryColors[index % industryColors.length]
-        })) || [];
+        const exp = Array.isArray(formData.workExperience) && formData.workExperience.length > 0 ? formData.workExperience[0] : null;
+        const payload = {
+            title: exp?.title || formData.title || '',
+            company: exp?.company || '',
+            companyField: exp?.companyField || '',
+            description: exp?.description || '',
+        };
 
-        const smartTags = {
-            domains: importedData.industryAnalysis?.professionalFocus || [],
-            orgDNA: {
-                label: importedData.industryAnalysis?.organizationalEnvironment?.type || '',
-                subLabel: importedData.industryAnalysis?.organizationalEnvironment?.details || '',
-                icon: <BuildingOffice2Icon className="w-3.5 h-3.5" />
+        if (!payload.title && !payload.company && !payload.companyField) {
+            setGenerateSummaryError('הוסף תפקיד או חברה לפני שמפעילים את הכתיבה.');
+            return;
+        }
+
+        setIsGeneratingSummary(true);
+        setGenerateSummaryError(null);
+        try {
+            const summary = await generateExperienceSummaryForCandidate(targetId, payload);
+            if (summary) {
+                setFormData((prev: any) => ({ ...prev, professionalSummary: summary }));
             }
+        } catch (err: any) {
+            setGenerateSummaryError(err.message || 'שגיאה ביצירת תיאור ניסיון.');
+        } finally {
+            setIsGeneratingSummary(false);
+        }
+    };
+
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+    const authHeaders = () => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    };
+
+    const resetAiFlow = () => {
+        setAiCandidateId(null);
+        setParsedSummary(null);
+        setResumeData(initialResumeState);
+        setParseError(null);
+        setPastedResumeText('');
+    };
+
+    const goToChoice = () => {
+        resetAiFlow();
+        if (typeof window !== 'undefined') {
+            window.location.href = 'https://hiro.co.il/#/candidates';
+            return;
+        }
+        setCreationMode('choice');
+    };
+
+    const startAiInput = () => {
+        resetAiFlow();
+        setCreationMode('ai_input');
+    };
+
+    const applyParsedData = (candidateData: any) => {
+        if (!candidateData) return;
+
+        const mapExperience = (items: any[]) => (Array.isArray(items)
+            ? items
+                .map((exp: any, index: number) => ({
+                    id: exp.id || Date.now() + index,
+                    title: exp.title || exp.position || '',
+                    company: exp.company || exp.organization || '',
+                    startDate: exp.startDate || exp.from || '',
+                    endDate: exp.endDate || exp.to || '',
+                    description: exp.description || exp.summary || '',
+                    companyField: exp.companyField || '',
+                }))
+                .filter((exp) => exp.title || exp.description)
+            : []);
+
+        const mapEducation = (items: any[]) => (Array.isArray(items)
+            ? items
+                .map((edu: any, index: number) => ({
+                    id: edu.id || index,
+                    value: (
+                        edu.value ||
+                        edu.degree ||
+                        edu.institution ||
+                        edu.fieldOfStudy ||
+                        ''
+                    ).trim(),
+                }))
+                .filter((edu) => edu.value)
+            : []);
+
+        const mapLanguages = (items: any[]) => (Array.isArray(items)
+            ? items.map((lang: any, index: number) => ({
+                id: lang.id || index,
+                name: lang.name || lang.language || '',
+                level: typeof lang.level === 'number' ? lang.level : 50,
+                levelText: lang.levelText || lang.proficiency || '',
+            }))
+            : []);
+
+        const experience = mapExperience(candidateData.workExperience || []);
+        const education = mapEducation(candidateData.education || []);
+        const languages = mapLanguages(candidateData.languages || []);
+        const tags = Array.isArray(candidateData.tags) ? candidateData.tags : [];
+        const skillsRaw = candidateData.skills || {};
+        const skills = {
+            soft: Array.isArray(skillsRaw.soft) ? skillsRaw.soft : [],
+            technical: Array.isArray(skillsRaw.technical) ? skillsRaw.technical : [],
         };
 
         setFormData((prev: any) => ({
             ...prev,
-            fullName: importedData.fullName || prev.fullName,
-            email: importedData.email || prev.email,
-            phone: importedData.phone || prev.phone,
-            address: importedData.address || prev.address,
-            title: importedData.title || prev.title,
-            professionalSummary: importedData.professionalSummary || importedData.summary || prev.professionalSummary,
-            tags: importedData.skills || prev.tags,
-            workExperience: workExperience.length > 0 ? workExperience : prev.workExperience,
-            education: educationData.length > 0 ? educationData : prev.education,
-            languages: importedData.languages && importedData.languages.length > 0 ? importedData.languages.map((lang: any, index: number) => ({id: index, name: lang.name, level: 50, levelText: lang.level || 'טוב'})) : prev.languages,
-            industryAnalysis: {
-                industries: industries,
-                parentCategory: importedData.industryAnalysis?.parentCategory || '',
-                smartTags: smartTags
-            }
+            fullName: candidateData.fullName || prev.fullName,
+            email: candidateData.email || prev.email,
+            phone: candidateData.phone || prev.phone,
+            address: candidateData.address || prev.address,
+            title: candidateData.title || prev.title,
+            professionalSummary: candidateData.professionalSummary || candidateData.summary || prev.professionalSummary,
+            tags: tags.length > 0 ? tags : prev.tags,
+            skills,
+            workExperience: experience.length > 0 ? experience : prev.workExperience,
+            education: education.length > 0 ? education : prev.education,
+            languages: languages.length > 0 ? languages : prev.languages,
+            industryAnalysis: candidateData.industryAnalysis || prev.industryAnalysis,
         }));
-        
+
         setResumeData({
-            name: importedData.fullName || 'Candidate',
-            contact: `${importedData.email || ''} ${importedData.phone || ''}`,
-            summary: importedData.professionalSummary || importedData.summary || 'No summary extracted.',
-            experience: workExperience.map((exp: any) => `<b>${exp.title}</b> at ${exp.company}<br/>${exp.description}`),
+            name: candidateData.fullName || 'Candidate',
+            contact: `${candidateData.email || ''} ${candidateData.phone || ''}`.trim(),
+            summary: candidateData.professionalSummary || candidateData.summary || 'No summary extracted.',
+            experience: experience.map((exp: any) => `<b>${exp.title}</b> at ${exp.company}<br/>${exp.description}`),
+            workExperience: experience,
         });
+
         setCreationMode('ai_result');
     };
 
@@ -167,6 +394,7 @@ const NewCandidateViewV2: React.FC = () => {
         setIsParsing(true);
         setParseError(null);
         setParsedSummary(null);
+        setAiCandidateId(null);
 
         let messageIndex = 0;
         const interval = setInterval(() => {
@@ -175,125 +403,121 @@ const NewCandidateViewV2: React.FC = () => {
         }, 1500);
 
         try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            
-            const responseSchema = {
-                type: Type.OBJECT,
-                properties: {
-                    fullName: { type: Type.STRING },
-                    email: { type: Type.STRING },
-                    phone: { type: Type.STRING },
-                    address: { type: Type.STRING },
-                    title: { type: Type.STRING },
-                    professionalSummary: { type: Type.STRING },
-                    skills: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    industryAnalysis: {
-                        type: Type.OBJECT,
-                        properties: {
-                            industries: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        label: { type: Type.STRING },
-                                        percentage: { type: Type.INTEGER }
-                                    },
-                                    required: ['label', 'percentage']
-                                }
-                            },
-                            professionalFocus: { type: Type.ARRAY, items: { type: Type.STRING } },
-                            organizationalEnvironment: {
-                                type: Type.OBJECT,
-                                properties: {
-                                    type: { type: Type.STRING },
-                                    details: { type: Type.STRING }
-                                },
-                                required: ['type', 'details']
-                            }
-                        },
-                        required: ['industries', 'professionalFocus', 'organizationalEnvironment']
-                    },
-                    workExperience: { 
-                        type: Type.ARRAY, 
-                        items: { 
-                            type: Type.OBJECT,
-                            properties: {
-                                title: { type: Type.STRING },
-                                company: { type: Type.STRING },
-                                startDate: { type: Type.STRING },
-                                endDate: { type: Type.STRING },
-                                description: { type: Type.STRING }
-                            }
-                        } 
-                    },
-                    education: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                degree: { type: Type.STRING },
-                                institution: { type: Type.STRING },
-                                years: { type: Type.STRING }
-                            }
-                        }
-                    },
-                    languages: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING }, level: { type: Type.STRING } } } }
-                },
-                required: ['fullName', 'title', 'professionalSummary', 'skills', 'industryAnalysis']
-            };
-            
-            let requestContents: any;
-            let promptText = `Analyze the provided CV and extract structured data in Hebrew. Infer the professional title and generate a punchy professional summary.`;
+            if (!apiBase) {
+                throw new Error('חסר כתובת API (VITE_API_BASE)');
+            }
+
+            const payload: Record<string, unknown> = {};
 
             if (inputType === 'file' && data instanceof Blob) {
-                const base64Data = await blobToBase64(data);
-                requestContents = {
-                    parts: [
-                        { text: promptText },
-                        { inlineData: { mimeType: data.type, data: base64Data } }
-                    ]
-                };
+                const file = data as File;
+                payload.fileBase64 = await blobToBase64(file);
+                if (file.type) payload.mimeType = file.type;
+                if (file.name) payload.fileName = file.name;
+            } else if (inputType === 'text' && typeof data === 'string') {
+                const trimmed = data.trim();
+                if (!trimmed) {
+                    throw new Error('אנא הזן טקסט תקין לניתוח.');
+                }
+                payload.resumeText = trimmed;
             } else {
-                requestContents = `${promptText}\n\n${data}`;
+                throw new Error('קובץ או טקסט לא חוקיים.');
             }
-            
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
-                contents: requestContents,
-                 config: {
-                    responseMimeType: "application/json",
-                    responseSchema: responseSchema,
-                },
-            });
-            
-            const parsedJson = JSON.parse(response.text);
-            
-            const summaryItems: string[] = [];
-            if (parsedJson.fullName) summaryItems.push('שם מלא');
-            if (parsedJson.phone) summaryItems.push('טלפון');
-            if (parsedJson.title) summaryItems.push('פרופיל ראשי');
-            if (parsedJson.industryAnalysis) summaryItems.push('ניתוח תעשייתי');
-            
-            setParsedSummary(summaryItems);
-            applyParsedData(parsedJson);
 
+            const response = await fetch(`${apiBase}/api/candidates/ai`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const json = await response.json();
+
+            if (!response.ok) {
+                throw new Error(json.message || 'שגיאה בשרת במהלך ניתוח AI.');
+            }
+
+            const candidate = json.candidate || {};
+            const summaryItems: string[] = [];
+            if (candidate.fullName) summaryItems.push('שם מלא');
+            if (candidate.phone) summaryItems.push('טלפון');
+            if (candidate.title) summaryItems.push('פרופיל ראשי');
+            if (candidate.industryAnalysis?.industries?.length) summaryItems.push('ניתוח תעשייתי');
+
+            setParsedSummary(summaryItems);
+            setAiCandidateId(candidate.id || null);
+            applyParsedData(candidate);
         } catch (error: any) {
-            setParseError("שגיאה בניתוח קורות החיים. אנא נסה שנית או הזן ידנית.");
+            setParseError(error.message || 'שגיאה בניתוח קורות החיים. אנא נסה שנית או הזן ידנית.');
         } finally {
             setIsParsing(false);
             clearInterval(interval);
             setLoadingMessage('');
         }
-    }, []);
+    }, [apiBase, applyParsedData]);
+
+    const processFileUpload = useCallback(async (file: File) => {
+        await handleParse('file', file);
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
+    }, [handleParse]);
 
     const handleFileChange = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
-        if (file) await handleParse('file', file);
-    }, [handleParse]);
+        if (file) {
+            await processFileUpload(file);
+        }
+    }, [processFileUpload]);
 
-    const handleSave = () => {
-        alert('מועמד נשמר בהצלחה!');
-        navigate('/candidates');
+    const handleDrop = useCallback(async (event: React.DragEvent<HTMLLabelElement>) => {
+        event.preventDefault();
+        const file = event.dataTransfer.files?.[0];
+        if (file) {
+            await processFileUpload(file);
+        }
+    }, [processFileUpload]);
+
+    const handleSave = async () => {
+        if (!apiBase) {
+            setParseError('חסר כתובת API (VITE_API_BASE)');
+            return;
+        }
+        setIsParsing(true);
+        setParseError(null);
+        try {
+            const payload = { ...formData };
+            if (!payload.fullName) payload.fullName = 'מועמד חדש';
+            const method = aiCandidateId ? 'PUT' : 'POST';
+            const url = aiCandidateId
+                ? `${apiBase}/api/candidates/${aiCandidateId}`
+                : `${apiBase}/api/candidates`;
+            const res = await fetch(url, {
+                method,
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                let msg = 'שמירה נכשלה, בדוק את הפרטים ונסה שוב.';
+                try {
+                    const errJson = await res.json();
+                    msg = errJson.message || msg;
+                } catch {
+                    const txt = await res.text();
+                    if (txt) msg = txt;
+                }
+                throw new Error(msg);
+            }
+            const saved = await res.json();
+            const resolvedId = saved.id || saved.backendId || saved.candidateId || null;
+            setCandidateId(resolvedId);
+            setAiCandidateId(resolvedId);
+            if (resolvedId) {
+                setFormData((prev: any) => ({ ...prev, ...saved }));
+            }
+        } catch (err: any) {
+            setParseError(err.message || 'שמירה נכשלה, נסה שוב.');
+        } finally {
+            setIsParsing(false);
+        }
     };
 
     // --- RENDER HELPERS ---
@@ -306,7 +530,7 @@ const NewCandidateViewV2: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl px-4">
                 {/* AI Option */}
                 <button 
-                    onClick={() => setCreationMode('ai_input')}
+                    onClick={startAiInput}
                     className="flex flex-col items-center text-center p-8 bg-bg-card rounded-3xl border-2 border-primary-500 shadow-xl shadow-primary-500/10 hover:shadow-primary-500/20 hover:scale-105 transition-all group"
                 >
                     <div className="w-20 h-20 bg-primary-100 text-primary-600 rounded-2xl flex items-center justify-center mb-6 group-hover:rotate-6 transition-transform">
@@ -336,8 +560,8 @@ const NewCandidateViewV2: React.FC = () => {
     );
 
     const AIInputScreen = () => (
-        <div className="max-w-3xl mx-auto space-y-8 animate-fade-in py-8">
-            <button onClick={() => setCreationMode('choice')} className="text-sm font-bold text-text-muted hover:text-primary-600 flex items-center gap-1 transition-colors">
+            <div className="max-w-3xl mx-auto space-y-8 animate-fade-in py-8">
+            <button onClick={goToChoice} className="text-sm font-bold text-text-muted hover:text-primary-600 flex items-center gap-1 transition-colors">
                 <ArrowLeftIcon className="w-4 h-4 transform rotate-180" />
                 {t('new_candidate.back_to_choice')}
             </button>
@@ -379,13 +603,23 @@ const NewCandidateViewV2: React.FC = () => {
                     <div className="h-px bg-border-default flex-grow"></div>
                 </div>
 
-                <label className="flex flex-col items-center justify-center w-full h-48 border-2 border-border-default border-dashed rounded-3xl bg-bg-subtle/30 cursor-pointer hover:bg-bg-subtle hover:border-primary-400 transition-all">
+                <label
+                    className="flex flex-col items-center justify-center w-full h-48 border-2 border-border-default border-dashed rounded-3xl bg-bg-subtle/30 cursor-pointer hover:bg-bg-subtle hover:border-primary-400 transition-all"
+                    onDrop={handleDrop}
+                    onDragOver={(event) => event.preventDefault()}
+                >
                     <div className="flex flex-col items-center justify-center pt-5 pb-6">
                         <ArrowUpTrayIcon className="w-10 h-10 mb-4 text-primary-500" />
                         <p className="mb-1 text-lg font-bold text-text-default">{t('new_candidate.dropzone_text')}</p>
-                        <p className="text-sm text-text-muted">PDF, TXT</p>
+                        <p className="text-sm text-text-muted">PDF, DOC, DOCX, PNG, JPG, JPEG</p>
                     </div>
-                    <input type="file" className="hidden" onChange={handleFileChange} accept=".pdf,.txt" />
+                    <input
+                        type="file"
+                        className="hidden"
+                        ref={fileInputRef}
+                        onChange={handleFileChange}
+                        accept=".pdf,.doc,.docx,.png,.jpg,.jpeg"
+                    />
                 </label>
             </div>
         </div>
@@ -403,13 +637,13 @@ const NewCandidateViewV2: React.FC = () => {
                         <p className="text-sm text-green-700">{t('new_candidate.success_extracted', { items: parsedSummary?.join(', ') })}</p>
                     </div>
                 </div>
-                <button onClick={() => setCreationMode('ai_input')} className="text-sm font-bold text-green-800 hover:underline">{t('new_candidate.try_another')}</button>
+                <button onClick={startAiInput} className="text-sm font-bold text-green-800 hover:underline">{t('new_candidate.try_another')}</button>
             </div>
 
             <div className="bg-bg-card rounded-3xl border border-border-default shadow-sm p-4 flex items-center justify-between">
                 <h2 className="text-xl font-bold text-text-default px-4">{t('new_candidate.review_profile')}</h2>
                 <div className="flex gap-3">
-                    <button onClick={() => setCreationMode('choice')} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
+                    <button onClick={goToChoice} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
                     <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">{t('new_candidate.btn_save')}</button>
                 </div>
             </div>
@@ -426,8 +660,19 @@ const NewCandidateViewV2: React.FC = () => {
             />
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <MainContent formData={formData} onFormChange={setFormData} />
-                <ResumeViewer resumeData={resumeData} />
+                <MainContent 
+                    formData={formData} 
+                    onFormChange={setFormData} 
+                    onGenerateExperienceSummary={handleGenerateExperienceSummary}
+                    isGeneratingSummary={isGeneratingSummary}
+                    generateSummaryError={generateSummaryError}
+                />
+                <ResumeViewer
+                    resumeData={resumeData}
+                    onUploadResume={uploadResumeFile}
+                    onResumeUploaded={handleResumeUploaded}
+                    candidateId={candidateId || aiCandidateId}
+                />
             </div>
         </div>
     );
@@ -436,11 +681,11 @@ const NewCandidateViewV2: React.FC = () => {
         <div className="max-w-5xl mx-auto py-8 space-y-6 animate-fade-in">
             <div className="bg-bg-card rounded-3xl border border-border-default shadow-sm p-4 flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                    <button onClick={() => setCreationMode('choice')} className="p-2 rounded-full hover:bg-bg-hover"><ArrowLeftIcon className="w-5 h-5 transform rotate-180" /></button>
+                    <button onClick={goToChoice} className="p-2 rounded-full hover:bg-bg-hover"><ArrowLeftIcon className="w-5 h-5 transform rotate-180" /></button>
                     <h2 className="text-xl font-bold text-text-default">{t('new_candidate.manual_title')}</h2>
                 </div>
                 <div className="flex gap-3">
-                    <button onClick={() => setCreationMode('choice')} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
+                    <button onClick={goToChoice} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
                     <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">{t('new_candidate.btn_save')}</button>
                 </div>
             </div>
@@ -457,7 +702,13 @@ const NewCandidateViewV2: React.FC = () => {
             />
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <MainContent formData={formData} onFormChange={setFormData} />
+                <MainContent 
+                    formData={formData} 
+                    onFormChange={setFormData} 
+                    onGenerateExperienceSummary={handleGenerateExperienceSummary}
+                    isGeneratingSummary={isGeneratingSummary}
+                    generateSummaryError={generateSummaryError}
+                />
                 <div className="bg-bg-subtle/50 rounded-3xl border-2 border-dashed border-border-default flex flex-col items-center justify-center p-12 text-center">
                     <DocumentTextIcon className="w-16 h-16 text-text-subtle mb-4" />
                     <h3 className="text-lg font-bold text-text-default">{t('new_candidate.no_cv_title')}</h3>

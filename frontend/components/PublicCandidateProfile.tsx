@@ -84,6 +84,7 @@ const PublicCandidateProfile: React.FC = () => {
                         <span className="text-xs font-medium text-text-muted border-r border-text-subtle pr-2 mr-2">פרופיל מקצועי</span>
                     </div>
                     <button 
+                        type="button"
                         onClick={handleShare}
                         className="text-sm font-medium text-primary-600 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"
                     >
@@ -149,7 +150,10 @@ const PublicCandidateProfile: React.FC = () => {
                                     <span className="font-medium">{candidateData.phone}</span>
                                 </a>
                             </div>
-                            <button className="w-full mt-6 bg-primary-600 text-white font-bold py-3 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 flex items-center justify-center gap-2">
+                            <button
+                                type="button"
+                                className="w-full mt-6 bg-primary-600 text-white font-bold py-3 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 flex items-center justify-center gap-2"
+                            >
                                 <ArrowDownTrayIcon className="w-5 h-5" />
                                 הורד קורות חיים
                             </button>

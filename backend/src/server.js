@@ -15,11 +15,19 @@ const tagRoutes = require('./routes/tagRoutes');
 const chatRoutes = require('./routes/chatRoutes');
 const jobFieldRoutes = require('./routes/jobFieldRoutes');
 const candidateRoutes = require('./routes/candidateRoutes');
+const promptRoutes = require('./routes/promptRoutes');
+const candidateApplicationRoutes = require('./routes/candidateApplicationRoutes');
+const picklistRoutes = require('./routes/picklistRoutes');
+const helpCenterRoutes = require('./routes/helpCenterRoutes');
+const candidateTagRoutes = require('./routes/candidateTagRoutes');
+const businessLogicRoutes = require('./routes/businessLogicRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
+const bodyParserLimit = process.env.BODY_PARSER_LIMIT || '5mb';
 
-app.use(express.json());
+app.use(express.json({ limit: bodyParserLimit }));
+app.use(express.urlencoded({ limit: bodyParserLimit, extended: true }));
 app.use(corsMiddleware());
 app.options('*', corsMiddleware());   // 👈 מאפשר OPTIONS לכל הנתיבים
 
@@ -35,6 +43,12 @@ app.use('/api/tags', tagRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/job-fields', jobFieldRoutes);
 app.use('/api/candidates', candidateRoutes);
+app.use('/api/prompts', promptRoutes);  
+app.use('/api/applications', candidateApplicationRoutes);
+app.use('/api/picklists', picklistRoutes);
+app.use('/api/help-center', helpCenterRoutes);
+app.use('/api/admin/candidate-tags', candidateTagRoutes);
+app.use('/api/admin/business-logic', businessLogicRoutes);
 
 const start = async () => {
   try {

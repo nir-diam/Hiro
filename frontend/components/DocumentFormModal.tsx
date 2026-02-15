@@ -105,7 +105,7 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
                             <p className="mb-2 text-sm text-text-muted"><span className="font-semibold">לחץ להעלאה</span> או גרור קובץ</p>
                             <p className="text-xs text-text-subtle">PDF, DOCX, PNG, JPG (MAX. 10MB)</p>
                         </div>
-                        <input id="dropzone-file" type="file" className="hidden" onChange={handleFileChange} />
+                        <input id="dropzone-file" type="file" accept=".pdf,.doc,.docx,.dox,.png,.jpg,.jpeg" className="hidden" onChange={handleFileChange} />
                     </label>
                 </div> 
             )}

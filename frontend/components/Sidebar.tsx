@@ -1,10 +1,11 @@
 
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { UserGroupIcon, BriefcaseIcon, ChartPieIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
+import { UserGroupIcon, BriefcaseIcon, ChartPieIcon,BanknotesIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { useLanguage } from '../context/LanguageContext';
 
+// ... (Keep existing interfaces and NavItem/SubMenuLink components) ...
 interface NavItemProps {
   icon: React.ReactElement<{ className?: string }>;
   label: string;
@@ -50,11 +51,50 @@ interface SidebarProps {
     onClose: () => void; // This toggles the state
 }
 
+type ConnectedUser = {
+    id?: string;
+    email?: string;
+    name?: string;
+    role?: string;
+    phone?: string;
+};
+
+const readStoredUser = (): ConnectedUser | null => {
+    const raw = localStorage.getItem('herouser') || localStorage.getItem('user');
+    if (!raw) return null;
+    try {
+        return JSON.parse(raw);
+    } catch {
+        return null;
+    }
+};
+
+const getInitial = (u: ConnectedUser | null): string => {
+    const base = (u?.name || u?.email || '').trim();
+    if (!base) return '?';
+    return base[0].toUpperCase();
+};
+
+const roleLabelHe = (role?: string): string => {
+    switch ((role || '').toLowerCase()) {
+        case 'admin': return 'אדמין';
+        case 'recruiter': return 'מגייס/ת';
+        case 'coordinator': return 'רכז/ת';
+        case 'manager': return 'מנהל/ת';
+        case 'candidate': return 'מועמד/ת';
+        case 'guest': return 'אורח';
+        default: return role || '';
+    }
+};
+
 const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const navigate = useNavigate();
     const location = useLocation();
     const { savedSearches, deleteSearch } = useSavedSearches();
     const { t, dir } = useLanguage();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    const [connectedUser, setConnectedUser] = useState<ConnectedUser | null>(() => readStoredUser());
 
     const [isMobileView, setIsMobileView] = useState(window.innerWidth < 1024);
     
@@ -63,10 +103,12 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const [isSavedSearchesOpen, setIsSavedSearchesOpen] = useState(false);
     const [isJobsOpen, setIsJobsOpen] = useState(false);
     const [isClientsOpen, setIsClientsOpen] = useState(false);
+    const [isFinanceOpen, setIsFinanceOpen] = useState(false); // New state for Finance
     const [isReportsOpen, setIsReportsOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [isMiscOpen, setIsMiscOpen] = useState(false);
 
+    // ... (Keep existing useEffect and handlers) ...
     useEffect(() => {
         const handleResize = () => {
             setIsMobileView(window.innerWidth < 1024);
@@ -74,6 +116,61 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
     }, []);
+
+    useEffect(() => {
+        // Keep sidebar user in sync across tabs/windows
+        const onStorage = (e: StorageEvent) => {
+            if (e.key === 'herouser' || e.key === 'user' || e.key === 'token' || e.key === null) {
+                setConnectedUser(readStoredUser());
+            }
+        };
+        window.addEventListener('storage', onStorage);
+        return () => window.removeEventListener('storage', onStorage);
+    }, []);
+
+    useEffect(() => {
+        // Refresh from localStorage on navigation (same-tab login/logout won't trigger `storage`)
+        setConnectedUser(readStoredUser());
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.pathname]);
+
+    useEffect(() => {
+        // Refresh on window focus (helps after returning from login / other flows)
+        const onFocus = () => setConnectedUser(readStoredUser());
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
+    }, []);
+
+    useEffect(() => {
+        // If we have a token but missing user details (like name), fetch /auth/me
+        const token = localStorage.getItem('token');
+        if (!token) return;
+
+        const hasName = !!(connectedUser?.name && connectedUser.name.trim());
+        if (hasName) return;
+
+        let cancelled = false;
+        (async () => {
+            try {
+                const meUrl = apiBase ? `${apiBase}/api/auth/me` : '/api/auth/me';
+                const res = await fetch(meUrl, {
+                    headers: { Authorization: `Bearer ${token}` },
+                });
+                if (!res.ok) return;
+                const me = await res.json();
+                if (cancelled) return;
+                setConnectedUser(me);
+                try {
+                    localStorage.setItem('herouser', JSON.stringify(me));
+                    localStorage.setItem('user', JSON.stringify(me));
+                } catch {}
+            } catch {
+                // ignore
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [apiBase, connectedUser?.name]);
 
     const handleNavigation = (path: string) => {
         navigate(path);
@@ -87,17 +184,26 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         navigate('/p/gidon-shapira');
     };
 
-    const handleLogout = () => {
+								
+			    const handleLogout = () => {
         try {
             localStorage.clear();
         } catch (e) {
             console.error('Failed to clear localStorage', e);
         }
+        setConnectedUser(null);
         navigate('/login');
     };
+ 
+								 
+					 
+															 
+		 
+						   
+	  
 
-    // On Desktop: isSidebarOpen determines if it's Expanded (true) or Collapsed/Mini (false)
-    // On Mobile: isSidebarOpen determines if the drawer is Visible (true) or Hidden (false)
+																							 
+																							
     const isOpen = isSidebarOpen; 
     const pathname = location.pathname;
 
@@ -106,12 +212,13 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const isJobBoardActive = pathname.startsWith('/job-board');
     const isJobsActive = pathname.startsWith('/jobs');
     const isClientsActive = pathname.startsWith('/clients');
+    const isFinanceActive = pathname.startsWith('/finance'); // New active check
     const isReportsActive = pathname.startsWith('/reports');
     const isMiscActive = pathname.startsWith('/login') || pathname.startsWith('/p/');
     const isSettingsActive = pathname.startsWith('/settings') || pathname.startsWith('/admin');
     const isCommunicationsActive = pathname.startsWith('/communications');
 
-    // Helper to auto-expand parent if collapsed when clicking a parent item
+    // ... (Keep handleParentClick) ...
     const handleParentClick = (
         subState: boolean, 
         setSubState: React.Dispatch<React.SetStateAction<boolean>>, 
@@ -130,7 +237,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         }
     };
 
-    // Determine chevron direction based on RTL/LTR and open state
+																  
     const CollapseIcon = isOpen 
         ? (dir === 'rtl' ? ChevronRightIcon : ChevronLeftIcon)
         : (dir === 'rtl' ? ChevronLeftIcon : ChevronRightIcon);
@@ -165,7 +272,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                 <div className="flex-1 flex flex-col justify-between overflow-y-auto overflow-x-hidden custom-scrollbar py-4 space-y-1">
                     <nav className="flex flex-col space-y-1">
                         
-                        {/* Candidates Group */}
+                        {/* ... (Existing Candidates Group) ... */}
                         <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isCandidatesOpen, setIsCandidatesOpen, '/candidates')}
@@ -186,7 +293,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 )}
                             </button>
                             
-                            {/* Submenu */}
+                            {/* ... (Existing Submenu) ... */}
                             <div className={`overflow-hidden transition-all duration-300 ${isOpen && isCandidatesOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
                                 <div className="mt-1 space-y-0.5">
                                     <SubMenuLink 
@@ -201,7 +308,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                         onClick={() => handleNavigation('/candidates/new')} 
                                         isActive={pathname === '/candidates/new'}
                                     />
-                                    {/* Saved Searches Toggle inside Candidates */}
+                                    {/* ... (Saved Searches) ... */}
                                     <button
                                         onClick={() => setIsSavedSearchesOpen(!isSavedSearchesOpen)}
                                         className="w-full text-start text-sm font-medium py-2 px-9 text-text-muted hover:bg-bg-hover hover:text-text-default flex items-center justify-between group"
@@ -354,6 +461,50 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             </div>
                         </div>
 
+                        {/* --- FINANCE GROUP (NEW) --- */}
+                        <div className="w-full">
+                            <button
+                                onClick={() => handleParentClick(isFinanceOpen, setIsFinanceOpen, '/finance')}
+                                className={`w-full flex items-center transition-all duration-200 group relative
+                                    ${isFinanceActive ? 'text-primary-700 bg-primary-50' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}
+                                    ${isOpen ? 'px-3 py-2.5 mx-2 rounded-lg justify-between' : 'p-3 mx-auto justify-center rounded-lg w-12 h-12'}
+                                `}
+                                title={!isOpen ? 'כספים' : ''}
+                            >
+                                <div className="flex items-center">
+                                    <BanknotesIcon className={`w-6 h-6 shrink-0 transition-colors ${isFinanceActive ? 'text-primary-600' : 'text-text-muted group-hover:text-primary-600'}`}/>
+                                    <span className={`font-medium text-sm whitespace-nowrap overflow-hidden transition-all duration-300 ${isOpen ? 'w-auto opacity-100 ms-3' : 'w-0 opacity-0'}`}>
+                                        כספים
+                                    </span>
+                                </div>
+                                {isOpen && (
+                                    <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isFinanceOpen ? 'rotate-180' : ''}`} />
+                                )}
+                            </button>
+                            <div className={`overflow-hidden transition-all duration-300 ${isOpen && isFinanceOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
+                                <div className="mt-1 space-y-0.5">
+                                    <SubMenuLink 
+                                        to="/finance/dashboard"
+                                        label="דשבורד פיננסי" 
+                                        onClick={() => handleNavigation('/finance/dashboard')} 
+                                        isActive={pathname === '/finance/dashboard'}
+                                    />
+                                    <SubMenuLink 
+                                        to="/finance/invoices"
+                                        label="גבייה וחשבוניות"
+                                        onClick={() => handleNavigation('/finance/invoices')} 
+                                        isActive={pathname === '/finance/invoices'}
+                                    />
+                                     <SubMenuLink 
+                                        to="/finance/commissions"
+                                        label="עמלות רכזות"
+                                        onClick={() => handleNavigation('/finance/commissions')} 
+                                        isActive={pathname === '/finance/commissions'}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+
                          {/* Reports Group */}
                          <div className="w-full">
                             <button
@@ -374,6 +525,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                     <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform duration-200 ${isReportsOpen ? 'rotate-180' : ''}`} />
                                 )}
                             </button>
+                            {/* ... (Existing Submenu) ... */}
                             <div className={`overflow-hidden transition-all duration-300 ${isOpen && isReportsOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
                                 <div className="mt-1 space-y-0.5">
                                      <SubMenuLink 
@@ -405,6 +557,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                         </div>
 
                          {/* Settings Group */}
+                         {/* ... (Existing) ... */}
                          <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isSettingsOpen, setIsSettingsOpen, '/settings')}
@@ -438,6 +591,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                         onClick={() => handleNavigation('/settings/coordinators')} 
                                         isActive={pathname.startsWith('/settings/coordinators')}
                                     />
+                                    {/* ... rest of settings ... */}
                                     <SubMenuLink 
                                         to="/settings/message-templates"
                                         label={t('nav.message_templates')}
@@ -473,6 +627,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                         </div>
 
                          {/* Misc Group */}
+                         {/* ... (Existing) ... */}
                          <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isMiscOpen, setIsMiscOpen, '')}
@@ -494,6 +649,12 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             </button>
                             <div className={`overflow-hidden transition-all duration-300 ${isOpen && isMiscOpen ? 'max-h-48 opacity-100' : 'max-h-0 opacity-0'}`}>
                                 <div className="mt-1 space-y-0.5">
+                                     <SubMenuLink 
+                                        to="/landing"
+                                        label="דף נחיתה (Marketing Site)"
+                                        onClick={() => handleNavigation('/landing')} 
+                                        isActive={pathname === '/landing'}
+                                    />
                                     <SubMenuLink 
                                         to="/login"
                                         label={t('nav.login')}
@@ -516,7 +677,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                     </nav>
                 </div>
                 
-                {/* Collapse / User Section */}
+                {/* ... (Existing Footer) ... */}
                 <div className="border-t border-border-default mt-auto">
                     {/* Only show collapse toggle on desktop */}
                     {!isMobileView && (
@@ -534,11 +695,15 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                     <div className="p-4">
                         <button className={`w-full flex items-center gap-3 p-2 rounded-lg hover:bg-bg-subtle transition-colors group ${!isOpen ? 'justify-center' : ''}`}>
                              <div className="w-10 h-10 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center font-bold text-lg border-2 border-white shadow-sm group-hover:scale-105 transition-transform">
-                                 ש
+                                 {getInitial(connectedUser)}
                              </div>
                              <div className={`flex flex-col text-start overflow-hidden transition-all duration-300 ${isOpen ? 'opacity-100 w-auto' : 'opacity-0 w-0 hidden'}`}>
-                                 <span className="font-bold text-sm text-text-default truncate">שפירא גדעון</span>
-                                 <span className="text-xs text-text-muted truncate">מנהל גיוס</span>
+                                 <span className="font-bold text-sm text-text-default truncate">
+                                     {connectedUser?.name || connectedUser?.email || 'משתמש'}
+                                 </span>
+                                 <span className="text-xs text-text-muted truncate">
+                                     {roleLabelHe(connectedUser?.role)}
+                                 </span>
                              </div>
                         </button>
                         <div className={`mt-2 flex justify-center transition-all duration-300 ${isOpen ? 'opacity-100' : 'opacity-0 h-0 overflow-hidden'}`}>

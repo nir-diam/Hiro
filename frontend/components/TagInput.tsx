@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { XMarkIcon, PlusIcon } from './Icons';
 
-const Tag: React.FC<{ children: React.ReactNode; onRemove: () => void; }> = ({ children, onRemove }) => {
+const Tag: React.FC<{ children: React.ReactNode; onRemove: () => void; title?: string }> = ({ children, onRemove, title }) => {
     const wordCount = typeof children === 'string' ? children.split(' ').filter(Boolean).length : 1;
     
     let widthClass = 'min-w-[6rem]'; // Base for 1 word
@@ -15,7 +15,10 @@ const Tag: React.FC<{ children: React.ReactNode; onRemove: () => void; }> = ({ c
     }
 
     return (
-        <span className={`inline-flex items-center justify-center ${widthClass} bg-primary-100 text-primary-800 text-sm font-medium py-1 px-2 rounded-full animate-fade-in`}>
+        <span
+            className={`inline-flex items-center justify-center ${widthClass} bg-primary-100 text-primary-800 text-sm font-medium py-1 px-2 rounded-full animate-fade-in`}
+            title={title}
+        >
             <span>{children}</span>
             <button 
                 onClick={onRemove} 
@@ -33,7 +36,8 @@ export const TagInput: React.FC<{
     setTags: (tags: string[]) => void;
     placeholder?: string;
     limit?: number;
-}> = ({ tags, setTags, placeholder = "הוסף תגית...", limit }) => {
+    getTagTitle?: (tag: string) => string | undefined;
+}> = ({ tags, setTags, placeholder = "הוסף תגית...", limit, getTagTitle }) => {
     const [inputValue, setInputValue] = useState('');
     const [isAdding, setIsAdding] = useState(false);
     const [isExpanded, setIsExpanded] = useState(false);
@@ -93,7 +97,7 @@ export const TagInput: React.FC<{
             `}</style>
             <div className="flex flex-wrap items-center justify-center gap-2 w-full">
                 {visibleTags.map((tag) => (
-                    <Tag key={tag} onRemove={() => removeTag(tag)}>
+                    <Tag key={tag} onRemove={() => removeTag(tag)} title={getTagTitle?.(tag)}>
                         {tag}
                     </Tag>
                 ))}

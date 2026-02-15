@@ -10,19 +10,23 @@ import {
     DocumentTextIcon,
     ArchiveBoxIcon,
     CheckBadgeIcon,
-    ClockIcon
+    ClockIcon,
+    BanknotesIcon,
+    ClipboardDocumentCheckIcon 
 } from './Icons';
 import ClientDetailsTab from './ClientDetailsTab';
 import ClientContactsTab from './ClientContactsTab';
 import ClientJobsTab from './ClientJobsTab';
 import ClientEventsTab from './ClientEventsTab';
 import ClientDocumentsTab from './ClientDocumentsTab';
+import ClientTasksTab from './ClientTasksTab'; 
+import ClientFinanceTab from './ClientFinanceTab'; // Changed import
 import AccordionSection from './AccordionSection';
+import DocumentViewerModal from './DocumentViewerModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 
-type Tab = 'details' | 'contacts' | 'jobs' | 'events' | 'documents';
-
+type Tab = 'details' | 'tasks' | 'contacts' | 'jobs' | 'events' | 'documents' | 'finance'; 
 
 const StatCard: React.FC<{ title: string; value: string; icon: React.ReactElement; colorClass: { bg: string; text: string; } }> = ({ title, value, icon, colorClass }) => (
     <div className="bg-bg-card p-4 rounded-xl border border-border-default flex items-center gap-4 shadow-sm hover:shadow-md transition-shadow">
@@ -43,27 +47,20 @@ const InfoItem: React.FC<{ label: string, children: React.ReactNode }> = ({ labe
     </div>
 );
 
-
 const ClientInsightsDashboard: React.FC = () => {
     const { t } = useLanguage();
-    // Mock data for insights
     const insights = {
         openJobs: 12,
         frozenJobs: 3,
         closedJobs: 28,
         avgJobLifespan: "42 ימים",
-        submissions: {
-            week: 15,
-            month: 62,
-            year: 740,
-        },
+        submissions: { week: 15, month: 62, year: 740 },
         hiredCount: 21,
         daysSinceStart: 452,
     };
 
     return (
         <div className="space-y-6">
-            {/* Stat Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
                 <StatCard title={t('client_profile.stat_open_jobs')} value={insights.openJobs.toString()} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
                 <StatCard title={t('client_profile.stat_frozen_jobs')} value={insights.frozenJobs.toString()} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
@@ -71,7 +68,6 @@ const ClientInsightsDashboard: React.FC = () => {
                 <StatCard title={t('client_profile.stat_lifespan')} value={insights.avgJobLifespan} icon={<ClockIcon />} colorClass={{ bg: 'bg-secondary-100', text: 'text-secondary-600' }} />
             </div>
 
-            {/* Detailed Insights */}
             <AccordionSection title={t('client_profile.section_insights')} icon={<UserGroupIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
                     <InfoItem label={t('client_profile.insight_submissions_week')}>{insights.submissions.week}</InfoItem>
@@ -103,10 +99,12 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
 
     const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
         { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
+        { id: 'tasks', label: 'משימות', icon: <ClipboardDocumentCheckIcon className="w-5 h-5" /> }, 
         { id: 'contacts', label: t('client_profile.tab_contacts'), icon: <UserGroupIcon className="w-5 h-5" /> },
         { id: 'jobs', label: t('client_profile.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
         { id: 'events', label: t('client_profile.tab_events'), icon: <CalendarDaysIcon className="w-5 h-5" /> },
         { id: 'documents', label: t('client_profile.tab_documents'), icon: <DocumentTextIcon className="w-5 h-5" /> },
+        { id: 'finance', label: 'כספים', icon: <BanknotesIcon className="w-5 h-5" /> },
     ];
 
     if (!client) {
@@ -126,10 +124,12 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                         </div>
                     </div>
                 );
+            case 'tasks': return <ClientTasksTab />; 
             case 'contacts': return <ClientContactsTab clientId={clientId!} onOpenMessageModal={openMessageModal} />;
             case 'jobs': return <ClientJobsTab />;
             case 'events': return <ClientEventsTab />;
             case 'documents': return <ClientDocumentsTab />;
+            case 'finance': return <ClientFinanceTab clientName={client.name} />;
             default: return null;
         }
     };
@@ -142,7 +142,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
             </header>
             
             <div className="border-b border-border-default">
-                <nav className="flex items-center -mb-px gap-4 overflow-x-auto">
+                <nav className="flex items-center -mb-px gap-4 overflow-x-auto no-scrollbar">
                     {tabs.map(tab => (
                          <button 
                             key={tab.id}

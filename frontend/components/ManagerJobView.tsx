@@ -7,7 +7,7 @@ import {
     CheckCircleIcon, NoSymbolIcon, ClockIcon, PaperAirplaneIcon, ChevronLeftIcon, AvatarIcon
 } from './Icons';
 import { mockJobCandidates } from '../data/mockJobData';
-import { Job, jobsData } from './JobsView';
+import { Job } from './JobsView';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 import ManagerFeedbackModal from './ManagerFeedbackModal';
 import { Candidate } from './CandidatesListView';
@@ -59,7 +59,34 @@ const ManagerJobView: React.FC = () => {
         'ראיון מקצועי', 'מבחן בית', 'בדיקת ממליצים', 'הצעת שכר', 'התקבל', 'נדחה'
     ]; 
 
-    const job = jobsData.find(j => j.id.toString() === jobId) || jobsData[0];
+    const [job, setJob] = useState<Job | null>(null);
+    const [jobLoading, setJobLoading] = useState(false);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    useEffect(() => {
+        if (!apiBase || !jobId) return;
+        let isMounted = true;
+        setJobLoading(true);
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/jobs/${jobId}`);
+                if (!res.ok) throw new Error('Failed to load job');
+                const data = await res.json();
+                if (isMounted) {
+                    setJob(data);
+                }
+            } catch (err) {
+                console.error('[ManagerJobView] could not load job', err);
+            } finally {
+                if (isMounted) {
+                    setJobLoading(false);
+                }
+            }
+        })();
+        return () => {
+            isMounted = false;
+        };
+    }, [apiBase, jobId]);
     
     // Filter candidates based on allowed statuses and search
     const filteredCandidates = useMemo(() => {
@@ -178,7 +205,7 @@ const ManagerJobView: React.FC = () => {
                         <ArrowLeftIcon className="w-5 h-5 transform rotate-180 text-text-muted" />
                     </button>
                     <div>
-                        <h1 className="text-2xl font-bold text-text-default">{job.title}</h1>
+                        <h1 className="text-2xl font-bold text-text-default">{job?.title || (jobLoading ? 'טוען משרה...' : 'משרה נבחרת')}</h1>
                         <p className="text-sm text-text-muted">{filteredCandidates.length} מועמדים פעילים</p>
                     </div>
                 </div>
