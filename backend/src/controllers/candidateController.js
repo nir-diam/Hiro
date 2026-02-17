@@ -1,6 +1,5 @@
 const path = require('path');
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
-const { flexibleChecksumsMiddlewareOptions } = require('@aws-sdk/middleware-flexible-checksums');
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const candidateService = require('../services/candidateService');
 const { embedCandidateAndSave, searchCandidates } = require('../services/vectorSearchService');
@@ -12,6 +11,7 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
+const { createS3Client, buildPublicUrl } = require('../services/s3Service');
 
 const extractTextFromImageBuffer = async (buffer) => {
   const worker = await createWorker('eng+heb');
@@ -38,35 +38,6 @@ const tryEmbedCandidate = async (candidateId, extraText = '') => {
 };
 
 const requiredS3Env = ['AWS_REGION', 'AWS_S3_BUCKET', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'];
-
-const ensureS3Env = () => {
-  const missing = requiredS3Env.filter((key) => !process.env[key]);
-  if (missing.length) {
-    const err = new Error(`Missing S3 config: ${missing.join(', ')}`);
-    err.status = 500;
-    throw err;
-  }
-};
-
-const s3Client = () => {
-  ensureS3Env();
-  const client = new S3Client({
-    region: process.env.AWS_REGION,
-    credentials: {
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-    },
-    // Force the SDK to avoid request checksum injection
-    requestChecksumCalculation: 'NEVER',
-  });
-  // Remove checksum middleware globally so presigned URLs won't require checksum headers
-  client.middlewareStack.remove(flexibleChecksumsMiddlewareOptions.name);
-  client.middlewareStack.removeByTag('SET_BODY_CHECKSUM');
-  return client;
-};
-
-const buildPublicUrl = (key) =>
-  `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 
 // --- AI CV parsing (Gemini) ---
 const tryParseJson = (text) => {
@@ -613,7 +584,7 @@ const createUploadUrl = async (req, res) => {
   }
 
   try {
-    const client = s3Client();
+    const client = createS3Client();
     const safeName = path.basename(fileName);
     const key = `${folder}/${req.params.id}/${Date.now()}-${safeName}`;
 
@@ -767,7 +738,7 @@ const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeT
     Body: buffer,
     ContentType: mimeType || 'application/octet-stream',
   });
-  const client = s3Client();
+  const client = createS3Client();
   await client.send(command);
   const publicUrl = buildPublicUrl(key);
   await candidateService.update(candidateId, { resumeUrl: publicUrl });
@@ -1287,7 +1258,10 @@ module.exports = {
   rebuildAllEmbeddings,
   semanticSearch,
   freeSearch,
+  uploadResumeForCandidate,
   generateExperienceSummary,
+  fetchResumeText,
+  buildParsedUpdates,
 };
 
 

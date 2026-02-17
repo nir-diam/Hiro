@@ -21,6 +21,7 @@ const picklistRoutes = require('./routes/picklistRoutes');
 const helpCenterRoutes = require('./routes/helpCenterRoutes');
 const candidateTagRoutes = require('./routes/candidateTagRoutes');
 const businessLogicRoutes = require('./routes/businessLogicRoutes');
+const emailRoutes = require('./routes/emailRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -49,6 +50,7 @@ app.use('/api/picklists', picklistRoutes);
 app.use('/api/help-center', helpCenterRoutes);
 app.use('/api/admin/candidate-tags', candidateTagRoutes);
 app.use('/api/admin/business-logic', businessLogicRoutes);
+app.use('/email', emailRoutes);
 
 const start = async () => {
   try {

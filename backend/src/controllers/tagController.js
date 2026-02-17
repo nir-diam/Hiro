@@ -16,18 +16,32 @@ const enrich = async (req, res) => {
   }
 };
 
+const sanitizeTagPayload = (tag) => {
+  const payload = tag.toJSON ? tag.toJSON() : { ...tag };
+  delete payload.embedding;
+  return payload;
+};
+
 const list = async (_req, res) => {
   const tags = await tagService.list();
-  res.json(tags);
+  const sanitized = (Array.isArray(tags) ? tags : []).map(sanitizeTagPayload);
+  res.json(sanitized);
 };
 
 const get = async (req, res) => {
   try {
     const tag = await tagService.getById(req.params.id);
-    res.json(tag);
+    const payload = tag.toJSON ? tag.toJSON() : { ...tag };
+    delete payload.embedding;
+    res.json(payload);
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
   }
+};
+
+const fireAndForget = (promise) => {
+  if (!promise || typeof promise.catch !== 'function') return;
+  promise.catch((err) => console.error('[tagController] background task failed', err?.message || err));
 };
 
 const create = async (req, res) => {
@@ -39,14 +53,18 @@ const create = async (req, res) => {
         : req.body?.qualityState === 'initial_detection'
           ? 'ai'
           : 'manual';
-    const tag = await tagService.create(req.body, {
+    const payload = { ...req.body };
+    delete payload.embedding;
+    const tag = await tagService.create(payload, {
       actingUser: userId,
       source,
       createdBy: userId,
       updatedBy: userId,
     });
-    tagEmbeddingService.scheduleTagEmbedding(tag);
-    res.status(201).json(tag);
+    fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
+    const responsePayload = tag.toJSON ? tag.toJSON() : { ...tag };
+    delete responsePayload.embedding;
+    res.status(201).json(responsePayload);
   } catch (err) {
     res.status(400).json({ message: err.message || 'Create failed' });
   }
@@ -55,12 +73,16 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const userId = req.user?.sub || req.user?.id || 'system';
-    const tag = await tagService.update(req.params.id, req.body, {
+    const payload = { ...req.body };
+    delete payload.embedding;
+    const tag = await tagService.update(req.params.id, payload, {
       actingUser: userId,
       updatedBy: userId,
     });
-    tagEmbeddingService.scheduleTagEmbedding(tag);
-    res.json(tag);
+    fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
+    const responsePayload = tag.toJSON ? tag.toJSON() : { ...tag };
+    delete responsePayload.embedding;
+    res.json(responsePayload);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }
@@ -72,10 +94,15 @@ const remove = async (req, res) => {
     return res.status(400).json({ message: 'Missing tag id' });
   }
 
+  const transaction = await sequelize.transaction();
   try {
-    await tagService.remove(id);
+    await TagHistory.destroy({ where: { tag_id: id }, transaction });
+    await tagService.remove(id, { transaction });
+    await transaction.commit();
     res.status(204).end();
   } catch (err) {
+    await transaction.rollback();
+
     const isFkError =
       err?.parent?.constraint === 'candidate_tags_tag_id_fkey' ||
       err?.code === '23503' ||

@@ -25,5 +25,10 @@ const remove = async (id) => {
   await job.destroy();
 };
 
-module.exports = { list, getById, create, update, remove };
+const findByPostingCode = async (code) => {
+  if (!code) return null;
+  return Job.findOne({ where: { postingCode: code } });
+};
+
+module.exports = { list, getById, create, update, remove, findByPostingCode };
 

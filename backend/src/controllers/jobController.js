@@ -1,4 +1,5 @@
 const jobService = require('../services/jobService');
+const jobCandidateService = require('../services/jobCandidateService');
 
 const list = async (_req, res) => {
   const jobs = await jobService.list();
@@ -41,5 +42,15 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { list, get, create, update, remove };
+const getCandidates = async (req, res) => {
+  try {
+    const job = await jobService.getById(req.params.id);
+    const candidates = await jobCandidateService.listForJob(req.params.id);
+    res.json({ job, candidates });
+  } catch (err) {
+    res.status(err.status || 404).json({ message: err.message || 'Not found' });
+  }
+};
+
+module.exports = { list, get, create, update, remove, getCandidates };
 

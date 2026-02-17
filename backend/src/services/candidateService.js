@@ -71,6 +71,11 @@ const getById = async (id) => {
   return mapCandidateWithTags(candidate);
 };
 
+const findByEmail = async (email) => {
+  if (!email) return null;
+  return Candidate.findOne({ where: { email } });
+};
+
 const fetchInstanceById = async (id) => {
   const candidate = await Candidate.findByPk(id);
   if (!candidate) {
@@ -170,6 +175,16 @@ const searchFree = async ({ query, limit = 50 }) => {
   });
 };
 
-module.exports = { list, getById, getByUserId, listByUserId, create, update, remove, searchFree };
+module.exports = {
+  list,
+  getById,
+  getByUserId,
+  listByUserId,
+  create,
+  update,
+  remove,
+  searchFree,
+  findByEmail,
+};
 
 

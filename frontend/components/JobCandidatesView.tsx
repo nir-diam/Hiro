@@ -2,12 +2,11 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
-    MagnifyingGlassIcon, AvatarIcon, TableCellsIcon, Squares2X2Icon,
+    MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon,
     PlusIcon, ChevronUpIcon, FolderIcon, ArchiveBoxIcon, ArrowPathIcon,
     ChatBubbleBottomCenterTextIcon, EnvelopeIcon, WhatsappIcon, XMarkIcon, SparklesIcon,
     MapPinIcon, CheckCircleIcon, FlagIcon, ChevronLeftIcon
 } from './Icons';
-import { mockJobCandidates } from '../data/mockJobData';
 import { useLanguage } from '../context/LanguageContext';
 
 type CandidateStatus = 'חדש' | 'סינון טלפוני' | 'ראיון' | 'הצעה' | 'נדחה';
@@ -92,6 +91,9 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
     const navigate = useNavigate();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [job, setJob] = useState<{ city?: string; location?: string } | null>(null);
+    const [candidates, setCandidates] = useState<any[]>([]);
+    const [loadingCandidates, setLoadingCandidates] = useState(false);
+    const [fetchError, setFetchError] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [statusFilter, setStatusFilter] = useState('הכל');
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
@@ -100,34 +102,43 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
     useEffect(() => {
         if (!apiBase || !jobId) return;
         let active = true;
+        setLoadingCandidates(true);
+        setFetchError(null);
+
         (async () => {
             try {
-                const res = await fetch(`${apiBase}/api/jobs/${jobId}`);
-                if (!res.ok) throw new Error('Failed to load job');
-                const payload = await res.json();
-                if (active) {
-                    setJob({
-                        city: payload?.city,
-                        location: payload?.location,
-                    });
+                const res = await fetch(`${apiBase}/api/jobs/${jobId}/candidates`);
+                if (!res.ok) {
+                    throw new Error('Failed to load candidates for this job');
                 }
+                const payload = await res.json();
+                if (!active) return;
+                setJob({
+                    city: payload.job?.city,
+                    location: payload.job?.location,
+                });
+                setCandidates(Array.isArray(payload.candidates) ? payload.candidates : []);
             } catch (err) {
-                console.error('[JobCandidatesView] failed to load job', err);
+                console.error('[JobCandidatesView] failed to load job candidates', err);
+                if (active) setFetchError((err as Error).message || 'נכשל בטעינת מועמדים');
+            } finally {
+                if (active) setLoadingCandidates(false);
             }
         })();
+
         return () => {
             active = false;
         };
     }, [apiBase, jobId]);
 
     const filteredCandidates = useMemo(() => {
-        return mockJobCandidates
-            .filter(c => statusFilter === 'הכל' || c.status === statusFilter)
-            .filter(c => 
-                c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+        return candidates
+            .filter((c) => statusFilter === 'הכל' || c.status === statusFilter)
+            .filter((c) =>
+                c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 c.title.toLowerCase().includes(searchTerm.toLowerCase())
             );
-    }, [searchTerm, statusFilter]);
+    }, [candidates, searchTerm, statusFilter]);
 
     const handleScoreClick = (e: React.MouseEvent, id: number) => {
         e.stopPropagation();
@@ -176,6 +187,9 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
             </header>
 
             <main className="p-6">
+                {fetchError && (
+                    <div className="mb-4 text-sm text-red-600">{fetchError}</div>
+                )}
                 {viewMode === 'table' ? (
                     <div className="overflow-x-visible rounded-2xl border border-border-default">
                         <table className="w-full text-sm text-right">
@@ -190,6 +204,20 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle overflow-visible">
+                                {loadingCandidates && (
+                                    <tr>
+                                        <td colSpan={6} className="p-4 text-center text-text-muted text-xs">
+                                            טוען מועמדים...
+                                        </td>
+                                    </tr>
+                                )}
+                                {!loadingCandidates && filteredCandidates.length === 0 && (
+                                    <tr>
+                                        <td colSpan={6} className="p-4 text-center text-text-muted text-xs">
+                                            אין מועמדים זמינים במשרה זו כרגע.
+                                        </td>
+                                    </tr>
+                                )}
                                 {filteredCandidates.map(c => (
                                     <tr key={c.id} onClick={() => openSummaryDrawer(c)} className="hover:bg-primary-50/30 cursor-pointer transition-colors group">
                                         <td className="p-4">
@@ -248,58 +276,68 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                     </div>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                        {filteredCandidates.map(c => (
-                            <div key={c.id} onClick={() => openSummaryDrawer(c)} className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group">
-                                <div className="flex justify-between items-start mb-4">
-                                    <div className="flex items-center gap-3">
-                                        <div className="w-12 h-12 rounded-2xl bg-primary-100 flex items-center justify-center text-primary-700 font-bold text-lg border border-primary-200 group-hover:rotate-3 transition-transform">
-                                            {c.avatar}
-                                        </div>
-                                        <div>
-                                            <h4 className="font-bold text-text-default group-hover:text-primary-700 transition-colors">{c.name}</h4>
-                                            <p className="text-xs text-text-muted">{c.title}</p>
-                                        </div>
-                                    </div>
-                                    <div className="relative">
-                                        <button 
-                                            className="bg-primary-50 text-primary-700 font-black text-xs px-2 py-1 rounded-lg border border-primary-100 flex items-center gap-1 hover:bg-primary-100 transition-colors"
-                                            onClick={(e) => handleScoreClick(e, c.id)}
-                                        >
-                                            <SparklesIcon className="w-3 h-3"/>
-                                            {c.matchScore}%
-                                        </button>
-                                        {activePopoverId === c.id && (
-                                            <MatchAnalysisPopover 
-                                                candidate={c} 
-                                                lastAnalyzed="28/07/2025"
-                                                onClose={() => setActivePopoverId(null)}
-                                                onRecalculate={async () => { await new Promise(r => setTimeout(r, 1000)); }}
-                                            />
-                                        )}
-                                    </div>
-                                </div>
-                                
-                                <div className="flex items-center justify-between mb-4">
-                                     <button 
-                                        onClick={(e) => handleNavigate(e, c.address || '')}
-                                        className="text-xs flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md text-text-muted hover:text-blue-600 hover:bg-blue-50 transition-colors"
-                                    >
-                                        <MapPinIcon className="w-3 h-3"/>
-                                        {c.address ? `${c.address} (~${Math.floor(Math.random() * 40) + 2} ק"מ)` : t('job_candidates.unknown_location')}
-                                    </button>
-                                </div>
-
-                                <div className="flex items-center justify-between mt-6 pt-4 border-t border-border-subtle">
-                                    <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${statusStyles[c.status as CandidateStatus]}`}>
-                                        {c.status}
-                                    </span>
-                                    <div className="flex gap-2">
-                                        <button className="p-1.5 text-text-subtle hover:text-primary-600 transition-colors" onClick={e => e.stopPropagation()}><WhatsappIcon className="w-4 h-4"/></button>
-                                        <button className="p-1.5 text-text-subtle hover:text-primary-600 transition-colors" onClick={e => e.stopPropagation()}><EnvelopeIcon className="w-4 h-4"/></button>
-                                    </div>
-                                </div>
+                        {loadingCandidates ? (
+                            <div className="col-span-full py-10 text-center text-xs text-text-muted">
+                                טוען מועמדים...
                             </div>
-                        ))}
+                        ) : filteredCandidates.length === 0 ? (
+                            <div className="col-span-full py-10 text-center text-xs text-text-muted">
+                                אין מועמדים זמינים למשרה זו.
+                            </div>
+                        ) : (
+                            filteredCandidates.map(c => (
+                                <div key={c.id} onClick={() => openSummaryDrawer(c)} className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-12 h-12 rounded-2xl bg-primary-100 flex items-center justify-center text-primary-700 font-bold text-lg border border-primary-200 group-hover:rotate-3 transition-transform">
+                                                {c.avatar}
+                                            </div>
+                                            <div>
+                                                <h4 className="font-bold text-text-default group-hover:text-primary-700 transition-colors">{c.name}</h4>
+                                                <p className="text-xs text-text-muted">{c.title}</p>
+                                            </div>
+                                        </div>
+                                        <div className="relative">
+                                            <button 
+                                                className="bg-primary-50 text-primary-700 font-black text-xs px-2 py-1 rounded-lg border border-primary-100 flex items-center gap-1 hover:bg-primary-100 transition-colors"
+                                                onClick={(e) => handleScoreClick(e, c.id)}
+                                            >
+                                                <SparklesIcon className="w-3 h-3"/>
+                                                {c.matchScore}%
+                                            </button>
+                                            {activePopoverId === c.id && (
+                                                <MatchAnalysisPopover 
+                                                    candidate={c} 
+                                                    lastAnalyzed="28/07/2025"
+                                                    onClose={() => setActivePopoverId(null)}
+                                                    onRecalculate={async () => { await new Promise(r => setTimeout(r, 1000)); }}
+                                                />
+                                            )}
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="flex items-center justify-between mb-4">
+                                         <button 
+                                            onClick={(e) => handleNavigate(e, c.address || '')}
+                                            className="text-xs flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md text-text-muted hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                                        >
+                                            <MapPinIcon className="w-3 h-3"/>
+                                            {c.address ? `${c.address} (~${Math.floor(Math.random() * 40) + 2} ק"מ)` : t('job_candidates.unknown_location')}
+                                        </button>
+                                    </div>
+
+                                    <div className="flex items-center justify-between mt-6 pt-4 border-t border-border-subtle">
+                                        <span className={`text-[10px] font-black px-2 py-0.5 rounded-full border ${statusStyles[c.status as CandidateStatus]}`}>
+                                            {c.status}
+                                        </span>
+                                        <div className="flex gap-2">
+                                            <button className="p-1.5 text-text-subtle hover:text-primary-600 transition-colors" onClick={e => e.stopPropagation()}><WhatsappIcon className="w-4 h-4"/></button>
+                                            <button className="p-1.5 text-text-subtle hover:text-primary-600 transition-colors" onClick={e => e.stopPropagation()}><EnvelopeIcon className="w-4 h-4"/></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))
+                        )}
                     </div>
                 )}
             </main>

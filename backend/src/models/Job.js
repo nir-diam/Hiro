@@ -54,6 +54,7 @@ const Job = sequelize.define(
       defaultValue: 'standard',
     },
     internalNotes: DataTypes.TEXT,
+    uniqueEmail: DataTypes.STRING,
     contacts: { type: DataTypes.JSONB, defaultValue: [] },
     recruitmentSources: { type: DataTypes.JSONB, defaultValue: [] },
     telephoneQuestions: { type: DataTypes.JSONB, defaultValue: [] },

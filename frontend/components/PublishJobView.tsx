@@ -74,6 +74,7 @@ const mockJob = {
         'ניסיון מוכח בניהול צוות',
         'שליטה מלאה בגוגל אנליטיקס'
     ],
+    postingCode: '123456',
     screeningQuestions: [
         { id: 1, question: "מה הניסיון שלך בניהול קמפיינים PPC?", answerType: 'טקסט חופשי', idealAnswer: '', isMandatory: true, category: 'ניסיון', isPublished: true, multipleChoiceOptions: '', order: 1 },
         { id: 2, question: "האם יש לך ניסיון עם Google Analytics?", answerType: 'Yes/No', idealAnswer: 'Yes', isMandatory: true, category: 'כלים', isPublished: true, multipleChoiceOptions: '', order: 2 },
@@ -133,9 +134,13 @@ const ToggleSwitch: React.FC<{ label: string; name: string; checked: boolean; on
 const PublishJobView: React.FC = () => {
     const { jobId } = useParams();
     const navigate = useNavigate();
-    const job = mockJob; 
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [job, setJob] = useState(mockJob);
+    const [jobLoading, setJobLoading] = useState(false);
+    const [jobError, setJobError] = useState<string | null>(null);
 
-    const [publishingCode] = useState(String(Math.floor(100000 + Math.random() * 900000)));
+    const [fallbackPostingCode] = useState(() => String(Math.floor(100000 + Math.random() * 900000)));
+    const publishingCode = job.postingCode || fallbackPostingCode;
     const [copySuccess, setCopySuccess] = useState(false);
     const [publicJobTitle, setPublicJobTitle] = useState(job.jobTitle);
     const [publicJobDescription, setPublicJobDescription] = useState(job.description);
@@ -174,6 +179,53 @@ const PublishJobView: React.FC = () => {
             scrollContainer.scrollTop = 0;
         }
     }, []);
+
+    useEffect(() => {
+        let active = true;
+        if (!jobId || !apiBase) {
+            return;
+        }
+        setJobLoading(true);
+        setJobError(null);
+        fetch(`${apiBase}/api/jobs/${jobId}`)
+            .then((res) => {
+                if (!res.ok) {
+                    throw new Error('Failed to load job');
+                }
+                return res.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                setJob(data);
+            })
+            .catch((err) => {
+                if (!active) return;
+                setJobError(err.message || 'Failed to load job');
+            })
+            .finally(() => {
+                if (!active) return;
+                setJobLoading(false);
+            });
+        return () => {
+            active = false;
+        };
+    }, [apiBase, jobId]);
+
+    useEffect(() => {
+        setPublicJobTitle(job.jobTitle);
+        setPublicJobDescription(job.description);
+        const requirements = Array.isArray(job.requirements) ? job.requirements : [];
+        setPublicJobRequirements(requirements.join('\n'));
+        setScreeningQuestions(Array.isArray(job.screeningQuestions) ? job.screeningQuestions : []);
+    }, [job]);
+
+    useEffect(() => {
+        setTrackingLinks([
+            { id: 1, source: 'LinkedIn Post', url: `https://hiro.co.il/jobs/${job.id}?src=li_post`, views: 450, applicants: 32 },
+            { id: 2, source: 'Facebook Campaign', url: `https://hiro.co.il/jobs/${job.id}?src=fb_jul`, views: 1200, applicants: 15 },
+            { id: 3, source: 'Website Career Page', url: `https://hiro.co.il/jobs/${job.id}?src=career`, views: 890, applicants: 56 },
+        ]);
+    }, [job.id]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -372,6 +424,12 @@ const PublishJobView: React.FC = () => {
                     </button>
                 </div>
             </header>
+            {jobLoading && (
+                <p className="text-xs text-text-muted">טוען נתוני משרה...</p>
+            )}
+            {jobError && (
+                <p className="text-xs text-red-600">{jobError}</p>
+            )}
 
             <AccordionSection title="פרטי משרה לפרסום" icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                 <div className="space-y-6">
@@ -389,6 +447,7 @@ const PublishJobView: React.FC = () => {
                             )}
                         </div>
                     </div>
+                  
                      {copySuccess && <p className="text-xs text-green-600 -mt-2 text-left animate-fade-in">הקוד הועתק!</p>}
 
                     <div>

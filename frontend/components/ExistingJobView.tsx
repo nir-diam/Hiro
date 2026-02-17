@@ -76,7 +76,10 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
     const { jobId } = useParams<{ jobId?: string }>();
     const navigate = useNavigate();
 
+    const [apiBase] = useState(import.meta.env.VITE_API_BASE || '');
     const [jobDataState, setJobDataState] = useState(mockExistingJob);
+    const [jobLoading, setJobLoading] = useState(true);
+    const [jobError, setJobError] = useState<string | null>(null);
     const [jobEvents, setJobEvents] = useState(initialJobEvents);
 
     const [chatMessages, setChatMessages] = useState<Message[]>([]);
@@ -93,6 +96,38 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
         window.addEventListener('resize', handleResize);
         return () => window.removeEventListener('resize', handleResize);
     }, []);
+
+    useEffect(() => {
+        if (!jobId) {
+            setJobLoading(false);
+            return;
+        }
+        let active = true;
+        (async () => {
+            try {
+                setJobLoading(true);
+                setJobError(null);
+                const res = await fetch(`${apiBase}/api/jobs/${jobId}`);
+                if (!res.ok) {
+                    throw new Error(res.statusText || 'Failed to load job');
+                }
+                const data = await res.json();
+                if (active) {
+                    setJobDataState(data);
+                }
+            } catch (err: any) {
+                console.error('[ExistingJobView] failed to load job', err);
+                if (active) {
+                    setJobError(err?.message || 'Failed to load job');
+                }
+            } finally {
+                if (active) setJobLoading(false);
+            }
+        })();
+        return () => {
+            active = false;
+        };
+    }, [apiBase, jobId]);
 
     const initializeChat = () => {
         if (chatSession) return;
@@ -165,6 +200,29 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
             setChatError("שגיאת AI");
         } finally {
             setIsChatLoading(false);
+        }
+    };
+
+    const handleJobSave = async (jobData: any) => {
+        if (!jobId) {
+            onSave(jobData);
+            return;
+        }
+        try {
+            const res = await fetch(`${apiBase}/api/jobs/${jobId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(jobData),
+            });
+            if (!res.ok) {
+                throw new Error('Update failed');
+            }
+            const updated = await res.json();
+            setJobDataState(updated);
+            onSave(updated);
+        } catch (err: any) {
+            console.error('[ExistingJobView] failed to save job', err);
+            alert(err?.message || 'עדכון משרה נכשל');
         }
     };
 
@@ -285,7 +343,17 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
 
                     <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm min-h-[600px]">
                         {mainView === 'candidates' && <JobCandidatesView openSummaryDrawer={openSummaryDrawer} jobId={jobDataState.id} />}
-                        {mainView === 'edit' && <div className="p-6"><NewJobView onCancel={() => setMainView('candidates')} onSave={onSave} isEditing={true} jobData={jobDataState} isEmbedded={true} /></div>}
+                        {mainView === 'edit' && (
+                            <div className="p-6">
+                                <NewJobView
+                                    onCancel={() => setMainView('candidates')}
+                                    onSave={handleJobSave}
+                                    isEditing={true}
+                                    jobData={jobDataState}
+                                    isEmbedded={true}
+                                />
+                            </div>
+                        )}
                         {mainView === 'events' && <JobEventsView externalEvents={jobEvents} onAddEvent={(e) => setJobEvents(prev => [e, ...prev])} />}
                     </div>
                 </div>

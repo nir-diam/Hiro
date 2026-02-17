@@ -86,6 +86,23 @@ const questionTypeOptions: { id: QuestionType; label: string; icon: any }[] = [
     { id: 'video', label: 'וידאו', icon: VideoCameraIcon },
 ];
 
+const mapJobGenderSelection = (gender?: string): ('male' | 'female')[] => {
+    if (gender === 'זכר') return ['male'];
+    if (gender === 'נקבה') return ['female'];
+    return ['male', 'female'];
+};
+
+const deriveLocationsFromJob = (jobData: any): LocationItem[] => {
+    if (Array.isArray(jobData?.locations) && jobData.locations.length) {
+        return jobData.locations.map((loc: LocationItem) => ({ ...loc }));
+    }
+    const fallbackCity = String(jobData?.city || jobData?.location || '').trim();
+    if (fallbackCity) {
+        return [{ type: 'city', value: fallbackCity }];
+    }
+    return [];
+};
+
 const disqualificationReasons = [
     "ניסיון",
     "שכר",
@@ -162,9 +179,15 @@ const SectionCard: React.FC<{ id: string; title: string; icon: React.ReactNode; 
     </div>
 );
 
-const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creationDate: string }> = ({ jobId, postingCode, creationDate }) => {
+const TechnicalIdentifiers: React.FC<{
+    jobId: string;
+    postingCode: string;
+    creationDate: string;
+    uniqueEmail: string;
+    onUniqueEmailChange: (value: string) => void;
+    onPostingCodeChange: (value: string) => void;
+}> = ({ jobId, postingCode, creationDate, uniqueEmail, onUniqueEmailChange, onPostingCodeChange }) => {
     const [isOpen, setIsOpen] = useState(false);
-    const uniqueEmail = `humand+j${jobId}@app.hiro.co.il`;
     const { t } = useLanguage();
 
     return (
@@ -185,8 +208,8 @@ const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creat
                         <input 
                             type="text" 
                             value={uniqueEmail} 
-                            disabled 
-                            className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed select-all" 
+                            onChange={(e) => onUniqueEmailChange(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 transition"
                         />
                     </div>
                      <div>
@@ -194,8 +217,8 @@ const TechnicalIdentifiers: React.FC<{ jobId: string; postingCode: string; creat
                         <input 
                             type="text" 
                             value={postingCode} 
-                            disabled 
-                            className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
+                            onChange={(e) => onPostingCodeChange(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-center transition"
                         />
                     </div>
                      <div className="grid grid-cols-2 gap-2">
@@ -1103,10 +1126,15 @@ interface NewJobViewProps {
   isEmbedded?: boolean;
 }
 
+const defaultJobId = '10257';
+const defaultPostingCode = String(Math.floor(100000 + Math.random() * 900000));
+const defaultUniqueEmail = `humand+j${defaultJobId}@app.hiro.co.il`;
+
 const initialJobState = {
     clientName: '', 
-    jobId: '10257', 
-    postingCode: String(Math.floor(100000 + Math.random() * 900000)), 
+    jobId: defaultJobId, 
+    postingCode: defaultPostingCode, 
+    uniqueEmail: defaultUniqueEmail,
     creationDate: new Date().toLocaleDateString('he-IL'),
     status: 'טיוטה', 
     priority: 'רגילה' as Priority, 
@@ -1181,7 +1209,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
     useEffect(() => {
         if (isEditing && jobData) {
-             setFormData(prev => ({
+             const candidateLocations = deriveLocationsFromJob(jobData);
+            setFormData(prev => ({
                 ...prev,
                 clientName: jobData.client || prev.clientName,
                 jobTitle: jobData.title || prev.jobTitle,
@@ -1209,7 +1238,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 
                 languages: jobData.languages || [],
                 skills: jobData.skills || [], 
-                locations: jobData.locations || [], 
+                locations: candidateLocations.length ? candidateLocations : prev.locations,
+                gender: mapJobGenderSelection(jobData.gender),
+                mobility: jobData.mobility ? 'חובה' : 'לא חשוב',
+                drivingLicense: jobData.licenseType || 'לא חשוב',
+                jobId: jobData.id || prev.jobId,
+                uniqueEmail: jobData.uniqueEmail || prev.uniqueEmail,
+                postingCode: jobData.postingCode || prev.postingCode,
+                creationDate: jobData.openDate ? new Date(jobData.openDate).toLocaleDateString('he-IL') : prev.creationDate,
              }));
              if (jobData.client) setIsClientConfirmed(true);
         }
@@ -1706,6 +1742,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             rating: 0,
             healthProfile: formData.healthProfile,
             internalNotes: formData.internalNotes,
+            uniqueEmail: formData.uniqueEmail,
             contacts: contactObjects,
             recruitmentSources: formData.recruitmentSources.map(source => ({
                 id: source.id,
@@ -1714,6 +1751,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 alertDays: source.alertDays,
             })),
             telephoneQuestions: formData.telephoneQuestions,
+            digitalQuestions: formData.digitalQuestions,
             languages: formData.languages,
         };
     };
@@ -1751,7 +1789,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
     const handleSaveAndContinue = async () => {
         if (isEditing) {
-            onSave(formData);
+            onSave(buildJobPayload());
             navigate(`/jobs/${formData.jobId}/publish`);
             return;
         }
@@ -1763,7 +1801,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
     const handleJustSave = async () => {
         if (isEditing) {
-            onSave(formData);
+            onSave(buildJobPayload());
             alert('השינויים נשמרו בהצלחה');
             return;
         }
@@ -2016,7 +2054,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                            <PriorityToggle value={formData.priority} onChange={(p) => setFormData(prev => ({ ...prev, priority: p }))} />
                        </div>
                     </div>
-                    <TechnicalIdentifiers jobId={formData.jobId} postingCode={formData.postingCode} creationDate={formData.creationDate} />
+                    <TechnicalIdentifiers 
+                        jobId={formData.jobId} 
+                        postingCode={formData.postingCode} 
+                        uniqueEmail={formData.uniqueEmail}
+                        creationDate={formData.creationDate}
+                        onUniqueEmailChange={(value) => setFormData(prev => ({ ...prev, uniqueEmail: value }))}
+                        onPostingCodeChange={(value) => setFormData(prev => ({ ...prev, postingCode: value }))}
+                    />
                 </SectionCard>
 
                 <SectionCard id="description-content" title={t('new_job.section_description')} icon={<PencilIcon className="w-5 h-5"/>}>

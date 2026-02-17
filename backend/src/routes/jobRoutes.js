@@ -4,6 +4,7 @@ const jobController = require('../controllers/jobController');
 const router = express.Router();
 
 router.get('/', jobController.list);
+router.get('/:id/candidates', jobController.getCandidates);
 router.get('/:id', jobController.get);
 router.post('/', jobController.create);
 router.put('/:id', jobController.update);

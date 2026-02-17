@@ -46,6 +46,7 @@ const AdminCandidateProfileView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [candidate, setCandidate] = useState<any | null>(null);
     const [resumeText, setResumeText] = useState<string>('');
+    const [resumeUrl, setResumeUrl] = useState<string>('');
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState<boolean>(false);
     const [candidateTags, setCandidateTags] = useState<any[]>([]);
@@ -64,7 +65,8 @@ const AdminCandidateProfileView: React.FC = () => {
             if (!res.ok) throw new Error('Failed to load candidate');
             const data = await res.json();
             setCandidate(data);
-            setResumeText(data.searchText || data.professionalSummary || '');
+            setResumeText(data.resumeText || data.searchText || data.professionalSummary || '');
+            setResumeUrl(data.resumeUrl || '');
         } catch (err: any) {
             setError(err.message || 'Load failed');
         } finally {
@@ -580,8 +582,10 @@ const AdminCandidateProfileView: React.FC = () => {
                                 education: Array.isArray(candidate.education) 
                                     ? candidate.education.map((edu: any) => (typeof edu === 'string' ? edu : edu.value || ''))
                                     : [],
-                                raw: resumeText 
+                                raw: resumeText,
+                                candidateId: candidateIdentifier,
                             }} 
+                            resumeFileUrl={resumeUrl}
                             className="h-full border-0 shadow-none" 
                         />
                     </div>

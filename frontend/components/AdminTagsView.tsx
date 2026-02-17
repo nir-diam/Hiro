@@ -1566,7 +1566,6 @@ const AdminTagsView: React.FC = () => {
                 const created = await res.json();
                 setTags(prev => [...prev, created]);
             }
-            await loadTags();
             setIsModalOpen(false);
         } catch (err: any) {
             alert(err.message || 'Save failed');

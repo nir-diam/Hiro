@@ -20,6 +20,7 @@
     "express": "^4.19.2",
     "google-auth-library": "^9.14.1",
     "jsonwebtoken": "^9.0.2",
+    "mailparser": "^3.9.3",
     "mammoth": "^1.6.0",
     "ml-pca": "^4.1.1",
     "node-fetch": "^3.3.2",

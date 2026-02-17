@@ -6,6 +6,13 @@ const tagEmbeddingService = require('./tagEmbeddingService');
 const { sendSingleTurnChat } = require('./geminiService');
 const promptService = require('./promptService');
 
+const fireAndForget = (promise) => {
+  if (!promise || typeof promise.catch !== 'function') return;
+  promise.catch((err) => {
+    console.error('[tagService] background task failed', err?.message || err);
+  });
+};
+
 const cleanupPendingCorrections = async (values = [], options = {}) => {
   const terms = Array.from(
     new Set(
@@ -41,7 +48,12 @@ const cleanupPendingCorrections = async (values = [], options = {}) => {
   });
 };
 
-const list = async () => Tag.findAll();
+const list = async () =>
+  Tag.findAll({
+    attributes: {
+      exclude: ['embedding'],
+    },
+  });
 
 const getById = async (id) => {
   const tag = await Tag.findByPk(id);
@@ -122,13 +134,13 @@ const create = async (payload, options = {}) => {
     payload.synonyms = normalizeSynonyms(payload.synonyms);
   }
   const created = await Tag.create(payload);
-  await recordTagHistory({
+  fireAndForget(recordTagHistory({
     tagId: created.id,
     action: 'create',
     actor: payload.createdBy || options.actingUser,
     after: created.get({ plain: true }),
-  });
-  tagEmbeddingService.scheduleTagEmbedding(created);
+  }));
+  fireAndForget(tagEmbeddingService.scheduleTagEmbedding(created));
   return created;
 };
 
@@ -154,21 +166,22 @@ const update = async (id, payload, options = {}) => {
   );
 
   await tag.update(payload);
-  await recordTagHistory({
+  fireAndForget(recordTagHistory({
     tagId: tag.id,
     action: 'update',
     actor: payload.updatedBy || options.actingUser,
     before: beforeState,
     after: tag.get({ plain: true }),
-  });
+  }));
 
-  tagEmbeddingService.scheduleTagEmbedding(tag);
+  fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
   return tag;
 };
 
-const remove = async (id) => {
+const remove = async (id, options = {}) => {
   const tag = await getById(id);
-  await tag.destroy();
+  const transaction = options.transaction;
+  await tag.destroy({ transaction });
 };
 
 let tagPromptTemplate = null;
