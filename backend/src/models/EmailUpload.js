@@ -33,6 +33,19 @@ const EmailUpload = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    body: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    candidateId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      references: {
+        model: 'candidates',
+        key: 'id',
+      },
+      onDelete: 'SET NULL',
+    },
   },
   {
     tableName: 'email_uploads',

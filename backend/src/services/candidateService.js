@@ -31,6 +31,31 @@ const includeCandidateTags = [
   },
 ];
 
+// When CandidateTag.raw_type is null, derive from Tag.type so frontend gets correct labels (e.g. Skill, Tool).
+const TAG_TYPE_TO_RAW_TYPE = {
+  role: 'Role',
+  skill: 'Skill',
+  industry: 'Industry',
+  tool: 'Tool',
+  certification: 'Certification',
+  language: 'Language',
+  seniority: 'Seniority',
+  domain: 'Industry',
+  hard_skill: 'Skill',
+  soft_skill: 'Soft',
+  education: 'Certification',
+};
+
+function resolveRawType(ct) {
+  if (ct.raw_type) return ct.raw_type;
+  const tagType = ct.tag?.type;
+  if (tagType && Object.prototype.hasOwnProperty.call(TAG_TYPE_TO_RAW_TYPE, tagType)) {
+    return TAG_TYPE_TO_RAW_TYPE[tagType];
+  }
+  if (tagType) return tagType.charAt(0).toUpperCase() + tagType.slice(1).toLowerCase();
+  return null;
+}
+
 const mapCandidateWithTags = (candidate) => {
   if (!candidate) return null;
   const payload = candidate.toJSON ? candidate.toJSON() : { ...candidate };
@@ -45,7 +70,7 @@ const mapCandidateWithTags = (candidate) => {
     tagKey: ct.tag?.tagKey,
     displayNameHe: ct.tag?.displayNameHe,
     displayNameEn: ct.tag?.displayNameEn,
-    rawType: ct.raw_type,
+    rawType: resolveRawType(ct),
     context: ct.context,
     isCurrent: ct.is_current,
     isInSummary: ct.is_in_summary,
@@ -60,6 +85,36 @@ const mapCandidateWithTags = (candidate) => {
 
 const list = async () =>
   (await Candidate.findAll({ include: includeCandidateTags })).map(mapCandidateWithTags);
+
+const listPaginated = async ({ page = 1, limit = 100, search = '' } = {}) => {
+  const safeLimit = Number.isFinite(limit) ? limit : 100;
+  const safePage = Number.isFinite(page) && page > 0 ? page : 1;
+  const offset = (safePage - 1) * safeLimit;
+  const where = {};
+  const trimmedSearch = String(search || '').trim();
+  if (trimmedSearch) {
+    const likeValue = { [Op.iLike]: `%${trimmedSearch}%` };
+    where[Op.or] = [
+      { fullName: likeValue },
+      { email: likeValue },
+      { professionalSummary: likeValue },
+    ];
+  }
+
+  const { rows, count } = await Candidate.findAndCountAll({
+    include: includeCandidateTags,
+    where,
+    limit: safeLimit,
+    offset,
+    order: [['updatedAt', 'DESC']],
+  });
+  return {
+    rows: rows.map(mapCandidateWithTags),
+    count,
+    page: safePage,
+    limit: safeLimit,
+  };
+};
 
 const getById = async (id) => {
   const candidate = await Candidate.findByPk(id, { include: includeCandidateTags });
@@ -184,6 +239,7 @@ module.exports = {
   update,
   remove,
   searchFree,
+  listPaginated,
   findByEmail,
 };
 

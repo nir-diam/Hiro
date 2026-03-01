@@ -4,7 +4,7 @@ import {
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, TagIcon, 
     CheckCircleIcon, ExclamationTriangleIcon, SparklesIcon, 
     ArrowTopRightOnSquareIcon, FunnelIcon, AdjustmentsHorizontalIcon,
-    Squares2X2Icon, ListBulletIcon, XMarkIcon, UserIcon
+    Squares2X2Icon, ListBulletIcon, XMarkIcon, UserIcon, ArrowPathIcon
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
@@ -72,6 +72,7 @@ const AdminTagCorrectionsView: React.FC = () => {
     const [linkedCandidates, setLinkedCandidates] = useState<{ id: string; name: string }[]>([]);
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const [isResolving, setIsResolving] = useState(false);
     const topRef = useRef<HTMLDivElement | null>(null);
 
 const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
@@ -113,13 +114,26 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             const res = await fetch(`${apiBase}/api/tags`);
             if (!res.ok) return;
             const payload = await res.json();
-            if (!Array.isArray(payload)) return;
-            const normalized = payload
-                .filter((tag) => tag.status === 'active')
-                .map((tag) => ({
-                id: tag.id,
-                name: String(tag.displayNameHe || tag.tagKey || 'תגית').trim(),
-            }));
+
+            // Support both array and `{ data: [...] }` response shapes
+            const tagsArray = Array.isArray(payload)
+                ? payload
+                : Array.isArray(payload?.data)
+                    ? payload.data
+                    : [];
+
+            if (!tagsArray.length) {
+                setAllTags([]);
+                return;
+            }
+
+            const normalized = tagsArray
+                .filter((tag: any) => tag?.status == 'active' && tag?.qualityState == 'verified')
+                .map((tag: any) => ({
+                    id: tag.id,
+                    name: String(tag.displayNameHe || tag.tagKey || tag.displayNameEn || 'תגית').trim(),
+                }));
+
             setAllTags(normalized);
         } catch (err) {
             console.error('Failed to load tags list', err);
@@ -179,7 +193,9 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
     }, [filteredUnmatched]);
 
     const filteredExistingTags = useMemo(() => 
-        linkSearchTerm ? allTags.filter(t => t.name.toLowerCase().includes(linkSearchTerm.toLowerCase())) : [],
+        linkSearchTerm
+            ? allTags.filter((t) => t.name.toLowerCase().includes(linkSearchTerm.toLowerCase()))
+            : allTags,
     [linkSearchTerm, allTags]);
 
     // Effects
@@ -275,6 +291,7 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
 
     const handleResolve = async (action: 'link' | 'create' | 'ignore') => {
         if (!selectedGroup) return;
+        setIsResolving(true);
         try {
             if (action === 'link') {
                 if (!selectedExistingTag) {
@@ -293,6 +310,8 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             setSelectedGroup(null);
         } catch (err: any) {
             flashStatus(err.message || 'הפעולה נכשלה');
+        } finally {
+            setIsResolving(false);
         }
     };
 
@@ -509,7 +528,7 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                             </div>
 
                                             {/* Results Dropdown */}
-                                            {linkSearchTerm && !selectedExistingTag && (
+                                            {!selectedExistingTag && (
                                                 <div className="border border-border-default rounded-lg bg-white shadow-sm max-h-40 overflow-y-auto mb-4 custom-scrollbar">
                                             {filteredExistingTags.length > 0 ? (
                                                 filteredExistingTags.map(tag => (
@@ -530,11 +549,14 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                             <div className="mt-auto">
                                                 <button 
                                                     onClick={() => handleResolve('link')}
-                                                    disabled={!selectedExistingTag}
+                                                    disabled={!selectedExistingTag || isResolving}
                                                     className="w-full bg-primary-600 text-white font-bold py-3 rounded-xl hover:bg-primary-700 transition shadow-md disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none flex items-center justify-center gap-2"
                                                 >
-                                                    <CheckCircleIcon className="w-5 h-5"/>
-                                                    מזג ל-{selectedExistingTag?.name || '...'}
+                                                    {isResolving ? (
+                                                        <><ArrowPathIcon className="w-5 h-5 animate-spin"/> מעבד...</>
+                                                    ) : (
+                                                        <><CheckCircleIcon className="w-5 h-5"/> מזג ל-{selectedExistingTag?.name || '...'}</>
+                                                    )}
                                                 </button>
                                             </div>
                                         </div>
@@ -558,15 +580,16 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                             <div className="mt-auto space-y-3">
                                                 <button 
                                                     onClick={() => handleResolve('create')}
-                                                    className="w-full bg-white border-2 border-green-500 text-green-700 font-bold py-3 rounded-xl hover:bg-green-50 transition shadow-sm flex items-center justify-center gap-2"
+                                                    disabled={isResolving}
+                                                    className="w-full bg-white border-2 border-green-500 text-green-700 font-bold py-3 rounded-xl hover:bg-green-50 transition shadow-sm flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                                                 >
-                                                    <PlusIcon className="w-5 h-5"/>
-                                                    צור תגית "{selectedGroup?.term}"
+                                                    {isResolving ? <><ArrowPathIcon className="w-5 h-5 animate-spin"/> מעבד...</> : <><PlusIcon className="w-5 h-5"/> צור תגית "{selectedGroup?.term}"</>}
                                                 </button>
                                                 
                                                 <button 
                                                     onClick={() => handleResolve('ignore')}
-                                                    className="w-full text-text-muted hover:text-red-600 text-xs font-bold py-2 flex items-center justify-center gap-1 transition-colors"
+                                                    disabled={isResolving}
+                                                    className="w-full text-text-muted hover:text-red-600 text-xs font-bold py-2 flex items-center justify-center gap-1 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                                                 >
                                                     <TrashIcon className="w-3.5 h-3.5"/>
                                                     התעלם (מחק מהרשימה)

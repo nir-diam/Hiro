@@ -65,6 +65,37 @@ const bulkUpdate = async (req, res) => {
   }
 };
 
+const bulkCreate = async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const candidateId = payload.candidate_id || payload.candidateId;
+    const entries = Array.isArray(payload.tags) ? payload.tags : [];
+    if (!candidateId || !entries.length) {
+      return res.status(400).json({ message: 'candidate_id and tags are required' });
+    }
+    const created = [];
+    for (const entry of entries) {
+      const tagEntry = {
+        candidate_id: candidateId,
+        tagKey: entry.tagKey || entry.key || entry.name,
+        displayNameHe: entry.displayNameHe || entry.name,
+        displayNameEn: entry.displayNameEn || entry.name,
+        raw_type: entry.raw_type || entry.type || entry.category,
+        context: entry.context,
+        confidence_score: entry.confidence_score,
+        calculated_weight: entry.calculated_weight,
+        final_score: entry.final_score,
+      };
+      const record = await candidateTagService.createCandidateTag(tagEntry);
+      if (record) created.push(record);
+    }
+    res.status(201).json(created);
+  } catch (err) {
+    console.error('[candidateTagController.bulkCreate]', err);
+    res.status(err.status || 400).json({ message: err.message || 'Failed to create tags' });
+  }
+};
+
 const listByTag = async (req, res) => {
   try {
     const { tagId } = req.params;
@@ -97,6 +128,7 @@ module.exports = {
   update,
   remove,
   bulkUpdate,
+  bulkCreate,
   listByTag,
   countByTags,
 };

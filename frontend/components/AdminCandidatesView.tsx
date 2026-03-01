@@ -8,7 +8,8 @@ import {
     AdjustmentsHorizontalIcon, EllipsisVerticalIcon,
     UserPlusIcon, XMarkIcon, ChevronDownIcon, EnvelopeIcon, PaperAirplaneIcon,
     BriefcaseIcon, AcademicCapIcon, WalletIcon, PlusIcon, BookmarkIcon, FunnelIcon, MinusIcon,
-    ChatBubbleBottomCenterTextIcon, TableCellsIcon, Squares2X2Icon, Cog6ToothIcon, CircleStackIcon
+    ChatBubbleBottomCenterTextIcon, TableCellsIcon, Squares2X2Icon, Cog6ToothIcon, CircleStackIcon,
+    ChevronLeftIcon, ChevronRightIcon
 } from './Icons';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
@@ -352,6 +353,11 @@ const AdminCandidatesView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [candidates, setCandidates] = useState<AdminCandidate[]>([]);
     const [searchResults, setSearchResults] = useState<AdminCandidate[]>([]);
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(100);
+    const [totalCandidates, setTotalCandidates] = useState(0);
+    const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
+    const totalPages = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
     const [isLoading, setIsLoading] = useState(false);
     const [isSearching, setIsSearching] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -440,12 +446,12 @@ const AdminCandidatesView: React.FC = () => {
     }), []);
 
     const stats = useMemo(() => ({
-        total: candidates.length,
+        total: totalCandidates,
         newToday: 0,
         fromCampaigns: candidates.filter(c => c.sourceType === 'campaign').length,
         organic: candidates.filter(c => c.sourceType === 'portal_signup').length,
         joinedPool: 0
-    }), [candidates]);
+    }), [candidates, totalCandidates]);
     
     // Stats View Config (New)
     const [statsConfig, setStatsConfig] = useState<ViewConfig[]>(defaultStatsConfig);
@@ -494,21 +500,47 @@ const AdminCandidatesView: React.FC = () => {
         setIsLoading(true);
         setError(null);
         try {
-            const res = await fetch(`${apiBase}/api/candidates`);
+            const params = new URLSearchParams({
+                page: String(page),
+                limit: String(pageSize),
+            });
+            const trimmed = searchTerm.trim();
+            if (trimmed.length >= 3) {
+                params.set('search', trimmed);
+            }
+            const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
             if (!res.ok) throw new Error('Failed to load candidates');
-            const data = await res.json();
-            const list = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
+            const payload = await res.json();
+            const list = Array.isArray(payload.data)
+                ? payload.data
+                : Array.isArray(payload.rows)
+                    ? payload.rows
+                    : [];
             setCandidates(list.map(mapCandidate));
+            setTotalCandidates(Number(payload.total) || list.length);
         } catch (err: any) {
             setError(err.message || 'Load failed');
+            setCandidates([]);
+            setTotalCandidates(0);
         } finally {
             setIsLoading(false);
         }
-    }, [apiBase, mapCandidate]);
+    }, [apiBase, mapCandidate, page, pageSize, searchTerm]);
 
     useEffect(() => {
         loadCandidates();
     }, [loadCandidates]);
+
+    useEffect(() => {
+        const refreshInterval = setInterval(() => {
+            loadCandidates();
+        }, 10000);
+        return () => clearInterval(refreshInterval);
+    }, [loadCandidates]);
+
+    useEffect(() => {
+        setPage(1);
+    }, [searchTerm]);
 
     // Clear search when entering view
     useEffect(() => {
@@ -516,6 +548,12 @@ const AdminCandidatesView: React.FC = () => {
         setSearchResults([]);
         setSelectedIds(new Set());
     }, []);
+
+    useEffect(() => {
+        if (page > totalPages) {
+            setPage(totalPages);
+        }
+    }, [page, totalPages]);
 
     const buildFilters = useCallback(() => {
         return {
@@ -546,7 +584,7 @@ const AdminCandidatesView: React.FC = () => {
             const res = await fetch(`${apiBase}/api/candidates/search/free`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: q, limit: 200 }),
+                body: JSON.stringify({ query: q, limit: pageSize }),
             });
             if (!res.ok) throw new Error('Search failed');
             const data = await res.json();
@@ -556,7 +594,7 @@ const AdminCandidatesView: React.FC = () => {
         } finally {
             setIsSearching(false);
         }
-    }, [apiBase, mapCandidate]);
+    }, [apiBase, mapCandidate, pageSize]);
 
     const runAdvancedSearch = useCallback(async (term: string) => {
         const q = term.trim();
@@ -572,7 +610,7 @@ const AdminCandidatesView: React.FC = () => {
             const res = await fetch(`${apiBase}/api/candidates/search/semantic`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: q, filters, limit: 200 }),
+                body: JSON.stringify({ query: q, filters, limit: pageSize }),
             });
             if (!res.ok) throw new Error('Search failed');
             const data = await res.json();
@@ -583,7 +621,7 @@ const AdminCandidatesView: React.FC = () => {
         } finally {
             setIsSearching(false);
         }
-    }, [apiBase, buildFilters, mapCandidate]);
+    }, [apiBase, buildFilters, mapCandidate, pageSize]);
 
     useEffect(() => {
         const handle = setTimeout(() => {
@@ -1003,6 +1041,45 @@ const AdminCandidatesView: React.FC = () => {
                              <button onClick={() => setViewMode('table')} className={`p-2 rounded-lg transition-all ${viewMode === 'table' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
                              <button onClick={() => setViewMode('grid')} className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
                         </div>
+                    </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 mt-3">
+                    <label className="text-[11px] text-text-muted font-semibold uppercase tracking-wide">גודל עמוד</label>
+                    <select
+                        value={pageSize}
+                        onChange={(e) => {
+                            const nextSize = Number(e.target.value) || 100;
+                            setPageSize(nextSize);
+                            setPage(1);
+                        }}
+                        className="text-sm bg-bg-input border border-border-default rounded-xl px-3 py-1.5 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition shadow-sm"
+                    >
+                        {pageSizeOptions.map((size) => (
+                            <option key={size} value={size}>
+                                {size}
+                            </option>
+                        ))}
+                    </select>
+                    <div className="flex items-center gap-1 text-xs text-text-muted">
+                        <button
+                            type="button"
+                            disabled={page <= 1}
+                            onClick={() => setPage((prev) => Math.max(1, prev - 1))}
+                            className="p-1 rounded-full border border-border-default bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <ChevronRightIcon className="w-4 h-4" />
+                        </button>
+                        <span>
+                            עמוד {page} מתוך {totalPages}
+                        </span>
+                        <button
+                            type="button"
+                            disabled={page >= totalPages}
+                            onClick={() => setPage((prev) => Math.min(totalPages, prev + 1))}
+                            className="p-1 rounded-full border border-border-default bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <ChevronLeftIcon className="w-4 h-4" />
+                        </button>
                     </div>
                 </div>
                 

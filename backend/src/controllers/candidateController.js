@@ -391,9 +391,29 @@ const parseResumeWithAi = async ({ resumeText }) => {
   return parsed;
 };
 
-const list = async (_req, res) => {
-  const candidates = await candidateService.list();
-  res.json(candidates);
+const list = async (req, res) => {
+  try {
+    const incomingPage = Number(req.query.page) || 1;
+    const incomingLimit = Number(req.query.limit) || 100;
+    const page = Number.isFinite(incomingPage) && incomingPage > 0 ? Math.round(incomingPage) : 1;
+    const limit = Number.isFinite(incomingLimit) ? Math.round(incomingLimit) : 100;
+    const clampedLimit = Math.min(500, Math.max(10, limit));
+    const search = String(req.query.search || '').trim();
+    const payload = await candidateService.listPaginated({
+      page,
+      limit: clampedLimit,
+      search,
+    });
+    res.json({
+      data: payload.rows,
+      total: Number(payload.count) || 0,
+      page: payload.page,
+      limit: payload.limit,
+    });
+  } catch (err) {
+    console.error('[candidateController.list]', err.message || err);
+    res.status(err.status || 400).json({ message: err.message || 'Failed to list candidates' });
+  }
 };
 
 const getByUser = async (req, res) => {
@@ -546,6 +566,9 @@ const createFromAi = async (req, res) => {
 const update = async (req, res) => {
   try {
     const candidate = await candidateService.update(req.params.id, req.body);
+    if (Array.isArray(req.body.tags) && req.body.tags.length) {
+      await candidateTagService.syncTagsForCandidate(candidate.id, req.body.tags);
+    }
     const embedText = [
       candidate.fullName,
       candidate.professionalSummary,
@@ -556,9 +579,6 @@ const update = async (req, res) => {
       .trim();
     if (embedText.length > 3) {
       void tryEmbedCandidate(candidate.id, embedText);
-    }
-    if (Array.isArray(req.body.tags)) {
-      await candidateTagService.removeAbsentTags(candidate.id, req.body.tags);
     }
     const enrichedCandidate = await candidateService.getById(candidate.id);
     res.json(enrichedCandidate);

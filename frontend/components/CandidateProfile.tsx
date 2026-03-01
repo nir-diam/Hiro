@@ -1,71 +1,18 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon } from './Icons';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
+import { SmartTagType, SmartTagData } from './SmartTagTypes';
+import TagRowGroup from './TagRowGroup';
+import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
   <button onClick={onClick} title={title} className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors relative z-20 ${className || 'bg-primary-100/70 text-primary-600 hover:bg-primary-200'}`}>
     {children}
   </button>
 );
-
-type SmartTagType = 'role' | 'seniority' | 'skill' | 'industry' | 'certification' | 'language' | 'tool' | 'soft';
-
-interface SmartTagData {
-    label: string;
-    type: SmartTagType;
-    isVerified?: boolean;
-    isAiSuggested?: boolean;
-    customTooltip?: string;
-}
-
-const SmartTag: React.FC<SmartTagData> = ({ label, type, isVerified, isAiSuggested, customTooltip }) => {
-    const baseClasses = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-default select-none border whitespace-nowrap relative group/tag";
-    const configs: Record<SmartTagType, string> = {
-        role: "bg-primary-600 text-white font-bold border-primary-600 shadow-sm",
-        seniority: "bg-white border-primary-400 text-primary-700 font-bold",
-        skill: "bg-slate-100 text-slate-800 border-slate-200 font-semibold",
-        tool: "bg-blue-50 text-blue-800 border-blue-100 font-bold",
-        soft: "bg-transparent border-slate-200 text-slate-600 italic font-medium",
-        industry: "bg-emerald-50 text-emerald-800 border-emerald-100 font-bold",
-        certification: "bg-orange-50 text-orange-800 border-orange-100 font-bold",
-        language: "bg-pink-50 text-pink-700 border-pink-100 font-medium",
-    };
-    const typeLabels: Record<SmartTagType, string> = {
-        role: "תפקיד",
-        seniority: "בכירות",
-        skill: "מיומנות",
-        tool: "כלי עבודה",
-        soft: "כישורים רכים",
-        industry: "תעשייה",
-        certification: "השכלה/הסמכה",
-        language: "שפה",
-    };
-    const sourceLabel = isAiSuggested ? "AI (בינה מלאכותית)" : "הוזן ידנית / מועמד";
-
-    return (
-        <div
-            className={`${baseClasses} ${configs[type]} ${isAiSuggested ? 'border-dashed' : 'border-solid'} hover:shadow-md hover:-translate-y-0.5`}
-        >
-            {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
-            <span>{label}</span>
-            {isVerified && <CheckCircleIcon className="w-3 h-3 text-current opacity-80" />}
-            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[220px] px-3 py-2 bg-gray-900/95 text-white text-[11px] rounded-lg opacity-0 group-hover/tag:opacity-100 transition-opacity duration-200 pointer-events-none z-50 backdrop-blur-sm shadow-xl flex flex-col items-center gap-0.5 transform scale-95 group-hover/tag:scale-100 origin-bottom text-center leading-tight">
-                {customTooltip ? (
-                    <span className="font-medium whitespace-pre-wrap">{customTooltip}</span>
-                ) : (
-                    <>
-                        <span className="font-bold border-b border-gray-700 pb-0.5 mb-0.5">{typeLabels[type]}</span>
-                        <span className="text-gray-300 text-[9px]">{sourceLabel}</span>
-                    </>
-                )}
-                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900/95"></div>
-            </div>
-        </div>
-    );
-};
 
 const MAX_VISIBLE_TAGS = 5;
 
@@ -81,6 +28,12 @@ const TAG_LINE_CONFIG: Array<{
     { type: 'certification', label: 'השכלה/הסמכה', icon: AcademicCapIcon },
     { type: 'language', label: 'שפה', icon: LanguageIcon },
 ];
+
+const ensureArray = (value: any) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string' && value.trim()) return [value];
+    return [];
+};
 
 const TimelineEvent: React.FC<{ day: string; month: string; time: string; title: string; company: string; color: string }> = ({ day, month, time, title, company, color }) => (
     <div className="flex-1 min-w-[90px] bg-white border border-border-default rounded-xl p-2.5 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between relative overflow-hidden group">
@@ -371,6 +324,10 @@ const ExperienceBar: React.FC<{
     );
 };
 
+interface CandidateListItem {
+    id: string;
+}
+
 interface MultiProfileOption {
     id: string | number;
     profileName: string;
@@ -396,6 +353,8 @@ interface CandidateProfileProps {
     activeProfileId?: string | number;
     onSwitchProfile?: (id: string | number) => void;
     onAddProfile?: () => void;
+    candidateList?: CandidateListItem[];
+    onNavigateCandidate?: (candidateId: string) => void;
 }
 
 const CONTEXT_LABELS: Record<string, string> = {
@@ -425,7 +384,28 @@ type CandidateTagDetail = {
     isCurrent?: boolean;
     isInSummary?: boolean;
     confidenceScore?: number;
+    finalScore?: number;
 };
+
+const getLabelCaseInsensitive = (labels: Record<string, string>, key: string): string | undefined => {
+    if (!key || typeof key !== 'string') return undefined;
+    const exact = labels[key];
+    if (exact) return exact;
+    const capped = key.charAt(0).toUpperCase() + key.slice(1).toLowerCase();
+    return labels[capped] ?? labels[key.toLowerCase()] ?? key;
+};
+
+const normalizeTagDetail = (d: any): CandidateTagDetail => ({
+    tagKey: d?.tagKey ?? d?.tag_key,
+    displayNameHe: d?.displayNameHe ?? d?.display_name_he,
+    displayNameEn: d?.displayNameEn ?? d?.display_name_en,
+    rawType: d?.rawType ?? d?.raw_type,
+    context: d?.context,
+    isCurrent: d?.isCurrent ?? d?.is_current,
+    isInSummary: d?.isInSummary ?? d?.is_in_summary,
+    confidenceScore: typeof (d?.confidenceScore ?? d?.confidence_score) === 'number' ? (d?.confidenceScore ?? d?.confidence_score) : undefined,
+    finalScore: typeof (d?.finalScore ?? d?.final_score) === 'number' ? (d?.finalScore ?? d?.final_score) : undefined,
+});
 
 const formatConfidenceLabel = (value?: number) => {
     if (typeof value !== 'number' || Number.isNaN(value)) return undefined;
@@ -435,23 +415,32 @@ const formatConfidenceLabel = (value?: number) => {
     return 'בביטחון מוגבל';
 };
 
+const formatFinalScoreLabel = (value?: number): string | undefined => {
+    if (typeof value !== 'number' || Number.isNaN(value)) return undefined;
+    const v = Math.max(100, Math.min(350, value));
+    const level = v >= 250 ? 'גבוהה' : v >= 150 ? 'בינוני' : 'נמוך';
+    return `ביטחון: ${level}`;
+};
+
 const buildTagTooltipText = (tag: string, detail?: CandidateTagDetail) => {
     if (!detail) return undefined;
     const descriptorParts: string[] = [];
     if (detail.rawType && detail.rawType !== tag) {
-        descriptorParts.push(RAW_TYPE_LABELS[detail.rawType] || detail.rawType);
+        const labelHe = getLabelCaseInsensitive(RAW_TYPE_LABELS, detail.rawType);
+        if (labelHe && labelHe !== detail.rawType) descriptorParts.push(labelHe);
     }
-    const contextLabel = detail.context ? CONTEXT_LABELS[detail.context] || detail.context : undefined;
+    const contextLabel = detail.context ? (getLabelCaseInsensitive(CONTEXT_LABELS, detail.context) || detail.context) : undefined;
     const temporalLabel = detail.isCurrent ? 'נוכחי' : 'ניסיון עבר';
-    const summaryLabel = detail.isInSummary ? 'נכלל בסיכום' : undefined;
-    const confidenceLabel = formatConfidenceLabel(detail.confidenceScore);
+    const summaryLabel = detail.isInSummary ? 'נכלל בסיכום' : 'לא נכלל בסיכום';
+    const confidenceFromScore = formatConfidenceLabel(detail.confidenceScore);
+    const finalScoreLabel = formatFinalScoreLabel(detail.finalScore) ?? confidenceFromScore;
     const descriptor = descriptorParts.length ? `זוהה כ${descriptorParts.join(' ')}` : 'זוהה';
     const parts = [
         descriptor,
         contextLabel ? `בהקשר ${contextLabel}` : undefined,
         temporalLabel,
         summaryLabel,
-        confidenceLabel,
+        finalScoreLabel,
     ].filter(Boolean);
     return parts.length ? parts.join(' · ') : undefined;
 };
@@ -463,10 +452,15 @@ const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     if (raw.includes('industry')) return 'industry';
     if (raw.includes('certification') || raw.includes('degree') || raw.includes('education')) return 'certification';
     if (raw.includes('language')) return 'language';
-    if (raw.includes('tool')) return 'skill';
-    if (raw.includes('soft') || raw.includes('skill')) return 'skill';
+    if (raw.includes('tool')) return 'tool';
+    if (raw.includes('soft')) return 'soft';
+    if (raw.includes('skill')) return 'skill';
     return 'skill';
 };
+
+interface CandidateListItem {
+  id: string;
+}
 
 const CandidateProfile: React.FC<CandidateProfileProps> = ({
   candidateData,
@@ -486,6 +480,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   activeProfileId,
   onSwitchProfile,
   onAddProfile,
+  candidateList = [],
+  onNavigateCandidate,
 }) => {
   const { t } = useLanguage();
   const jobMatchesCount = 8; 
@@ -494,8 +490,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const currentProfileId = activeProfileId ?? candidateData.id;
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
-  const profileList = fetchedProfiles;
-  const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
+    const profileList = fetchedProfiles;
+    const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
   const showProfileSwitcher = profileList.length > 0;
   const [isSwitcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
@@ -507,7 +503,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const tagDetailLookup = useMemo(() => {
     const map = new Map<string, CandidateTagDetail>();
-    (candidateData.tagDetails || []).forEach((detail: CandidateTagDetail) => {
+    (candidateData.tagDetails || []).forEach((d: any) => {
+      const detail = normalizeTagDetail(d);
       [detail.tagKey, detail.displayNameHe, detail.displayNameEn].forEach((key) => {
         if (typeof key === 'string' && key.trim()) {
           map.set(key.trim(), detail);
@@ -534,12 +531,69 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       return token ? { Authorization: `Bearer ${token}` } : {};
   };
   const candidateId = candidateData.backendId || candidateData.id;
-  const [activeTagRow, setActiveTagRow] = useState<SmartTagType | null>(null);
-  const [newTagText, setNewTagText] = useState<Record<SmartTagType, string>>({});
-  const [isSavingTag, setIsSavingTag] = useState(false);
-  const tagInputRefs = useRef<Record<SmartTagType, HTMLInputElement | null>>({});
-  const [pendingTagDetails, setPendingTagDetails] = useState<Record<string, SmartTagType>>({});
+  const candidateListIndex = useMemo(() => {
+    if (!candidateList?.length || !candidateId) return -1;
+    return candidateList.findIndex((item) => item.id === candidateId);
+  }, [candidateList, candidateId]);
+  const canNavigatePrevCandidate = candidateListIndex > 0;
+  const canNavigateNextCandidate =
+    candidateListIndex >= 0 && candidateListIndex < (candidateList?.length ?? 0) - 1;
+  const handleNavigateCandidate = (offset: number) => {
+    if (candidateListIndex === -1) return;
+    const target = candidateList[candidateListIndex + offset];
+    if (!target?.id) return;
+    onNavigateCandidate?.(target.id);
+  };
   const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
+  const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
+  const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
+  const ROW_CATEGORY_MAP: Record<string, TagCategory> = {
+    roles: 'role',
+    qualifications: 'role',
+    tools: 'tool',
+    soft: 'soft_skill',
+  };
+  const mapCategoryToRawType = (category: TagCategory): string => {
+    if (category === 'soft_skill') return 'soft_skill';
+    if (category === 'tool') return 'tool';
+    return category;
+  };
+  const persistCandidateTag = async (tag: TagOption) => {
+    if (!candidateId) return;
+    try {
+      await fetch(`${apiBase}/api/admin/candidate-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({
+          candidate_id: candidateId,
+          tagKey: tag.nameHe,
+          displayNameHe: tag.nameHe,
+          raw_type: mapCategoryToRawType(tag.category),
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to persist tag', err);
+    }
+  };
+
+  const persistCandidateTagsBatch = async (tags: TagOption[]) => {
+    if (!candidateId || !tags.length) return;
+    try {
+      const payload = tags.map((tag) => ({
+        tagKey: getTagLabel(tag),
+        displayNameHe: tag.nameHe || getTagLabel(tag),
+        displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+        raw_type: mapCategoryToRawType(tag.category),
+      }));
+      await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
+        body: JSON.stringify({ candidate_id: candidateId, tags: payload }),
+      });
+    } catch (err) {
+      console.error('Failed to persist tags batch', err);
+    }
+  };
 
   const groupedSmartTags = useMemo(() => {
     const base = TAG_LINE_CONFIG.reduce<Record<SmartTagType, SmartTagData[]>>((acc, section) => {
@@ -550,11 +604,11 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     const tagsList: string[] = Array.isArray(candidateData.tags) ? candidateData.tags : [];
     tagsList.forEach((tag) => {
       const detail = tagDetailLookup.get(tag);
-      const pendingType = pendingTagDetails[tag];
-      if (pendingType && !detail) return; // wait for confirmed detail before adding fallback
       const type = inferSmartTagType(detail);
+      const displayNameHe = detail?.displayNameHe?.trim();
+      const label = (displayNameHe || tag).trim() || tag;
       const entry: SmartTagData = {
-        label: tag,
+        label,
         type,
         isVerified: Boolean(detail?.isCurrent),
         isAiSuggested: false,
@@ -566,41 +620,105 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       base[type].push(entry);
     });
 
-    Object.entries(pendingTagDetails).forEach(([label, type]) => {
-      const normalizedType = type as SmartTagType;
-      const exists = base[normalizedType]?.some(tagItem => tagItem.label === label);
-      if (!exists) {
-        base[normalizedType].push({
+    const languageEntries = ensureArray(candidateData.languages)
+      .map((lang: any) => {
+        const label =
+          (typeof lang === 'string'
+            ? lang
+            : lang?.lang || lang?.language || lang?.name || lang?.value || '').toString().trim();
+        if (!label) return null;
+        const descriptor =
+          typeof lang === 'object' ? lang.levelText || lang.level || lang.proficiency || '' : '';
+        return {
           label,
-          type: normalizedType,
+          type: 'language' as SmartTagType,
           isVerified: false,
           isAiSuggested: false,
-        });
-      }
+          customTooltip: descriptor ? `רמה: ${descriptor}` : undefined,
+        } as SmartTagData;
+      })
+      .filter(Boolean) as SmartTagData[];
+
+    const softSkillEntries = ensureArray(candidateData.skills?.soft)
+      .map((softSkill) => {
+        const label = (typeof softSkill === 'string' ? softSkill : '').trim();
+        if (!label) return null;
+        return {
+          label,
+          type: 'soft' as SmartTagType,
+          isVerified: false,
+          isAiSuggested: false,
+        } as SmartTagData;
+      })
+      .filter(Boolean) as SmartTagData[];
+
+    languageEntries.forEach((entry) => {
+      if (!base[entry.type]) base[entry.type] = [];
+      base[entry.type].push(entry);
+    });
+
+    softSkillEntries.forEach((entry) => {
+      if (!base[entry.type]) base[entry.type] = [];
+      base[entry.type].push(entry);
     });
 
     return base;
-  }, [candidateData.tags, tagDetailLookup, getTagTooltip, pendingTagDetails]);
-  useEffect(() => {
-    if (activeTagRow) {
-      tagInputRefs.current[activeTagRow]?.focus();
-    }
-  }, [activeTagRow]);
+  }, [candidateData.tags, tagDetailLookup, getTagTooltip]);
 
-  useEffect(() => {
-    setPendingTagDetails(prev => {
-      const next = { ...prev };
-      let changed = false;
-      Object.entries(prev).forEach(([label, type]) => {
-        const detail = tagDetailLookup.get(label);
-        if (detail && inferSmartTagType(detail) === type) {
-          delete next[label];
-          changed = true;
-        }
+  const handleRowTagSelectorOpen = (rowId: string) => {
+    const category = ROW_CATEGORY_MAP[rowId] || 'role';
+    setTagSelectorCategory(category);
+    setIsTagSelectorOpen(true);
+  };
+
+  const getTagLabel = (tag: TagOption): string => tag.nameHe || tag.nameEn || tag.id || '';
+
+  const deleteCandidateTag = async (candidateTagId?: string) => {
+    if (!candidateTagId) return;
+    try {
+      await fetch(`${apiBase}/api/admin/candidate-tags/${candidateTagId}`, {
+        method: 'DELETE',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
       });
-      return changed ? next : prev;
-    });
-  }, [tagDetailLookup]);
+    } catch (err) {
+      console.error('Failed to delete candidate tag', err);
+    }
+  };
+
+  const handleTagSelectorSave = async (selected: TagOption[]) => {
+    if (!selected.length) {
+      setIsTagSelectorOpen(false);
+      return;
+    }
+    const existingTags = Array.isArray(candidateData.tags) ? candidateData.tags : [];
+    const existingSet = new Set(existingTags);
+    const newTags = selected
+      .map((tag) => getTagLabel(tag))
+      .filter((label) => label && !existingSet.has(label));
+    if (newTags.length) {
+      const merged = Array.from(new Set([...existingTags, ...newTags]));
+      const existingDetails = Array.isArray(candidateData.tagDetails) ? candidateData.tagDetails : [];
+      const addedDetails = selected
+        .filter((tag) => newTags.includes(getTagLabel(tag)))
+        .map((tag) => ({
+          tagKey: getTagLabel(tag),
+          displayNameHe: tag.nameHe || getTagLabel(tag),
+          displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+          rawType: mapCategoryToRawType(tag.category),
+          context: undefined,
+          isCurrent: true,
+          isInSummary: true,
+          confidenceScore: undefined,
+        }));
+      onFormChange({
+        ...candidateData,
+        tags: merged,
+        tagDetails: [...existingDetails, ...addedDetails],
+      });
+      await persistCandidateTagsBatch(selected.filter((tag) => newTags.includes(getTagLabel(tag))));
+    }
+    setIsTagSelectorOpen(false);
+  };
 
   const toggleSectionExpansion = useCallback((type: SmartTagType) => {
     setExpandedSections(prev => {
@@ -625,73 +743,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     }
     return mockExperienceDistribution;
   }, [candidateData.workExperience, candidateData.industryAnalysis]);
-
-  const handleCreateCandidateTag = async (type: SmartTagType, label: string) => {
-    if (!candidateId || !label.trim()) {
-      setActiveTagRow(null);
-      setNewTagText(prev => ({ ...prev, [type]: '' }));
-      return;
-    }
-
-    setIsSavingTag(true);
-    setPendingTagDetails(prev => ({
-      ...prev,
-      [label.trim()]: type,
-    }));
-    try {
-      const payload = {
-        candidate_id: candidateId,
-        tagKey: label.trim(),
-        displayNameHe: label.trim(),
-        raw_type: type,
-      };
-      const res = await fetch(`${apiBase}/api/admin/candidate-tags`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(await res.text() || 'Failed to add tag');
-      await res.json();
-      const currentTags = Array.isArray(candidateData.tags) ? candidateData.tags : [];
-      if (!currentTags.includes(label.trim())) {
-        onTagsChange([...currentTags, label.trim()]);
-      }
-    } catch (err) {
-      console.error('Failed to add tag', err);
-    } finally {
-      setIsSavingTag(false);
-      setActiveTagRow(null);
-      setNewTagText(prev => ({ ...prev, [type]: '' }));
-    }
-  };
-
-  const handleTagInputBlur = (type: SmartTagType) => {
-    const currentValue = newTagText[type] || '';
-    if (!currentValue.trim()) {
-      setActiveTagRow(null);
-      setNewTagText(prev => ({ ...prev, [type]: '' }));
-      return;
-    }
-    handleCreateCandidateTag(type, currentValue.trim());
-  };
-
-  const handleTagInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>, type: SmartTagType) => {
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      const currentValue = newTagText[type] || '';
-      if (currentValue.trim()) {
-        handleCreateCandidateTag(type, currentValue.trim());
-      }
-    } else if (event.key === 'Escape') {
-      setActiveTagRow(null);
-      setNewTagText(prev => ({ ...prev, [type]: '' }));
-    }
-  };
-
-  const handleAddTagRow = (type: SmartTagType) => {
-    setActiveTagRow(type);
-    setNewTagText(prev => ({ ...prev, [type]: '' }));
-  };
 
   const crc32base64 = async (file: File) => {
       const table = new Uint32Array(256).map((_, n) => {
@@ -949,7 +1000,25 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   };
 
   return (
-    <div className="space-y-4">
+      <div className="space-y-4">
+      <div className="flex justify-center gap-2">
+          <button
+            type="button"
+            disabled={!canNavigatePrevCandidate}
+            onClick={() => handleNavigateCandidate(-1)}
+            className="p-2 rounded-full bg-bg-card border border-border-default text-text-muted hover:text-primary-600 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ChevronRightIcon className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            disabled={!canNavigateNextCandidate}
+            onClick={() => handleNavigateCandidate(1)}
+            className="p-2 rounded-full bg-bg-card border border-border-default text-text-muted hover:text-primary-600 transition disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ChevronLeftIcon className="w-4 h-4" />
+          </button>
+      </div>
       {renderProfileSwitcher()}
 
       <div className="candidate-profile-card bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border border-border-subtle">
@@ -1036,74 +1105,26 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                         
 
                       <div className="w-full mt-auto">
-                <div className="flex justify-between items-center mb-2">
-                    <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">{t('profile.tags_skills')}</h4>
-                </div>
-                <div className="space-y-4">
-                  {TAG_LINE_CONFIG.map(section => {
-                    const isActiveRow = activeTagRow === section.type;
-                    return (
-                      <div key={section.type} className="space-y-2 group/row">
-                        <div className="flex items-center gap-2 text-[11px] text-text-muted">
-                          <section.icon className="w-4 h-4 text-primary-500" />
-                          <span className="font-semibold text-text-default">{section.label}</span>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2 min-h-[36px]">
-                          {(() => {
-                            const tags = groupedSmartTags[section.type] || [];
-                            const isExpanded = expandedSections.has(section.type);
-                            const visibleTags = isExpanded ? tags : tags.slice(0, MAX_VISIBLE_TAGS);
-                            const extraCount = Math.max(0, tags.length - MAX_VISIBLE_TAGS);
-                            return (
-                              <>
-                                {visibleTags.map(tag => (
-                                  <SmartTag key={`${section.type}-${tag.label}`} {...tag} />
-                                ))}
-                                {tags.length ? null : (
-                                  <span className="text-[11px] text-text-subtle italic">לא מוגדר</span>
-                                )}
-                                {tags.length > MAX_VISIBLE_TAGS && (
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleSectionExpansion(section.type)}
-                                    className="text-[11px] font-semibold text-primary-600 border border-primary-200 rounded-full px-3 py-1 opacity-80 hover:opacity-100 transition"
-                                  >
-                                    {isExpanded ? 'הסתר' : `+${extraCount}`}
-                                  </button>
-                                )}
-                              </>
-                            );
-                          })()}
-                          {isActiveRow ? (
-                            <input
-                              ref={(el) => {
-                                if (el) tagInputRefs.current[section.type] = el;
-                                else tagInputRefs.current[section.type] = null;
-                              }}
-                              value={newTagText[section.type] || ''}
-                              onChange={(e) => setNewTagText(prev => ({ ...prev, [section.type]: e.target.value }))}
-                              onBlur={() => handleTagInputBlur(section.type)}
-                              onKeyDown={(e) => handleTagInputKeyDown(e, section.type)}
-                              placeholder={`הוסף תגית חדשה`}
-                              className="bg-white border border-border-default rounded-full px-3 py-1.5 text-xs focus:ring-2 focus:ring-primary-500 transition-colors"
-                              disabled={isSavingTag && isActiveRow}
-                              autoComplete="off"
-                            />
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleAddTagRow(section.type)}
-                              className="opacity-0 group-hover/row:opacity-100 transition-opacity p-1 rounded-full hover:bg-bg-subtle text-text-muted hover:text-primary-600"
-                              title="הוסף תגית לקטגוריה זו"
-                            >
-                              <PlusIcon className="w-4 h-4" />
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
+                      <TagRowGroup
+                          groupedSmartTags={groupedSmartTags}
+                          onQualificationAdd={() => {
+                              const target = document.getElementById('education');
+                              if (target) {
+                                  target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                              }
+                          }}
+                          onRowAdd={handleRowTagSelectorOpen}
+                          onTagRemove={(label) => {
+                              const existingTags = Array.isArray(candidateData.tags) ? candidateData.tags : [];
+                              const filtered = existingTags.filter((tag) => tag !== label);
+                              if (filtered.length === existingTags.length) return;
+                              const detail = tagDetailLookup.get(label.trim());
+                              if (detail?.id) {
+                                  deleteCandidateTag(detail.id);
+                              }
+                              onFormChange({ ...candidateData, tags: filtered });
+                          }}
+                      />
               </div>
                       
                       {!hideActions && (
@@ -1178,6 +1199,13 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           accept=".pdf,.doc,.docx,.png,.jpg"
           className="hidden"
           onChange={handleResumeSelected}
+        />
+        <TagSelectorModal
+            isOpen={isTagSelectorOpen}
+            onClose={() => setIsTagSelectorOpen(false)}
+            onSave={handleTagSelectorSave}
+            existingTags={Array.isArray(candidateData.tags) ? candidateData.tags : []}
+            initialCategory={tagSelectorCategory}
         />
     </div>
   );

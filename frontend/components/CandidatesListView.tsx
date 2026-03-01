@@ -7,7 +7,7 @@ import {
     AcademicCapIcon, LanguageIcon, XMarkIcon, MapPinIcon, TableCellsIcon, Squares2X2Icon, ExclamationTriangleIcon,
     ChevronUpIcon, BookmarkIcon, CheckCircleIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon, FolderIcon, ArchiveBoxIcon, ChatBubbleBottomCenterTextIcon, EnvelopeIcon, WhatsappIcon,
     BookmarkIconSolid, CheckIcon, AdjustmentsHorizontalIcon, BuildingOffice2Icon, MinusIcon, SparklesIcon, FunnelIcon,
-    ChevronLeftIcon, DocumentArrowDownIcon
+    DocumentArrowDownIcon
 } from './Icons';
 import { SavedSearch, useSavedSearches } from '../context/SavedSearchesContext';
 import CompanyFilterPopover from './CompanyFilterPopover';
@@ -356,6 +356,60 @@ const DoubleRangeSlider: React.FC<{
 };
 
 
+interface TablePaginationControlsProps {
+    page: number;
+    totalPages: number;
+    pageSize: number;
+    pageSizeOptions: number[];
+    onPageChange: (next: number) => void;
+    onPageSizeChange: (size: number) => void;
+}
+
+const TablePaginationControls: React.FC<TablePaginationControlsProps> = ({
+    page,
+    totalPages,
+    pageSize,
+    pageSizeOptions,
+    onPageChange,
+    onPageSizeChange,
+}) => (
+    <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+        <label className="flex items-center gap-1 whitespace-nowrap">
+            <span>דפים</span>
+            <select
+                value={pageSize}
+                onChange={(event) => onPageSizeChange(Number(event.target.value))}
+                className="bg-white border border-border-default rounded px-2 py-1 text-[11px]"
+            >
+                {pageSizeOptions.map((option) => (
+                    <option key={option} value={option}>
+                        {option}
+                    </option>
+                ))}
+            </select>
+        </label>
+        <button
+            type="button"
+            onClick={() => onPageChange(page - 1)}
+            disabled={page <= 1}
+            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+            קודם
+        </button>
+        <span className="text-xs text-text-default">
+            {page} / {totalPages}
+        </span>
+        <button
+            type="button"
+            onClick={() => onPageChange(page + 1)}
+            disabled={page >= totalPages}
+            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+            הבא
+        </button>
+    </div>
+);
+
 const jobScopeOptions = ['מלאה', 'חלקית', 'משמרות', 'פרילנס'];
 
 interface CandidatesListViewProps {
@@ -498,10 +552,32 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const { t } = useLanguage();
 
     const [searchTerm, setSearchTerm] = useState('');
+    useEffect(() => {
+        const handler = setTimeout(() => {
+            const trimmed = searchTerm.trim();
+            setDebouncedSearchTerm(trimmed.length >= 3 ? trimmed : '');
+            setPage(1);
+        }, 500);
+        return () => clearTimeout(handler);
+    }, [searchTerm]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const settingsRef = useRef<HTMLDivElement>(null);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(100);
+    const [totalCandidates, setTotalCandidates] = useState(0);
+    const totalPages = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
+    const goToPage = useCallback((target: number) => {
+        const normalized = Math.max(1, Math.min(totalPages, target));
+        setPage(normalized);
+    }, [totalPages]);
+    const handlePageSizeSelect = useCallback((nextSize: number) => {
+        setPageSize(nextSize);
+        setPage(1);
+    }, []);
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
     const dragItemIndex = useRef<number | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     
@@ -603,28 +679,52 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         };
     }, []);
 
-    useEffect(() => {
+    const fetchCandidates = useCallback(async () => {
         if (!apiBase) return;
         setIsRemoteLoading(true);
-        (async () => {
-            try {
-                const res = await fetch(`${apiBase}/api/candidates`);
-                if (!res.ok) throw new Error('failed to load');
-                const data = await res.json();
-                const list =
-                    Array.isArray(data) ? data :
-                    Array.isArray(data?.rows) ? data.rows :
-                    Array.isArray(data?.data) ? data.data :
-                    Array.isArray(data?.rows?.rows) ? data.rows.rows :
-                    [];
-                setCandidates(list.map(mapCandidate));
-            } catch (e) {
-                setCandidates([]);
-            } finally {
-                setIsRemoteLoading(false);
+        try {
+            const params = new URLSearchParams({
+                page: String(page),
+                limit: String(pageSize),
+            });
+            if (debouncedSearchTerm) {
+                params.set('search', debouncedSearchTerm);
             }
-        })();
-    }, [apiBase, mapCandidate]);
+            const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
+            if (!res.ok) throw new Error('failed to load');
+            const payload = await res.json();
+            const list = Array.isArray(payload.data)
+                ? payload.data
+                : Array.isArray(payload.rows)
+                    ? payload.rows
+                    : [];
+            setCandidates(list.map(mapCandidate));
+            setTotalCandidates(Number(payload.total) || list.length);
+        } catch (e) {
+            setCandidates([]);
+            setTotalCandidates(0);
+        } finally {
+            setIsRemoteLoading(false);
+        }
+    }, [apiBase, mapCandidate, page, pageSize, debouncedSearchTerm]);
+
+    useEffect(() => {
+        fetchCandidates();
+    }, [fetchCandidates]);
+
+    useEffect(() => {
+        const refreshInterval = setInterval(() => {
+            fetchCandidates();
+        }, 10000);
+        return () => clearInterval(refreshInterval);
+    }, [fetchCandidates]);
+
+    useEffect(() => {
+        const maxPage = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
+        if (page > maxPage) {
+            setPage(maxPage);
+        }
+    }, [page, pageSize, totalCandidates]);
 
     // Initialize columns state with translations
     const allColumns = useMemo(() => [
@@ -1178,6 +1278,24 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         <SparklesIcon className="w-5 h-5" />
                     </button>
                 </div>
+                <div className="flex flex-wrap items-center gap-2 mt-2">
+                    <label className="text-[11px] text-text-muted font-semibold uppercase tracking-wide">גודל עמוד</label>
+                    <select
+                        value={pageSize}
+                        onChange={(e) => {
+                            const nextSize = Number(e.target.value) || 100;
+                            setPageSize(nextSize);
+                            setPage(1);
+                        }}
+                        className="text-sm bg-bg-input border border-border-default rounded-xl px-3 py-1.5 focus:ring-2 focus:ring-primary-500 focus:border-transparent transition shadow-sm"
+                    >
+                        {pageSizeOptions.map((size) => (
+                            <option key={size} value={size}>
+                                {size}
+                            </option>
+                        ))}
+                    </select>
+                </div>
 
                 {/* Smart Search Panel */}
             <SmartSearchPanel 
@@ -1520,8 +1638,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
             <main className="bg-bg-card rounded-2xl shadow-sm overflow-hidden border border-border-default">
                 {viewMode === 'table' ? (
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-sm text-right min-w-[800px]">
+                    <>
+                        <div className="px-4 py-3 border-b border-border-default bg-bg-subtle">
+                            <TablePaginationControls
+                                page={page}
+                                pageSize={pageSize}
+                                totalPages={totalPages}
+                                pageSizeOptions={pageSizeOptions}
+                                onPageChange={goToPage}
+                                onPageSizeChange={handlePageSizeSelect}
+                            />
+                        </div>
+                        <div className="overflow-x-auto">
+                            <table className="w-full text-sm text-right min-w-[800px]">
                             <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                                 <tr>
                                     {selectionMode && (
@@ -1588,7 +1717,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             ))}
                             </tbody>
                         </table>
-                    </div>
+                        </div>
+                        <div className="px-4 py-3 border-t border-border-default bg-bg-subtle">
+                            <TablePaginationControls
+                                page={page}
+                                pageSize={pageSize}
+                                totalPages={totalPages}
+                                pageSizeOptions={pageSizeOptions}
+                                onPageChange={goToPage}
+                                onPageSizeChange={handlePageSizeSelect}
+                            />
+                        </div>
+                    </>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-4">
                         {processedCandidates.map(candidate => {

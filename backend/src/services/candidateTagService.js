@@ -134,6 +134,33 @@ const stringSimilarity = (a, b) => {
   return 1 - distance / maxLen;
 };
 
+const buildAliasMatchLiteral = (lowerTrimmed) =>
+  sequelize.literal(
+    `EXISTS (SELECT 1 FROM unnest("Tag"."aliases") alias WHERE lower(alias) = ${sequelize.escape(
+      lowerTrimmed,
+    )})`,
+  );
+
+const findTagByNameOrAlias = async (name) => {
+  const trimmed = (name || '').trim();
+  if (!trimmed) return null;
+  const lowerTrimmed = trimmed.toLowerCase();
+  const aliasMatchLiteral = buildAliasMatchLiteral(lowerTrimmed);
+
+  return Tag.findOne({
+    where: {
+      [Op.or]: [
+        sequelize.where(fn('LOWER', col('display_name_he')), lowerTrimmed),
+        sequelize.where(fn('LOWER', col('display_name_en')), lowerTrimmed),
+        sequelize.where(fn('LOWER', col('tag_key')), lowerTrimmed),
+        aliasMatchLiteral,
+      ],
+    },
+  });
+};
+
+const doesTagNameOrAliasExist = async (name) => Boolean(await findTagByNameOrAlias(name));
+
 const recordTagUsage = async (tagRecord) => {
   if (!tagRecord) return;
   tagRecord.usageCount = (tagRecord.usageCount || 0) + 1;
@@ -170,16 +197,11 @@ const findFuzzyTag = async (value) => {
 
 const ensureTagRecord = async (tagKey, defaults = {}) => {
   if (!tagKey) return null;
-  const existing = await Tag.findOne({
-    where: {
-      [Op.or]: [
-        { tagKey: { [Op.iLike]: tagKey } },
-        { displayNameHe: { [Op.iLike]: tagKey } },
-        { displayNameEn: { [Op.iLike]: tagKey } },
-      ],
-    },
-  });
-  if (existing) return { tag: existing, created: false };
+  const searchTargets = [tagKey, defaults.displayNameHe, defaults.displayNameEn];
+  for (const target of searchTargets) {
+    const found = await findTagByNameOrAlias(target);
+    if (found) return { tag: found, created: false };
+  }
   const fuzzy = await findFuzzyTag(defaults.displayNameHe || defaults.displayNameEn || tagKey);
   if (fuzzy) return { tag: fuzzy, created: false };
 
@@ -196,21 +218,15 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
   ];
   const tagType = allowedTypes.includes(typeValue) ? typeValue : 'role';
 
-  const statusValue = typeof defaults.status === 'string' ? defaults.status.toLowerCase() : 'pending';
-  const allowedStatuses = ['active', 'draft', 'deprecated', 'archived', 'pending'];
-  const tagStatus = allowedStatuses.includes(statusValue) ? statusValue : 'pending';
-
-  const [tag, created] = await Tag.findOrCreate({
-    where: { tagKey },
-    defaults: {
-      displayNameHe: defaults.displayNameHe || tagKey,
-      displayNameEn: defaults.displayNameEn || tagKey,
-      type: tagType,
-      source: 'ai',
-      status: tagStatus,
-    },
+  const tag = await Tag.create({
+    tagKey,
+    displayNameHe: defaults.displayNameHe || tagKey,
+    displayNameEn: defaults.displayNameEn || tagKey,
+    type: tagType,
+    source: 'ai',
+    status: 'pending'
   });
-  return { tag, created };
+  return { tag, created: true };
 };
 
 const syncTagsForCandidate = async (candidateId, entries = []) => {
@@ -228,13 +244,24 @@ const syncTagsForCandidate = async (candidateId, entries = []) => {
 
   await CandidateTag.destroy({ where: { candidate_id: candidateId } });
 
-  await Promise.all(
+  // Resolve each payload to a tag, then deduplicate by tag.id so we never insert duplicate (candidate_id, tag_id)
+  const resolved = await Promise.all(
     payloads.map(async (payload) => {
       const { tag, created } = await ensureTagRecord(payload.tagKey, {
         displayNameHe: payload.name,
         type: payload.raw_type || 'role',
       });
-      if (!tag) return null;
+      return tag ? { tag, created, payload } : null;
+    }),
+  );
+  const byTagId = new Map();
+  resolved.filter(Boolean).forEach((r) => {
+    if (!byTagId.has(r.tag.id)) byTagId.set(r.tag.id, r);
+  });
+  const uniqueResolved = Array.from(byTagId.values());
+
+  await Promise.all(
+    uniqueResolved.map(async ({ tag, created, payload }) => {
       const score = tagScoringEngine.scoreTag(payload);
       const entry = await CandidateTag.create({
         candidate_id: candidateId,

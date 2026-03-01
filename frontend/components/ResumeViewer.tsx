@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { PencilIcon, ArrowDownTrayIcon, TrashIcon, ChevronDownIcon, ArrowUpTrayIcon, PinIcon, PaperClipIcon, EyeIcon, CodeBracketIcon, EnvelopeIcon } from './Icons';
 import OriginalResume from './OriginalResume';
 import IndustryExperienceSummary from './IndustryExperienceSummary';
@@ -41,26 +41,14 @@ interface ResumeViewerProps {
     candidateId?: string | null;
 }
 
-// Mock Email Data based on the screenshot provided
-const mockEmailData = {
-    fromName: 'jobmaster.co.il',
-    fromEmail: 'cv@jobmaster.co.il',
-    to: 'Sarit',
-    toEmail: 'humand@app.civi.co.il',
-    date: '19/11/2025 08:39',
-    subject: '',
-    content: `
-        <div style="font-family: Arial, sans-serif; direction: rtl; text-align: right; color: #333; line-height: 1.5;">
-           
-        </div>
-    `,
-    rawContent: `From: jobmaster.co.il <cv@jobmaster.co.il>
-Date: 19/11/2025 08:39
-To: Sarit <humand@app.civi.co.il>
-Subject: 
-`
-};
-
+interface EmailUploadRecord {
+    id: number;
+    from: string;
+    to: string;
+    subject: string;
+    body: string;
+    createdAt: string;
+}
 
 const ResumeViewer: React.FC<ResumeViewerProps> = ({
   resumeData,
@@ -83,6 +71,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const [isPinned, setIsPinned] = useState(false);
   const [copyButtonText, setCopyButtonText] = useState(t('resume.copy_cv'));
   const [uploading, setUploading] = useState(false);
+  const [latestEmail, setLatestEmail] = useState<EmailUploadRecord | null>(null);
   const uploadingLabel = t('resume.uploading') || 'טוען קובץ...';
 
   // Update copyButtonText when language changes
@@ -111,10 +100,34 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
       ? { ...resumeData, resumeUrl: effectiveResumeUrl }
       : { name: '', contact: '', summary: '', experience: [], education: [], resumeUrl: effectiveResumeUrl };
   
+  const candidateIdentifier = candidateIdProp || resumeData.candidateId || null;
+
   const getAuthHeaders = () => {
     if (typeof window === 'undefined') return {};
     const token = localStorage.getItem('token');
     return token ? { Authorization: `Bearer ${token}` } : {};
+  };
+
+  const parseEmailAddress = (value?: string) => {
+    if (!value) return { name: '', email: '' };
+    const trimmed = value.trim();
+    const match = trimmed.match(/(.*?)<([^>]+)>/);
+    if (match) {
+      const name = match[1].trim();
+      return { name: name || match[2], email: match[2].trim() };
+    }
+    return { name: trimmed.replace(/[^a-zA-Zא-ת\s]/g, '').trim(), email: trimmed };
+  };
+
+  const formatEmailDate = (value?: string) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('he-IL');
+  };
+
+  const stripHtml = (input: string = '') => {
+    return input.replace(/<\/?[^>]+(>|$)/g, ' ').replace(/\s+/g, ' ').trim();
   };
 
   const crc32base64 = async (file: File) => {
@@ -152,6 +165,30 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
     if (typeof window === 'undefined') return;
     window.dispatchEvent(new CustomEvent('candidate-data-refreshed', { detail: candidatePayload }));
   };
+
+  const fetchLatestEmail = useCallback(async () => {
+    if (!candidateIdentifier) {
+      setLatestEmail(null);
+      return;
+    }
+    try {
+      const res = await fetch(`${apiBase}/api/email-uploads/candidate/${candidateIdentifier}`, {
+        headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+      });
+      if (!res.ok) throw new Error('Failed to load email');
+      const payload = await res.json();
+      const records = Array.isArray(payload) ? payload : [];
+      setLatestEmail(records[0] || null);
+    } catch (err) {
+      console.error('Failed to load email upload', err);
+      setLatestEmail(null);
+    }
+  }, [apiBase, candidateIdentifier]);
+
+  useEffect(() => {
+    if (activeTab !== 'email') return;
+    fetchLatestEmail();
+  }, [activeTab, fetchLatestEmail]);
 
   const handleToggleView = () => {
     setResumeViewMode(prev => prev === 'parsed' ? 'original' : 'parsed');
@@ -285,6 +322,15 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
     const safeSummary = finalResumeData.summary || '';
     const highlightedSummary = safeSummary.replace(/עבודה עצמאית/g, `<span class="${tagsHighlighted ? 'bg-accent-100/70 px-1 rounded' : ''}">עבודה עצמאית</span>`);
 
+    const emailFrom = latestEmail ? parseEmailAddress(latestEmail.from) : null;
+    const emailTo = latestEmail ? parseEmailAddress(latestEmail.to) : null;
+    const emailSubject = latestEmail?.subject || 'ללא נושא';
+    const emailDateLabel = latestEmail ? formatEmailDate(latestEmail.createdAt) : '';
+    const emailBody = latestEmail?.body || '';
+    const hasEmailContent = Boolean(emailBody.trim());
+    const plainEmailBody = stripHtml(emailBody);
+    const isHtmlContent = hasEmailContent && /<[^>]+>/i.test(emailBody);
+
 
   return (
     <>
@@ -310,13 +356,14 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
               {/* Email View Toolbar */}
               {activeTab === 'email' && (
                   <div className="flex justify-between items-center p-3 border-b border-border-default bg-bg-subtle/10">
-                      <div className="text-sm text-text-muted font-medium flex items-center gap-2">
-                         <EnvelopeIcon className="w-4 h-4"/>
-                         {t('resume.email_incoming')} (1)
-                      </div>
+                         <div className="text-sm text-text-muted font-medium flex items-center gap-2">
+                            <EnvelopeIcon className="w-4 h-4"/>
+                            {t('resume.email_incoming')} ({latestEmail ? 1 : 0})
+                         </div>
                       <button 
                         onClick={handleToggleEmailView}
-                        className="flex items-center gap-2 text-xs font-bold text-primary-700 bg-primary-50 border border-primary-200 px-3 py-1.5 rounded-md hover:bg-primary-100 transition-colors shadow-sm"
+                        disabled={!hasEmailContent}
+                        className={`flex items-center gap-2 text-xs font-bold text-primary-700 bg-primary-50 border border-primary-200 px-3 py-1.5 rounded-md transition-colors shadow-sm ${!hasEmailContent ? 'opacity-40 cursor-not-allowed hover:bg-primary-50' : 'hover:bg-primary-100'}`}
                       >
                           {emailViewMode === 'formatted' ? <CodeBracketIcon className="w-4 h-4"/> : <EyeIcon className="w-4 h-4"/>}
                           <span>{emailViewMode === 'formatted' ? t('resume.view_text') : t('resume.view_formatted')}</span>
@@ -435,9 +482,10 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                               </div>
                             ) : (
                                 finalResumeData.resumeUrl ? (
-                                    <div className="flex flex-col gap-3 max-w-4xl mx-auto">
-                                        <div className="flex-1 min-h-[60vh] border border-border-default rounded-2xl overflow-hidden bg-black/5">
-                                            <iframe  style={{width: '100%', height: '1000px'}}
+                                    <div className="flex flex-col gap-3 max-w-4xl mx-auto w-full">
+                                        <div className="flex-1 min-h-[60vh] border border-border-default rounded-2xl overflow-auto bg-black/5">
+                                            <iframe
+                                                style={{ width: '100%', minWidth: '200px', height: '1000px' }}
                                                 src={isDocxPreview ? docxViewerUrl : finalResumeData.resumeUrl}
                                                 title="Resume preview"
                                                 className="w-full h-full"
@@ -462,42 +510,63 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                       </div>
                   ) : (
                       <div className="h-full flex flex-col">
-                          {/* Email Header Info */}
                           <div className="px-6 py-4 bg-bg-subtle/10 border-b border-border-default">
-                              <div className="flex justify-between items-start mb-4">
-                                  <h3 className="text-xl font-bold text-text-default">{mockEmailData.subject}</h3>
-                                  <div className="flex items-center gap-2 text-text-muted text-xs bg-bg-card border border-border-default rounded px-2 py-1">
-                                    <span>{mockEmailData.date}</span>
+                              {latestEmail ? (
+                                <>
+                                  <div className="flex justify-between items-start mb-4">
+                                      <h3 className="text-xl font-bold text-text-default">{emailSubject || t('resume.no_subject')}</h3>
+                                      <div className="flex items-center gap-2 text-text-muted text-xs bg-bg-card border border-border-default rounded px-2 py-1">
+                                        <span>{emailDateLabel}</span>
+                                      </div>
                                   </div>
-                              </div>
-                              <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm items-center">
-                                  <span className="font-bold text-text-muted justify-self-end">מאת:</span>
-                                  <div className="flex items-center gap-2">
-                                      <span className="text-text-default font-semibold">{mockEmailData.fromName}</span>
-                                      <span className="text-text-subtle text-xs">&lt;{mockEmailData.fromEmail}&gt;</span>
+                                  <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm items-center">
+                                      <span className="font-bold text-text-muted justify-self-end">מאת:</span>
+                                      <div className="flex items-center gap-2">
+                                          <span className="text-text-default font-semibold">{emailFrom?.name || emailFrom?.email || '-'}</span>
+                                          {emailFrom?.email && (
+                                              <span className="text-text-subtle text-xs">&lt;{emailFrom.email}&gt;</span>
+                                          )}
+                                      </div>
+                                      <span className="font-bold text-text-muted justify-self-end">אל:</span>
+                                      <div className="flex items-center gap-2">
+                                          <span className="text-text-default font-semibold">{emailTo?.name || emailTo?.email || '-'}</span>
+                                          {emailTo?.email && (
+                                              <span className="text-text-subtle text-xs">&lt;{emailTo.email}&gt;</span>
+                                          )}
+                                      </div>
                                   </div>
-                                  
-                                  <span className="font-bold text-text-muted justify-self-end">אל:</span>
-                                  <div className="flex items-center gap-2">
-                                      <span className="text-text-default font-semibold">{mockEmailData.to}</span>
-                                      <span className="text-text-subtle text-xs">&lt;{mockEmailData.toEmail}&gt;</span>
-                                  </div>
-                              </div>
+                                </>
+                              ) : (
+                                <div className="text-sm text-text-muted italic text-center">אין הודעות דוא&quot;ל זמינות</div>
+                              )}
                           </div>
 
-                          {/* Email Content */}
                           <div className="p-8 bg-white flex-1 overflow-y-auto">
-                              {emailViewMode === 'formatted' ? (
-                                  <div 
-                                    className="prose prose-sm max-w-3xl mx-auto" 
-                                    dangerouslySetInnerHTML={{ __html: mockEmailData.content }} 
-                                    onClick={handleEmailContentClick}
-                                  />
+                              {latestEmail && hasEmailContent ? (
+                                  emailViewMode === 'formatted' ? (
+                                      isHtmlContent ? (
+                                          <div
+                                            className="prose prose-sm max-w-3xl mx-auto"
+                                            dangerouslySetInnerHTML={{ __html: emailBody }}
+                                            onClick={handleEmailContentClick}
+                                          />
+                                      ) : (
+                                          <div className="prose prose-sm max-w-3xl mx-auto">
+                                            {emailBody.split('\n').map((line, idx) => (
+                                                <p key={idx}>{line}</p>
+                                            ))}
+                                          </div>
+                                      )
+                                  ) : (
+                                      <div className="max-w-3xl mx-auto">
+                                        <pre className="whitespace-pre-wrap font-mono text-xs text-text-default bg-gray-50 p-6 rounded-xl border border-gray-200 shadow-inner leading-relaxed">
+                                            {plainEmailBody}
+                                        </pre>
+                                      </div>
+                                  )
                               ) : (
-                                  <div className="max-w-3xl mx-auto">
-                                    <pre className="whitespace-pre-wrap font-mono text-xs text-text-default bg-gray-50 p-6 rounded-xl border border-gray-200 shadow-inner leading-relaxed">
-                                        {mockEmailData.rawContent}
-                                    </pre>
+                                  <div className="h-full w-full flex flex-col justify-center items-center text-sm text-text-muted">
+                                      <p>אין תוכן מייל להצגה</p>
                                   </div>
                               )}
                           </div>

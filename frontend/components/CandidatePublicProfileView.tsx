@@ -7,14 +7,13 @@ import {
     BuildingOffice2Icon, ClockIcon, CalendarDaysIcon, EnvelopeIcon, PhoneIcon, 
     LanguageIcon, AcademicCapIcon, HiroLogotype, ArrowLeftIcon, 
     UserCircleIcon, BookmarkIconSolid, PaperAirplaneIcon, InboxIcon, VideoCameraIcon,
-    ExclamationTriangleIcon, TagIcon, FlagIcon
+    ExclamationTriangleIcon, TagIcon, FlagIcon, ChevronLeftIcon, ChevronRightIcon
 } from './Icons';
 import MainContent from './MainContent'; 
 import AccordionSection from './AccordionSection';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { JobAlertModalConfig } from './CreateJobAlertModal';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
-import TagSelectorModal from './TagSelectorModal';
 import { useLocation, useNavigate } from 'react-router-dom'; 
 import ShareProfileModal from './ShareProfileModal';
 import HiroAIChat from './HiroAIChat'; 
@@ -25,6 +24,9 @@ import JobSearchFilters from './JobSearchFilters';
 import CandidateScreeningWizard, { ScreeningQuestion } from './CandidateScreeningWizard'; // New Import
 import { generateExperienceSummaryForCandidate } from '../services/experienceSummaryService';
 import { useLanguage } from '../context/LanguageContext';
+import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
+import { SmartTagType, SmartTagData } from './SmartTagTypes';
+import TagRowGroup from './TagRowGroup';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -94,60 +96,6 @@ const formatConfidenceLabel = (value?: number) => {
     return 'בביטחון מוגבל';
 };
 
-type SmartTagType = 'role' | 'seniority' | 'skill' | 'industry' | 'certification' | 'language' | 'tool' | 'soft';
-
-interface SmartTagData {
-    label: string;
-    type: SmartTagType;
-    isVerified?: boolean;
-    isAiSuggested?: boolean;
-    customTooltip?: string;
-}
-
-const SmartTag: React.FC<SmartTagData> = ({ label, type, isVerified, isAiSuggested, customTooltip }) => {
-    const baseClasses = "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-default select-none border whitespace-nowrap relative group/tag";
-    const configs: Record<SmartTagType, string> = {
-        role: "bg-primary-600 text-white font-bold border-primary-600 shadow-sm",
-        seniority: "bg-white border-primary-400 text-primary-700 font-bold",
-        skill: "bg-slate-100 text-slate-800 border-slate-200 font-semibold",
-        tool: "bg-blue-50 text-blue-800 border-blue-100 font-bold",
-        soft: "bg-transparent border-slate-200 text-slate-600 italic font-medium",
-        industry: "bg-emerald-50 text-emerald-800 border-emerald-100 font-bold",
-        certification: "bg-orange-50 text-orange-800 border-orange-100 font-bold",
-        language: "bg-pink-50 text-pink-700 border-pink-100 font-medium",
-    };
-    const typeLabels: Record<SmartTagType, string> = {
-        role: "תפקיד",
-        seniority: "בכירות",
-        skill: "מיומנות",
-        tool: "כלי עבודה",
-        soft: "כישורים רכים",
-        industry: "תעשייה",
-        certification: "השכלה/הסמכה",
-        language: "שפה",
-    };
-    const sourceLabel = isAiSuggested ? "AI (בינה מלאכותית)" : "הוזן ידנית / מועמד";
-
-    return (
-        <div className={`${baseClasses} ${configs[type]} ${isAiSuggested ? 'border-dashed' : 'border-solid'} hover:shadow-md hover:-translate-y-0.5`}>
-            {isAiSuggested && <SparklesIcon className="w-3 h-3 opacity-70" />}
-            <span>{label}</span>
-            {isVerified && <CheckCircleIcon className="w-3 h-3 text-current opacity-80" />}
-            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-max max-w-[220px] px-3 py-2 bg-gray-900/95 text-white text-[11px] rounded-lg opacity-0 group-hover/tag:opacity-100 transition-opacity duration-200 pointer-events-none z-50 backdrop-blur-sm shadow-xl flex flex-col items-center gap-0.5 transform scale-95 group-hover/tag:scale-100 origin-bottom text-center leading-tight">
-                {customTooltip ? (
-                    <span className="font-medium whitespace-pre-wrap">{customTooltip}</span>
-                ) : (
-                    <>
-                        <span className="font-bold border-b border-gray-700 pb-0.5 mb-0.5">{typeLabels[type]}</span>
-                        <span className="text-gray-300 text-[9px]">{sourceLabel}</span>
-                    </>
-                )}
-                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900/95"></div>
-            </div>
-        </div>
-    );
-};
-
 const MAX_VISIBLE_TAGS = 5;
 const TAG_LINE_CONFIG: Array<{ type: SmartTagType; label: string; icon: React.ComponentType<{ className?: string }> }> = [
     { type: 'role', label: 'תפקיד', icon: TagIcon },
@@ -158,6 +106,96 @@ const TAG_LINE_CONFIG: Array<{ type: SmartTagType; label: string; icon: React.Co
     { type: 'language', label: 'שפה', icon: LanguageIcon },
 ];
 
+const ensureArray = (val: any) => {
+    if (Array.isArray(val)) return val;
+    if (typeof val === 'string') {
+        try {
+            const parsed = JSON.parse(val);
+            if (Array.isArray(parsed)) return parsed;
+            return [val];
+        } catch {
+            return [val];
+        }
+    }
+    return [];
+};
+
+const normalizeCandidateData = (data: any) => {
+    const copy = { ...data };
+    copy.tags = ensureArray(copy.tags).map((t: any) => (typeof t === 'string' ? t : String(t?.value || t || ''))).filter(Boolean);
+    copy.desiredRoles = ensureArray(copy.desiredRoles)
+        .map((r: any) => {
+            if (typeof r === 'string') return { value: r };
+            if (r && typeof r === 'object' && r.value) return r;
+            return null;
+        })
+        .filter(Boolean);
+    copy.workExperience = Array.isArray(copy.workExperience) ? copy.workExperience : [];
+    const soft = ensureArray(copy.softSkills || copy.skills?.soft);
+
+    const deriveLevelText = (level: number) => {
+        if (level >= 80) return 'מומחה';
+        if (level >= 60) return 'מתקדם';
+        if (level >= 40) return 'טוב';
+        return 'בסיסי';
+    };
+
+    const normalizeTechSkill = (item: any) => {
+        if (!item) return null;
+        if (typeof item === 'string') {
+            const level = 50;
+            return {
+                id: Date.now() + Math.random(),
+                name: item,
+                level,
+                levelText: deriveLevelText(level),
+            };
+        }
+        if (typeof item === 'object') {
+            if (item.name) {
+                const level = typeof item.level === 'number' ? item.level : 50;
+                return {
+                    ...item,
+                    level,
+                    levelText: item.levelText || deriveLevelText(level),
+                };
+            }
+            const charKeys = Object.keys(item).filter((k) => !isNaN(Number(k)));
+            if (charKeys.length) {
+                const name = charKeys
+                    .sort((a, b) => Number(a) - Number(b))
+                    .map((k) => item[k])
+                    .join('')
+                    .trim();
+                const level = typeof item.level === 'number' ? item.level : 50;
+                return {
+                    id: Date.now() + Math.random(),
+                    name: name || 'מיומנות',
+                    level,
+                    levelText: item.levelText || deriveLevelText(level),
+                };
+            }
+        }
+        return null;
+    };
+
+    const rawTech = ensureArray(copy.techSkills || copy.skills?.technical);
+    const tech = rawTech.map(normalizeTechSkill).filter(Boolean);
+
+    copy.softSkills = soft;
+    copy.techSkills = tech;
+    copy.skills = { soft, technical: tech };
+    copy.candidateNotes = copy.candidateNotes ?? copy.internalNotes ?? '';
+    copy.languages = ensureArray(copy.languages);
+    copy.preferences = ensureArray(copy.preferences);
+    copy.interests = ensureArray(copy.interests);
+    copy.candidateNotes = copy.candidateNotes || '';
+    if (copy.salaryMin !== undefined && copy.salaryMin !== null) copy.salaryMin = Number(copy.salaryMin) || 0;
+    if (copy.salaryMax !== undefined && copy.salaryMax !== null) copy.salaryMax = Number(copy.salaryMax) || 0;
+    if (!copy.profileName) copy.profileName = copy.title || 'פרופיל';
+    return copy;
+};
+
 type CandidateTagDetail = {
     tagKey?: string;
     displayNameHe?: string;
@@ -167,25 +205,39 @@ type CandidateTagDetail = {
     isCurrent?: boolean;
     isInSummary?: boolean;
     confidenceScore?: number;
+    finalScore?: number;
+};
+
+const getRawTypeLabelHe = (rawType?: string): string | undefined => {
+    if (!rawType || typeof rawType !== 'string') return undefined;
+    const exact = RAW_TYPE_LABELS[rawType];
+    if (exact) return exact;
+    const capped = rawType.charAt(0).toUpperCase() + rawType.slice(1).toLowerCase();
+    return RAW_TYPE_LABELS[capped] ?? RAW_TYPE_LABELS[rawType.toLowerCase()] ?? undefined;
+};
+
+const formatFinalScoreLabel = (value?: number): string | undefined => {
+    if (typeof value !== 'number' || Number.isNaN(value)) return undefined;
+    const v = Math.max(100, Math.min(350, value));
+    const level = v >= 250 ? 'גבוהה' : v >= 150 ? 'בינוני' : 'נמוך';
+    return `ביטחון: ${level}`;
 };
 
 const buildTagTooltipText = (tag: string, detail?: CandidateTagDetail) => {
     if (!detail) return undefined;
-    const descriptorParts: string[] = [];
-    if (detail.rawType && detail.rawType !== tag) {
-        descriptorParts.push(RAW_TYPE_LABELS[detail.rawType] || detail.rawType);
-    }
-    const contextLabel = detail.context ? CONTEXT_LABELS[detail.context] || detail.context : undefined;
+    const rawTypeLabelHe = getRawTypeLabelHe(detail.rawType);
+    const descriptor = rawTypeLabelHe ? `זוהה כ${rawTypeLabelHe}` : undefined;
+    const contextLabel = detail.context ? (CONTEXT_LABELS[detail.context] || detail.context) : undefined;
     const temporalLabel = detail.isCurrent ? 'נוכחי' : 'ניסיון עבר';
-    const summaryLabel = detail.isInSummary ? 'נכלל בסיכום' : undefined;
-    const confidenceLabel = formatConfidenceLabel(detail.confidenceScore);
-    const descriptor = descriptorParts.length ? `זוהה כ${descriptorParts.join(' ')}` : 'זוהה';
+    const summaryLabel = detail.isInSummary ? 'נכלל בסיכום' : 'לא נכלל בסיכום';
+    const confidenceFromScore = formatConfidenceLabel(detail.confidenceScore);
+    const finalScoreLabel = formatFinalScoreLabel(detail.finalScore) ?? confidenceFromScore;
     const parts = [
         descriptor,
         contextLabel ? `בהקשר ${contextLabel}` : undefined,
         temporalLabel,
         summaryLabel,
-        confidenceLabel,
+        finalScoreLabel,
     ].filter(Boolean);
     return parts.length ? parts.join(' · ') : undefined;
 };
@@ -197,8 +249,9 @@ const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     if (raw.includes('industry')) return 'industry';
     if (raw.includes('certification') || raw.includes('degree') || raw.includes('education')) return 'certification';
     if (raw.includes('language')) return 'language';
-    if (raw.includes('tool')) return 'skill';
-    if (raw.includes('soft') || raw.includes('skill')) return 'skill';
+    if (raw.includes('tool')) return 'tool';
+    if (raw.includes('soft')) return 'soft';
+    if (raw.includes('skill')) return 'skill';
     return 'skill';
 };
 
@@ -765,6 +818,8 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [saveError, setSaveError] = useState<string | null>(null);
     const [uploadState, setUploadState] = useState<{ inProgress: boolean; type?: 'profile' | 'resume'; message?: string }>({ inProgress: false });
     const [loadError, setLoadError] = useState<string | null>(null);
+    const [candidateList, setCandidateList] = useState<any[]>([]);
+    const [isCandidateListLoading, setIsCandidateListLoading] = useState(false);
     
     // --- State for Pending Tasks (Screening) ---
     const [isScreeningWizardOpen, setIsScreeningWizardOpen] = useState(false);
@@ -774,17 +829,75 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const activeProfile = useMemo(() => 
         profiles.find(p => p.id === activeProfileId) || profiles[0]
     , [activeProfileId, profiles]);
+    const currentProfileIndex = useMemo(
+        () => candidateList.findIndex((p) => p.id === candidateId),
+        [candidateList, candidateId],
+    );
 
     // Data for forms (synced with active profile)
     const [formData, setFormData] = useState(activeProfile);
     
     // UI State for Header Interactions
-    const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     const [joinCandidatePool, setJoinCandidatePool] = useState(true);
     const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
-    const [tagCategoryToAdd, setTagCategoryToAdd] = useState<SmartTagType>('skill');
-    const [isAddingTag, setIsAddingTag] = useState(false);
+    const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
+    const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
+    const [localTagDetails, setLocalTagDetails] = useState<CandidateTagDetail[]>([]);
+    const ROW_CATEGORY_MAP: Record<string, TagCategory> = {
+        roles: 'role',
+        qualifications: 'role',
+        tools: 'tool',
+        soft: 'soft_skill',
+    };
+    const loadCandidateRef = useRef<(() => Promise<void>) | null>(null);
+
+    const mapCategoryToRawType = (category: TagCategory): string => {
+        if (category === 'soft_skill') return 'soft_skill';
+        if (category === 'tool') return 'tool';
+        return category;
+    };
+    const authHeaders = useCallback(() => {
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        return token ? { Authorization: `Bearer ${token}` } : {};
+    }, []);
+
+    const persistCandidateTag = async (tag: TagOption) => {
+        if (!candidateId) return;
+        try {
+            await fetch(`${apiBase}/api/admin/candidate-tags`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({
+                    candidate_id: candidateId,
+                    tagKey: tag.nameHe,
+                    displayNameHe: tag.nameHe,
+                    raw_type: mapCategoryToRawType(tag.category),
+                }),
+            });
+        } catch (err) {
+            console.error('Failed to persist tag', err);
+        }
+    };
+
+    const persistCandidateTagsBatch = async (tags: TagOption[]) => {
+        if (!candidateId || !tags.length) return;
+        try {
+            const payload = tags.map((tag) => ({
+                tagKey: getTagLabel(tag),
+                displayNameHe: tag.nameHe || getTagLabel(tag),
+                displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+                raw_type: mapCategoryToRawType(tag.category),
+            }));
+            await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ candidate_id: candidateId, tags: payload }),
+            });
+        } catch (err) {
+            console.error('Failed to persist tags batch', err);
+        }
+    };
 
     const tagDetailLookup = useMemo(() => {
         const map = new Map<string, any>();
@@ -801,13 +914,14 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     const getTagTooltip = useCallback((tag: string) => {
         const detail = tagDetailLookup.get(tag);
-        return buildTagTooltipText(tag, {
+        return buildTagTooltipText(tag, detail ? {
             rawType: detail?.rawType,
             context: detail?.context,
             isCurrent: detail?.isCurrent,
             isInSummary: detail?.isInSummary,
             confidenceScore: detail?.confidenceScore,
-        });
+            finalScore: detail?.finalScore,
+        } : undefined);
     }, [tagDetailLookup]);
 
     const groupedSmartTags = useMemo(() => {
@@ -816,23 +930,168 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             return acc;
         }, {} as Record<SmartTagType, SmartTagData[]>);
 
-        const tagsList: string[] = Array.isArray(formData.tags) ? formData.tags : [];
-        tagsList.forEach((tag) => {
-            const detail = tagDetailLookup.get(tag);
-            const type = inferSmartTagType(detail);
-            const entry: SmartTagData = {
+        const combinedDetails = [...ensureArray(formData.tagDetails), ...localTagDetails];
+        const detailEntries = combinedDetails
+            .map((detail: any) => {
+                const displayNameHe = (detail.displayNameHe ?? detail.display_name_he ?? '').toString().trim();
+                const label = displayNameHe || (detail.displayNameEn ?? detail.display_name_en ?? '').toString().trim() || (detail.tagKey ?? detail.tag_key ?? '').toString().trim();
+                if (!label) return null;
+                const type = inferSmartTagType(detail);
+                return {
+                    label: displayNameHe || label,
+                    type,
+                    isVerified: Boolean(detail?.isCurrent),
+                    isAiSuggested: false,
+                    customTooltip: buildTagTooltipText(label, { ...detail, finalScore: detail?.finalScore ?? detail?.final_score }),
+                } as SmartTagData;
+            })
+            .filter(Boolean) as SmartTagData[];
+
+        detailEntries.forEach((entry) => {
+            if (!base[entry.type]) base[entry.type] = [];
+            base[entry.type].push(entry);
+        });
+
+        const existingLabels = new Set(detailEntries.map((entry) => entry.label));
+        const fallbackTags = ensureArray(formData.tags)
+            .map((tag) => (tag ? tag.toString().trim() : ''))
+            .filter(Boolean)
+            .filter((tag) => !existingLabels.has(tag))
+            .map((tag) => ({
                 label: tag,
-                type,
-                isVerified: Boolean(detail?.isCurrent),
+                type: 'skill' as SmartTagType,
+                isVerified: false,
                 isAiSuggested: false,
-                customTooltip: getTagTooltip(tag),
-            };
-            if (!base[type]) base[type] = [];
-            base[type].push(entry);
+            }));
+
+        fallbackTags.forEach((entry) => {
+            if (!base[entry.type]) base[entry.type] = [];
+            base[entry.type].push(entry);
+        });
+
+        const softSkillEntries = ensureArray(formData.skills?.soft)
+            .map((softSkill) => {
+                const label = (typeof softSkill === 'string' ? softSkill : '').trim();
+                if (!label) return null;
+                if (existingLabels.has(label)) return null;
+                return {
+                    label,
+                    type: 'soft' as SmartTagType,
+                    isVerified: false,
+                    isAiSuggested: false,
+                } as SmartTagData;
+            })
+            .filter(Boolean) as SmartTagData[];
+
+        softSkillEntries.forEach((entry) => {
+            if (!base[entry.type]) base[entry.type] = [];
+            base[entry.type].push(entry);
+        });
+
+        const languageEntries = ensureArray(formData.languages)
+            .map((lang: any) => {
+                const label =
+                    (typeof lang === 'string'
+                        ? lang
+                        : lang?.lang || lang?.language || lang?.name || lang?.value || '').toString().trim();
+                if (!label) return null;
+                const descriptor =
+                    typeof lang === 'object'
+                        ? lang.levelText || lang.level || lang.proficiency || ''
+                        : '';
+                return {
+                    label,
+                    type: 'language' as SmartTagType,
+                    isVerified: false,
+                    isAiSuggested: false,
+                    customTooltip: descriptor ? `רמה: ${descriptor}` : undefined,
+                } as SmartTagData;
+            })
+            .filter(Boolean) as SmartTagData[];
+
+        languageEntries.forEach((entry) => {
+            if (!base[entry.type]) base[entry.type] = [];
+            base[entry.type].push(entry);
         });
 
         return base;
-    }, [formData.tags, tagDetailLookup, getTagTooltip]);
+    }, [formData.tagDetails, formData.tags, formData.languages, buildTagTooltipText]);
+
+    const openTagSelectorForRow = (rowId: string) => {
+        const category = ROW_CATEGORY_MAP[rowId] || 'role';
+        setTagSelectorCategory(category);
+        setIsTagSelectorOpen(true);
+    };
+
+    const getTagLabel = (tag: TagOption): string => tag.nameHe || tag.nameEn || tag.id || '';
+
+    const deleteCandidateTag = async (candidateTagId?: string) => {
+        if (!candidateTagId) return;
+        try {
+            await fetch(`${apiBase}/api/admin/candidate-tags/${candidateTagId}`, {
+                method: 'DELETE',
+                headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+            });
+        } catch (err) {
+            console.error('Failed to delete candidate tag', err);
+        }
+    };
+
+    const handleTagSelectorSave = async (selected: TagOption[]) => {
+        if (!selected.length) {
+            setIsTagSelectorOpen(false);
+            return;
+        }
+        const existingTags = Array.isArray(formData.tags) ? formData.tags : [];
+        const existingSet = new Set(existingTags);
+        const newTags = selected
+            .map((tag) => getTagLabel(tag))
+            .filter((label) => label && !existingSet.has(label));
+        if (newTags.length) {
+            const merged = Array.from(new Set([...existingTags, ...newTags]));
+            const existingDetails = ensureArray(formData.tagDetails);
+            const addedDetails = selected
+                .filter((tag) => newTags.includes(getTagLabel(tag)))
+                .map((tag) => ({
+                    id: `local-${Date.now()}-${tag.id || tag.nameHe}`,
+                    tagKey: getTagLabel(tag),
+                    displayNameHe: tag.nameHe || getTagLabel(tag),
+                    displayNameEn: tag.nameEn || tag.nameHe || getTagLabel(tag),
+                    rawType: mapCategoryToRawType(tag.category),
+                    context: null,
+                    isCurrent: true,
+                    isInSummary: true,
+                    confidenceScore: undefined,
+                }));
+            handleUpdateProfileData({
+                tags: merged,
+                tagDetails: [...existingDetails, ...addedDetails],
+            });
+            setLocalTagDetails((prev) => [...prev, ...addedDetails]);
+            await persistCandidateTagsBatch(selected.filter((tag) => newTags.includes(getTagLabel(tag))));
+        }
+        setIsTagSelectorOpen(false);
+        await loadCandidateRef.current?.();
+    };
+
+    const handleTagRemove = (label: string) => {
+        if (!label) return;
+        const existingTags = Array.isArray(formData.tags) ? formData.tags : [];
+        const filtered = existingTags.filter((tag: string) => tag !== label);
+        if (filtered.length === existingTags.length) return;
+        const detail = tagDetailLookup.get(label.trim());
+        if (detail?.id) {
+            deleteCandidateTag(detail.id);
+        }
+        handleUpdateProfileData({ tags: filtered });
+        setLocalTagDetails((prev) =>
+            prev.filter(
+                (local) =>
+                    (local.displayNameHe || local.tagKey || '').trim() !== label &&
+                    (local.displayNameEn || local.tagKey || '').trim() !== label,
+            ),
+        );
+    };
 
     const toggleSectionExpansion = useCallback((type: SmartTagType) => {
         setExpandedSections(prev => {
@@ -875,98 +1134,40 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     const filterVisibleProfiles = (items: any[]) => items.filter((item) => !item.isDeleted);
 
-    const authHeaders = () => {
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        return token ? { Authorization: `Bearer ${token}` } : {};
-    };
-
-    const ensureArray = (val: any) => {
-        if (Array.isArray(val)) return val;
-        if (typeof val === 'string') {
-            try {
-                const parsed = JSON.parse(val);
-                if (Array.isArray(parsed)) return parsed;
-                return [val];
-            } catch {
-                return [val];
+    const loadCandidateById = useCallback(async (targetId: string) => {
+        try {
+            const base = apiBase || '';
+            const res = await fetch(`${base}/api/candidates/${targetId}`, {
+                headers: { ...authHeaders() },
+            });
+            if (!res.ok) {
+                throw new Error('Failed to load candidate');
             }
+            const data = await res.json();
+            const normalized = normalizeCandidateData(data);
+            setFormData(normalized);
+            setProfiles((prev) => {
+                const exists = prev.some((item) => item.id === normalized.id);
+                if (exists) {
+                    return prev.map((item) => (item.id === normalized.id ? normalized : item));
+                }
+                return [...prev, normalized];
+            });
+            setCandidateId(normalized.id);
+            setActiveProfileId(normalized.id);
+            setActiveView('profile');
+        } catch (err) {
+            console.error('Failed to load candidate by id', err);
         }
-        return [];
-    };
+    }, [apiBase, normalizeCandidateData, authHeaders]);
 
-    const normalizeCandidateData = (data: any) => {
-        const copy = { ...data };
-        copy.tags = ensureArray(copy.tags).map((t: any) => (typeof t === 'string' ? t : String(t?.value || t || ''))).filter(Boolean);
-        copy.desiredRoles = ensureArray(copy.desiredRoles)
-            .map((r: any) => {
-                if (typeof r === 'string') return { value: r };
-                if (r && typeof r === 'object' && r.value) return r;
-                return null;
-            })
-            .filter(Boolean);
-        copy.workExperience = Array.isArray(copy.workExperience) ? copy.workExperience : [];
-        const soft = ensureArray(copy.softSkills || copy.skills?.soft);
-
-        const deriveLevelText = (level: number) => {
-            if (level >= 80) return 'מומחה';
-            if (level >= 60) return 'מתקדם';
-            if (level >= 40) return 'טוב';
-            return 'בסיסי';
-        };
-
-        const normalizeTechSkill = (item: any) => {
-            if (!item) return null;
-            if (typeof item === 'string') {
-                const level = 50;
-                return {
-                    id: Date.now() + Math.random(),
-                    name: item,
-                    level,
-                    levelText: deriveLevelText(level),
-                };
-            }
-            if (typeof item === 'object') {
-                if (item.name) {
-                    const level = typeof item.level === 'number' ? item.level : 50;
-                    return {
-                        ...item,
-                        level,
-                        levelText: item.levelText || deriveLevelText(level),
-                    };
-                }
-                const charKeys = Object.keys(item).filter(k => !isNaN(Number(k)));
-                if (charKeys.length) {
-                    const name = charKeys.sort((a, b) => Number(a) - Number(b)).map(k => item[k]).join('').trim();
-                    const level = typeof item.level === 'number' ? item.level : 50;
-                    return {
-                        id: Date.now() + Math.random(),
-                        name: name || 'מיומנות',
-                        level,
-                        levelText: item.levelText || deriveLevelText(level),
-                    };
-                }
-            }
-            return null;
-        };
-
-        const rawTech = ensureArray(copy.techSkills || copy.skills?.technical);
-        const tech = rawTech
-            .map(normalizeTechSkill)
-            .filter(Boolean);
-
-        copy.softSkills = soft;
-        copy.techSkills = tech;
-        copy.skills = { soft, technical: tech };
-        copy.candidateNotes = copy.candidateNotes ?? copy.internalNotes ?? '';
-        copy.languages = ensureArray(copy.languages);
-        copy.preferences = ensureArray(copy.preferences);
-        copy.interests = ensureArray(copy.interests);
-        copy.candidateNotes = copy.candidateNotes || '';
-        if (copy.salaryMin !== undefined && copy.salaryMin !== null) copy.salaryMin = Number(copy.salaryMin) || 0;
-        if (copy.salaryMax !== undefined && copy.salaryMax !== null) copy.salaryMax = Number(copy.salaryMax) || 0;
-        if (!copy.profileName) copy.profileName = copy.title || 'פרופיל';
-        return copy;
-    };
+    const moveProfile = useCallback((offset: number) => {
+        const idx = currentProfileIndex;
+        if (idx === -1) return;
+        const target = candidateList[idx + offset];
+        if (!target) return;
+        loadCandidateById(target.id);
+    }, [currentProfileIndex, candidateList, loadCandidateById]);
 
     const sanitizePayload = (data: any) => {
         const copy = normalizeCandidateData(data);
@@ -1012,6 +1213,30 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (!decoded?.sub) return null;
         return { id: decoded.sub, email: decoded.email, role: decoded.role };
     };
+
+    const fetchCandidateList = useCallback(async () => {
+        if (!apiBase) return;
+        setIsCandidateListLoading(true);
+        try {
+            const base = apiBase || '';
+            const response = await fetch(`${base}/api/candidates?page=1&limit=250`, {
+                headers: { ...authHeaders() },
+                cache: 'reload',
+            });
+            if (!response.ok) throw new Error('Failed to fetch candidate list');
+            const payload = await response.json();
+            const list = Array.isArray(payload.data)
+                ? payload.data
+                : Array.isArray(payload)
+                    ? payload
+                    : [];
+            setCandidateList(list.map(normalizeCandidateData));
+        } catch (err) {
+            console.error('Failed to load candidate list', err);
+        } finally {
+            setIsCandidateListLoading(false);
+        }
+    }, [apiBase, normalizeCandidateData, authHeaders]);
 
     const loadCandidate = async () => {
         setLoadError(null);
@@ -1121,6 +1346,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             setIsSwitching(false);
         }
     };
+        loadCandidateRef.current = loadCandidate;
 
     const ensureCandidateRecord = async (payloadOverride?: any) => {
         // apiBase can be empty string (same-origin)
@@ -1264,8 +1490,8 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             return;
         }
         loadCandidate();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+        fetchCandidateList();
+    }, [fetchCandidateList]);
 
     // Handlers
     const handleSwitchProfile = (id: number) => {
@@ -1413,57 +1639,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }, 800);
     };
 
-    const addCandidateTag = async (tag: string, type: SmartTagType = 'skill') => {
-        const trimmed = tag.trim();
-        if (!candidateId || !trimmed) return null;
-        setIsAddingTag(true);
-        try {
-            const payload = {
-                candidate_id: candidateId,
-                tagKey: trimmed,
-                displayNameHe: trimmed,
-                raw_type: SMART_TAG_RAW_TYPE_MAP[type] || 'Skill',
-            };
-            const res = await fetch(`${apiBase}/api/admin/candidate-tags`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(payload),
-            });
-            if (!res.ok) throw new Error(await res.text() || 'Failed to add tag');
-            await res.json();
-            setFormData(prev => {
-                const existing = Array.isArray(prev.tags) ? prev.tags : [];
-                if (existing.includes(trimmed)) return prev;
-                const normalized = normalizeCandidateData({ ...prev, tags: [...existing, trimmed] });
-                setProfiles(prevProfiles => prevProfiles.map(p => p.id === activeProfileId ? normalized : p));
-                return normalized;
-            });
-            return trimmed;
-        } catch (err) {
-            console.error('Failed to add tag', err);
-            return null;
-        } finally {
-            setIsAddingTag(false);
-        }
-    };
-
-    const handleAddTags = async (newTags: string[]) => {
-        const unique = newTags.filter(t => {
-            if (!t) return false;
-            return !formData.tags.includes(t);
-        });
-        if (!unique.length) {
-            setIsTagSelectorOpen(false);
-            return;
-        }
-        await Promise.all(unique.map(tag => addCandidateTag(tag, tagCategoryToAdd)));
-        setIsTagSelectorOpen(false);
-        setTagCategoryToAdd('skill');
-    };
-    
-    const handleRemoveTag = (tag: string) => {
-        handleUpdateProfileData({ tags: formData.tags.filter((t: string) => t !== tag) });
-    };
 
     const handleSelectRole = (selected: SelectedJobField | null) => {
         if (selected) {
@@ -1777,63 +1952,26 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 </div>
 
                 {/* RESTORED: Tags */}
-                    <div className="w-full mt-auto">
-                        <div className="flex justify-between items-center mb-2">
-                            <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">{t('profile.tags_skills')}</h4>
-                        </div>
-                        <div className="space-y-4">
-                    {TAG_LINE_CONFIG.map(section => {
-                                const tags = groupedSmartTags[section.type] || [];
-                                const isExpanded = expandedSections.has(section.type);
-                                const visibleTags = isExpanded ? tags : tags.slice(0, MAX_VISIBLE_TAGS);
-                                const extraCount = Math.max(0, tags.length - MAX_VISIBLE_TAGS);
-                                return (
-                                    <div key={section.type} className="space-y-2 group/row">
-                                        <div className="flex items-center gap-2 text-[11px] text-text-muted">
-                                            <section.icon className="w-4 h-4 text-primary-500" />
-                                            <span className="font-semibold text-text-default">{section.label}</span>
-                                        </div>
-                                        <div className="flex flex-wrap items-center gap-2 min-h-[36px]">
-                                            {tags.length === 0 && (
-                                                <span className="text-[11px] text-text-subtle italic">לא מוגדר</span>
-                                            )}
-                                            {visibleTags.map(tag => (
-                                                <div key={`${section.type}-${tag.label}`} className="relative group">
-                                                    <SmartTag {...tag} />
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleRemoveTag(tag.label)}
-                                                        className="absolute -top-1 -right-1 rounded-full bg-white border border-border-default text-text-muted p-0.5 opacity-0 group-hover:opacity-100 transition"
-                                                        title="הסר תגית"
-                                                    >
-                                                        <XMarkIcon className="w-3 h-3" />
-                                                    </button>
-                                                </div>
-                                            ))}
-                                            {extraCount > 0 && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => toggleSectionExpansion(section.type)}
-                                                    className="text-[11px] font-semibold text-primary-600 border border-primary-200 rounded-full px-3 py-1 opacity-80 hover:opacity-100 transition"
-                                                >
-                                                    {isExpanded ? 'הסתר' : `+${extraCount}`}
-                                                </button>
-                                            )}
-                                            <button
-                                                type="button"
-                                                onClick={() => { setTagCategoryToAdd(section.type); setIsTagSelectorOpen(true); }}
-                                                className="opacity-0 group-hover/row:opacity-100 transition-opacity p-1 rounded-full hover:bg-bg-subtle text-text-muted hover:text-primary-600"
-                                                title="הוסף תגית לקטגוריה זו"
-                                            >
-                                                <PlusIcon className="w-4 h-4" />
-                                            </button>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                     
-                    </div>
+                <div className="w-full mt-auto">
+                    <TagRowGroup
+                        groupedSmartTags={groupedSmartTags}
+                        onQualificationAdd={() => {
+                            const target = document.getElementById('education');
+                            if (target) {
+                                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                            }
+                        }}
+                        onRowAdd={openTagSelectorForRow}
+                        onTagRemove={handleTagRemove}
+                    />
+                    <TagSelectorModal
+                        isOpen={isTagSelectorOpen}
+                        onClose={() => setIsTagSelectorOpen(false)}
+                        onSave={handleTagSelectorSave}
+                        existingTags={Array.isArray(formData.tags) ? formData.tags : []}
+                        initialCategory={tagSelectorCategory}
+                    />
+                </div>
 
                     {/* RESTORED: Desired Roles */}
                     <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 mt-2">
@@ -2123,11 +2261,29 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                     </button>
                 </div>
 
-                <div className="p-4 sm:p-8 pb-24 max-w-5xl mx-auto w-full">
+            <div className="p-4 sm:p-8 pb-24 max-w-5xl mx-auto w-full">
                     {isSwitching ? (
                         <ProfileLoadingSkeleton />
                     ) : (
                         <div className="animate-fade-in">
+                    <div className="flex justify-center gap-2 mb-3">
+                        <button
+                            type="button"
+                            onClick={() => moveProfile(-1)}
+                            disabled={currentProfileIndex <= 0}
+                            className="p-2 rounded-full bg-bg-card border border-border-default text-text-muted hover:text-primary-600 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <ChevronLeftIcon className="w-4 h-4"/>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => moveProfile(1)}
+                            disabled={currentProfileIndex === -1 || currentProfileIndex >= candidateList.length - 1}
+                            className="p-2 rounded-full bg-bg-card border border-border-default text-text-muted hover:text-primary-600 transition disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <ChevronRightIcon className="w-4 h-4"/>
+                        </button>
+                    </div>
                         {activeView === 'profile' && renderProfileContent()}
                         {activeView === 'jobs' && renderJobs()}
                         {activeView === 'favorites' && renderFavorites()}
@@ -2148,7 +2304,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             
             {/* Modals for Tags/Roles */}
             <JobFieldSelector onChange={handleSelectRole} isModalOpen={isJobFieldSelectorOpen} setIsModalOpen={setIsJobFieldSelectorOpen} />
-            <TagSelectorModal isOpen={isTagSelectorOpen} onClose={() => setIsTagSelectorOpen(false)} onSave={handleAddTags} existingTags={formData.tags} />
             
              <HiroAIChat
                 isOpen={isChatOpen}

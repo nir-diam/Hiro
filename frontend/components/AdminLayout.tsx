@@ -12,8 +12,7 @@ const AdminLayout: React.FC = () => {
         { to: '/admin/companies', label: t('admin.tab_companies_db'), icon: <GlobeAmericasIcon className="w-5 h-5" /> },
         { to: '/admin/company-corrections', label: t('admin.tab_company_corrections'), icon: <WrenchScrewdriverIcon className="w-5 h-5" /> },
         { to: '/admin/candidates', label: t('admin.tab_candidates'), icon: <UserGroupIcon className="w-5 h-5" /> },
-        { to: '/admin/tags', label: t('admin.tab_tags'), icon: <TagIcon className="w-5 h-5" /> },
-        { to: '/admin/tag-corrections', label: 'תיקון תגיות', icon: <TagIcon className="w-5 h-5" /> },
+        { to: '/admin/tags', label: 'תגיות', icon: <TagIcon className="w-5 h-5" /> },
         { to: '/admin/jobs', label: t('admin.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
         { to: '/admin/job-fields', label: t('admin.tab_job_fields'), icon: <SquaresPlusIcon className="w-5 h-5" /> },
         { to: '/admin/events', label: 'יומן אירועים', icon: <ShieldCheckIcon className="w-5 h-5" /> },
@@ -21,8 +20,6 @@ const AdminLayout: React.FC = () => {
         { to: '/admin/picklists', label: 'ניהול picklists', icon: <ListBulletIcon className="w-5 h-5" /> },
         { to: '/admin/help-center', label: 'מרכז עזרה', icon: <DocumentTextIcon className="w-5 h-5" /> },
         { to: '/admin/settings/prompts', label: 'AI Prompts', icon: <SparklesIcon className="w-5 h-5" /> },
-        { to: '/admin/candidateTags', label: 'תגיות מועמדים', icon: <TagIcon className="w-5 h-5" /> },
-
     ];
 
     return (

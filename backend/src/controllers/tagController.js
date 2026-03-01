@@ -22,10 +22,42 @@ const sanitizeTagPayload = (tag) => {
   return payload;
 };
 
-const list = async (_req, res) => {
-  const tags = await tagService.list();
-  const sanitized = (Array.isArray(tags) ? tags : []).map(sanitizeTagPayload);
-  res.json(sanitized);
+const parseListParam = (value) => {
+  if (!value) return [];
+  return String(value)
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const list = async (req, res) => {
+  try {
+    const page = Number(req.query.page) || undefined;
+    const limit = Number(req.query.limit) || undefined;
+    const parsedStatuses = parseListParam(req.query.statuses);
+    const options = {
+      page,
+      limit,
+      searchTerm: req.query.search,
+      synonymSearch: req.query.synonym,
+      types: parseListParam(req.query.types),
+      categories: parseListParam(req.query.categories),
+      statuses: parsedStatuses,
+      sourceFilter: req.query.source,
+      createdFrom: req.query.createdFrom,
+      createdTo: req.query.createdTo,
+      updatedFrom: req.query.updatedFrom,
+      updatedTo: req.query.updatedTo,
+      sort: req.query.sort,
+      direction: req.query.direction,
+    };
+    const { rows, total, page: currentPage, limit: currentLimit } = await tagService.list(options);
+    const sanitized = rows.map(sanitizeTagPayload);
+    res.json({ data: sanitized, total, page: currentPage, limit: currentLimit });
+  } catch (err) {
+    console.error('[tagController.list]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load tags' });
+  }
 };
 
 const get = async (req, res) => {
@@ -54,6 +86,36 @@ const create = async (req, res) => {
           ? 'ai'
           : 'manual';
     const payload = { ...req.body };
+    const normalizedName =
+      (payload.displayNameHe || payload.displayNameEn || payload.tagKey || '')
+        .toString()
+        .trim();
+  if (normalizedName) {
+    const duplicate = await Tag.findOne({
+      where: {
+        [Op.or]: [
+          sequelize.where(sequelize.fn('LOWER', sequelize.col('display_name_he')), normalizedName.toLowerCase()),
+          sequelize.where(sequelize.fn('LOWER', sequelize.col('tag_key')), normalizedName.toLowerCase()),
+        ],
+      },
+    });
+    if (duplicate) {
+      const existing = duplicate.toJSON ? duplicate.toJSON() : { ...duplicate };
+      console.info('[tagController.create] duplicate tag detected', normalizedName, existing.id);
+      return res.status(409).json({
+        message: 'This tag already exists',
+        duplicate: {
+          id: existing.id,
+          tagKey: existing.tagKey,
+          displayNameHe: existing.displayNameHe,
+          displayNameEn: existing.displayNameEn,
+        },
+      });
+    }
+  }
+    if (!payload.status) {
+      payload.status = 'draft';
+    }
     delete payload.embedding;
     const tag = await tagService.create(payload, {
       actingUser: userId,
@@ -237,7 +299,27 @@ const resolvePending = async (req, res) => {
   const candidateTagFilter = hasPendingTags ? { tag_id: { [Op.in]: pendingTagIds } } : null;
 
   if (action === 'link' && targetTag && hasPendingTags) {
-    await CandidateTag.update({ tag_id: targetTag.id }, { where: candidateTagFilter });
+    // Update each candidate_tag row: if candidate already has target tag, remove the pending row; else reassign to target tag (avoids unique constraint)
+    const rows = await CandidateTag.findAll({ where: candidateTagFilter });
+    const candidateIds = [...new Set(rows.map((r) => r.candidate_id))];
+    for (const row of rows) {
+      const alreadyHas = await CandidateTag.findOne({
+        where: { candidate_id: row.candidate_id, tag_id: targetTag.id },
+      });
+      if (alreadyHas) {
+        await row.destroy();
+      } else {
+        await row.update({ tag_id: targetTag.id });
+      }
+    }
+    // Ensure target tag is linked for every candidate that had the pending tag (when we add to aliases below, the candidate must have the targetTag in CandidateTag)
+    for (const cid of candidateIds) {
+      await CandidateTag.findOrCreate({
+        where: { candidate_id: cid, tag_id: targetTag.id },
+        defaults: { candidate_id: cid, tag_id: targetTag.id },
+        isActive: true,
+      });
+    }
   }
 
   if (action === 'ignore' && hasPendingTags) {
@@ -267,6 +349,7 @@ const resolvePending = async (req, res) => {
       }
 
       if (action !== 'create') {
+        await TagHistory.destroy({ where: { tag_id: entry.id } });
         await entry.destroy();
       }
     }

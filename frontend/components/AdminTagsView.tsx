@@ -1062,6 +1062,10 @@ const AdminTagsView: React.FC = () => {
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [filterVertical, setFilterVertical] = useState(true);
     const navigate = useNavigate();
+    const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
+    const [pageSize, setPageSize] = useState(100);
+    const [page, setPage] = useState(1);
+    const [totalRecords, setTotalRecords] = useState(0);
     const resolveSuggestedType = useCallback((suggestion: any) => {
         const normalize = (value?: string) => (value || '').toString().trim().toLowerCase();
         const picklist = typePicklistOptions || [];
@@ -1311,20 +1315,64 @@ const AdminTagsView: React.FC = () => {
     }, [apiBase]);
 
     const loadTags = useCallback(async () => {
-            setLoading(true);
-            setError(null);
-            try {
-                const res = await fetch(`${apiBase}/api/tags`);
-                if (!res.ok) throw new Error('Failed to load tags');
-                const data = await res.json();
-                setTags(data);
+        if (!apiBase) return;
+        setLoading(true);
+        setError(null);
+        try {
+            const params = new URLSearchParams();
+            params.set('page', String(page));
+            params.set('limit', String(pageSize));
+            if (searchTerm.trim()) params.set('search', searchTerm.trim());
+            if (synonymFilter.trim()) params.set('synonym', synonymFilter.trim());
+            if (selectedTypes.length) params.set('types', selectedTypes.join(','));
+            if (selectedCategories.length) params.set('categories', selectedCategories.join(','));
+            if (selectedStatuses.length) params.set('statuses', selectedStatuses.join(','));
+            if (sourceFilter) params.set('source', sourceFilter);
+            if (createdFrom) params.set('createdFrom', createdFrom);
+            if (createdTo) params.set('createdTo', createdTo);
+            if (updatedFrom) params.set('updatedFrom', updatedFrom);
+            if (updatedTo) params.set('updatedTo', updatedTo);
+            const currentSortKey = sortConfig.key || 'tagKey';
+            params.set('sort', currentSortKey);
+            params.set('direction', sortConfig.direction);
+            const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
+                cache: 'reload',
+            });
+            if (!res.ok) throw new Error('Failed to load tags');
+            const payload = await res.json();
+            const data = Array.isArray(payload.data)
+                ? payload.data
+                : Array.isArray(payload)
+                    ? payload
+                    : [];
+            setTags(data);
+            setTotalRecords(Number(payload.total ?? payload?.data?.length ?? data.length));
             refreshUsageCounts(data.map((tag: Tag) => tag.id));
-            } catch (err: any) {
-                setError(err.message || 'Load failed');
-            } finally {
-                setLoading(false);
-            }
-    }, [apiBase]);
+        } catch (err: any) {
+            setError(err.message || 'Load failed');
+            setTags([]);
+            setTotalRecords(0);
+        } finally {
+            setLoading(false);
+        }
+    }, [
+        apiBase,
+        page,
+        pageSize,
+        searchTerm,
+        synonymFilter,
+        selectedTypes,
+        selectedCategories,
+        selectedStatuses,
+        sourceFilter,
+        createdFrom,
+        createdTo,
+        updatedFrom,
+        updatedTo,
+        sortConfig.key,
+        sortConfig.direction,
+        refreshUsageCounts,
+    ]);
 
     useEffect(() => {
         loadTags();
@@ -1393,70 +1441,25 @@ const AdminTagsView: React.FC = () => {
         }
     }, [aiSuggestions]);
 
-    const filteredTags = useMemo(() => {
-        const normalizedSearch = searchTerm.trim().toLowerCase();
-        const normalizedSynonym = synonymFilter.trim().toLowerCase();
-        return tags.filter(t => {
-            const matchesSearch = !normalizedSearch || (
-                (t.displayNameHe || '').toLowerCase().includes(normalizedSearch) ||
-                (t.tagKey || '').toLowerCase().includes(normalizedSearch) ||
-                (t.category || '').toLowerCase().includes(normalizedSearch) ||
-                (t.aliases || []).some(alias => alias.toLowerCase().includes(normalizedSearch))
-            );
-            if (!matchesSearch) return false;
-            if (selectedTypes.length && !selectedTypes.includes(t.type)) return false;
-            if (selectedCategories.length) {
-                const normalizedCategory = (t.category || '').trim();
-                if (!selectedCategories.includes(normalizedCategory)) return false;
-            }
-            if (selectedStatuses.length && !selectedStatuses.includes(t.status)) return false;
-            if (sourceFilter) {
-                const normalizedSource = mapSourceToFilterValue(t.source);
-                if (normalizedSource !== sourceFilter) return false;
-            }
-            const createdDateString = formatDateOnly(t.createdAt || t.lastUsedAt);
-            const fromDateFilter = createdFrom || '';
-            const toDateFilter = createdTo || createdFrom;
-            if (fromDateFilter && (!createdDateString || createdDateString < fromDateFilter)) return false;
-            if (toDateFilter && (!createdDateString || createdDateString > toDateFilter)) return false;
-            const updatedDateString = formatDateOnly(t.updatedAt || t.lastUsedAt);
-            const updatedFromFilter = updatedFrom || '';
-            const updatedToFilter = updatedTo || updatedFrom;
-            if (updatedFromFilter && (!updatedDateString || updatedDateString < updatedFromFilter)) return false;
-            if (updatedToFilter && (!updatedDateString || updatedDateString > updatedToFilter)) return false;
-            if (normalizedSynonym) {
-                const synonymText = ensureArray(t.synonyms)
-                    .map(s => (typeof s === 'string' ? s : s?.phrase || ''))
-                    .join(' ')
-                    .toLowerCase();
-                if (!synonymText.includes(normalizedSynonym)) return false;
-            }
-            return true;
-        });
-    }, [tags, searchTerm, selectedTypes, selectedCategories, selectedStatuses, synonymFilter, sourceFilter, createdFrom, createdTo, updatedFrom, updatedTo]);
+    useEffect(() => {
+        setPage(1);
+    }, [searchTerm, selectedTypes, selectedCategories, selectedStatuses, synonymFilter, sourceFilter, createdFrom, createdTo, updatedFrom, updatedTo, sortConfig.key, sortConfig.direction, pageSize]);
 
-    const sortedTags = useMemo(() => {
-        if (!sortConfig.key) return filteredTags;
-        const sorted = [...filteredTags];
-        const multiplier = sortConfig.direction === 'asc' ? 1 : -1;
-        sorted.sort((a, b) => {
-            const getValue = (tag: Tag, key: SortKey) => {
-                if (key === 'usageCount') return getCountForTag(tag);
-                if (key === 'createdAt') {
-                    const value = tag.createdAt || tag.lastUsedAt;
-                    return value ? new Date(value).getTime() : 0;
-                }
-                if (key === 'source') return mapSourceToFilterValue(tag.source);
-                return (tag[key] as string)?.toString().toLowerCase() || '';
-            };
-            const aValue = getValue(a, sortConfig.key as SortKey);
-            const bValue = getValue(b, sortConfig.key as SortKey);
-            if (aValue < bValue) return -1 * multiplier;
-            if (aValue > bValue) return 1 * multiplier;
-            return 0;
-        });
-        return sorted;
-    }, [filteredTags, sortConfig]);
+    const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+    useEffect(() => {
+        setPage((prev) => Math.min(prev, totalPages));
+    }, [totalPages]);
+
+    const startIndex = totalRecords ? (page - 1) * pageSize : 0;
+    const endIndex = Math.min(startIndex + pageSize, totalRecords);
+    const handlePageSizeChange = (value: number) => {
+        setPageSize(value);
+        setPage(1);
+    };
+    const goToPage = (target: number) => {
+        if (target < 1 || target > totalPages) return;
+        setPage(target);
+    };
 
     const availableReassignTags = useMemo(() => {
         if (!pendingTagDelete) return tags;
@@ -1538,6 +1541,38 @@ const AdminTagsView: React.FC = () => {
         setIsModalOpen(true);
     };
 
+    const extractServerMessage = async (res: Response, fallback: string) => {
+        if (res.ok) return null;
+        let textPayload = await res.text();
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+            try {
+                const parsed = JSON.parse(textPayload);
+                throw Object.assign(new Error(parsed?.message || fallback), {
+                    duplicate: parsed?.duplicate,
+                });
+            } catch (error) {
+                if (error instanceof Error) throw error;
+                if (textPayload) throw new Error(textPayload);
+                throw new Error(fallback);
+            }
+        }
+        if (textPayload) throw new Error(textPayload);
+        throw new Error(fallback);
+    };
+
+    type DuplicateAlert = {
+        message: string;
+        displayNameHe?: string;
+    };
+    const [duplicateAlert, setDuplicateAlert] = useState<DuplicateAlert | null>(null);
+
+    useEffect(() => {
+        if (!duplicateAlert) return;
+        const timer = setTimeout(() => setDuplicateAlert(null), 4000);
+        return () => clearTimeout(timer);
+    }, [duplicateAlert]);
+
     const handleSave = async (savedTag: Tag) => {
         const payload: any = { ...savedTag };
         if (!editingTag) {
@@ -1553,7 +1588,7 @@ const AdminTagsView: React.FC = () => {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
                 });
-                if (!res.ok) throw new Error('Update failed');
+                await extractServerMessage(res, 'Update failed');
                 const updated = await res.json();
                 setTags(prev => prev.map(t => t.id === editingTag.id ? updated : t));
             } else {
@@ -1562,13 +1597,16 @@ const AdminTagsView: React.FC = () => {
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload),
                 });
-                if (!res.ok) throw new Error('Create failed');
+                await extractServerMessage(res, 'Create failed');
                 const created = await res.json();
                 setTags(prev => [...prev, created]);
             }
             setIsModalOpen(false);
         } catch (err: any) {
-            alert(err.message || 'Save failed');
+            setDuplicateAlert({
+                message: err?.message || 'Save failed',
+                displayNameHe: err?.duplicate?.displayNameHe,
+            });
         }
     };
     
@@ -1816,7 +1854,7 @@ const AdminTagsView: React.FC = () => {
 
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.checked) {
-            setSelectedTagIds(new Set(sortedTags.map(t => t.id)));
+            setSelectedTagIds(new Set(tags.map(t => t.id)));
         } else {
             setSelectedTagIds(new Set<string>());
         }
@@ -2185,6 +2223,48 @@ const AdminTagsView: React.FC = () => {
 
             {/* Table */}
             <div className="bg-bg-card border border-border-default rounded-2xl shadow-sm overflow-hidden flex-1 flex flex-col">
+                <div className="px-3 py-3 border-b border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        {totalRecords
+                            ? `מראה ${totalRecords ? startIndex + 1 : 0}–${totalRecords ? endIndex : 0} מתוך ${totalRecords} תגיות`
+                            : 'לא נמצאו תגיות להצגה'}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <label className="flex items-center gap-1 whitespace-nowrap">
+                            <span>דפים</span>
+                            <select
+                                value={pageSize}
+                                onChange={(event) => handlePageSizeChange(Number(event.target.value))}
+                                className="bg-white border border-border-default rounded px-2 py-1 text-xs"
+                            >
+                                {pageSizeOptions.map((option) => (
+                                    <option key={option} value={option}>
+                                        {option}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <button
+                            type="button"
+                            onClick={() => goToPage(page - 1)}
+                            disabled={page <= 1}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            קודם
+                        </button>
+                        <span className="text-xs text-text-default">
+                            {page} / {totalPages}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => goToPage(page + 1)}
+                            disabled={page >= totalPages}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            הבא
+                        </button>
+                    </div>
+                </div>
                 <div className="overflow-x-auto flex-1">
                     <table className="w-full text-right text-sm table-fixed">
                         <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-10 border-b border-border-default">
@@ -2193,7 +2273,7 @@ const AdminTagsView: React.FC = () => {
                                     <input 
                                         type="checkbox" 
                                         onChange={handleSelectAll} 
-                                        checked={sortedTags.length > 0 && selectedTagIds.size === sortedTags.length}
+                                        checked={tags.length > 0 && selectedTagIds.size === tags.length}
                                         className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
                                     />
                                 </th>
@@ -2218,7 +2298,7 @@ const AdminTagsView: React.FC = () => {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
-                            {sortedTags.map(tag => (
+                            {tags.map(tag => (
                                 <tr key={tag.id} className={`hover:bg-bg-hover transition-colors group cursor-pointer ${selectedTagIds.has(tag.id) ? 'bg-primary-50/50' : ''}`} onClick={() => handleEdit(tag)}>
                                     <td className="p-4 text-center" onClick={e => e.stopPropagation()}>
                                         <input 
@@ -2244,8 +2324,47 @@ const AdminTagsView: React.FC = () => {
                         </tbody>
                     </table>
                 </div>
-                 <div className="p-3 border-t border-border-default text-xs text-text-muted bg-bg-subtle/30">
-                    סה"כ {sortedTags.length} תגיות
+                <div className="px-3 py-3 border-t border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        {totalRecords
+                            ? `מראה ${totalRecords ? startIndex + 1 : 0}–${totalRecords ? endIndex : 0} מתוך ${totalRecords} תגיות`
+                            : 'לא נמצאו תגיות להצגה'}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                        <label className="flex items-center gap-1 whitespace-nowrap">
+                            <span>דפים</span>
+                            <select
+                                value={pageSize}
+                                onChange={(event) => handlePageSizeChange(Number(event.target.value))}
+                                className="bg-white border border-border-default rounded px-2 py-1 text-xs"
+                            >
+                                {pageSizeOptions.map((option) => (
+                                    <option key={option} value={option}>
+                                        {option}
+                                    </option>
+                                ))}
+                            </select>
+                        </label>
+                        <button
+                            type="button"
+                            onClick={() => goToPage(page - 1)}
+                            disabled={page <= 1}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            קודם
+                        </button>
+                        <span className="text-xs text-text-default">
+                            {page} / {totalPages}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => goToPage(page + 1)}
+                            disabled={page >= totalPages}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            הבא
+                        </button>
+                    </div>
                 </div>
             </div>
 
@@ -2661,6 +2780,24 @@ const AdminTagsView: React.FC = () => {
                                 {isSavingSuggestions ? 'שומר...' : 'החל נבחרים'}
                             </button>
                         </div>
+                    </div>
+                </div>
+            )}
+
+            {duplicateAlert && (
+                <div className="fixed bottom-6 left-1/2 z-[150] -translate-x-1/2 flex max-w-md w-full flex-col gap-1 rounded-2xl border border-primary-200 bg-white/90 px-4 py-3 shadow-xl backdrop-blur-sm">
+                    <span className="text-sm font-bold text-text-default">{duplicateAlert.message}</span>
+                    {duplicateAlert.displayNameHe && (
+                        <span className="text-sm text-primary-600 font-semibold">{duplicateAlert.displayNameHe}</span>
+                    )}
+                    <div className="flex justify-end">
+                        <button
+                            type="button"
+                            onClick={() => setDuplicateAlert(null)}
+                            className="text-xs text-primary-500 hover:text-primary-700 underline-offset-2 hover:underline focus:outline-none"
+                        >
+                            סגור
+                        </button>
                     </div>
                 </div>
             )}

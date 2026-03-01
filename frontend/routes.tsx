@@ -64,6 +64,7 @@ import SettingsLayout from './components/SettingsLayout';
 import AdminSettingsLayout from './components/AdminSettingsLayout';
 
 import AdminCompanyCorrectionsView from './components/AdminCompanyCorrectionsView';
+import AdminTagsUnifiedView from './components/AdminTagsUnifiedView';
 import AdminTagsView from './components/AdminTagsView';
 import AdminCandidateTagsView from './components/AdminCandidateTagsView';
 import AdminJobFieldsView from './components/AdminJobFieldsView';
@@ -241,6 +242,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const [candidateFetchError, setCandidateFetchError] = useState<string | null>(null);
     const [isUpdatingCandidate, setIsUpdatingCandidate] = useState(false);
     const [candidateUpdateMessage, setCandidateUpdateMessage] = useState<string | null>(null);
+    const [candidateList, setCandidateList] = useState<{ id: string }[]>([]);
 
     const loadProfilesForUser = useCallback(async (userId?: string | number) => {
         if (!userId || !apiBase) {
@@ -265,10 +267,33 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         }
     }, [apiBase]);
 
-    const authHeaders = () => {
+    const authHeaders = useCallback(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         return token ? { Authorization: `Bearer ${token}` } : {};
-    };
+    }, []);
+
+    const fetchCandidateList = useCallback(async () => {
+        if (!apiBase) return;
+        try {
+            const response = await fetch(`${apiBase}/api/candidates?page=1&limit=250`, {
+                headers: { ...authHeaders() },
+                cache: 'reload',
+            });
+            if (!response.ok) throw new Error('Failed to load candidates');
+            const payload = await response.json();
+            const list = Array.isArray(payload.data)
+                ? payload.data
+                : Array.isArray(payload)
+                    ? payload
+                    : [];
+            const sanitized = list
+                .filter((item) => item && item.id)
+                .map((item) => ({ id: item.id }));
+            setCandidateList(sanitized);
+        } catch (err) {
+            console.error('Failed to fetch candidate list', err);
+        }
+    }, [apiBase, authHeaders]);
 
     const fetchCandidate = useCallback(async (signal?: AbortSignal, options?: { showLoading?: boolean }) => {
         if (!urlId) {
@@ -287,7 +312,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         }
 
             try {
-            const response = await fetch(`${apiBase}/api/candidates/${urlId}`, { signal });
+        const response = await fetch(`${apiBase}/api/candidates/${urlId}`, { signal, cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error('לא ניתן למצוא את המועמד המבוקש.');
                 }
@@ -324,6 +349,18 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         void fetchCandidate(controller.signal);
         return () => controller.abort();
     }, [fetchCandidate]);
+
+    useEffect(() => {
+        void fetchCandidateList();
+    }, [fetchCandidateList]);
+
+    useEffect(() => {
+        return () => {
+            if (saveTimeoutRef.current) {
+                clearTimeout(saveTimeoutRef.current);
+            }
+        };
+    }, []);
 
     useEffect(() => {
         const handleCandidateRefresh = (event: Event) => {
@@ -397,6 +434,45 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     
     const handleInternalTagsChange = (newTags: string[]) => {
         setFormData(prev => ({ ...prev, internalTags: newTags }));
+    };
+
+    const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastSavedRef = useRef<string | null>(null);
+
+    const triggerAutoSave = useCallback((nextData: any) => {
+        if (!nextData) return;
+        const payloadString = JSON.stringify(nextData);
+        if (lastSavedRef.current === payloadString) return;
+        if (saveTimeoutRef.current) {
+            clearTimeout(saveTimeoutRef.current);
+        }
+        saveTimeoutRef.current = setTimeout(async () => {
+            const targetId = urlId || nextData.backendId;
+            if (!targetId || !apiBase) return;
+            setIsUpdatingCandidate(true);
+            try {
+                const res = await fetch(`${apiBase}/api/candidates/${targetId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(nextData),
+                });
+                if (!res.ok) {
+                    const errBody = await res.json().catch(() => null);
+                    throw new Error(errBody?.message || 'עדכון אוטומטי נכשל');
+                }
+                lastSavedRef.current = payloadString;
+                setCandidateUpdateMessage('השינויים נשמרו אוטומטית.');
+            } catch (error: any) {
+                setCandidateUpdateMessage(error?.message || 'עדכון אוטומטי נכשל.');
+            } finally {
+                setIsUpdatingCandidate(false);
+            }
+        }, 600);
+    }, [apiBase, urlId]);
+
+    const handleFormChange = (updatedData: any) => {
+        setFormData(updatedData);
+        triggerAutoSave(updatedData);
     };
 
     const handleProfileSwitch = (profileId: string | number) => {
@@ -501,10 +577,6 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         }
     };
 
-    const handleFormChange = (updatedData: any) => {
-        setFormData(updatedData);
-    };
-    
     const handleNavClick = (view: string) => {
         props.handleSetActiveView(view);
     };
@@ -651,6 +723,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 activeProfileId={activeProfileId ?? formData.backendId ?? formData.id}
                 onSwitchProfile={handleProfileSwitch}
                 onAddProfile={handleAddProfile}
+                candidateList={candidateList}
+                onNavigateCandidate={(id) => {
+                    navigate(`/candidates/${id}`);
+                }}
             />
             
             <div ref={props.contentAreaRef} className="scroll-mt-32"></div>
@@ -755,11 +831,20 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                 { path: 'candidates', element: <AdminCandidatesView /> },
                 { path: 'candidates/:candidateId', element: <AdminCandidateProfileView /> },
                 { path: 'company-corrections', element: <AdminCompanyCorrectionsView /> },
-                { path: 'tags', element: <AdminTagsView /> },
-                { path: 'candidateTags', element: <AdminCandidateTagsView /> },
+                {
+                    path: 'tags',
+                    element: <AdminTagsUnifiedView />,
+                    children: [
+                        { index: true, element: <Navigate to="list" replace /> },
+                        { path: 'list', element: <AdminTagsView /> },
+                        { path: 'corrections', element: <AdminTagCorrectionsView /> },
+                        { path: 'candidates', element: <AdminCandidateTagsView /> },
+                    ],
+                },
+                { path: 'tag-corrections', element: <Navigate to="/admin/tags/corrections" replace /> },
+                { path: 'candidateTags', element: <Navigate to="/admin/tags/candidates" replace /> },
                 { path: 'picklists', element: <AdminPicklistsView /> },
                 { path: 'help-center', element: <AdminHelpCenterView /> },
-                { path: 'tag-corrections', element: <AdminTagCorrectionsView /> },
                 { path: 'events', element: <AdminEventsView /> },
                 { path: 'business-logic', element: <AdminBusinessLogicView /> },
                 { path: 'job-fields', element: <AdminJobFieldsView /> },

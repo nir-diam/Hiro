@@ -5,6 +5,7 @@ const CandidateTag = require('../models/CandidateTag');
 const tagEmbeddingService = require('./tagEmbeddingService');
 const { sendSingleTurnChat } = require('./geminiService');
 const promptService = require('./promptService');
+const { sequelize } = require('../config/db');
 
 const fireAndForget = (promise) => {
   if (!promise || typeof promise.catch !== 'function') return;
@@ -48,12 +49,141 @@ const cleanupPendingCorrections = async (values = [], options = {}) => {
   });
 };
 
-const list = async () =>
-  Tag.findAll({
+const list = async (options = {}) => {
+  const {
+    page = 1,
+    limit,
+    searchTerm = '',
+    synonymSearch = '',
+    types = [],
+    categories = [],
+    statuses = [],
+    sourceFilter,
+    createdFrom,
+    createdTo,
+    updatedFrom,
+    updatedTo,
+    sort = 'tagKey',
+    direction = 'asc',
+  } = options;
+
+  const hasLimit = typeof limit !== 'undefined' && limit !== null;
+  const normalizedLimit =
+    hasLimit ? Math.max(1, Math.min(Number(limit) || 100, 500)) : null;
+  const normalizedPage = Math.max(1, Number(page) || 1);
+  const offset = hasLimit ? (normalizedPage - 1) * normalizedLimit : 0;
+
+  const where = {};
+  const searchConditions = [];
+  const normalizedSearch = (searchTerm || '').trim().toLowerCase();
+  if (normalizedSearch) {
+    const likeTerm = `%${normalizedSearch}%`;
+    const columnMap = {
+      displayNameHe: 'display_name_he',
+      displayNameEn: 'display_name_en',
+      tagKey: 'tag_key',
+      category: 'category',
+    };
+    Object.values(columnMap).forEach((column) => {
+      searchConditions.push(
+        sequelize.where(sequelize.fn('LOWER', sequelize.col(column)), {
+          [Op.like]: likeTerm,
+        }),
+      );
+    });
+    // Also match tags whose synonyms (e.g. phrase "Training and Implementation") or aliases contain the search term
+    searchConditions.push(
+      sequelize.where(
+        sequelize.fn('LOWER', sequelize.cast(sequelize.col('synonyms'), 'text')),
+        { [Op.like]: likeTerm },
+      ),
+    );
+    searchConditions.push(
+      sequelize.where(
+        sequelize.fn('LOWER', sequelize.cast(sequelize.col('aliases'), 'text')),
+        { [Op.like]: likeTerm },
+      ),
+    );
+  }
+
+  const normalizedSynonym = (synonymSearch || '').trim().toLowerCase();
+  if (normalizedSynonym) {
+    const likeTerm = `%${normalizedSynonym}%`;
+    searchConditions.push(
+      sequelize.where(
+        sequelize.fn('LOWER', sequelize.cast(sequelize.col('synonyms'), 'text')),
+        { [Op.like]: likeTerm },
+      ),
+    );
+  }
+
+  if (searchConditions.length) {
+    where[Op.or] = searchConditions;
+  }
+
+  if (Array.isArray(types) && types.length) {
+    where.type = { [Op.in]: types };
+  }
+  if (Array.isArray(categories) && categories.length) {
+    where.category = { [Op.in]: categories };
+  }
+  if (Array.isArray(statuses) && statuses.length) {
+    where.status = { [Op.in]: statuses };
+  } else {
+    where.status = { [Op.ne]: 'pending' };
+  }
+
+  const normalizedSource = (sourceFilter || '').toLowerCase();
+  if (normalizedSource) {
+    if (normalizedSource === 'curator') {
+      where.source = { [Op.in]: ['admin', 'system'] };
+    } else if (normalizedSource === 'candidate') {
+      where.source = { [Op.in]: ['user', 'candidate'] };
+    } else if (['ai', 'manual', 'admin', 'system', 'user'].includes(normalizedSource)) {
+      where.source = normalizedSource;
+    }
+  }
+
+  if (createdFrom || createdTo) {
+    where.createdAt = {};
+    if (createdFrom) {
+      where.createdAt[Op.gte] = new Date(createdFrom);
+    }
+    if (createdTo) {
+      where.createdAt[Op.lte] = new Date(createdTo);
+    }
+  }
+  if (updatedFrom || updatedTo) {
+    where.updatedAt = {};
+    if (updatedFrom) {
+      where.updatedAt[Op.gte] = new Date(updatedFrom);
+    }
+    if (updatedTo) {
+      where.updatedAt[Op.lte] = new Date(updatedTo);
+    }
+  }
+
+  const sortableKeys = new Set(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'createdAt', 'source', 'usageCount']);
+  const safeSortKey = sortableKeys.has(sort) ? sort : 'tagKey';
+  const safeSortDirection = (direction || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+
+  const queryOptions = {
+    where,
+    order: [[safeSortKey, safeSortDirection]],
     attributes: {
       exclude: ['embedding'],
     },
-  });
+    ...(hasLimit
+      ? {
+          limit: normalizedLimit,
+          offset,
+        }
+      : {}),
+  };
+  const { count, rows } = await Tag.findAndCountAll(queryOptions);
+
+  return { rows, total: count, page: normalizedPage, limit: normalizedLimit };
+};
 
 const getById = async (id) => {
   const tag = await Tag.findByPk(id);

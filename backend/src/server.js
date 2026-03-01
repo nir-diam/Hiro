@@ -50,7 +50,7 @@ app.use('/api/picklists', picklistRoutes);
 app.use('/api/help-center', helpCenterRoutes);
 app.use('/api/admin/candidate-tags', candidateTagRoutes);
 app.use('/api/admin/business-logic', businessLogicRoutes);
-app.use('/email', emailRoutes);
+app.use('/api/email-uploads', emailRoutes);
 
 const start = async () => {
   try {
