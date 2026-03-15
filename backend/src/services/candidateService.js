@@ -2,6 +2,49 @@ const { Op } = require('sequelize');
 const Candidate = require('../models/Candidate');
 const CandidateTag = require('../models/CandidateTag');
 const Tag = require('../models/Tag');
+const CandidateOrganization = require('../models/CandidateOrganization');
+const Organization = require('../models/Organization');
+
+// Parse year from experience date string (YYYY-MM, YYYY, or "Present")
+const parseExperienceYear = (s) => {
+  if (!s || typeof s !== 'string') return null;
+  const t = String(s).trim();
+  if (/present|כיום/i.test(t)) return new Date().getFullYear();
+  const match = t.match(/^(\d{4})/);
+  return match ? parseInt(match[1], 10) : null;
+};
+
+/** Returns { yearsInCompany, isCurrent, lastEndYear } for this org from experience/workExperience. */
+const getWorkedAtOrgInfo = (experience, workExperience, orgName, aliases = []) => {
+  const names = new Set([
+    (orgName || '').trim().toLowerCase(),
+    ...(Array.isArray(aliases) ? aliases : []).map((a) => String(a).trim().toLowerCase()).filter(Boolean),
+  ]);
+  if (!names.size) return { yearsInCompany: null, isCurrent: false, lastEndYear: null };
+  let totalYears = 0;
+  let isCurrent = false;
+  let lastEndYear = null;
+  const exp = [
+    ...(Array.isArray(experience) ? experience : []),
+    ...(Array.isArray(workExperience) ? workExperience : []),
+  ];
+  for (const item of exp) {
+    const company = String(item?.company || '').trim().toLowerCase();
+    if (!company || !names.has(company)) continue;
+    const start = parseExperienceYear(item.startDate);
+    const end = parseExperienceYear(item.endDate);
+    if (start != null && end != null && end >= start) totalYears += end - start;
+    if (end != null) {
+      if (/present|כיום/i.test(String(item.endDate || '').trim())) isCurrent = true;
+      if (lastEndYear == null || end > lastEndYear) lastEndYear = end;
+    }
+  }
+  return {
+    yearsInCompany: totalYears > 0 ? totalYears : null,
+    isCurrent,
+    lastEndYear,
+  };
+};
 
 const associateTagRelations = () => {
   if (!Candidate.associations?.candidateTags) {
@@ -41,7 +84,6 @@ const TAG_TYPE_TO_RAW_TYPE = {
   language: 'Language',
   seniority: 'Seniority',
   domain: 'Industry',
-  hard_skill: 'Skill',
   soft_skill: 'Soft',
   education: 'Certification',
 };
@@ -113,6 +155,63 @@ const listPaginated = async ({ page = 1, limit = 100, search = '' } = {}) => {
     count,
     page: safePage,
     limit: safeLimit,
+  };
+};
+
+/**
+ * List candidates that are linked to a given organization (worked/working at company).
+ * Filters: yearsExperience (min years at org), employmentStatus ('current'|'past'), yearsLeftAgo (left at least N years ago).
+ */
+const listByWorkedAtOrganization = async ({
+  organizationId,
+  yearsExperience,
+  employmentStatus,
+  yearsLeftAgo,
+  limit = 500,
+} = {}) => {
+  if (!organizationId) {
+    return { rows: [], count: 0 };
+  }
+  const [org, links] = await Promise.all([
+    Organization.findByPk(organizationId, { attributes: ['name', 'aliases'] }),
+    CandidateOrganization.findAll({ where: { organizationId }, attributes: ['candidateId'] }),
+  ]);
+  const candidateIds = [...new Set(links.map((l) => l.candidateId).filter(Boolean))];
+  if (!candidateIds.length) {
+    return { rows: [], count: 0 };
+  }
+  const orgName = org?.name || '';
+  const aliases = org?.aliases || [];
+  const safeLimit = Number.isFinite(limit) ? Math.min(500, Math.max(1, limit)) : 500;
+  const candidates = await Candidate.findAll({
+    where: { id: candidateIds },
+    include: includeCandidateTags,
+    limit: safeLimit,
+    order: [['updatedAt', 'DESC']],
+  });
+  const currentYear = new Date().getFullYear();
+  const minYears = yearsExperience != null && Number.isFinite(yearsExperience) ? Number(yearsExperience) : null;
+  const wantCurrent = employmentStatus === 'current';
+  const wantPast = employmentStatus === 'past';
+  const leftYearsAgo = yearsLeftAgo != null && Number.isFinite(yearsLeftAgo) ? Number(yearsLeftAgo) : null;
+
+  const filtered = candidates.filter((c) => {
+    const row = c.toJSON ? c.toJSON() : { ...c.get() };
+    const exp = row.experience || [];
+    const workExp = row.workExperience || [];
+    const { yearsInCompany, isCurrent, lastEndYear } = getWorkedAtOrgInfo(exp, workExp, orgName, aliases);
+
+    if (minYears != null && (yearsInCompany == null || yearsInCompany < minYears)) return false;
+    if (wantCurrent && !isCurrent) return false;
+    if (wantPast && isCurrent) return false;
+    if (leftYearsAgo != null && (isCurrent || lastEndYear == null || currentYear - lastEndYear < leftYearsAgo)) return false;
+
+    return true;
+  });
+
+  return {
+    rows: filtered.map(mapCandidateWithTags),
+    count: filtered.length,
   };
 };
 
@@ -240,6 +339,7 @@ module.exports = {
   remove,
   searchFree,
   listPaginated,
+  listByWorkedAtOrganization,
   findByEmail,
 };
 

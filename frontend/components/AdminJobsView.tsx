@@ -643,6 +643,7 @@ const AdminJobsView: React.FC = () => {
                                     onClose={() => setIsCompanyFilterOpen(false)}
                                     filters={companyFilters}
                                     setFilters={setCompanyFilters}
+                                    onApply={loadJobs}
                                 />
                             )}
                         </div>

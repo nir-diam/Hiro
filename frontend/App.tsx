@@ -75,7 +75,7 @@ const AppContent: React.FC = () => {
              if(pathParts[1] === 'commissions') crumbs.push({ label: 'עמלות רכזות', path: '/finance/commissions' });
         }
         if (pathParts[0] === 'candidates') {
-            crumbs.push({ label: t('breadcrumbs.candidates_list'), path: '/candidates' });
+            crumbs.push({ label: t('breadcrumbs.candidates_list'), path: `/candidates${location.search}` });
             // ... existing candidate crumbs logic
             const savedSearchId = searchParams.get('savedSearchId');
             if (pathParts[1] && pathParts[1] !== 'new') {

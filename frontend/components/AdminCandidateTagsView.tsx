@@ -87,6 +87,7 @@ const AdminCandidateTagsView: React.FC = () => {
                 const candidateName = tag.candidate?.fullName || '';
                 const haystack = [
                     tag.tag?.tagKey || tag.tagKey || '',
+                    tag.tag?.displayNameHe || tag.displayNameHe || '',
                     tag.raw_type || '',
                     tag.context || '',
                     candidateName,
@@ -380,13 +381,14 @@ const AdminCandidateTagsView: React.FC = () => {
                                             <tr>
                                                 <th className="p-3">מועמד</th>
                                                 <th className="p-3">Tag Key</th>
+                                                <th className="p-3">שם בעברית</th>
                                                 <th className="p-3">Raw Type</th>
                                                 <th className="p-3">Context</th>
                                                 <th className="p-3">Current</th>
                                                 <th className="p-3">Summary</th>
                                                 <th className="p-3">Confidence</th>
                                                 <th className="p-3">Weight</th>
-                                                <th class1="p-3">Final</th>
+                                                <th className="p-3">Final</th>
                                                 <th className="p-3">Active</th>
                                                 <th className="p-3">Actions</th>
                                             </tr>
@@ -405,6 +407,7 @@ const AdminCandidateTagsView: React.FC = () => {
                                                             </button>
                                                         </td>
                                                         <td className="py-2 px-2 font-semibold">{tag.tag?.tagKey || tag.tagKey}</td>
+                                                        <td className="py-2 px-2" dir="rtl">{tag.tag?.displayNameHe ?? tag.displayNameHe ?? '-'}</td>
                                                         <td className="py-2 px-2">{tag.raw_type || '-'}</td>
                                                         <td className="py-2 px-2">{tag.context || '-'}</td>
                                                         <td className="py-2 px-2">{tag.is_current ? 'כן' : 'לא'}</td>

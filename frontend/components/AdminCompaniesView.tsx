@@ -1,14 +1,18 @@
 
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, PlusIcon, SparklesIcon, GlobeAmericasIcon, 
     MapPinIcon, Squares2X2Icon, TableCellsIcon, 
     TrashIcon, XMarkIcon, LinkedInIcon, BriefcaseIcon,
     ChartBarIcon, BoltIcon, ShieldCheckIcon, Cog6ToothIcon, ChatBubbleBottomCenterTextIcon,
-    BuildingOffice2Icon, ExclamationTriangleIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, FunnelIcon, TagIcon
+    BuildingOffice2Icon, ExclamationTriangleIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, FunnelIcon, TagIcon,
+    ArrowTopRightOnSquareIcon
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
+
+const apiBase = import.meta.env.VITE_API_BASE || '';
 
 // --- Types ---
 type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'Mixed' | 'Unknown';
@@ -23,19 +27,30 @@ interface Company {
     name: string; // Hebrew / Common
     nameEn: string;
     legalName: string;
-    aliases: string[]; 
-    
+    aliases: string[];
+    /** סטטוס פעילות: פעילה | לא פעילה | לא ידוע | בפירוק */
+    activityStatus?: string;
+
     // Links
     website: string;
-    linkedinUrl: string;    
-    
+    logo?: string;
+    linkedinUrl: string;
+
+    // Contact & place
+    email?: string;
+    address?: string;
+    phone?: string;
+    latitude?: number | string;
+    longitude?: number | string;
+
     // Hard Facts
-    foundedYear: string;    
+    foundedYear: string;
     location: string; // HQ City
     hqCountry: string;
-    
+
     // Scale
     employeeCount: string;
+    growthTrend?: string;
     
     // Business Logic
     mainField: string; // Industry Primary
@@ -64,6 +79,10 @@ interface Company {
     // Meta
     dataConfidence: DataConfidence;
     lastVerified: string;
+    createdAt?: string;
+    updatedAt?: string;
+    /** Number of candidates linked to this organization (worked at company) */
+    candidateCount?: number | null;
 
     isSelected?: boolean;
 }
@@ -88,6 +107,24 @@ interface HistoryEntry {
     action: string;
     details: string;
 }
+
+const ENRICHED_FIELD_LABELS: Record<string, string> = {
+    website: 'אתר',
+    logo: 'לוגו',
+    mainField: 'תחום ראשי',
+    subField: 'תת־תחום',
+    employeeCount: 'מספר עובדים',
+    foundedYear: 'שנת הקמה',
+    linkedinUrl: 'לינקדאין',
+    address: 'כתובת',
+    email: 'אימייל',
+    phone: 'טלפון',
+    growthTrend: 'מגמת צמיחה',
+    location: 'מיקום',
+    latitude: 'קו רוחב',
+    longitude: 'קו אורך',
+    description: 'תיאור',
+};
 
 // --- AI Tools Definitions ---
 const addCompaniesTool: FunctionDeclaration = {
@@ -159,7 +196,9 @@ const initialCompanies: Company[] = [
         tags: ['בניית אתרים', 'תוכנה לצרכן'],
         techTags: ['React', 'Node.js', 'Scala'],
         dataConfidence: 'הושלם',
-        lastVerified: '2025-05-01'
+        lastVerified: '2025-05-01',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        updatedAt: '2025-05-01T00:00:00.000Z',
     },
     { 
         id: '2', 
@@ -188,7 +227,9 @@ const initialCompanies: Company[] = [
         tags: ['מזון', 'מוצרי חלב', 'לוגיסטיקה'],
         techTags: ['SAP', 'Automation'],
         dataConfidence: 'הושלם',
-        lastVerified: '2025-04-15'
+        lastVerified: '2025-04-15',
+        createdAt: '2024-12-01T00:00:00.000Z',
+        updatedAt: '2025-04-15T00:00:00.000Z',
     },
     { 
         id: '3', 
@@ -217,7 +258,9 @@ const initialCompanies: Company[] = [
         tags: ['ביטחוני', 'תעופה', 'מל"טים'],
         techTags: ['C++', 'Embedded', 'Real-time'],
         dataConfidence: 'הושלם',
-        lastVerified: '2025-05-10'
+        lastVerified: '2025-05-10',
+        createdAt: '2024-11-10T00:00:00.000Z',
+        updatedAt: '2025-05-10T00:00:00.000Z',
     },
     {
         id: '4',
@@ -246,27 +289,33 @@ const initialCompanies: Company[] = [
         tags: ['אחזקות', 'תשתיות', 'נדל"ן'],
         techTags: [],
         dataConfidence: 'ממתין לסקירה',
-        lastVerified: '2025-05-12'
+        lastVerified: '2025-05-12',
+        createdAt: '2024-10-05T00:00:00.000Z',
+        updatedAt: '2025-05-12T00:00:00.000Z',
     }
 ];
 
 // --- Column Definition ---
 const allColumnsDef = [
+    { id: 'logo', label: 'לוגו' },
     { id: 'name', label: 'שם החברה' },
     { id: 'mainField', label: 'תחום' },
-    { id: 'structure', label: 'מבנה' }, 
+    { id: 'structure', label: 'מבנה' },
     { id: 'businessModel', label: 'מודל עסקי' },
     { id: 'type', label: 'סוג' },
+    { id: 'candidates', label: 'מועמדים' },
     { id: 'linkedinUrl', label: 'לינקדאין' },
-    { id: 'foundedYear', label: 'שנת הקמה' },
+    { id: 'website', label: 'אתר' },
     { id: 'employeeCount', label: 'גודל' },
     { id: 'location', label: 'מיקום' },
     { id: 'dataConfidence', label: 'אמינות' },
     { id: 'techTags', label: 'טכנולוגיות' },
-    { id: 'lastVerified', label: 'עודכן' },
+    { id: 'createdAt', label: 'תאריך הוספה' },
+    { id: 'updatedAt', label: 'תאריך עדכון' },
+    { id: 'lastVerified', label: 'עודכן (אימות)' },
 ];
 
-const defaultVisibleColumns = ['name', 'structure', 'mainField', 'businessModel', 'linkedinUrl', 'foundedYear', 'employeeCount', 'dataConfidence', 'techTags', 'location'];
+const defaultVisibleColumns = ['logo', 'name', 'structure', 'mainField', 'businessModel', 'candidates', 'linkedinUrl', 'website', 'employeeCount', 'dataConfidence', 'techTags', 'location', 'createdAt', 'updatedAt'];
 
 // --- Company Modal Component ---
 interface PicklistCategory {
@@ -296,11 +345,12 @@ const CompanyModal: React.FC<{
 }> = ({ isOpen, onClose, onSave, company }) => {
     const [formData, setFormData] = useState<Company>({
         id: '',
-        name: '', nameEn: '', legalName: '', aliases: [],
+        name: '', nameEn: '', legalName: '', aliases: [], activityStatus: '',
         description: '',
         mainField: '', subField: '', secondaryField: '',
         employeeCount: '',
-        website: '', linkedinUrl: '',
+        website: '', linkedinUrl: '', logo: '', email: '', address: '', phone: '',
+        latitude: '', longitude: '', growthTrend: '',
         foundedYear: '', location: '', hqCountry: 'Israel',
         type: 'הייטק', classification: 'פרטית',
         businessModel: 'B2B', productType: 'Product',
@@ -316,7 +366,16 @@ const CompanyModal: React.FC<{
     const [techTagsInput, setTechTagsInput] = useState('');
     const [subsidiariesInput, setSubsidiariesInput] = useState('');
     const [aliasesInput, setAliasesInput] = useState('');
-    const [activeTab, setActiveTab] = useState<'profile' | 'history'>('profile');
+    const [activeTab, setActiveTab] = useState<'profile' | 'history' | 'users'>('profile');
+    const [companyUsers, setCompanyUsers] = useState<
+        { id: string; fullName: string; title?: string; lastActivity?: string; status?: string; yearsInCompany?: number | null }[]
+    >([]);
+    const [companyUsersLoading, setCompanyUsersLoading] = useState(false);
+    const [usersRoleFilter, setUsersRoleFilter] = useState('');
+    const [usersExperienceFilter, setUsersExperienceFilter] = useState('');
+    const [usersStatusFilter, setUsersStatusFilter] = useState<'all' | 'current' | 'past'>('all');
+    const [usersLeftYearsFilter, setUsersLeftYearsFilter] = useState('');
+    const mapsApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
     useEffect(() => {
         if (isOpen) {
@@ -324,6 +383,7 @@ const CompanyModal: React.FC<{
                 setFormData({
                     ...company,
                     secondaryField: company.secondaryField || '',
+                    activityStatus: company.activityStatus || '',
                     history: company.history || [],
                 });
                 setTagsInput(company.tags.join(', '));
@@ -333,11 +393,12 @@ const CompanyModal: React.FC<{
             } else {
                 setFormData({
                     id: '',
-                    name: '', nameEn: '', legalName: '', aliases: [],
+                    name: '', nameEn: '', legalName: '', aliases: [], activityStatus: '',
                     description: '',
                     mainField: '', subField: '', secondaryField: '',
                     employeeCount: '',
-                    website: '', linkedinUrl: '',
+                    website: '', linkedinUrl: '', logo: '', email: '', address: '', phone: '',
+                    latitude: '', longitude: '', growthTrend: '',
                     foundedYear: '', location: '', hqCountry: 'Israel',
                     type: 'הייטק', classification: 'פרטית',
                     businessModel: 'B2B', productType: 'Product',
@@ -353,8 +414,42 @@ const CompanyModal: React.FC<{
                 setAliasesInput('');
             }
             setActiveTab('profile');
+            setCompanyUsers([]);
+            setUsersRoleFilter('');
+            setUsersExperienceFilter('');
+            setUsersStatusFilter('all');
+            setUsersLeftYearsFilter('');
         }
     }, [isOpen, company]);
+
+    useEffect(() => {
+        const loadCompanyUsers = async () => {
+            if (!apiBase || !company || activeTab !== 'users') return;
+            setCompanyUsersLoading(true);
+            try {
+                const res = await fetch(`${apiBase}/api/organizations/${company.id}/candidates`);
+                if (!res.ok) throw new Error('Failed to load company users');
+                const data = await res.json();
+                const list = Array.isArray(data) ? data : [];
+                setCompanyUsers(
+                    list.map((c: any) => ({
+                        id: c.id,
+                        fullName: c.fullName || '',
+                        title: c.title || '',
+                        lastActivity: c.lastActivity || '',
+                        status: c.status || '',
+                        yearsInCompany: c.yearsInCompany ?? null,
+                    })),
+                );
+            } catch (err) {
+                console.error('Failed to load company users', err);
+                setCompanyUsers([]);
+            } finally {
+                setCompanyUsersLoading(false);
+            }
+        };
+        loadCompanyUsers();
+    }, [apiBase, company, activeTab]);
 
     const sortedHistoryEntries = useMemo(() => {
         const list = Array.isArray(formData.history) ? formData.history : [];
@@ -364,8 +459,6 @@ const CompanyModal: React.FC<{
             return bTime - aTime;
         });
     }, [formData.history]);
-
-    const apiBase = import.meta.env.VITE_API_BASE || '';
     const [mainFieldOptions, setMainFieldOptions] = useState<PicklistCategory[]>([]);
     const [subFieldValues, setSubFieldValues] = useState<PicklistValue[]>([]);
     const [sectorOptions, setSectorOptions] = useState<PicklistValue[]>([]);
@@ -377,6 +470,43 @@ const CompanyModal: React.FC<{
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
         setFormData(prev => ({ ...prev, [name]: value }));
+    };
+
+    const handleGeocodeAddress = async () => {
+        const query = (formData.address || formData.location || '').trim();
+        if (!query) {
+            alert('נא להזין כתובת או עיר לפני החיפוש.');
+            return;
+        }
+        if (!mapsApiKey) {
+            alert('חסר מפתח Google Maps (VITE_GOOGLE_MAPS_API_KEY).');
+            return;
+        }
+        try {
+            const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(
+                query,
+            )}&key=${mapsApiKey}&language=iw`;
+            const res = await fetch(url);
+            if (!res.ok) {
+                throw new Error('Geocoding request failed');
+            }
+            const data = await res.json();
+            const first = data.results && data.results[0];
+            if (!first || !first.geometry || !first.geometry.location) {
+                alert('לא נמצאו תוצאות לכתובת הזו.');
+                return;
+            }
+            const { lat, lng } = first.geometry.location;
+            setFormData(prev => ({
+                ...prev,
+                latitude: lat,
+                longitude: lng,
+                address: prev.address || first.formatted_address || prev.address,
+            }));
+        } catch (err) {
+            console.error('Failed to geocode address', err);
+            alert('חלה שגיאה בעת ניסיון לקבל קואורדינטות מ-Google Maps.');
+        }
     };
     const loadBusinessSubcategories = useCallback(async (initialField: string) => {
         if (!apiBase) return;
@@ -511,7 +641,7 @@ const CompanyModal: React.FC<{
 
     return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4" onClick={onClose}>
-            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col max-h-[90vh] overflow-hidden border border-border-default animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col max-h-[90vh] border border-border-default animate-fade-in" onClick={e => e.stopPropagation()}>
                 <header className="flex items-center justify-between p-6 border-b border-border-default bg-bg-subtle/30">
                     <div>
                         <h2 className="text-xl font-black text-text-default">
@@ -535,6 +665,13 @@ const CompanyModal: React.FC<{
                             >
                                 היסטוריה
                             </button>
+                            <button
+                                type="button"
+                                onClick={() => setActiveTab('users')}
+                                className={`px-3 py-1 rounded-full text-xs font-semibold transition ${activeTab === 'users' ? 'bg-primary-600 text-white' : 'bg-bg-input text-text-muted'}`}
+                            >
+                                משתמשים
+                            </button>
                         </div>
                     </div>
                     <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors">
@@ -544,7 +681,6 @@ const CompanyModal: React.FC<{
                 
                 {activeTab === 'profile' ? (
                     <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-8">
-                     {/* Full form content here - Same as before */}
                      {/* Identity */}
                     <section>
                         <h3 className="text-sm font-bold text-primary-700 uppercase tracking-wider mb-4 flex items-center gap-2">
@@ -564,9 +700,19 @@ const CompanyModal: React.FC<{
                                 <input type="text" name="legalName" value={formData.legalName} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500 text-text-muted" placeholder="Ltd / Inc..." dir="ltr" />
                             </div>
                             
-                            <div className="md:col-span-3">
+                            <div className="md:col-span-2">
                                 <label className="block text-xs font-semibold text-text-muted mb-1">שמות נוספים לזיהוי (מופרד בפסיק)</label>
                                 <input type="text" value={aliasesInput} onChange={(e) => setAliasesInput(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="לדוגמה: ניסקו פרויקטים, קבוצת ניסקו..." />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">סטטוס פעילות</label>
+                                <select name="activityStatus" value={formData.activityStatus || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
+                                    <option value="">—</option>
+                                    <option value="פעילה">פעילה</option>
+                                    <option value="לא פעילה">לא פעילה</option>
+                                    <option value="לא ידוע">לא ידוע</option>
+                                    <option value="בפירוק">בפירוק</option>
+                                </select>
                             </div>
 
                             <div className="md:col-span-2">
@@ -583,13 +729,42 @@ const CompanyModal: React.FC<{
                                     <input type="url" name="linkedinUrl" value={formData.linkedinUrl} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="linkedin.com/company/..." dir="ltr" />
                                 </div>
                             </div>
+                            {/* Logo, contact, scale, coordinates */}
+                            <div className="md:col-span-3 grid grid-cols-1 md:grid-cols-3 gap-5 mt-4 pt-4 border-t border-border-subtle">
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">לוגו (URL)</label>
+                                    <div className="flex items-center gap-2">
+                                        {formData.logo && (
+                                            <img
+                                                src={formData.logo}
+                                                alt=""
+                                                className="w-10 h-10 rounded object-contain bg-white border border-border-subtle flex-shrink-0"
+                                                referrerPolicy="no-referrer"
+                                                onError={(e) => {
+                                                    (e.target as HTMLImageElement).style.display = 'none';
+                                                }}
+                                            />
+                                        )}
+                                        <input type="url" name="logo" value={formData.logo || ''} onChange={handleChange} className="flex-1 bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="https://..." dir="ltr" />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">אימייל</label>
+                                    <input type="email" name="email" value={formData.email || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="contact@company.com" dir="ltr" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">טלפון</label>
+                                    <input type="tel" name="phone" value={formData.phone || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="" dir="ltr" />
+                                </div>
+                                
+                            </div>
                         </div>
                     </section>
                     
                     {/* Other sections preserved from your original code */}
                     <div className="w-full h-px bg-border-subtle"></div>
 
-                     {/* SECTION 2: BUSINESS PROFILE */}
+                    {/* SECTION 2: BUSINESS PROFILE */}
                     <section>
                          <h3 className="text-sm font-bold text-primary-700 uppercase tracking-wider mb-4 flex items-center gap-2">
                             <BriefcaseIcon className="w-4 h-4"/> פרופיל עסקי
@@ -758,49 +933,79 @@ const CompanyModal: React.FC<{
                             )}
                         </div>
                     </section>
-
+                    
                     <div className="w-full h-px bg-border-subtle"></div>
-
+                    
                     {/* SECTION 3: SCALE & LOCATION */}
                     <section>
                          <h3 className="text-sm font-bold text-primary-700 uppercase tracking-wider mb-4 flex items-center gap-2">
                             <ChartBarIcon className="w-4 h-4"/> סקייל וצמיחה
                         </h3>
                          <div className="grid grid-cols-1 md:grid-cols-4 gap-5">
-                             <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">עובדים (כולל חברות בנות)</label>
-                                <select name="employeeCount" value={formData.employeeCount} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="1-10">1-10 (Seed)</option>
-                                    <option value="11-50">11-50 (Startup)</option>
-                                    <option value="51-200">51-200 (Growth)</option>
-                                    <option value="201-1000">201-1000 (Scale)</option>
-                                    <option value="1000+">1000+ (Enterprise)</option>
-                                    <option value="10000+">10000+ (Mega Enterprise)</option>
-                                </select>
-                            </div>
-                             <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">מגמת צמיחה</label>
-                                <select name="growthIndicator" value={formData.growthIndicator} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="Growing">צמיחה (Growing)</option>
-                                    <option value="Stable">יציב (Stable)</option>
-                                    <option value="Shrinking">הצטמצמות</option>
-                                    <option value="Unknown">לא ידוע</option>
-                                </select>
-                            </div>
-                             <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">שנת הקמה</label>
-                                <input type="text" name="foundedYear" value={formData.foundedYear} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="YYYY" />
-                            </div>
-                             <div>
+                             
+                        <div className="md:col-span-4">
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">כתובת</label>
+                                    <div className="flex items-center gap-2">
+                                        <input
+                                            type="text"
+                                            name="address"
+                                            value={formData.address || ''}
+                                            onChange={handleChange}
+                                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                                            placeholder="רחוב, עיר, מיקוד"
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={handleGeocodeAddress}
+                                            className="p-2 rounded-lg border border-border-default bg-bg-subtle text-primary-600 hover:bg-primary-50 hover:border-primary-300 transition-colors flex-shrink-0 inline-flex items-center justify-center"
+                                            title="חפש קואורדינטות ב-Google Maps"
+                                            aria-label="חפש קואורדינטות ב-Google Maps"
+                                        >
+                                            <MapPinIcon className="w-4 h-4" />
+                                        </button>
+                                    </div>
+                                </div>
+                                <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">מטה (עיר)</label>
                                 <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="עיר, רחוב" />
                             </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">מספר עובדים</label>
+                                    <input type="text" name="employeeCount" value={formData.employeeCount || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="למשל: 2, 1-10, 1000+" dir="ltr" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">מגמת צמיחה</label>
+                                    <input type="text" name="growthTrend" value={formData.growthTrend || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="למשל: Funding rounds, stage..." />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">שנת הקמה</label>
+                                    <input type="text" name="foundedYear" value={formData.foundedYear} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="YYYY" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">קו רוחב (Lat)</label>
+                                    <input type="text" name="latitude" value={formData.latitude != null ? String(formData.latitude) : ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="31.41" dir="ltr" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-semibold text-text-muted mb-1">קו אורך (Long)</label>
+                                    <div className="flex items-center gap-2">
+                                        <input type="text" name="longitude" value={formData.longitude != null ? String(formData.longitude) : ''} onChange={handleChange} className="flex-1 bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="34.58" dir="ltr" />
+                                        {formData.latitude != null && formData.longitude != null && String(formData.latitude).trim() !== '' && String(formData.longitude).trim() !== '' && (
+                                            <a href={`https://www.google.com/maps?q=${encodeURIComponent(String(formData.latitude))},${encodeURIComponent(String(formData.longitude))}`} target="_blank" rel="noopener noreferrer" className="p-1.5 rounded-lg text-primary-600 hover:bg-primary-50 shrink-0 inline-flex items-center justify-center" title="פתח ב-Google Maps" aria-label="פתח ב-Google Maps">
+                                                <MapPinIcon className="w-5 h-5" />
+                                            </a>
+                                        )}
+                                    </div>
+                                </div>
+                            
+                            
+                           
+                            
                          </div>
                     </section>
-
-                     <div className="w-full h-px bg-border-subtle"></div>
-
-                     {/* SECTION 4: TECH & TAGS */}
+                    
+                    <div className="w-full h-px bg-border-subtle"></div>
+                    
+                    {/* SECTION 4: TECH & TAGS */}
                     <section>
                          <h3 className="text-sm font-bold text-primary-700 uppercase tracking-wider mb-4 flex items-center gap-2">
                             <BoltIcon className="w-4 h-4"/> טכנולוגיה ותיוג
@@ -821,7 +1026,7 @@ const CompanyModal: React.FC<{
                         </div>
                     </section>
                 </form>
-                ) : (
+                ) : activeTab === 'history' ? (
                     <div className="flex-1 overflow-y-auto p-6 space-y-4">
                         {sortedHistoryEntries.length === 0 ? (
                             <div className="text-text-muted text-sm">לא נרשמו עדיין אירועים ביומן.</div>
@@ -841,6 +1046,142 @@ const CompanyModal: React.FC<{
                                 ))}
                             </ul>
                         )}
+                    </div>
+                ) : (
+                    <div className="flex-1 overflow-y-auto p-6 space-y-6">
+                        {/* Filters Row */}
+                        <div className="bg-bg-subtle p-4 rounded-xl border border-border-default flex flex-wrap gap-4 items-end">
+                            <div className="flex-1 min-w-[150px]">
+                                <label className="block text-xs font-semibold text-text-muted mb-1">תפקיד</label>
+                                <input
+                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-2 focus:ring-primary-500"
+                                    placeholder="חפש תפקיד..."
+                                    type="text"
+                                    value={usersRoleFilter}
+                                    onChange={(e) => setUsersRoleFilter(e.target.value)}
+                                />
+                            </div>
+                            <div className="w-32">
+                                <label className="block text-xs font-semibold text-text-muted mb-1">מס׳ שנות ניסיון</label>
+                                <input
+                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-2 focus:ring-primary-500"
+                                    placeholder="לדוגמה: 2"
+                                    type="number"
+                                    value={usersExperienceFilter}
+                                    onChange={(e) => setUsersExperienceFilter(e.target.value)}
+                                />
+                            </div>
+                            <div className="w-40">
+                                <label className="block text-xs font-semibold text-text-muted mb-1">סטטוס העסקה</label>
+                                <select
+                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-2 focus:ring-primary-500"
+                                    value={usersStatusFilter}
+                                    onChange={(e) =>
+                                        setUsersStatusFilter(e.target.value as 'all' | 'current' | 'past')
+                                    }
+                                >
+                                    <option value="all">הכל</option>
+                                    <option value="current">עובד/ת נוכחי/ת</option>
+                                    <option value="past">עובד/ת עבר</option>
+                                </select>
+                            </div>
+                            <div className="w-40">
+                                <label className="block text-xs font-semibold text-text-muted mb-1">עזב/ה לפני מס׳ שנים</label>
+                                <input
+                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-2 focus:ring-primary-500"
+                                    placeholder="לדוגמה: 3"
+                                    type="number"
+                                    value={usersLeftYearsFilter}
+                                    onChange={(e) => setUsersLeftYearsFilter(e.target.value)}
+                                />
+                            </div>
+                        </div>
+
+                        {/* Users Table */}
+                        <div className="border border-border-default rounded-xl overflow-hidden bg-bg-card">
+                            <table className="w-full text-right">
+                                <thead className="bg-bg-subtle border-b border-border-default text-xs font-bold text-text-muted">
+                                    <tr>
+                                        <th className="p-4">שם מועמד/ת</th>
+                                        <th className="p-4">תפקיד בחברה</th>
+                                        <th className="p-4">שנות ניסיון בחברה</th>
+                                        <th className="p-4">סטטוס</th>
+                                        <th className="p-4 w-10"></th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border-default">
+                                    {companyUsersLoading && (
+                                        <tr>
+                                            <td colSpan={5} className="p-6 text-center text-sm text-text-muted">
+                                                טוען מועמדים...
+                                            </td>
+                                        </tr>
+                                    )}
+                                    {!companyUsersLoading && companyUsers.length === 0 && (
+                                        <tr>
+                                            <td colSpan={5} className="p-6 text-center text-sm text-text-muted">
+                                                אין מועמדים שויכו לחברה זו.
+                                            </td>
+                                        </tr>
+                                    )}
+                                    {!companyUsersLoading &&
+                                        companyUsers.map((u) => (
+                                            <tr
+                                                key={u.id}
+                                                className="hover:bg-bg-hover transition-colors group cursor-pointer"
+                                                onClick={() =>
+                                                    window.open(
+                                                        `https://hiro.co.il/#/admin/candidates/${u.id}`,
+                                                        '_blank',
+                                                    )
+                                                }
+                                            >
+                                                <td className="p-4">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className="rounded-full flex items-center justify-center bg-primary-50 text-primary-700 w-8 h-8 text-xs font-bold">
+                                                            <span>
+                                                                {u.fullName
+                                                                    ?.split(' ')
+                                                                    .slice(0, 2)
+                                                                    .map((p) => p[0])
+                                                                    .join('') || '??'}
+                                                            </span>
+                                                        </div>
+                                                        <span className="font-semibold text-text-default">
+                                                            {u.fullName}
+                                                        </span>
+                                                    </div>
+                                                </td>
+                                                <td className="p-4 text-text-muted">{u.title || '—'}</td>
+                                                <td className="p-4 text-text-muted">
+                                                    {u.yearsInCompany != null ? `${u.yearsInCompany}` : '—'}
+                                                </td>
+                                                <td className="p-4">
+                                                    <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-slate-600 text-white shadow-sm">
+                                                        {u.status || 'לא ידוע'}
+                                                    </span>
+                                                </td>
+                                                <td className="p-4 text-left">
+                                                    <button
+                                                        type="button"
+                                                        className="p-1.5 text-text-muted hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                                        title="צפה בפרופיל"
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            window.open(
+                                                                `https://hiro.co.il/#/admin/candidates/${u.id}`,
+                                                                '_blank',
+                                                            );
+                                                        }}
+                                                    >
+                                                        <ArrowTopRightOnSquareIcon className="w-4 h-4" />
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 )}
 
@@ -890,7 +1231,7 @@ const formatHistoryTimestamp = (value: string) => {
 
 
 const AdminCompaniesView: React.FC = () => {
-    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const navigate = useNavigate();
     const [companies, setCompanies] = useState<Company[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -919,14 +1260,22 @@ const AdminCompaniesView: React.FC = () => {
         structure: '',
         parent: '',
         founded: '',
+        createdFrom: '',
+        createdTo: '',
+        updatedFrom: '',
+        updatedTo: '',
         tags: '',
         tech: '',
     });
 
-    // Column Management State
+    // Column Management & Sorting State
     const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
+    const [sortConfig, setSortConfig] = useState<{ columnId: string | null; direction: 'asc' | 'desc' }>({
+        columnId: null,
+        direction: 'asc',
+    });
     
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
@@ -963,13 +1312,21 @@ const AdminCompaniesView: React.FC = () => {
         nameEn: org.nameEn || org.name || '',
         legalName: org.legalName || org.name || '',
         aliases: org.aliases || [],
+        activityStatus: org.activityStatus || '',
         description: org.description || '',
         mainField: org.mainField || '',
         subField: org.subField || '',
         secondaryField: org.secondaryField || '',
         employeeCount: org.employeeCount || '',
         website: org.website || '',
+        logo: org.logo || '',
         linkedinUrl: org.linkedinUrl || '',
+        email: org.email || '',
+        address: org.address || '',
+        phone: org.phone || '',
+        latitude: org.latitude != null ? org.latitude : undefined,
+        longitude: org.longitude != null ? org.longitude : undefined,
+        growthTrend: org.growthTrend || '',
         foundedYear: org.foundedYear || '',
         location: org.location || '',
         hqCountry: org.hqCountry || '',
@@ -984,9 +1341,12 @@ const AdminCompaniesView: React.FC = () => {
         comments: org.comments || '',
         dataConfidence: (org.dataConfidence as any) || 'חדש',
         lastVerified: org.lastVerified || '',
+        createdAt: org.createdAt || '',
+        updatedAt: org.updatedAt || '',
         parentCompany: org.parentCompany || '',
         subsidiaries: org.subsidiaries || [],
         history: Array.isArray(org.history) ? org.history : [],
+        candidateCount: org.candidateCount != null ? Number(org.candidateCount) : null,
         isSelected: false
     }), []);
 
@@ -1011,25 +1371,30 @@ const AdminCompaniesView: React.FC = () => {
 
     const filteredCompanies = useMemo(() => 
         companies.filter(c => {
+            const toLower = (v: string | undefined | null) => (v || '').toLowerCase();
+
             // General Search
             const lowerSearch = searchTerm.trim().toLowerCase();
             const aliasesText = (c.aliases || []).join(' ').toLowerCase();
             const matchesSearch = !lowerSearch ||
-                                  c.name.toLowerCase().includes(lowerSearch) ||
-                                  c.mainField.toLowerCase().includes(lowerSearch) ||
+                                  toLower(c.name).includes(lowerSearch) ||
+                                  toLower(c.mainField).includes(lowerSearch) ||
                                   aliasesText.includes(lowerSearch);
             
             // Quick Filters
-            const matchesLocation = !filters.location || c.location.includes(filters.location);
+            const matchesLocation = !filters.location || toLower(c.location).includes(toLower(filters.location));
             const matchesType = !filters.type || c.type === filters.type;
             const matchesSize = !filters.size || c.employeeCount === filters.size;
-            const matchesField = !filters.field || c.mainField.includes(filters.field);
+            const matchesField = !filters.field ||
+                toLower(c.mainField).includes(toLower(filters.field)) ||
+                toLower(c.name).includes(toLower(filters.field)) ||
+                (c.nameEn && toLower(c.nameEn).includes(toLower(filters.field)));
             const matchesPending = !filters.showPendingOnly || c.dataConfidence === 'ממתין לסקירה';
 
             // Advanced Filters
-            const matchesName = !filters.name || c.name.includes(filters.name);
-            const matchesNameEn = !filters.nameEn || c.nameEn.toLowerCase().includes(filters.nameEn.toLowerCase());
-            const matchesLegal = !filters.legalName || c.legalName.toLowerCase().includes(filters.legalName.toLowerCase());
+            const matchesName = !filters.name || toLower(c.name).includes(toLower(filters.name));
+            const matchesNameEn = !filters.nameEn || toLower(c.nameEn).includes(toLower(filters.nameEn));
+            const matchesLegal = !filters.legalName || toLower(c.legalName).includes(toLower(filters.legalName));
             const matchesWeb = !filters.website || c.website.includes(filters.website);
             const matchesLinked = !filters.linkedin || c.linkedinUrl.includes(filters.linkedin);
             
@@ -1041,6 +1406,18 @@ const AdminCompaniesView: React.FC = () => {
             const matchesStruct = !filters.structure || c.structure === filters.structure;
             const matchesParent = !filters.parent || (c.parentCompany && c.parentCompany.includes(filters.parent));
             const matchesFounded = !filters.founded || c.foundedYear.includes(filters.founded);
+
+            const createdTime = c.createdAt ? new Date(c.createdAt).getTime() : NaN;
+            const updatedTime = c.updatedAt ? new Date(c.updatedAt).getTime() : NaN;
+            const createdFromTime = filters.createdFrom ? new Date(filters.createdFrom).getTime() : NaN;
+            const createdToTime = filters.createdTo ? new Date(filters.createdTo).getTime() : NaN;
+            const updatedFromTime = filters.updatedFrom ? new Date(filters.updatedFrom).getTime() : NaN;
+            const updatedToTime = filters.updatedTo ? new Date(filters.updatedTo).getTime() : NaN;
+
+            const matchesCreatedFrom = !filters.createdFrom || (!Number.isNaN(createdTime) && createdTime >= createdFromTime);
+            const matchesCreatedTo = !filters.createdTo || (!Number.isNaN(createdTime) && createdTime <= createdToTime);
+            const matchesUpdatedFrom = !filters.updatedFrom || (!Number.isNaN(updatedTime) && updatedTime >= updatedFromTime);
+            const matchesUpdatedTo = !filters.updatedTo || (!Number.isNaN(updatedTime) && updatedTime <= updatedToTime);
             
             const matchesTags = !filters.tags || c.tags.some(t => t.includes(filters.tags));
             const matchesTech = !filters.tech || c.techTags.some(t => t.toLowerCase().includes(filters.tech.toLowerCase()));
@@ -1048,15 +1425,84 @@ const AdminCompaniesView: React.FC = () => {
             return matchesSearch && matchesLocation && matchesType && matchesSize && matchesField && matchesPending &&
                    matchesName && matchesNameEn && matchesLegal && matchesWeb && matchesLinked &&
                    matchesSub && matchesBiz && matchesProd && matchesClass &&
-                   matchesStruct && matchesParent && matchesFounded && matchesTags && matchesTech;
+                   matchesStruct && matchesParent && matchesFounded &&
+                   matchesCreatedFrom && matchesCreatedTo &&
+                   matchesUpdatedFrom && matchesUpdatedTo &&
+                   matchesTags && matchesTech;
         }),
     [companies, searchTerm, filters]);
+
+    const sortedCompanies = useMemo(() => {
+        if (!sortConfig.columnId) return filteredCompanies;
+        const getValue = (c: Company, columnId: string): any => {
+            switch (columnId) {
+                case 'name': return c.name;
+                case 'mainField': return c.mainField;
+                case 'structure': return c.structure;
+                case 'businessModel': return c.businessModel;
+                case 'type': return c.type;
+                case 'employeeCount': return c.employeeCount;
+                case 'location': return c.location;
+                case 'dataConfidence': return c.dataConfidence;
+                case 'createdAt': return c.createdAt;
+                case 'updatedAt': return c.updatedAt;
+                case 'lastVerified': return c.lastVerified;
+                case 'candidates': return c.candidateCount ?? 0;
+                default: return (c as any)[columnId];
+            }
+        };
+
+        const toComparable = (val: any, columnId: string): any => {
+            if (val == null) return null;
+            if (columnId === 'createdAt' || columnId === 'updatedAt' || columnId === 'lastVerified') {
+                const t = new Date(val).getTime();
+                return Number.isNaN(t) ? null : t;
+            }
+            if (typeof val === 'number') return val;
+            const num = Number(val);
+            if (!Number.isNaN(num) && val !== '' && columnId === 'employeeCount') return num;
+            return String(val).toLowerCase();
+        };
+
+        const sorted = [...filteredCompanies];
+        sorted.sort((a, b) => {
+            const aRaw = getValue(a, sortConfig.columnId!);
+            const bRaw = getValue(b, sortConfig.columnId!);
+            const aVal = toComparable(aRaw, sortConfig.columnId!);
+            const bVal = toComparable(bRaw, sortConfig.columnId!);
+
+            if (aVal == null && bVal == null) return 0;
+            if (aVal == null) return sortConfig.direction === 'asc' ? 1 : -1;
+            if (bVal == null) return sortConfig.direction === 'asc' ? -1 : 1;
+
+            if (typeof aVal === 'number' && typeof bVal === 'number') {
+                return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
+            }
+
+            const cmp = String(aVal).localeCompare(String(bVal), 'he');
+            return sortConfig.direction === 'asc' ? cmp : -cmp;
+        });
+        return sorted;
+    }, [filteredCompanies, sortConfig]);
 
     // ... (Keep existing handler functions: Actions, Column Management, AI Enrichment, AI Chat - they are correct)
 
     const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
         setFilters(prev => ({ ...prev, [name]: value }));
+    };
+    
+    const handleSort = (columnId: string) => {
+        if (columnId === 'order') return;
+        setSortConfig(prev => {
+            if (prev.columnId === columnId) {
+                return {
+                    columnId,
+                    direction: prev.direction === 'asc' ? 'desc' : 'asc',
+                };
+            }
+            return { columnId, direction: 'asc' };
+        });
     };
     
     // --- Actions Handlers ---
@@ -1144,7 +1590,13 @@ const AdminCompaniesView: React.FC = () => {
             employeeCount: companyData.employeeCount,
             website: companyData.website,
             linkedinUrl: companyData.linkedinUrl,
+            email: companyData.email || '',
+            phone: companyData.phone || '',
+            address: companyData.address || '',
             location: companyData.location,
+            latitude: companyData.latitude ?? null,
+            longitude: companyData.longitude ?? null,
+            growthTrend: companyData.growthTrend || '',
             foundedYear: companyData.foundedYear,
             classification: companyData.classification,
             type: companyData.type,
@@ -1158,6 +1610,7 @@ const AdminCompaniesView: React.FC = () => {
             techTags: companyData.techTags || [],
             description: companyData.description,
             aliases: companyData.aliases || [],
+            activityStatus: companyData.activityStatus || '',
             comments: companyData.comments || '',
             dataConfidence: companyData.dataConfidence,
             lastVerified: companyData.lastVerified,
@@ -1562,8 +2015,34 @@ const AdminCompaniesView: React.FC = () => {
     
     // ... (Keep renderCell function)
     const renderCell = (company: Company, columnId: string) => {
-         // ... existing implementation
          switch (columnId) {
+             case 'logo':
+                 return company.logo ? (
+                     <img
+                         src={company.logo}
+                         alt=""
+                         className="w-12 h-12 rounded object-contain bg-white border border-border-subtle flex-shrink-0"
+                         referrerPolicy="no-referrer"
+                         onError={(e) => {
+                             const img = e.currentTarget;
+                             if (company.website) {
+                                 img.src = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(
+                                     company.website,
+                                 )}&sz=64`;
+                             } else {
+                                 img.style.display = 'none';
+                             }
+                         }}
+                     />
+                 ) : (
+                     <span className="text-text-subtle text-xs">-</span>
+                 );
+             case 'website':
+                 return company.website ? (
+                     <a href={company.website} target="_blank" rel="noreferrer" className="text-primary-600 hover:text-primary-700 inline-flex" onClick={e => e.stopPropagation()} title={company.website}>
+                         <GlobeAmericasIcon className="w-5 h-5" />
+                     </a>
+                 ) : <span className="text-text-subtle text-xs">-</span>;
              case 'name':
                  return (
                      <>
@@ -1606,13 +2085,25 @@ const AdminCompaniesView: React.FC = () => {
                             {company.businessModel}
                         </span>
                     ) : '-';
-             case 'linkedinUrl':
+             case 'candidates':
+                return (
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            navigate(`/admin/candidates?organization=${encodeURIComponent(company.id)}`);
+                        }}
+                        className="text-primary-600 hover:text-primary-700 font-semibold text-sm hover:underline"
+                    >
+                        {company.candidateCount != null && company.candidateCount > 0 ? company.candidateCount : '—'}
+                    </button>
+                );
+            case 'linkedinUrl':
                  return company.linkedinUrl ? (
                     <a href={company.linkedinUrl} target="_blank" rel="noreferrer" className="text-[#0077b5] hover:text-[#005582]" onClick={e => e.stopPropagation()}>
                         <LinkedInIcon className="w-5 h-5 inline"/>
                     </a>
                 ) : <span className="text-text-subtle text-xs">-</span>;
-            case 'foundedYear': return <span className="text-text-muted font-mono">{company.foundedYear || '-'}</span>;
             case 'employeeCount': return <span className="font-mono text-text-default font-semibold">{company.employeeCount}</span>;
             case 'dataConfidence':
                 if (company.dataConfidence === 'ממתין לסקירה') {
@@ -1652,6 +2143,18 @@ const AdminCompaniesView: React.FC = () => {
                          <MapPinIcon className="w-3.5 h-3.5"/> {company.location}
                     </div>
                  );
+            case 'createdAt': {
+                if (!company.createdAt) return <span className="text-text-subtle text-xs">-</span>;
+                const d = new Date(company.createdAt);
+                const label = Number.isNaN(d.getTime()) ? company.createdAt : d.toLocaleDateString('he-IL');
+                return <span className="text-xs text-text-muted">{label}</span>;
+            }
+            case 'updatedAt': {
+                if (!company.updatedAt) return <span className="text-text-subtle text-xs">-</span>;
+                const d = new Date(company.updatedAt);
+                const label = Number.isNaN(d.getTime()) ? company.updatedAt : d.toLocaleDateString('he-IL', { dateStyle: 'short' });
+                return <span className="text-xs text-text-muted">{label}</span>;
+            }
             case 'lastVerified': return <span className="text-xs text-text-muted">{company.lastVerified}</span>;
             default: return (company as any)[columnId];
          }
@@ -1746,7 +2249,7 @@ const AdminCompaniesView: React.FC = () => {
                         {!isAdvancedSearchOpen && (
                             <div className="flex flex-wrap items-center gap-3">
                                 <div className="flex-1 min-w-[150px]">
-                                     <input type="text" name="field" placeholder="תחום עיסוק" value={filters.field} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none" />
+                                     <input type="text" name="field" placeholder="חיפוש: שם חברה / תחום" value={filters.field} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none" />
                                 </div>
                                  <div className="flex-1 min-w-[150px]">
                                      <input type="text" name="location" placeholder="מיקום" value={filters.location} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none" />
@@ -1771,6 +2274,30 @@ const AdminCompaniesView: React.FC = () => {
                                          <option value="1000+">1000+</option>
                                          <option value="10000+">10000+</option>
                                      </select>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                    <label className="flex items-center gap-1 text-[11px] text-text-muted">
+                                        <span>תאריך הוספה:</span>
+                                        <input
+                                            type="date"
+                                            name="createdFrom"
+                                            value={filters.createdFrom}
+                                            onChange={handleFilterChange}
+                                            className="bg-bg-input border border-border-default rounded-xl py-1.5 px-2 text-xs focus:ring-2 focus:ring-primary-500 outline-none"
+                                            title="תאריך הוספה - מ"
+                                        />
+                                    </label>
+                                    <label className="flex items-center gap-1 text-[11px] text-text-muted">
+                                        <span>תאריך עדכון:</span>
+                                        <input
+                                            type="date"
+                                            name="updatedFrom"
+                                            value={filters.updatedFrom}
+                                            onChange={handleFilterChange}
+                                            className="bg-bg-input border border-border-default rounded-xl py-1.5 px-2 text-xs focus:ring-2 focus:ring-primary-500 outline-none"
+                                            title="תאריך עדכון - מ"
+                                        />
+                                    </label>
                                 </div>
                                  <div className="flex bg-bg-subtle p-1 rounded-xl border border-border-default ml-auto">
                                     <button onClick={() => setViewMode('table')} className={`p-2 rounded-lg transition-all ${viewMode === 'table' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
@@ -1822,6 +2349,35 @@ const AdminCompaniesView: React.FC = () => {
                                 </select>
                                 <input type="text" name="parent" placeholder="חברת אם" value={filters.parent} onChange={handleFilterChange} className="input-field" />
                                 <input type="text" name="founded" placeholder="שנת הקמה" value={filters.founded} onChange={handleFilterChange} className="input-field" />
+                                <label className="col-span-full text-[11px] font-semibold text-text-muted mt-2">תאריכים</label>
+                                <input
+                                    type="date"
+                                    name="createdFrom"
+                                    value={filters.createdFrom}
+                                    onChange={handleFilterChange}
+                                    className="input-field"
+                                />
+                                <input
+                                    type="date"
+                                    name="createdTo"
+                                    value={filters.createdTo}
+                                    onChange={handleFilterChange}
+                                    className="input-field"
+                                />
+                                <input
+                                    type="date"
+                                    name="updatedFrom"
+                                    value={filters.updatedFrom}
+                                    onChange={handleFilterChange}
+                                    className="input-field"
+                                />
+                                <input
+                                    type="date"
+                                    name="updatedTo"
+                                    value={filters.updatedTo}
+                                    onChange={handleFilterChange}
+                                    className="input-field"
+                                />
                                 
                                 {/* Tech & Tags */}
                                 <input type="text" name="tags" placeholder="תגיות כלליות" value={filters.tags} onChange={handleFilterChange} className="input-field" />
@@ -1878,7 +2434,8 @@ const AdminCompaniesView: React.FC = () => {
                     {/* Table View */}
                     {viewMode === 'table' ? (
                         <div className="bg-bg-card border border-border-default rounded-xl overflow-hidden shadow-sm">
-                            <table className="w-full text-sm text-right min-w-[1000px]">
+                            <div className="overflow-x-auto overflow-y-visible">
+                                <table className="w-full text-sm text-right min-w-[1000px]">
                                 {/* Sticky Header */}
                                 <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default sticky top-0 z-10 shadow-sm">
                                     <tr>
@@ -1886,7 +2443,7 @@ const AdminCompaniesView: React.FC = () => {
                                             <input 
                                                 type="checkbox" 
                                                 onChange={handleSelectAll} 
-                                                checked={filteredCompanies.length > 0 && selectedIds.size === filteredCompanies.length}
+                                                checked={sortedCompanies.length > 0 && selectedIds.size === sortedCompanies.length}
                                                 className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
                                             />
                                         </th>
@@ -1902,8 +2459,16 @@ const AdminCompaniesView: React.FC = () => {
                                                     onDragEnter={() => handleDragEnter(index)} 
                                                     onDragEnd={handleDragEnd} 
                                                     onDragOver={(e) => e.preventDefault()}
+                                                    onClick={() => handleSort(col.id)}
                                                 >
-                                                    {col.label}
+                                                    <span className="inline-flex items-center gap-1">
+                                                        {col.label}
+                                                        {sortConfig.columnId === col.id && (
+                                                            <span className="text-[10px]">
+                                                                {sortConfig.direction === 'asc' ? '▲' : '▼'}
+                                                            </span>
+                                                        )}
+                                                    </span>
                                                 </th>
                                             )
                                         })}
@@ -1928,7 +2493,7 @@ const AdminCompaniesView: React.FC = () => {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">
-                                    {filteredCompanies.map(company => (
+                                    {sortedCompanies.map((company, index) => (
                                         <tr 
                                             key={company.id} 
                                             className={`hover:bg-bg-hover transition-colors group cursor-pointer ${selectedIds.has(company.id) ? 'bg-primary-50/50' : ''}`}
@@ -1945,12 +2510,12 @@ const AdminCompaniesView: React.FC = () => {
                                             
                                             {visibleColumns.map(colId => (
                                                 <td key={colId} className="p-4">
-                                                    {renderCell(company, colId)}
+                                                    {renderCell(company, colId, index)}
                                                 </td>
                                             ))}
 
                                             <td className="p-4 text-center">
-                                                <div className="opacity-0 group-hover:opacity-100 transition-opacity flex justify-center gap-1">
+                                                <div className="opacity-100 transition-opacity flex justify-center gap-1">
                                                     <button 
                                                         onClick={(e) => { e.stopPropagation(); handleDeleteCompany(company.id); }}
                                                         className="p-1.5 hover:bg-red-50 text-red-500 rounded-lg transition-colors"
@@ -1964,6 +2529,7 @@ const AdminCompaniesView: React.FC = () => {
                                     ))}
                                 </tbody>
                             </table>
+                            </div>
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -2022,9 +2588,9 @@ const AdminCompaniesView: React.FC = () => {
                                         </button>
                                     </div>
                                 </div>
-                            ))}
-                        </div>
-                    )}
+                        ))}
+                    </div>
+                )}
                         </div>
                         <div className={`${activeSection === 'history' ? 'block' : 'hidden'} bg-white border border-border-default rounded-2xl p-6 shadow-sm space-y-3`}>
                             {historyEntries.length === 0 ? (
@@ -2080,10 +2646,46 @@ const AdminCompaniesView: React.FC = () => {
                         <div className="p-6 space-y-4 max-h-[420px] overflow-y-auto">
                             {tagSuggestions.map(s => {
                                 const selection = suggestionSelections[s.companyId] || { tags: true, techTags: true, enriched: {} };
-                                const enrichedFields = s.enriched ? Object.entries(s.enriched) : [];
+                                const enrichedFields = s.enriched ? Object.entries(s.enriched).filter(([key]) => key !== 'logo') : [];
+                                const logoUrl = s.enriched?.logo;
                                 return (
                                     <div key={s.companyId} className="rounded-xl border border-border-default p-4 bg-bg-subtle/50 space-y-3">
-                                        <div className="text-sm font-semibold text-text-default">{s.companyName}</div>
+                                        <div className="flex items-center gap-3">
+                                            {logoUrl && (
+                                                <>
+                                                    <img
+                                                        src={logoUrl}
+                                                        alt=""
+                                                        className="w-8 h-8 rounded object-contain bg-white border border-border-subtle flex-shrink-0"
+                                                        referrerPolicy="no-referrer"
+                                                        onError={(e) => {
+                                                            (e.target as HTMLImageElement).style.display = 'none';
+                                                        }}
+                                                    />
+                                                    <label className="flex items-center gap-2 text-xs text-text-muted">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={selection.enriched?.logo ?? true}
+                                                            onChange={() =>
+                                                                setSuggestionSelections(prev => ({
+                                                                    ...prev,
+                                                                    [s.companyId]: {
+                                                                        ...(prev[s.companyId] || { tags: true, techTags: true, enriched: {} }),
+                                                                        enriched: {
+                                                                            ...(prev[s.companyId]?.enriched || {}),
+                                                                            logo: !(selection.enriched?.logo ?? true),
+                                                                        },
+                                                                    },
+                                                                }))
+                                                            }
+                                                            className="h-4 w-4 text-primary-600"
+                                                        />
+                                                        <span>עדכן לוגו</span>
+                                                    </label>
+                                                </>
+                                            )}
+                                            <span className="text-sm font-semibold text-text-default">{s.companyName}</span>
+                                        </div>
                                         {s.tags.length > 0 && (
                                             <div className="flex flex-col gap-2 text-xs">
                                                 <label className="flex items-center gap-2">
@@ -2137,6 +2739,8 @@ const AdminCompaniesView: React.FC = () => {
                                                 <p className="text-[11px] text-text-muted uppercase tracking-wide">שדות מועשרים</p>
                                                 {enrichedFields.map(([field, value]) => {
                                                     const checked = selection.enriched[field] ?? true;
+                                                    const label = ENRICHED_FIELD_LABELS[field] ?? field;
+                                                    const displayValue = value != null ? String(value) : '';
                                                     return (
                                                         <label key={`${s.companyId}-enriched-${field}`} className="flex flex-col gap-1 text-xs">
                                                             <span className="flex items-center gap-2">
@@ -2155,9 +2759,9 @@ const AdminCompaniesView: React.FC = () => {
                                                                     }))}
                                                                     className="h-4 w-4 text-primary-600"
                                                                 />
-                                                                <span className="font-semibold">{field}</span>
+                                                                <span className="font-semibold">{label}</span>
                                                             </span>
-                                                            <span className="text-text-muted">{value}</span>
+                                                            <span className="text-text-muted">{displayValue}</span>
                                                         </label>
                                                     );
                                                 })}

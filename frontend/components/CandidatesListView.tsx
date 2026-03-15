@@ -537,17 +537,20 @@ const SmartSearchPanel: React.FC<{
 };
 
 
+const VIEW_STATE_KEY = 'hiro.candidates.listViewState';
+
 const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [candidates, setCandidates] = useState<Candidate[]>([]);
-    const [isRemoteLoading, setIsRemoteLoading] = useState(false);
+    const [isRemoteLoading, setIsRemoteLoading] = useState(true);
+    const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(false);
     const [jobs, setJobs] = useState<{ id: string; title: string }[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
     const [jobsError, setJobsError] = useState<string | null>(null);
     const [selectedJobId, setSelectedJobId] = useState('');
 
     const navigate = useNavigate();
-    const [searchParamsFromUrl] = useSearchParams();
+    const [searchParamsFromUrl, setUrlSearchParams] = useSearchParams();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const { t } = useLanguage();
 
@@ -568,14 +571,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [pageSize, setPageSize] = useState(100);
     const [totalCandidates, setTotalCandidates] = useState(0);
     const totalPages = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
-    const goToPage = useCallback((target: number) => {
-        const normalized = Math.max(1, Math.min(totalPages, target));
-        setPage(normalized);
-    }, [totalPages]);
-    const handlePageSizeSelect = useCallback((nextSize: number) => {
-        setPageSize(nextSize);
-        setPage(1);
-    }, []);
     const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
     const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
     const dragItemIndex = useRef<number | null>(null);
@@ -645,9 +640,52 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [showNeedsAttention, setShowNeedsAttention] = useState(false);
     const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
 
-    // --- NEW SMART SEARCH STATE ---
+    // Initialize basic search/filter state from URL on first mount
+    useEffect(() => {
+        const q = searchParamsFromUrl.get('q') || '';
+        if (q && q !== searchTerm) {
+            setSearchTerm(q);
+        }
+        const needs = searchParamsFromUrl.get('needs');
+        if (needs !== null) {
+            setShowNeedsAttention(needs === '1');
+        }
+        const fav = searchParamsFromUrl.get('fav');
+        if (fav !== null) {
+            setShowFavoritesOnly(fav === '1');
+        }
+        const field = searchParamsFromUrl.get('field') || '';
+        const industry = searchParamsFromUrl.get('industry') || '';
+        const sizesParam = searchParamsFromUrl.get('sizes') || '';
+        const sectorsParam = searchParamsFromUrl.get('sectors') || '';
+        const sizes = sizesParam ? sizesParam.split(',').filter(Boolean) : [];
+        const sectors = sectorsParam ? sectorsParam.split(',').filter(Boolean) : [];
+        setCompanyFilters((prev) => ({
+            ...prev,
+            field,
+            industry,
+            sizes,
+            sectors,
+        }));
+    }, [searchParamsFromUrl]);
+
+    // Persist basic search/filter state into URL so it survives navigation back from profile
+    useEffect(() => {
+        const params = new URLSearchParams();
+        if (searchTerm.trim()) params.set('q', searchTerm.trim());
+        if (showNeedsAttention) params.set('needs', '1');
+        if (showFavoritesOnly) params.set('fav', '1');
+        if (companyFilters.field) params.set('field', companyFilters.field);
+        if (companyFilters.industry) params.set('industry', companyFilters.industry);
+        if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join(','));
+        if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join(','));
+        setUrlSearchParams(params, { replace: true });
+    }, [searchTerm, showNeedsAttention, showFavoritesOnly, companyFilters, setUrlSearchParams]);
+
+    // --- SMART SEARCH STATE ---
     const [isSmartSearchOpen, setIsSmartSearchOpen] = useState(false);
     const [smartSearchQuery, setSmartSearchQuery] = useState('');
+    const [isSmartSearching, setIsSmartSearching] = useState(false);
     const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{ id: number, x: number, y: number } | null>(null);
 
     const mapCandidate = useCallback((c: any, idx: number): Candidate => {
@@ -684,12 +722,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setIsRemoteLoading(true);
         try {
             const params = new URLSearchParams({
-                page: String(page),
-                limit: String(pageSize),
+                page: '1',
+                limit: '10000',
             });
-            if (debouncedSearchTerm) {
-                params.set('search', debouncedSearchTerm);
-            }
             const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
             if (!res.ok) throw new Error('failed to load');
             const payload = await res.json();
@@ -698,26 +733,73 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 : Array.isArray(payload.rows)
                     ? payload.rows
                     : [];
-            setCandidates(list.map(mapCandidate));
-            setTotalCandidates(Number(payload.total) || list.length);
+            const mapped = list.map(mapCandidate);
+            setCandidates(mapped);
         } catch (e) {
             setCandidates([]);
-            setTotalCandidates(0);
         } finally {
             setIsRemoteLoading(false);
+            setHasInitiallyLoaded(true);
         }
-    }, [apiBase, mapCandidate, page, pageSize, debouncedSearchTerm]);
+    }, [apiBase, mapCandidate]);
 
-    useEffect(() => {
-        fetchCandidates();
-    }, [fetchCandidates]);
+    const goToPage = useCallback((target: number) => {
+        const normalized = Math.max(1, Math.min(totalPages, target));
+        setPage(normalized);
+    }, [totalPages]);
 
+    const handlePageSizeSelect = useCallback((nextSize: number) => {
+        setPageSize(nextSize);
+        setPage(1);
+    }, []);
+
+    // On first mount, try to restore full view state from sessionStorage.
+    // If found, skip backend fetch; otherwise load from backend once.
     useEffect(() => {
-        const refreshInterval = setInterval(() => {
+        let restored = false;
+        try {
+            const raw = sessionStorage.getItem(VIEW_STATE_KEY);
+            if (raw) {
+                const saved = JSON.parse(raw);
+                if (Array.isArray(saved.candidates) && saved.candidates.length) {
+                    setCandidates(saved.candidates);
+                    setSearchTerm(saved.searchTerm || '');
+                    setPage(saved.page || 1);
+                    setPageSize(saved.pageSize || 100);
+                    setShowNeedsAttention(!!saved.showNeedsAttention);
+                    setShowFavoritesOnly(!!saved.showFavoritesOnly);
+                    setHasInitiallyLoaded(true);
+                    restored = true;
+                }
+            }
+        } catch {
+            // ignore restore errors
+        }
+        if (!restored) {
             fetchCandidates();
-        }, 10000);
-        return () => clearInterval(refreshInterval);
+        }
     }, [fetchCandidates]);
+
+    // Persist current view state (candidates + filters + paging) into sessionStorage
+    // so that navigation to profile and back restores the exact same view.
+    useEffect(() => {
+        if (!hasInitiallyLoaded) return;
+        const stateToSave = {
+            candidates,
+            searchTerm,
+            page,
+            pageSize,
+            showNeedsAttention,
+            showFavoritesOnly,
+        };
+        try {
+            sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify(stateToSave));
+        } catch {
+            // ignore storage errors
+        }
+    }, [candidates, searchTerm, page, pageSize, showNeedsAttention, showFavoritesOnly, hasInitiallyLoaded]);
+
+
 
     useEffect(() => {
         const maxPage = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
@@ -904,6 +986,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             return;
         }
         setIsRemoteLoading(true);
+        setIsSmartSearching(true);
         try {
             const payloadQuery = [smartSearchQuery.trim(), job?.title].filter(Boolean).join(' | ');
             const res = await fetch(`${apiBase}/api/candidates/semantic-search`, {
@@ -925,6 +1008,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             alert(err.message || 'חיפוש חכם נכשל');
         } finally {
             setIsRemoteLoading(false);
+            setIsSmartSearching(false);
         }
     };
 
@@ -1071,14 +1155,26 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         return sortableItems;
     }, [candidates, searchTerm, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
 
+    // Paginate processed candidates on the client
+    const paginatedCandidates = useMemo(() => {
+        const start = (page - 1) * pageSize;
+        const end = start + pageSize;
+        return processedCandidates.slice(start, end);
+    }, [processedCandidates, page, pageSize]);
+
+    // Keep totalCandidates in sync with the number of processed candidates (for pagination)
+    useEffect(() => {
+        setTotalCandidates(processedCandidates.length);
+    }, [processedCandidates]);
+
     const areAllVisibleSelected = useMemo(() => {
-        if (processedCandidates.length === 0) return false;
-        return processedCandidates.every(c => selectedIds.has(c.id));
-    }, [selectedIds, processedCandidates]);
+        if (paginatedCandidates.length === 0) return false;
+        return paginatedCandidates.every(c => selectedIds.has(c.id));
+    }, [selectedIds, paginatedCandidates]);
     
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.checked) {
-            setSelectedIds(new Set(processedCandidates.map(c => c.id)));
+            setSelectedIds(new Set(paginatedCandidates.map(c => c.id)));
         } else {
             setSelectedIds(new Set());
         }
@@ -1120,6 +1216,26 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setFeedbackMessage(t('candidates.found_count', { count: processedCandidates.length }));
     };
 
+    const handleClearSearch = () => {
+        // Clear free search
+        setSearchTerm('');
+        setDebouncedSearchTerm('');
+        setPage(1);
+
+        // Reset saved view (so we don't restore old filters on next mount)
+        try {
+            sessionStorage.removeItem(VIEW_STATE_KEY);
+        } catch {
+            // ignore storage errors
+        }
+
+        // Show loading buffer again while reloading base list
+        setHasInitiallyLoaded(false);
+
+        // Reload fresh data from backend
+        fetchCandidates();
+    };
+
     const handleNameClick = useCallback(
         (e: React.MouseEvent, candidate: Candidate) => {
             e.stopPropagation();
@@ -1127,9 +1243,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 handleSelect(candidate.id);
                 return;
             }
-            navigate(`/candidates/${getCandidateRouteId(candidate)}`);
+            const search = location.search || '';
+            navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`);
         },
-        [selectionMode, handleSelect, navigate, getCandidateRouteId],
+        [selectionMode, handleSelect, navigate, getCandidateRouteId, location.search],
     );
 
     // Helper for score circle colors inside the list view (duplicated logic for consistency)
@@ -1258,27 +1375,42 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             `}</style>
 
             <header className="flex flex-col lg:flex-row items-start lg:items-center gap-3 pb-2">
-                <div className="flex gap-2 w-full lg:flex-grow items-center">
-                    <div className="relative flex-grow">
-                        <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute start-3 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        <input 
-                            type="text" 
-                            placeholder={t('candidates.search_placeholder')} 
-                            value={searchTerm} 
-                            onChange={e => setSearchTerm(e.target.value)} 
-                            className="w-full bg-bg-card border border-border-default rounded-xl py-3 ps-10 pe-3 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
-                        />
+                <div className="w-full lg:flex-grow">
+                    <div className="flex gap-2 items-center">
+                        <div className="relative flex-grow">
+                            <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute start-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            <input 
+                                type="text" 
+                                placeholder={t('candidates.search_placeholder')} 
+                                value={searchTerm} 
+                                onChange={e => setSearchTerm(e.target.value)} 
+                                className="w-full bg-bg-card border border-border-default rounded-xl py-3 ps-10 pe-3 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" 
+                            />
+                        </div>
+                        {/* SMART SEARCH TOGGLE BUTTON */}
+                        <button 
+                            onClick={() => setIsSmartSearchOpen(!isSmartSearchOpen)}
+                            className={`flex-shrink-0 p-3 rounded-xl border border-border-default transition-all shadow-sm flex items-center justify-center ${isSmartSearchOpen ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-bg-card text-text-muted hover:bg-bg-subtle hover:text-purple-600'}`}
+                            title="חיפוש חכם"
+                        >
+                            {isSmartSearching ? (
+                                <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                            ) : (
+                                <SparklesIcon className="w-5 h-5" />
+                            )}
+                        </button>
                     </div>
-                     {/* SMART SEARCH TOGGLE BUTTON */}
-                    <button 
-                        onClick={() => setIsSmartSearchOpen(!isSmartSearchOpen)}
-                        className={`flex-shrink-0 p-3 rounded-xl border border-border-default transition-all shadow-sm ${isSmartSearchOpen ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-bg-card text-text-muted hover:bg-bg-subtle hover:text-purple-600'}`}
-                        title="חיפוש חכם"
-                    >
-                        <SparklesIcon className="w-5 h-5" />
-                    </button>
+                    <div className="mt-2">
+                        <button
+                            type="button"
+                            onClick={handleClearSearch}
+                            className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-semibold rounded-lg bg-primary-600 text-white hover:bg-primary-700 shadow-sm border border-primary-600"
+                        >
+                            נקה חיפוש
+                        </button>
+                    </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 mt-2">
+                <div className="flex flex-wrap items-center gap-2 mt-2 lg:mt-0">
                     <label className="text-[11px] text-text-muted font-semibold uppercase tracking-wide">גודל עמוד</label>
                     <select
                         value={pageSize}
@@ -1337,9 +1469,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             </button>
                             {isCompanyFilterOpen && (
                                 <CompanyFilterPopover
-                                onClose={() => setIsCompanyFilterOpen(false)}
-                                filters={companyFilters}
-                                setFilters={setCompanyFilters}
+                                    onClose={() => setIsCompanyFilterOpen(false)}
+                                    filters={companyFilters}
+                                    setFilters={setCompanyFilters}
+                                    onApply={fetchCandidates}
                                 />
                             )}
                         </div>
@@ -1637,7 +1770,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             )}
 
             <main className="bg-bg-card rounded-2xl shadow-sm overflow-hidden border border-border-default">
-                {viewMode === 'table' ? (
+                {isRemoteLoading && !hasInitiallyLoaded ? (
+                    <div className="flex flex-col items-center justify-center min-h-[320px] gap-4 p-8">
+                        <ArrowPathIcon className="w-10 h-10 text-primary-500 animate-spin" aria-hidden />
+                        <p className="text-sm font-medium text-text-muted">{ 'טוען מועמדים...'}</p>
+                    </div>
+                ) : viewMode === 'table' ? (
                     <>
                         <div className="px-4 py-3 border-b border-border-default bg-bg-subtle">
                             <TablePaginationControls
@@ -1702,7 +1840,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
-                            {processedCandidates.map(candidate => (
+                            {paginatedCandidates.map(candidate => (
                                 <tr key={candidate.id} onClick={() => selectionMode ? handleSelect(candidate.id) : openSummaryDrawer(candidate)} className={`group transition-colors ${selectionMode ? 'cursor-pointer' : ''} ${selectedIds.has(candidate.id) ? 'bg-primary-50' : 'hover:bg-bg-hover'}`}>
                                      {selectionMode && (
                                         <td className="p-4">
@@ -1731,7 +1869,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     </>
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-4">
-                        {processedCandidates.map(candidate => {
+                        {paginatedCandidates.map(candidate => {
                             const missingFields = getMissingFields(candidate);
                             const isSelected = selectedIds.has(candidate.id);
                             const isFavorite = favorites.has(candidate.id);
@@ -1745,7 +1883,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     <CandidateCard 
                                         key={candidate.id} 
                                         candidate={candidate} 
-                                        onViewProfile={() => navigate(`/candidates/${getCandidateRouteId(candidate)}`)}
+                                        onViewProfile={() => {
+                                            const search = location.search || '';
+                                            navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`);
+                                        }}
                                         onOpenSummary={selectionMode ? () => {} : openSummaryDrawer}
                                         missingFields={missingFields}
                                         isFavorite={isFavorite}

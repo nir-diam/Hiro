@@ -22,10 +22,12 @@ const helpCenterRoutes = require('./routes/helpCenterRoutes');
 const candidateTagRoutes = require('./routes/candidateTagRoutes');
 const businessLogicRoutes = require('./routes/businessLogicRoutes');
 const emailRoutes = require('./routes/emailRoutes');
+const cityRoutes = require('./routes/cityRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
-const bodyParserLimit = process.env.BODY_PARSER_LIMIT || '5mb';
+// Increase limit for /api/candidates/ai (base64 resume + payload). If 413 persists, raise proxy limit (e.g. nginx client_max_body_size).
+const bodyParserLimit = process.env.BODY_PARSER_LIMIT || '10mb';
 
 app.use(express.json({ limit: bodyParserLimit }));
 app.use(express.urlencoded({ limit: bodyParserLimit, extended: true }));
@@ -51,6 +53,7 @@ app.use('/api/help-center', helpCenterRoutes);
 app.use('/api/admin/candidate-tags', candidateTagRoutes);
 app.use('/api/admin/business-logic', businessLogicRoutes);
 app.use('/api/email-uploads', emailRoutes);
+app.use('/api/cities', cityRoutes);
 
 const start = async () => {
   try {

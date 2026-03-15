@@ -1,7 +1,7 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { XMarkIcon, MagnifyingGlassIcon, ChevronLeftIcon, BriefcaseIcon } from './Icons';
+import { XMarkIcon, MagnifyingGlassIcon, ChevronLeftIcon, BriefcaseIcon, TagIcon } from './Icons';
 
 export interface SelectedJobField {
     category: string;
@@ -9,7 +9,14 @@ export interface SelectedJobField {
     role: string;
 }
 
-type JobRole = { id: string | number; value: string; synonyms?: string[] };
+type JobRoleTag = {
+    id: string | number;
+    tagKey: string;
+    displayNameHe?: string | null;
+    displayNameEn?: string | null;
+};
+
+type JobRole = { id: string | number; value: string; synonyms?: string[]; tags?: JobRoleTag[] };
 type JobFieldType = { id: string | number; name: string; roles: JobRole[] };
 type JobCategory = { id: string | number; name: string; fieldTypes: JobFieldType[] };
 
@@ -106,12 +113,22 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
         categories.forEach(category => {
             category.fieldTypes.forEach(fieldType => {
                 fieldType.roles.forEach(role => {
+                    const tagTexts =
+                        role.tags?.flatMap(t => [
+                            t.tagKey,
+                            t.displayNameHe || '',
+                            t.displayNameEn || '',
+                        ]) || [];
+
                     const searchableText = [
                         category.name,
                         fieldType.name,
                         role.value,
-                        ...role.synonyms,
-                    ].join(' ').toLowerCase();
+                        ...(role.synonyms || []),
+                        ...tagTexts,
+                    ]
+                        .join(' ')
+                        .toLowerCase();
 
                     if (searchableText.includes(lowerCaseSearch)) {
                         results.push({ category, fieldType, role });
@@ -121,6 +138,16 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
         });
         return results;
     }, [searchTerm, categories]);
+
+    const searchResultsByCategory = useMemo(() => {
+        const map = new Map<string, { category: JobCategory; fieldType: JobFieldType; role: JobRole }[]>();
+        searchResults.forEach((item) => {
+            const key = item.category.name;
+            if (!map.has(key)) map.set(key, []);
+            map.get(key)!.push(item);
+        });
+        return Array.from(map.entries());
+    }, [searchResults]);
 
     if (!isModalOpen) return null;
 
@@ -157,26 +184,50 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
                         // Search Results View
                         <div className="w-full overflow-y-auto p-2 custom-scrollbar">
                             {searchResults.length > 0 ? (
-                                <div className="space-y-1">
-                                    <p className="text-xs font-semibold text-text-muted px-2 py-1 mb-1">תוצאות חיפוש ({searchResults.length}):</p>
-                                    {searchResults.map(({ category, fieldType, role }, index) => (
-                                        <button 
-                                            key={index}
+                                <div className="space-y-6">
+                                    <p className="text-xs font-semibold text-text-muted px-1">תוצאות חיפוש ({searchResults.length}):</p>
+                                    {searchResultsByCategory.map(([categoryName, items]) => (
+                                        <div key={categoryName} className="animate-fade-in">
+                                            <h3 className="text-sm font-bold text-primary-700 bg-primary-50/60 px-3 py-1.5 rounded-lg mb-3 inline-block border border-primary-100/50">
+                                                {categoryName}
+                                            </h3>
+                                            <div className="grid grid-cols-1 gap-2">
+                                                {items.map(({ category, fieldType, role }) => (
+                                                    <button
+                                                        key={`${role.id}-${fieldType.id}`}
+                                                        type="button"
                                             onClick={() => handleSelectRole(role, fieldType, category.name)}
-                                            className="w-full text-right p-3 rounded-lg hover:bg-primary-50 hover:border-primary-100 border border-transparent transition-all flex items-center gap-3 group"
+                                            className="w-full text-right p-3 rounded-lg hover:bg-white hover:shadow-sm hover:border-primary-200 border border-transparent bg-bg-subtle/30 transition-all flex items-center gap-3 group"
                                         >
-                                            <div className="p-2 bg-bg-subtle rounded-full text-text-subtle group-hover:bg-white group-hover:text-primary-600 transition-colors">
+                                            <div className="p-2 bg-white rounded-full text-text-subtle group-hover:text-primary-600 shadow-sm transition-colors border border-border-subtle">
                                                 <BriefcaseIcon className="w-4 h-4" />
                                             </div>
-                                            <div className="flex-1 min-w-0">
+                                            <div className="flex-1 min-w-0 text-right">
                                                 <p className="font-bold text-sm text-text-default group-hover:text-primary-900 truncate">{role.value}</p>
-                                                <p className="text-xs text-text-muted mt-0.5 flex items-center gap-1 truncate">
-                                                    <span>{category.name}</span>
-                                                    <ChevronLeftIcon className="w-3 h-3 text-text-subtle" />
-                                                    <span>{fieldType.name}</span>
-                                                </p>
+                                                {role.tags && role.tags.length > 0 && (
+                                                                <div className="flex flex-wrap gap-1.5 mt-1.5 items-center">
+                                                                    <div className="flex items-center gap-1 text-xs text-text-subtle/80 ml-1">
+                                                                        <TagIcon className="w-3 h-3" />
+                                                                        <span className="font-medium">תגיות:</span>
+                                                                    </div>
+                                                                    {role.tags.map((t) => (
+                                                                        <span
+                                                                            key={t.id}
+                                                                            className="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium bg-primary-50 text-primary-700 border border-primary-100/50"
+                                                                        >
+                                                                            {t.displayNameHe || t.displayNameEn || t.tagKey}
+                                                                        </span>
+                                                                    ))}
+                                                                </div>
+                                                            )}
+                                                            <p className="text-xs text-text-muted mt-1 flex items-center gap-1 truncate opacity-80">
+                                                                <span className="text-primary-600/80 font-medium">{fieldType.name}</span>
+                                                            </p>
                                             </div>
                                         </button>
+                                                ))}
+                                            </div>
+                                        </div>
                                     ))}
                                 </div>
                             ) : (

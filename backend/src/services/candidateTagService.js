@@ -1,4 +1,4 @@
-const { Op, fn, col } = require('sequelize');
+const { Op, fn, col, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const CandidateTag = require('../models/CandidateTag');
 const Tag = require('../models/Tag');
@@ -135,28 +135,68 @@ const stringSimilarity = (a, b) => {
 };
 
 const buildAliasMatchLiteral = (lowerTrimmed) =>
-  sequelize.literal(
-    `EXISTS (SELECT 1 FROM unnest("Tag"."aliases") alias WHERE lower(alias) = ${sequelize.escape(
-      lowerTrimmed,
-    )})`,
+  sequelize.where(
+    sequelize.literal(`
+      EXISTS (
+        SELECT 1
+        FROM unnest(COALESCE("Tag"."aliases", ARRAY[]::text[])) AS alias
+        WHERE lower(trim(COALESCE(alias, '')::text)) = ${sequelize.escape(lowerTrimmed)}
+      )
+    `),
+    true
   );
+
+const buildSynonymMatchLiteral = (lowerTrimmed) => {
+  // Match when any synonym object has "phrase" value equal to lowerTrimmed (exact, case-insensitive).
+  // Pattern "phrase":"excel" matches {"phrase":"Excel"} but not {"phrase":"Microsoft Excel"}.
+  const pattern = `%"phrase":"${String(lowerTrimmed).replace(/\\/g, '\\\\').replace(/'/g, "''")}"%`;
+  const escapedPattern = sequelize.escape(pattern);
+  return sequelize.where(
+    sequelize.literal(`
+      EXISTS (
+        SELECT 1
+        FROM jsonb_array_elements_text(COALESCE("Tag"."synonyms", '[]'::jsonb)) AS s
+        WHERE s ILIKE ${escapedPattern}
+      )
+    `),
+    true,
+  );
+};
 
 const findTagByNameOrAlias = async (name) => {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
-  const lowerTrimmed = trimmed.toLowerCase();
-  const aliasMatchLiteral = buildAliasMatchLiteral(lowerTrimmed);
 
-  return Tag.findOne({
-    where: {
-      [Op.or]: [
-        sequelize.where(fn('LOWER', col('display_name_he')), lowerTrimmed),
-        sequelize.where(fn('LOWER', col('display_name_en')), lowerTrimmed),
-        sequelize.where(fn('LOWER', col('tag_key')), lowerTrimmed),
-        aliasMatchLiteral,
-      ],
-    },
-  });
+  const lowerTrimmed = trimmed.toLowerCase();
+  const escaped = sequelize.escape(lowerTrimmed);
+  // Same as working SQL: s ILIKE '%"excel"%' (element text contains the term in quotes)
+  const synonymPattern = sequelize.escape(`%"${String(lowerTrimmed).replace(/\\/g, '\\\\').replace(/"/g, '""')}"%`);
+
+  // Prefer raw query so synonym/alias match is reliable (no Sequelize alias or literal issues)
+  const rows = await sequelize.query(
+    `
+    SELECT id FROM public.tags
+    WHERE lower(trim(COALESCE(display_name_he, '')::text)) = lower(${escaped})
+       OR lower(trim(COALESCE(display_name_en, '')::text)) = lower(${escaped})
+       OR lower(trim(COALESCE(tag_key, '')::text)) = lower(${escaped})
+       OR EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements_text(COALESCE(synonyms, '[]'::jsonb)) AS s
+         WHERE s ILIKE ${synonymPattern}
+       )
+       OR EXISTS (
+         SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS alias
+         WHERE lower(trim(COALESCE(alias, '')::text)) = lower(${escaped})
+       )
+    LIMIT 1
+    `,
+    { type: QueryTypes.SELECT }
+  );
+  const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+  if (row && row.id) {
+    return Tag.findByPk(row.id);
+  }
+  return null;
 };
 
 const doesTagNameOrAliasExist = async (name) => Boolean(await findTagByNameOrAlias(name));
@@ -229,7 +269,14 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
   return { tag, created: true };
 };
 
-const syncTagsForCandidate = async (candidateId, entries = []) => {
+/**
+ * Sync all given tag entries to CandidateTag for a candidate.
+ * Every entry is inserted; is_active is true only when the tag exists in Tag with status === 'active'.
+ * @param {string} candidateId - Candidate UUID
+ * @param {Array} entries - Tag entries (strings or objects with tagKey/name/displayNameHe, etc.)
+ * @param {string} [uploadedByUserId] - Optional UUID of the user who uploaded the resume (stored in created_by)
+ */
+const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId = null) => {
   if (!candidateId || !entries.length) return [];
   const normalizedEntries = entries
     .map(normalizeEntry)
@@ -244,7 +291,7 @@ const syncTagsForCandidate = async (candidateId, entries = []) => {
 
   await CandidateTag.destroy({ where: { candidate_id: candidateId } });
 
-  // Resolve each payload to a tag, then deduplicate by tag.id so we never insert duplicate (candidate_id, tag_id)
+  // Resolve each payload to a tag (find existing or create pending). Deduplicate by tag.id.
   const resolved = await Promise.all(
     payloads.map(async (payload) => {
       const { tag, created } = await ensureTagRecord(payload.tagKey, {
@@ -260,10 +307,12 @@ const syncTagsForCandidate = async (candidateId, entries = []) => {
   });
   const uniqueResolved = Array.from(byTagId.values());
 
+  // Insert every tag: is_active = true only when Tag exists with status === 'active', else false. Attach uploader if provided.
   await Promise.all(
-    uniqueResolved.map(async ({ tag, created, payload }) => {
+    uniqueResolved.map(async ({ tag, payload }) => {
       const score = tagScoringEngine.scoreTag(payload);
-      const entry = await CandidateTag.create({
+      const isActive = (tag.status && String(tag.status).toLowerCase() === 'active') || false;
+      await CandidateTag.create({
         candidate_id: candidateId,
         tag_id: tag.id,
         raw_type: payload.raw_type,
@@ -273,10 +322,10 @@ const syncTagsForCandidate = async (candidateId, entries = []) => {
         confidence_score: payload.confidence_score,
         calculated_weight: score.calculatedWeight,
         final_score: score.finalScore,
-        is_active: created ? false : true,
+        is_active: isActive,
+        ...(uploadedByUserId ? { created_by: uploadedByUserId } : {}),
       });
       await recordTagUsage(tag);
-      return entry;
     }),
   );
 
@@ -316,6 +365,19 @@ const listAllCandidateTags = () =>
     ],
   });
 
+// Find a tag by human name/alias/synonym and return all CandidateTag records for it
+const listCandidateTagsByTagName = async (name) => {
+  const tag = await findTagByNameOrAlias(name);
+  if (!tag) return [];
+  return CandidateTag.findAll({
+    where: { tag_id: tag.id, is_active: true },
+    include: [
+      { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
+      { model: Tag, as: 'tag' },
+    ],
+  });
+};
+
 const countTagUsage = async (tagIds = []) => {
   if (!Array.isArray(tagIds) || !tagIds.length) return {};
   const rows = await CandidateTag.findAll({
@@ -336,6 +398,7 @@ module.exports = {
   syncTagsForCandidate,
   removeAbsentTags,
   ensureTagRecord,
+  findTagByNameOrAlias,
   createCandidateTag: async (payload) => {
     if (!payload?.candidate_id || !payload?.tagKey) throw new Error('candidate_id and tagKey required');
     const { tag, created } = await ensureTagRecord(payload.tagKey, {
@@ -420,6 +483,7 @@ module.exports = {
         { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
       ],
     }),
+  listCandidateTagsByTagName,
   listAllCandidateTags,
   countTagUsage,
 };

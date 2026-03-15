@@ -54,10 +54,20 @@ const createCategoryValue = async (categoryId, payload) => {
   return PicklistCategoryValue.create({ categoryId, ...payload });
 };
 
+const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
+
+/**
+ * Returns the list of allowed mainField values (subcategory names under the business field category).
+ * Used to constrain LLM enrichment so mainField is only from the picklist.
+ */
+const getMainFieldOptionNames = async () => {
+  const subcategories = await listSubcategories(BUSINESS_FIELD_CATEGORY_ID);
+  return (subcategories || []).map((c) => (c.name || '').trim()).filter(Boolean);
+};
+
 const ensureMainFieldCategory = async (label) => {
   if (!label || !label.trim()) return null;
   const normalized = label.trim().toLowerCase();
-  const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
   const existing = await PicklistCategory.findOne({
     where: {
       parentId: BUSINESS_FIELD_CATEGORY_ID,
@@ -170,5 +180,7 @@ module.exports = {
   deleteDomainValue,
   ensureMainFieldCategory,
   ensureCategoryValueByLabel,
+  getMainFieldOptionNames,
+  BUSINESS_FIELD_CATEGORY_ID,
 };
 

@@ -7,6 +7,7 @@ router.get('/', jobController.list);
 router.get('/:id/candidates', jobController.getCandidates);
 router.get('/:id', jobController.get);
 router.post('/', jobController.create);
+router.post('/ai/analyze', jobController.analyzeDescription);
 router.put('/:id', jobController.update);
 router.delete('/:id', jobController.remove);
 

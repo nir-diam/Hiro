@@ -925,9 +925,10 @@ const CandidatePoolView: React.FC = () => {
                     </button>
                      {isCompanyFilterOpen && (
                         <CompanyFilterPopover
-                        onClose={() => setIsCompanyFilterOpen(false)}
-                        filters={companyFilters}
-                        setFilters={setCompanyFilters}
+                            onClose={() => setIsCompanyFilterOpen(false)}
+                            filters={companyFilters}
+                            setFilters={setCompanyFilters}
+                            onApply={handleShowResults}
                         />
                     )}
 

@@ -1125,6 +1125,7 @@ const JobsView: React.FC = () => {
                                     onClose={() => setIsCompanyFilterOpen(false)}
                                     filters={companyFilterState}
                                     setFilters={setCompanyFilterState}
+                                    onApply={loadJobs}
                                 />
                             )}
                         </div>

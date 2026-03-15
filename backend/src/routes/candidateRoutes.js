@@ -4,6 +4,7 @@ const candidateController = require('../controllers/candidateController');
 const router = express.Router();
 
 router.get('/', candidateController.list);
+router.get('/by-worked-at-company', candidateController.listByWorkedAtCompany);
 router.get('/by-user/:userId', candidateController.getByUser);
 // Place specific routes BEFORE the generic '/:id' to avoid param capture
 router.get('/rebuild-embeddings', candidateController.rebuildAllEmbeddings);

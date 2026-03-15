@@ -45,6 +45,7 @@ const initialCandidateState = {
     salaryMin: 8000,
     salaryMax: 12000,
     tags: [] as string[],
+    tagDetails: [] as any[],
     title: "",
     professionalSummary: "",
     workExperience: [] as any[],
@@ -363,6 +364,7 @@ const NewCandidateViewV2: React.FC = () => {
             technical: Array.isArray(skillsRaw.technical) ? skillsRaw.technical : [],
         };
 
+        const tagDetails = Array.isArray(candidateData.tagDetails) ? candidateData.tagDetails : [];
         setFormData((prev: any) => ({
             ...prev,
             fullName: candidateData.fullName || prev.fullName,
@@ -372,6 +374,7 @@ const NewCandidateViewV2: React.FC = () => {
             title: candidateData.title || prev.title,
             professionalSummary: candidateData.professionalSummary || candidateData.summary || prev.professionalSummary,
             tags: tags.length > 0 ? tags : prev.tags,
+            tagDetails: tagDetails.length > 0 ? tagDetails : prev.tagDetails,
             skills,
             workExperience: experience.length > 0 ? experience : prev.workExperience,
             education: education.length > 0 ? education : prev.education,
@@ -512,6 +515,7 @@ const NewCandidateViewV2: React.FC = () => {
             setAiCandidateId(resolvedId);
             if (resolvedId) {
                 setFormData((prev: any) => ({ ...prev, ...saved }));
+                navigate(`/candidates/${resolvedId}`);
             }
         } catch (err: any) {
             setParseError(err.message || 'שמירה נכשלה, נסה שוב.');
@@ -643,7 +647,6 @@ const NewCandidateViewV2: React.FC = () => {
             <div className="bg-bg-card rounded-3xl border border-border-default shadow-sm p-4 flex items-center justify-between">
                 <h2 className="text-xl font-bold text-text-default px-4">{t('new_candidate.review_profile')}</h2>
                 <div className="flex gap-3">
-                    <button onClick={goToChoice} className="px-6 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_candidate.btn_cancel')}</button>
                     <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">{t('new_candidate.btn_save')}</button>
                 </div>
             </div>

@@ -13,6 +13,7 @@ import {
 } from './Icons';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
+import WorkedAtCompanyFilterPopover, { WorkedAtCompanyFilters } from './WorkedAtCompanyFilterPopover';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import { useSavedSearches } from '../context/SavedSearchesContext';
@@ -425,6 +426,18 @@ const AdminCandidatesView: React.FC = () => {
     
     const companyFilterButtonRef = useRef<HTMLButtonElement>(null);
 
+    const [isWorkedAtCompanyFilterOpen, setIsWorkedAtCompanyFilterOpen] = useState(false);
+    const [workedAtCompanyFilters, setWorkedAtCompanyFilters] = useState<WorkedAtCompanyFilters>({
+        organizationId: '',
+        organizationName: '',
+        yearsExperience: '',
+        employmentStatus: 'all',
+        yearsLeftAgo: '',
+    });
+    const [workedAtCompanyCandidateIds, setWorkedAtCompanyCandidateIds] = useState<Set<string> | null>(null);
+    const [workedAtCompanySearchResults, setWorkedAtCompanySearchResults] = useState<AdminCandidate[] | null>(null);
+    const workedAtCompanyFilterButtonRef = useRef<HTMLButtonElement>(null);
+
     const mapCandidate = useCallback((c: any): AdminCandidate => ({
         id: (c.id || c.userId || Math.random().toString()).toString(),
         name: c.fullName || c.name || 'ללא שם',
@@ -481,6 +494,71 @@ const AdminCandidatesView: React.FC = () => {
         })();
     }, [apiBase, searchParamsFromUrl]);
 
+    // When URL has ?organization=id, load candidates for that organization (same as tag filter flow)
+    useEffect(() => {
+        const organizationId = searchParamsFromUrl.get('organization');
+        if (!apiBase || !organizationId) return;
+        (async () => {
+            try {
+                const [candidatesRes, orgRes] = await Promise.all([
+                    fetch(`${apiBase}/api/candidates/by-worked-at-company?organizationId=${encodeURIComponent(organizationId)}&limit=500`),
+                    fetch(`${apiBase}/api/organizations/${encodeURIComponent(organizationId)}`),
+                ]);
+                if (!candidatesRes.ok) throw new Error('Failed to load candidates by organization');
+                const json = await candidatesRes.json();
+                const list = Array.isArray(json.data) ? json.data : [];
+                const mapped = list.map((c: any) => mapCandidate(c));
+                setWorkedAtCompanySearchResults(mapped);
+                let organizationName = '';
+                if (orgRes.ok) {
+                    const orgData = await orgRes.json();
+                    organizationName = orgData?.name || '';
+                }
+                setWorkedAtCompanyFilters((prev) => ({
+                    ...prev,
+                    organizationId,
+                    organizationName,
+                }));
+            } catch (err) {
+                console.error('Failed to apply organization filter from URL', err);
+                setWorkedAtCompanySearchResults([]);
+                setWorkedAtCompanyFilters((prev) => ({ ...prev, organizationId, organizationName: '' }));
+            }
+        })();
+    }, [apiBase, searchParamsFromUrl, mapCandidate]);
+
+    const handleWorkedAtCompanySearch = useCallback(
+        async (filters: WorkedAtCompanyFilters) => {
+            if (!apiBase) return;
+            if (!filters.organizationId) {
+                setWorkedAtCompanySearchResults(null);
+                setWorkedAtCompanyCandidateIds(null);
+                return;
+            }
+            try {
+                const params = new URLSearchParams({
+                    organizationId: filters.organizationId,
+                    limit: '500',
+                });
+                if (filters.yearsExperience !== '') params.set('yearsExperience', String(filters.yearsExperience));
+                if (filters.employmentStatus && filters.employmentStatus !== 'all') params.set('employmentStatus', filters.employmentStatus);
+                if (filters.yearsLeftAgo !== '') params.set('yearsLeftAgo', String(filters.yearsLeftAgo));
+                const res = await fetch(`${apiBase}/api/candidates/by-worked-at-company?${params.toString()}`);
+                if (!res.ok) throw new Error('Failed to load candidates by worked-at-company');
+                const json = await res.json();
+                const list = Array.isArray(json.data) ? json.data : [];
+                const mapped = list.map((c: any) => mapCandidate(c));
+                setWorkedAtCompanySearchResults(mapped);
+                setWorkedAtCompanyCandidateIds(null);
+            } catch (err) {
+                console.error('Failed to apply worked-at-company filter', err);
+                setWorkedAtCompanySearchResults(null);
+                setWorkedAtCompanyCandidateIds(null);
+            }
+        },
+        [apiBase, mapCandidate]
+    );
+
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
           if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
@@ -531,12 +609,7 @@ const AdminCandidatesView: React.FC = () => {
         loadCandidates();
     }, [loadCandidates]);
 
-    useEffect(() => {
-        const refreshInterval = setInterval(() => {
-            loadCandidates();
-        }, 10000);
-        return () => clearInterval(refreshInterval);
-    }, [loadCandidates]);
+
 
     useEffect(() => {
         setPage(1);
@@ -636,8 +709,13 @@ const AdminCandidatesView: React.FC = () => {
 
     // Filter Logic
     const filteredCandidates = useMemo(() => {
+        const useWorkedAtCompany = workedAtCompanySearchResults != null;
         const useRemote = searchResults.length > 0 && searchTerm.trim().length >= 3;
-        const base = useRemote ? searchResults : candidates;
+        const base = useWorkedAtCompany
+            ? workedAtCompanySearchResults
+            : useRemote
+                ? searchResults
+                : candidates;
         let filtered = base.filter(c => {
             const matchesSearch = useRemote || !searchTerm ||
                                   c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
@@ -647,7 +725,11 @@ const AdminCandidatesView: React.FC = () => {
                 const backendId = c.backendId || c.id;
                 if (!backendId || !tagFilterCandidateIds.has(backendId)) return false;
             }
-            
+            if (workedAtCompanyCandidateIds && workedAtCompanyCandidateIds.size) {
+                const backendId = c.backendId || c.id;
+                if (!backendId || !workedAtCompanyCandidateIds.has(backendId)) return false;
+            }
+
             const matchesSource = searchParams.sourceType === 'all' || c.sourceType === searchParams.sourceType;
             const matchesLocation = searchParams.locations.length === 0 || 
                 searchParams.locations.some(loc => 
@@ -694,7 +776,7 @@ const AdminCandidatesView: React.FC = () => {
         }
         
         return filtered;
-    }, [searchTerm, searchParams, companyFilters, sortConfig, candidates, searchResults]);
+    }, [searchTerm, searchParams, companyFilters, sortConfig, candidates, searchResults, workedAtCompanyCandidateIds, workedAtCompanySearchResults]);
 
     // Handlers
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -767,6 +849,15 @@ const AdminCandidatesView: React.FC = () => {
         setMainFieldInput('');
         setComplexRules([]);
         setCompanyFilters({ sizes: [], sectors: [], industry: '', field: '' });
+        setWorkedAtCompanyFilters({
+            organizationId: '',
+            organizationName: '',
+            yearsExperience: '',
+            employmentStatus: 'all',
+            yearsLeftAgo: '',
+        });
+        setWorkedAtCompanyCandidateIds(null);
+        setWorkedAtCompanySearchResults(null);
     };
     
     // --- Complex Rules Logic ---
@@ -1015,6 +1106,30 @@ const AdminCandidatesView: React.FC = () => {
                             <ChevronDownIcon className={`w-4 h-4 transition-transform ${isAdvancedSearchOpen ? 'rotate-180' : ''}`} />
                         </button>
 
+                        <div className="relative">
+                            <button
+                                ref={workedAtCompanyFilterButtonRef}
+                                onClick={() => setIsWorkedAtCompanyFilterOpen((prev) => !prev)}
+                                className={`flex items-center gap-2 font-semibold py-2.5 px-4 rounded-xl border transition-all whitespace-nowrap ${
+                                    isWorkedAtCompanyFilterOpen || workedAtCompanyFilters.organizationId
+                                        ? 'bg-primary-100 text-primary-700 border-primary-300'
+                                        : 'bg-white text-text-default border-border-default hover:border-primary-300'
+                                }`}
+                            >
+                                <BuildingOffice2Icon className="w-5 h-5" />
+                                <span>עבד/עובד בחברה</span>
+                            </button>
+                            {isWorkedAtCompanyFilterOpen && apiBase && (
+                                <WorkedAtCompanyFilterPopover
+                                    apiBase={apiBase}
+                                    onClose={() => setIsWorkedAtCompanyFilterOpen(false)}
+                                    filters={workedAtCompanyFilters}
+                                    setFilters={setWorkedAtCompanyFilters}
+                                    onSearch={handleWorkedAtCompanySearch}
+                                />
+                            )}
+                        </div>
+
                          <div className="relative">
                             <button
                                 ref={companyFilterButtonRef}
@@ -1033,6 +1148,7 @@ const AdminCandidatesView: React.FC = () => {
                                     onClose={() => setIsCompanyFilterOpen(false)}
                                     filters={companyFilters}
                                     setFilters={setCompanyFilters}
+                                    onApply={loadCandidates}
                                 />
                             )}
                         </div>

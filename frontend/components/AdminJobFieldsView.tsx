@@ -215,14 +215,23 @@ const ListItem: React.FC<{
 };
 
 // --- MODAL FOR ADD/EDIT ---
+export type TaxonomyModalSaveContext = {
+    type: EntityType;
+    mode: ModalMode;
+    targetId?: string;
+    initialSynonyms?: string[];
+    initialTags?: TagOption[];
+};
+
 interface TaxonomyModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSave: (value: string, tags?: TagOption[]) => void;
+    onSave: (value: string, tags?: TagOption[], context?: TaxonomyModalSaveContext) => void | Promise<void>;
     initialValue: string;
     type: EntityType;
     mode: ModalMode;
     targetId?: string;
+    initialSynonyms?: string[];
     apiBase: string;
     availableTags: TagOption[];
     initialTags?: TagOption[];
@@ -236,6 +245,8 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
     initialValue,
     type,
     mode,
+    targetId,
+    initialSynonyms = [],
     apiBase,
     availableTags,
     initialTags = [],
@@ -246,12 +257,14 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
     const [tagInput, setTagInput] = useState('');
     const [isSavingTag, setIsSavingTag] = useState(false);
     const [tagError, setTagError] = useState<string | null>(null);
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const inputRef = useRef<HTMLInputElement>(null);
+    const formRef = useRef<HTMLFormElement>(null);
 
     useEffect(() => {
         if (isOpen) {
             setValue(initialValue);
-            setSelectedTags(initialTags || []);
+            setSelectedTags(Array.isArray(initialTags) ? [...initialTags] : []);
             setTagInput('');
             setTagError(null);
             setTimeout(() => inputRef.current?.focus(), 100);
@@ -268,11 +281,20 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
 
     if (!isOpen) return null;
 
-    const handleSubmit = (e: React.FormEvent) => {
+    const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!value.trim()) return;
-        onSave(value.trim(), selectedTags);
-        onClose();
+        if (!value.trim() || isSubmitting) return;
+        setIsSubmitting(true);
+        setTagError(null);
+        try {
+            const context: TaxonomyModalSaveContext = { type, mode, targetId, initialSynonyms, initialTags };
+            await Promise.resolve(onSave(value.trim(), selectedTags, context));
+            onClose();
+        } catch (err: any) {
+            setTagError(err?.message || 'הפעולה נכשלה');
+        } finally {
+            setIsSubmitting(false);
+        }
     };
 
     const datalistId = `${type}-tag-options`;
@@ -364,7 +386,7 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                         <XMarkIcon className="w-5 h-5" />
                     </button>
                 </div>
-                <form onSubmit={handleSubmit} className="p-6">
+                <form ref={formRef} onSubmit={handleSubmit} className="p-6">
                     <div className="mb-4">
                         <label className="block text-sm font-semibold text-text-muted mb-2">
                             {type === 'role' ? 'שם התפקיד (ראשי)' : type === 'cluster' ? 'שם הקלאסטר' : 'שם הקטגוריה'}
@@ -394,7 +416,7 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                                 </button>
                             </div>
 
-                            <div className="flex gap-2 mb-2 flex-wrap">
+                        <div className="flex gap-2 mb-2 flex-wrap">
                                 <input
                                     value={tagInput}
                                     onChange={(e) => setTagInput(e.target.value)}
@@ -420,8 +442,10 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                                 }}
                             >
                                 <div className="max-h-[320px] overflow-y-auto custom-scrollbar">
-                                    {matchingTags.length === 0 ? (
-                                        <div className="p-3 text-xs text-text-muted">לא נמצאו תגיות תואמות</div>
+                                    {availableTags.length === 0 ? (
+                                        <div className="p-3 text-xs text-text-muted">טוען תגיות מהשרת...</div>
+                                    ) : matchingTags.length === 0 ? (
+                                        <div className="p-3 text-xs text-text-muted">לא נמצאו תגיות תואמות לחיפוש</div>
                                     ) : (
                                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 p-2 text-xs">
                                             {matchingTags.map((tag) => (
@@ -464,6 +488,9 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                         </div>
                     )}
 
+                    {tagError && (
+                        <p className="text-sm text-red-600 mb-2" role="alert">{tagError}</p>
+                    )}
                     <div className="flex justify-end gap-3 pt-2 border-t border-border-default mt-4">
                         <button
                             type="button"
@@ -473,10 +500,25 @@ const TaxonomyModal: React.FC<TaxonomyModalProps> = ({
                             ביטול
                         </button>
                         <button
-                            type="submit"
-                            className="px-6 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all"
+                            type="button"
+                            disabled={isSubmitting || !value.trim()}
+                            onClick={async () => {
+                                if (isSubmitting || !value.trim()) return;
+                                setIsSubmitting(true);
+                                setTagError(null);
+                                try {
+                                    const context: TaxonomyModalSaveContext = { type, mode, targetId, initialSynonyms, initialTags };
+                                    await Promise.resolve(onSave(value.trim(), selectedTags, context));
+                                    onClose();
+                                } catch (err: any) {
+                                    setTagError(err?.message || 'הפעולה נכשלה');
+                                } finally {
+                                    setIsSubmitting(false);
+                                }
+                            }}
+                            className="px-6 py-2 text-sm font-bold text-white bg-primary-600 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                         >
-                            {mode === 'add' ? 'הוסף' : 'שמור שינויים'}
+                            {isSubmitting ? 'שומר...' : (mode === 'add' ? 'הוסף' : 'שמור שינויים')}
                         </button>
                     </div>
                 </form>
@@ -492,7 +534,7 @@ interface Message {
 
 const AdminJobFieldsView: React.FC = () => {
     // --- STATE ---
-    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const apiBase = import.meta.env.VITE_API_BASE || (typeof window !== 'undefined' ? window.location.origin : '');
     const [data, setData] = useState<JobCategory[]>(jobFieldsData);
     const [fetchError, setFetchError] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -597,12 +639,12 @@ const normalizeTagOption = (tag: any): TagOption => ({
         let canceled = false;
         const fetchTags = async () => {
             try {
-                const response = await fetch(`${apiBase}/api/tags`);
+                const response = await fetch(`${apiBase}/api/tags?statuses=active&limit=1000&page=1`);
                 if (!response.ok) throw new Error('לא ניתן לטעון תגיות');
                 const payload = await response.json();
-                if (Array.isArray(payload) && !canceled) {
-                    const filtered = payload.filter((tag) => tag.status !== 'deprecated' && tag.status !== 'archived');
-                    setAvailableTags(filtered.map(normalizeTagOption));
+                const rows = Array.isArray(payload) ? payload : (payload.data ?? []);
+                if (!canceled && rows.length >= 0) {
+                    setAvailableTags(rows.map(normalizeTagOption));
                 }
             } catch (err) {
                 console.error('Failed to load tags', err);
@@ -908,12 +950,19 @@ const normalizeTagOption = (tag: any): TagOption => ({
     };
 
     // --- CRUD OPERATIONS ---
-    const handleModalSave = async (value: string, tags: TagOption[] = []) => {
-        const { type, mode, targetId, initialSynonyms } = modalState;
+    const handleModalSave = async (value: string, tags: TagOption[] = [], context?: TaxonomyModalSaveContext) => {
+        const type = context?.type ?? modalState.type;
+        const mode = context?.mode ?? modalState.mode;
+        const targetId = context?.targetId ?? modalState.targetId;
+        const initialSynonyms = context?.initialSynonyms ?? modalState.initialSynonyms ?? [];
+        const initialTags = context?.initialTags ?? modalState.initialTags ?? [];
         if (!value.trim()) return;
         const headers = { 'Content-Type': 'application/json' };
-        const tagIds = tags.map((tag) => tag.id).filter(Boolean);
-        const synonyms = initialSynonyms || [];
+        // For role edit: send all tag ids = existing (initialTags) + selected in modal (tags), so we never drop existing when adding e.g. angular
+        const existingIds = (type === 'role' && Array.isArray(initialTags) ? initialTags : []).map((t) => t.id).filter(Boolean);
+        const selectedIds = tags.map((tag) => tag.id).filter(Boolean);
+        const tagIds = type === 'role' ? Array.from(new Set([...existingIds, ...selectedIds])) : tags.map((tag) => tag.id).filter(Boolean);
+        const synonyms = initialSynonyms;
 
         try {
             if (mode === 'add') {
@@ -1023,7 +1072,9 @@ const normalizeTagOption = (tag: any): TagOption => ({
                 }
             }
         } catch (err: any) {
-            window.alert(err.message || 'הפעולה נכשלה');
+            const message = err?.message || 'הפעולה נכשלה';
+            window.alert(message);
+            throw err;
         }
     };
 
@@ -1319,7 +1370,7 @@ const normalizeTagOption = (tag: any): TagOption => ({
                             }
                             isSelected={false}
                             onClick={() => {}}
-                            onEdit={() => openEditModal('role', role.id, role.value, role.synonyms, role.tags)}
+                            onEdit={() => openEditModal('role', role.id, role.value, role.synonyms ?? [], role.tags ?? [])}
                             onDelete={() => handleDelete('role', role.id, role.value)}
                             status="active"
                             badgeCount={role.tags && role.tags.length > 0 ? role.tags.length : undefined}
@@ -1350,7 +1401,8 @@ const normalizeTagOption = (tag: any): TagOption => ({
                type={modalState.type}
                mode={modalState.mode}
                initialValue={modalState.initialValue}
-               initialTags={modalState.initialTags}
+               initialSynonyms={modalState.initialSynonyms}
+               initialTags={modalState.initialTags ?? []}
                availableTags={availableTags}
                onTagCreated={handleTagCreated}
                targetId={modalState.targetId}

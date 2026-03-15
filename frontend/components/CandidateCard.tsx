@@ -170,7 +170,7 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
             </div>
 
             {/* Industry Profile Bar (New Design) */}
-            {candidate.industryAnalysis && candidate.industryAnalysis.industries.length > 0 && (
+            {Array.isArray(candidate.industryAnalysis?.industries) && candidate.industryAnalysis.industries.length > 0 && (
                 <CompactExperienceBar industries={candidate.industryAnalysis.industries} />
             )}
 

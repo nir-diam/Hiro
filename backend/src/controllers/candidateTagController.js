@@ -1,4 +1,5 @@
 const candidateTagService = require('../services/candidateTagService');
+const Tag = require('../models/Tag');
 
 const listForCandidate = async (req, res) => {
   try {
@@ -108,6 +109,30 @@ const listByTag = async (req, res) => {
   }
 };
 
+// GET /api/candidate-tags/by-name?name=xxxx
+// Uses candidateTagService.findTagByNameOrAlias to resolve the tag and returns CandidateTag rows for it.
+const listByTagName = async (req, res) => {
+  try {
+    const { name } = req.query || {};
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ message: 'name query parameter is required' });
+    }
+
+    const cleanedName = String(name).trim();
+
+    const tag = await candidateTagService.findTagByNameOrAlias(cleanedName);
+    if (!tag) {
+      return res.json([]);
+    }
+
+    const records = await candidateTagService.listCandidateTagsByTagName(cleanedName);
+    res.json(records);
+  } catch (err) {
+    console.error('[candidateTagController.listByTagName]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list candidate tags by name' });
+  }
+};
+
 const countByTags = async (req, res) => {
   try {
     const { tagIds } = req.body || {};
@@ -131,5 +156,6 @@ module.exports = {
   bulkCreate,
   listByTag,
   countByTags,
+  listByTagName,
 };
 

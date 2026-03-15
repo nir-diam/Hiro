@@ -7,6 +7,7 @@ const router = express.Router();
 router.get('/', organizationController.list);
 router.use('/tmp', organizationTmpRoutes);
 router.get('/:id', organizationController.get);
+router.get('/:id/candidates', organizationController.listCandidates);
 router.post('/', organizationController.create);
 router.post('/enrich', organizationController.enrich);
 router.put('/:id', organizationController.update);

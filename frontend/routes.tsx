@@ -1,7 +1,7 @@
 
 // ... (imports)
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
-import { useRoutes, Navigate, useParams, Outlet, useNavigate } from 'react-router-dom';
+import { useRoutes, Navigate, useParams, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
 
 // Import all page components
@@ -231,6 +231,7 @@ const normalizeCandidatePayload = (payload: any) => ({
 
 const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const params = useParams();
+    const location = useLocation();
     const urlId = params.candidateId;
     const navigate = useNavigate();
     console.log('ProfilePageWrapper render', { urlId, params });
@@ -725,7 +726,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 onAddProfile={handleAddProfile}
                 candidateList={candidateList}
                 onNavigateCandidate={(id) => {
-                    navigate(`/candidates/${id}`);
+                    const search = location.search || '';
+                    navigate(`/candidates/${id}${search}`);
                 }}
             />
             

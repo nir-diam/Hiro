@@ -92,15 +92,18 @@ const mapJobGenderSelection = (gender?: string): ('male' | 'female')[] => {
     return ['male', 'female'];
 };
 
+const LOCATION_SEP = ', ';
+
 const deriveLocationsFromJob = (jobData: any): LocationItem[] => {
     if (Array.isArray(jobData?.locations) && jobData.locations.length) {
         return jobData.locations.map((loc: LocationItem) => ({ ...loc }));
     }
-    const fallbackCity = String(jobData?.city || jobData?.location || '').trim();
-    if (fallbackCity) {
-        return [{ type: 'city', value: fallbackCity }];
+    const locationStr = String(jobData?.location || jobData?.city || '').trim();
+    if (!locationStr) return [];
+    if (locationStr.includes(LOCATION_SEP)) {
+        return locationStr.split(LOCATION_SEP).map((value: string) => ({ type: 'city' as const, value: value.trim() })).filter((loc: LocationItem) => loc.value);
     }
-    return [];
+    return [{ type: 'city', value: locationStr }];
 };
 
 const disqualificationReasons = [
@@ -184,9 +187,8 @@ const TechnicalIdentifiers: React.FC<{
     postingCode: string;
     creationDate: string;
     uniqueEmail: string;
-    onUniqueEmailChange: (value: string) => void;
     onPostingCodeChange: (value: string) => void;
-}> = ({ jobId, postingCode, creationDate, uniqueEmail, onUniqueEmailChange, onPostingCodeChange }) => {
+}> = ({ jobId, postingCode, creationDate, uniqueEmail, onPostingCodeChange }) => {
     const [isOpen, setIsOpen] = useState(false);
     const { t } = useLanguage();
 
@@ -208,8 +210,8 @@ const TechnicalIdentifiers: React.FC<{
                         <input 
                             type="text" 
                             value={uniqueEmail} 
-                            onChange={(e) => onUniqueEmailChange(e.target.value)}
-                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 transition"
+                            readOnly 
+                            className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed"
                         />
                     </div>
                      <div>
@@ -1126,9 +1128,9 @@ interface NewJobViewProps {
   isEmbedded?: boolean;
 }
 
-const defaultJobId = '10257';
-const defaultPostingCode = String(Math.floor(100000 + Math.random() * 900000));
-const defaultUniqueEmail = `humand+j${defaultJobId}@app.hiro.co.il`;
+const defaultPostingCode = String(Math.floor(1 + Math.random() * 999999));
+const defaultJobId = defaultPostingCode;
+const defaultUniqueEmail = `humand+${defaultPostingCode}@app.hiro.co.il`;
 
 const initialJobState = {
     clientName: '', 
@@ -1206,6 +1208,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
     const navRef = useRef<HTMLDivElement>(null);
+    const formDataRef = useRef(formData);
+    formDataRef.current = formData;
 
     useEffect(() => {
         if (isEditing && jobData) {
@@ -1243,8 +1247,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 mobility: jobData.mobility ? 'חובה' : 'לא חשוב',
                 drivingLicense: jobData.licenseType || 'לא חשוב',
                 jobId: jobData.id || prev.jobId,
-                uniqueEmail: jobData.uniqueEmail || prev.uniqueEmail,
                 postingCode: jobData.postingCode || prev.postingCode,
+                uniqueEmail: jobData.postingCode ? `humand+${jobData.postingCode}@app.hiro.co.il` : (jobData.uniqueEmail || prev.uniqueEmail),
                 creationDate: jobData.openDate ? new Date(jobData.openDate).toLocaleDateString('he-IL') : prev.creationDate,
              }));
              if (jobData.client) setIsClientConfirmed(true);
@@ -1309,92 +1313,113 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const handleParseJob = async () => {
-        if (!pastedJobText.trim()) return;
+        if (!pastedJobText.trim() || !apiBase) return;
         setIsParsing(true);
         try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
-                contents: [
-                    { text: "אתה עוזר גיוס חכם. נתח את תיאור המשרה הבא וחלץ ממנו את הפרטים לתוך JSON. המפתחות הנדרשים: jobTitle (שם המשרה), jobDescription (תיאור, נקה תווים מיותרים), requirements (דרישות), salaryMin (שכר מינימום, אופציונלי), salaryMax (שכר מקסימום, אופציונלי), city (עיר, אופציונלי). בנוסף, צור רשימה של 3-4 שאלות סינון (screeningQuestions) קריטיות למשרה זו, שנועדו לפסול מועמדים לא מתאימים (לדוגמה: 'האם יש לך ניסיון ב-React?'). לכל שאלה, הצע סיבת פסילה קצרה (disqualificationReason)." },
-                    { text: pastedJobText }
-                ],
-                config: {
-                    responseMimeType: 'application/json',
-                    responseSchema: {
-                        type: Type.OBJECT,
-                        properties: {
-                            jobTitle: { type: Type.STRING },
-                            jobDescription: { type: Type.STRING },
-                            requirements: { type: Type.STRING },
-                            salaryMin: { type: Type.NUMBER },
-                            salaryMax: { type: Type.NUMBER },
-                            city: { type: Type.STRING },
-                            screeningQuestions: {
-                                type: Type.ARRAY,
-                                items: {
-                                    type: Type.OBJECT,
-                                    properties: {
-                                        question: { type: Type.STRING },
-                                        disqualificationReason: { type: Type.STRING }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            const res = await fetch(`${apiBase}/api/jobs/ai/analyze`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text: pastedJobText }),
             });
 
-            if (response.text) {
-                const extractedData = JSON.parse(response.text);
-                
-                const filled = new Set<string>();
-                const filledList: string[] = [];
-                const missingList: string[] = [];
-                
-                if (extractedData.jobTitle) { filled.add('jobTitle'); filledList.push('כותרת המשרה'); } else missingList.push('כותרת המשרה');
-                if (extractedData.jobDescription) { filled.add('jobDescription'); filledList.push('תיאור המשרה'); } else missingList.push('תיאור המשרה');
-                if (extractedData.salaryMin || extractedData.salaryMax) { filled.add('salaryMin'); filled.add('salaryMax'); filledList.push('טווח שכר'); } else missingList.push('טווח שכר');
-                if (extractedData.city) { filled.add('locations'); filledList.push('מיקום'); } else missingList.push('מיקום');
-                if (extractedData.screeningQuestions?.length > 0) { filledList.push(`${extractedData.screeningQuestions.length} שאלות סינון`); }
-
-                // Map AI questions to Digital Questions (Knockout) - Defaulting type to 'text' for simplicity, but editable
-                const newQuestions = extractedData.screeningQuestions?.map((q: any, index: number) => ({
-                    id: Date.now() + index,
-                    text: q.question,
-                    type: 'text', // Default from AI
-                    order: index + 1,
-                    disqualificationReason: q.disqualificationReason || 'ניסיון',
-                    isMandatory: true,
-                    disqualifyIfWrong: true,
-                    isExpanded: false
-                })) || [];
-
-                setFormData(prev => ({
-                    ...prev,
-                    jobTitle: extractedData.jobTitle || prev.jobTitle,
-                    jobDescription: extractedData.jobDescription || prev.jobDescription,
-                    requirements: extractedData.requirements || prev.requirements,
-                    salaryMin: extractedData.salaryMin || prev.salaryMin,
-                    salaryMax: extractedData.salaryMax || prev.salaryMax,
-                    locations: extractedData.city ? [...prev.locations, { type: 'city', value: extractedData.city }] : prev.locations,
-                    digitalQuestions: newQuestions, // Populate digital
-                    enableDigitalScreening: true
-                }));
-                
-                setAiFilledFields(filled);
-                setParseSummaryData({ filled: filledList, missing: missingList });
-                
-                setParseSuccess(true);
-                setTimeout(() => {
-                    setParseSuccess(false);
-                    setIsAIModalOpen(false);
-                    setPastedJobText('');
-                    setShowParseSummary(true); 
-                }, 1000);
+            if (!res.ok) {
+                throw new Error('Failed to analyze job description');
             }
+
+            const json = await res.json();
+            const raw = json?.data || {};
+            // Normalize API field names to form shape (API may return title/description/licenseType; form uses jobTitle/jobDescription/drivingLicense)
+            const extractedData = {
+                ...raw,
+                jobTitle: raw.title ?? raw.jobTitle,
+                jobDescription: raw.description ?? raw.jobDescription,
+                drivingLicense: raw.licenseType ?? raw.drivingLicense,
+            };
+
+            const filled = new Set<string>();
+            const filledList: string[] = [];
+            const missingList: string[] = [];
+
+            if (extractedData.jobTitle) { filled.add('jobTitle'); filledList.push('כותרת המשרה'); } else missingList.push('כותרת המשרה');
+            if (extractedData.jobDescription) { filled.add('jobDescription'); filledList.push('תיאור המשרה'); } else missingList.push('תיאור המשרה');
+            if (extractedData.requirements) { filled.add('requirements'); filledList.push('דרישות המשרה'); } else missingList.push('דרישות המשרה');
+            if (extractedData.salaryMin || extractedData.salaryMax) { filled.add('salaryMin'); filled.add('salaryMax'); filledList.push('טווח שכר'); } else missingList.push('טווח שכר');
+            if (extractedData.city) { filled.add('locations'); filledList.push('מיקום'); } else missingList.push('מיקום');
+            if (extractedData.internalNotes) { filled.add('internalNotes'); filledList.push('הערות פנימיות'); } else missingList.push('הערות פנימיות');
+            if (Array.isArray(extractedData.languages) && extractedData.languages.length > 0) { filled.add('languages'); filledList.push('שפות'); } else missingList.push('שפות');
+            if (extractedData.drivingLicense) { filled.add('drivingLicense'); filledList.push('רישיון נהיגה'); } else missingList.push('רישיון נהיגה');
+            if (extractedData.mobility) { filled.add('mobility'); filledList.push('דרישות ניידות'); } else missingList.push('דרישות ניידות');
+
+            const screeningOrDigital = extractedData.screeningQuestions ?? extractedData.digitalQuestions ?? [];
+            if (screeningOrDigital.length > 0) {
+                filledList.push(`${screeningOrDigital.length} שאלות סינון`);
+            }
+
+            const aiLanguages: LanguageRequirement[] = Array.isArray(extractedData.languages)
+                ? extractedData.languages
+                    .filter((l: any) => l && (l.name || l.language))
+                    .map((l: any, index: number) => ({
+                        id: Date.now() + index,
+                        language: l.language || l.name,
+                        level: l.level || 'טובה מאוד',
+                    }))
+                : [];
+
+            const newQuestions = screeningOrDigital.map((q: any, index: number) => ({
+                id: Date.now() + index,
+                text: q.text ?? q.question,
+                type: q.type || 'text',
+                order: q.order ?? index + 1,
+                disqualificationReason: q.disqualificationReason || 'ניסיון',
+                isMandatory: q.isMandatory !== false,
+                disqualifyIfWrong: q.disqualifyIfWrong !== false,
+                isExpanded: q.isExpanded === true,
+            }));
+
+            const apiTelephone = extractedData.telephoneQuestions ?? [];
+            const newTelephoneQuestions: Question[] = apiTelephone.map((q: any, index: number) => ({
+                id: Date.now() + 1000 + index,
+                text: q.text ?? q.question ?? '',
+                type: (q.type as QuestionType) || 'text',
+                order: q.order ?? index + 1,
+                isMandatory: q.required !== false && q.isMandatory !== false,
+                disqualifyIfWrong: false,
+                isExpanded: false,
+                disqualificationReason: q.disqualificationReason,
+            }));
+
+            setFormData(prev => ({
+                ...prev,
+                jobTitle: extractedData.jobTitle || prev.jobTitle,
+                jobDescription: extractedData.jobDescription || prev.jobDescription,
+                requirements: extractedData.requirements || prev.requirements,
+                internalNotes: extractedData.internalNotes || prev.internalNotes,
+                salaryMin: typeof extractedData.salaryMin === 'number' ? extractedData.salaryMin : prev.salaryMin,
+                salaryMax: typeof extractedData.salaryMax === 'number' ? extractedData.salaryMax : prev.salaryMax,
+                locations: extractedData.city
+                    ? [...prev.locations, { type: 'city', value: extractedData.city }]
+                    : prev.locations,
+                languages: aiLanguages.length ? aiLanguages : prev.languages,
+                drivingLicense: extractedData.drivingLicense || prev.drivingLicense,
+                mobility: extractedData.mobility || prev.mobility,
+                digitalQuestions: newQuestions,
+                enableDigitalScreening: true,
+                telephoneQuestions: newTelephoneQuestions.length > 0 ? newTelephoneQuestions : prev.telephoneQuestions,
+                enableManualScreening: newTelephoneQuestions.length > 0 ? true : prev.enableManualScreening,
+            }));
+
+            setAiFilledFields(filled);
+            setParseSummaryData({ filled: filledList, missing: missingList });
+
+            setParseSuccess(true);
+            setTimeout(() => {
+                setParseSuccess(false);
+                setIsAIModalOpen(false);
+                setPastedJobText('');
+                setShowParseSummary(true);
+            }, 1000);
         } catch (error) {
-            console.error("Parsing error", error);
+            console.error('Parsing error', error);
         } finally {
             setIsParsing(false);
         }
@@ -1690,69 +1715,70 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const buildJobPayload = () => {
-        const field = formData.jobField;
-        const cityLocation = formData.locations.find(loc => loc.type === 'city');
-        const baseLocation = cityLocation?.value || formData.locations[0]?.value || 'תל אביב';
+        const data = formDataRef.current;
+        const field = data.jobField;
+        const cityValues = (data.locations || []).filter((loc: LocationItem) => loc.type === 'city').map((loc: LocationItem) => loc.value.trim()).filter(Boolean);
+        const firstCity = cityValues[0] || 'תל אביב';
+        const locationString = cityValues.length ? cityValues.join(LOCATION_SEP) : firstCity;
         const genderValue = (() => {
-            const includesMale = formData.gender.includes('male');
-            const includesFemale = formData.gender.includes('female');
+            const includesMale = data.gender.includes('male');
+            const includesFemale = data.gender.includes('female');
             if (includesMale && !includesFemale) return 'זכר';
             if (includesFemale && !includesMale) return 'נקבה';
             return 'לא משנה';
         })();
-        const requirements = (formData.requirements || '')
-            .split(/\r?\n/)
-            .map(line => line.trim())
-            .filter(Boolean);
-        const contactObjects = mockContacts.filter(contact => formData.contacts.includes(contact.id));
-        const recruiterName = mockInternalRecruiters.find(r => formData.assignedRecruiters.includes(r.id))?.name || 'מערכת';
-        const accountManagerName = mockAccountManagers.find(m => formData.assignedAccountManagers.includes(m.id))?.name || 'מערכת';
+        const requirements = Array.isArray(data.requirements)
+            ? data.requirements.map((r: string) => String(r).trim()).filter(Boolean)
+            : (data.requirements || '').split(/\r?\n/).map((line: string) => line.trim()).filter(Boolean);
+        const contactObjects = mockContacts.filter(contact => data.contacts.includes(contact.id));
+        const recruiterName = mockInternalRecruiters.find(r => data.assignedRecruiters.includes(r.id))?.name || 'מערכת';
+        const accountManagerName = mockAccountManagers.find(m => data.assignedAccountManagers.includes(m.id))?.name || 'מערכת';
 
         return {
-            title: formData.jobTitle || 'משרה חדשה',
-            client: formData.clientName || 'לקוח כללי',
+            title: data.jobTitle || 'משרה חדשה',
+            client: data.clientName || 'לקוח כללי',
             field: field?.category || '',
             role: field?.role || '',
-            priority: formData.priority,
+            priority: data.priority,
             clientType: 'כללי',
-            city: baseLocation,
+            city: firstCity,
             region: '',
             gender: genderValue,
-            mobility: formData.mobility === 'חובה',
-            licenseType: formData.drivingLicense === 'לא חשוב' ? '' : formData.drivingLicense,
-            postingCode: formData.postingCode,
+            mobility: data.mobility === 'חובה',
+            licenseType: data.drivingLicense === 'לא חשוב' ? '' : data.drivingLicense,
+            postingCode: data.postingCode,
             validityDays: 30,
             recruitingCoordinator: recruiterName,
             accountManager: accountManagerName,
-            salaryMin: formData.salaryMin,
-            salaryMax: formData.salaryMax,
-            ageMin: formData.ageMin,
-            ageMax: formData.ageMax,
+            salaryMin: data.salaryMin,
+            salaryMax: data.salaryMax,
+            ageMin: data.ageMin,
+            ageMax: data.ageMax,
             openPositions: 1,
-            status: formData.status === 'פעילה' ? 'פתוחה' : formData.status,
+            status: data.status === 'פעילה' ? 'פתוחה' : data.status,
             associatedCandidates: 0,
             waitingForScreening: 0,
             activeProcess: 0,
             openDate: new Date().toISOString(),
             recruiter: recruiterName,
-            location: baseLocation,
-            jobType: Array.isArray(formData.jobType) ? formData.jobType : [formData.jobType],
-            description: formData.jobDescription,
+            location: locationString,
+            jobType: Array.isArray(data.jobType) ? data.jobType : [data.jobType],
+            description: data.jobDescription,
             requirements,
             rating: 0,
-            healthProfile: formData.healthProfile,
-            internalNotes: formData.internalNotes,
-            uniqueEmail: formData.uniqueEmail,
+            healthProfile: data.healthProfile,
+            internalNotes: data.internalNotes,
+            uniqueEmail: data.uniqueEmail,
             contacts: contactObjects,
-            recruitmentSources: formData.recruitmentSources.map(source => ({
+            recruitmentSources: (data.recruitmentSources || []).map((source: { id: string; name: string; status: string; alertDays: number | null }) => ({
                 id: source.id,
                 name: source.name,
                 status: source.status,
                 alertDays: source.alertDays,
             })),
-            telephoneQuestions: formData.telephoneQuestions,
-            digitalQuestions: formData.digitalQuestions,
-            languages: formData.languages,
+            telephoneQuestions: data.telephoneQuestions,
+            digitalQuestions: data.digitalQuestions,
+            languages: data.languages,
         };
     };
 
@@ -2055,12 +2081,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                        </div>
                     </div>
                     <TechnicalIdentifiers 
-                        jobId={formData.jobId} 
+                        jobId={formData.postingCode} 
                         postingCode={formData.postingCode} 
-                        uniqueEmail={formData.uniqueEmail}
+                        uniqueEmail={`humand+${formData.postingCode}@app.hiro.co.il`}
                         creationDate={formData.creationDate}
-                        onUniqueEmailChange={(value) => setFormData(prev => ({ ...prev, uniqueEmail: value }))}
-                        onPostingCodeChange={(value) => setFormData(prev => ({ ...prev, postingCode: value }))}
+                        onPostingCodeChange={(value) => setFormData(prev => ({ ...prev, postingCode: value, uniqueEmail: `humand+${value}@app.hiro.co.il` }))}
                     />
                 </SectionCard>
 
@@ -2357,6 +2382,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                     selectedLocations={formData.locations}
                                     onChange={handleLocationsChange}
                                     className="w-full"
+                                    summarizeAsCityNames
                                 />
                             </div>
                         </div>

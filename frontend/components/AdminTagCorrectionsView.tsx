@@ -4,7 +4,7 @@ import {
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, TagIcon, 
     CheckCircleIcon, ExclamationTriangleIcon, SparklesIcon, 
     ArrowTopRightOnSquareIcon, FunnelIcon, AdjustmentsHorizontalIcon,
-    Squares2X2Icon, ListBulletIcon, XMarkIcon, UserIcon, ArrowPathIcon
+    Squares2X2Icon, ListBulletIcon, XMarkIcon, UserIcon
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
@@ -70,9 +70,9 @@ const AdminTagCorrectionsView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [allTags, setAllTags] = useState<TagOption[]>([]);
     const [linkedCandidates, setLinkedCandidates] = useState<{ id: string; name: string }[]>([]);
+    const [linkedCandidatesLoading, setLinkedCandidatesLoading] = useState(false);
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-    const [isResolving, setIsResolving] = useState(false);
     const topRef = useRef<HTMLDivElement | null>(null);
 
 const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
@@ -114,26 +114,13 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             const res = await fetch(`${apiBase}/api/tags`);
             if (!res.ok) return;
             const payload = await res.json();
-
-            // Support both array and `{ data: [...] }` response shapes
-            const tagsArray = Array.isArray(payload)
-                ? payload
-                : Array.isArray(payload?.data)
-                    ? payload.data
-                    : [];
-
-            if (!tagsArray.length) {
-                setAllTags([]);
-                return;
-            }
-
-            const normalized = tagsArray
-                .filter((tag: any) => tag?.status == 'active' && tag?.qualityState == 'verified')
+            const list = Array.isArray(payload) ? payload : (payload?.data ?? []);
+            const normalized = list
+                .filter((tag: any) => tag.status === 'active')
                 .map((tag: any) => ({
                     id: tag.id,
-                    name: String(tag.displayNameHe || tag.tagKey || tag.displayNameEn || 'תגית').trim(),
+                    name: String(tag.displayNameHe || tag.displayNameEn || tag.tagKey || 'תגית').trim(),
                 }));
-
             setAllTags(normalized);
         } catch (err) {
             console.error('Failed to load tags list', err);
@@ -193,9 +180,7 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
     }, [filteredUnmatched]);
 
     const filteredExistingTags = useMemo(() => 
-        linkSearchTerm
-            ? allTags.filter((t) => t.name.toLowerCase().includes(linkSearchTerm.toLowerCase()))
-            : allTags,
+        linkSearchTerm ? allTags.filter(t => t.name.toLowerCase().includes(linkSearchTerm.toLowerCase())) : [],
     [linkSearchTerm, allTags]);
 
     // Effects
@@ -232,8 +217,11 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
         let active = true;
         if (!selectedGroup || !apiBase) {
             setLinkedCandidates([]);
+            setLinkedCandidatesLoading(false);
             return;
         }
+        setLinkedCandidatesLoading(true);
+        setLinkedCandidates([]);
         const loadCandidates = async () => {
             try {
                 const responses = await Promise.all(
@@ -254,6 +242,8 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             } catch (err) {
                 console.error('[AdminTagCorrectionsView] failed to load candidate info', err);
                 if (active) setLinkedCandidates([]);
+            } finally {
+                if (active) setLinkedCandidatesLoading(false);
             }
         };
         loadCandidates();
@@ -291,7 +281,6 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
 
     const handleResolve = async (action: 'link' | 'create' | 'ignore') => {
         if (!selectedGroup) return;
-        setIsResolving(true);
         try {
             if (action === 'link') {
                 if (!selectedExistingTag) {
@@ -310,8 +299,6 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             setSelectedGroup(null);
         } catch (err: any) {
             flashStatus(err.message || 'הפעולה נכשלה');
-        } finally {
-            setIsResolving(false);
         }
     };
 
@@ -395,9 +382,16 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                 >
                                     <option value="all">כל הסוגים</option>
                                     <option value="skill">Skill</option>
-                                    <option value="role">Role</option>
+                                    <option value="role">Role</option>  
+                                    <option value="industry">Industry</option>
                                     <option value="tool">Tool</option>
-                                    <option value="unknown">Unknown</option>
+                                    <option value="certification">Certification</option>
+                                    <option value="language">Language</option>
+                                    <option value="seniority">Seniority</option>
+                                    <option value="domain">Domain</option>
+                                    <option value="hard_skill">Hard Skill</option>
+                                    <option value="soft_skill">Soft Skill</option>
+                                    <option value="education">Education</option>
                                 </select>
                                 <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"/>
                              </div>
@@ -470,23 +464,33 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                         מקור: {representativeTag?.contextSample || selectedGroup?.contextSample}
                                     </span>
                                     <h2 className="text-4xl font-black text-text-default mb-2" dir="ltr">{selectedGroup?.term}</h2>
-                                    <div className="text-sm text-text-muted">
-                                        זוהה כ-<span className="font-bold text-text-default">{selectedGroup?.detectedType}</span> ב-{selectedGroup?.occurrences || 0} קורות חיים שונים
-                                    </div>
-                                    {linkedCandidates.length > 0 && (
-                                        <div className="flex flex-wrap gap-2 justify-center">
-                                            {linkedCandidates.map(candidate => (
-                                                <button
-                                                    key={candidate.id}
-                                                    onClick={() => handleOpenCandidateDrawer(candidate.id, candidate.name)}
-                                                    className="flex items-center gap-1 text-xs text-text-muted bg-white px-3 py-1 rounded-full border border-border-default shadow-sm hover:text-primary-600 transition-colors"
-                                                >
-                                                    <UserIcon className="w-4 h-4" />
-                                                    {candidate.name}
-                                                </button>
-                                            ))}
+                                    {linkedCandidatesLoading ? (
+                                        <div className="flex items-center justify-center gap-2 text-sm text-text-muted py-4">
+                                            <span className="inline-block w-4 h-4 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" aria-hidden />
+                                            <span>טוען מועמדים...</span>
                                         </div>
+                                    ) : (
+                                        <>
+                                            <div className="text-sm text-text-muted">
+                                                זוהה כ-<span className="font-bold text-text-default">{selectedGroup?.detectedType}</span> ב-{selectedGroup?.occurrences || 0} קורות חיים שונים
+                                            </div>
+                                            {linkedCandidates.length > 0 && (
+                                                <div className="flex flex-wrap gap-2 justify-center">
+                                                    {linkedCandidates.map(candidate => (
+                                                        <button
+                                                            key={candidate.id}
+                                                            onClick={() => handleOpenCandidateDrawer(candidate.id, candidate.name)}
+                                                            className="flex items-center gap-1 text-xs text-text-muted bg-white px-3 py-1 rounded-full border border-border-default shadow-sm hover:text-primary-600 transition-colors"
+                                                        >
+                                                            <UserIcon className="w-4 h-4" />
+                                                            {candidate.name}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </>
                                     )}
+                                  
                                 </div>
 
                                 {/* AI Suggestion Box */}
@@ -505,6 +509,13 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                 )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-8 relative">
+                                    {linkedCandidatesLoading ? (
+                                        <div className="col-span-full flex items-center justify-center gap-2 text-sm text-text-muted py-12">
+                                            <span className="inline-block w-5 h-5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" aria-hidden />
+                                            <span>טוען מועמדים...</span>
+                                        </div>
+                                    ) : (
+                                        <>
                                     {/* Action A: Merge */}
                                     <div className="flex flex-col h-full">
                                         <h3 className="text-lg font-bold text-text-default mb-4 flex items-center gap-2">
@@ -527,36 +538,34 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                                 />
                                             </div>
 
-                                            {/* Results Dropdown */}
-                                            {!selectedExistingTag && (
+                                            {/* Results Dropdown: filter from allTags loaded on page load */}
+                                            {linkSearchTerm && !selectedExistingTag && (
                                                 <div className="border border-border-default rounded-lg bg-white shadow-sm max-h-40 overflow-y-auto mb-4 custom-scrollbar">
-                                            {filteredExistingTags.length > 0 ? (
-                                                filteredExistingTags.map(tag => (
-                                                    <button 
-                                                        key={tag.id}
-                                                        onClick={() => { setSelectedExistingTag(tag); setLinkSearchTerm(tag.name); }}
-                                                        className="w-full text-right p-2.5 text-sm hover:bg-primary-50 hover:text-primary-700 transition-colors border-b border-border-subtle last:border-0"
-                                                    >
-                                                        {tag.name}
-                                                    </button>
-                                                ))
-                                            ) : (
-                                                <div className="p-3 text-center text-xs text-text-muted">לא נמצאו תגיות</div>
-                                            )}
+                                                    {filteredExistingTags.length > 0 ? (
+                                                        filteredExistingTags.map(tag => (
+                                                            <button
+                                                                key={tag.id}
+                                                                type="button"
+                                                                onClick={() => { setSelectedExistingTag(tag); setLinkSearchTerm(tag.name); }}
+                                                                className="w-full text-right p-2.5 text-sm hover:bg-primary-50 hover:text-primary-700 transition-colors border-b border-border-subtle last:border-0"
+                                                            >
+                                                                {tag.name}
+                                                            </button>
+                                                        ))
+                                                    ) : (
+                                                        <div className="p-3 text-center text-xs text-text-muted">לא נמצאו תגיות</div>
+                                                    )}
                                                 </div>
                                             )}
 
                                             <div className="mt-auto">
                                                 <button 
                                                     onClick={() => handleResolve('link')}
-                                                    disabled={!selectedExistingTag || isResolving}
+                                                    disabled={!selectedExistingTag}
                                                     className="w-full bg-primary-600 text-white font-bold py-3 rounded-xl hover:bg-primary-700 transition shadow-md disabled:bg-gray-200 disabled:text-gray-400 disabled:shadow-none flex items-center justify-center gap-2"
                                                 >
-                                                    {isResolving ? (
-                                                        <><ArrowPathIcon className="w-5 h-5 animate-spin"/> מעבד...</>
-                                                    ) : (
-                                                        <><CheckCircleIcon className="w-5 h-5"/> מזג ל-{selectedExistingTag?.name || '...'}</>
-                                                    )}
+                                                    <CheckCircleIcon className="w-5 h-5"/>
+                                                    מזג ל-{selectedExistingTag?.name || '...'}
                                                 </button>
                                             </div>
                                         </div>
@@ -580,16 +589,15 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                             <div className="mt-auto space-y-3">
                                                 <button 
                                                     onClick={() => handleResolve('create')}
-                                                    disabled={isResolving}
-                                                    className="w-full bg-white border-2 border-green-500 text-green-700 font-bold py-3 rounded-xl hover:bg-green-50 transition shadow-sm flex items-center justify-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                                                    className="w-full bg-white border-2 border-green-500 text-green-700 font-bold py-3 rounded-xl hover:bg-green-50 transition shadow-sm flex items-center justify-center gap-2"
                                                 >
-                                                    {isResolving ? <><ArrowPathIcon className="w-5 h-5 animate-spin"/> מעבד...</> : <><PlusIcon className="w-5 h-5"/> צור תגית "{selectedGroup?.term}"</>}
+                                                    <PlusIcon className="w-5 h-5"/>
+                                                    צור תגית "{selectedGroup?.term}"
                                                 </button>
                                                 
                                                 <button 
                                                     onClick={() => handleResolve('ignore')}
-                                                    disabled={isResolving}
-                                                    className="w-full text-text-muted hover:text-red-600 text-xs font-bold py-2 flex items-center justify-center gap-1 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+                                                    className="w-full text-text-muted hover:text-red-600 text-xs font-bold py-2 flex items-center justify-center gap-1 transition-colors"
                                                 >
                                                     <TrashIcon className="w-3.5 h-3.5"/>
                                                     התעלם (מחק מהרשימה)
@@ -597,6 +605,8 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                             </div>
                                         </div>
                                     </div>
+                                        </>
+                                    )}
                                 </div>
                             </div>
                         </div>

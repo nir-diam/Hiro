@@ -2,7 +2,6 @@
 import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { XMarkIcon, MagnifyingGlassIcon } from './Icons';
-import { jobFieldsData } from '../data/jobFieldsData';
 
 interface CompanyFilters {
     sizes: string[];
@@ -15,16 +14,34 @@ interface CompanyFilterPopoverProps {
     onClose: () => void;
     filters: CompanyFilters;
     setFilters: React.Dispatch<React.SetStateAction<CompanyFilters>>;
+    onApply?: () => void;
 }
 
 const companySizeOptions = ['1-50', '51-200', '200-1000', '1000+'];
 const companySectorOptions = ['פרטי', 'ציבורי', 'ממשלתי', 'מלכ"ר'];
 
+type IndustryCategory = {
+    id: string;
+    name: string;
+    description?: string;
+};
 
-const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, filters, setFilters }) => {
+type FieldValue = {
+    id: string;
+    label: string;
+    value: string;
+    displayName?: string | null;
+};
+
+
+const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, filters, setFilters, onApply }) => {
     const popoverRef = useRef<HTMLDivElement>(null);
     const [industrySearchTerm, setIndustrySearchTerm] = useState('');
     const [fieldSearchTerm, setFieldSearchTerm] = useState('');
+    const [industries, setIndustries] = useState<IndustryCategory[]>([]);
+    const [fields, setFields] = useState<FieldValue[]>([]);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
 
     // Changed click outside logic: Now using a backdrop div with onClick instead of document listener
     // This is safer with createPortal and avoids issues with event bubbling order
@@ -64,17 +81,70 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
         setFilters({ sizes: [], sectors: [], industry: '', field: '' });
     };
 
-    const filteredIndustries = useMemo(() => 
-        jobFieldsData.filter(cat => cat.name.toLowerCase().includes(industrySearchTerm.toLowerCase())),
-        [industrySearchTerm]
+    // Load industries (subcategories) from picklists for the BUSINESS_FIELD_CATEGORY_ID
+    useEffect(() => {
+        if (!apiBase) return;
+        const controller = new AbortController();
+        (async () => {
+            try {
+                const res = await fetch(
+                    `${apiBase}/api/picklists/categories/${BUSINESS_FIELD_CATEGORY_ID}/subcategories`,
+                    { signal: controller.signal },
+                );
+                if (!res.ok) return;
+                const data: IndustryCategory[] = await res.json();
+                setIndustries(data || []);
+            } catch {
+                // silent fail – keep empty industries
+            }
+        })();
+        return () => controller.abort();
+    }, [apiBase]);
+
+    // Load fields (values) for the selected industry
+    useEffect(() => {
+        if (!apiBase || !filters.industry) {
+            setFields([]);
+            return;
+        }
+        const selected = industries.find((i) => i.name === filters.industry);
+        if (!selected) {
+            setFields([]);
+            return;
+        }
+        const controller = new AbortController();
+        (async () => {
+            try {
+                const res = await fetch(
+                    `${apiBase}/api/picklists/categories/${selected.id}/values`,
+                    { signal: controller.signal },
+                );
+                if (!res.ok) return;
+                const data: FieldValue[] = await res.json();
+                setFields(data || []);
+            } catch {
+                // silent fail – keep empty fields
+            }
+        })();
+        return () => controller.abort();
+    }, [apiBase, filters.industry, industries]);
+
+    const filteredIndustries = useMemo(
+        () =>
+            industries.filter((cat) =>
+                cat.name.toLowerCase().includes(industrySearchTerm.toLowerCase()),
+            ),
+        [industries, industrySearchTerm],
     );
 
     const availableFields = useMemo(() => {
         if (!filters.industry) return [];
-        const category = jobFieldsData.find(cat => cat.name === filters.industry);
-        if (!category) return [];
-        return category.fieldTypes.filter(field => field.name.toLowerCase().includes(fieldSearchTerm.toLowerCase()));
-    }, [filters.industry, fieldSearchTerm]);
+        return fields.filter((field) =>
+            (field.displayName || field.label)
+                .toLowerCase()
+                .includes(fieldSearchTerm.toLowerCase()),
+        );
+    }, [filters.industry, fieldSearchTerm, fields]);
 
     // Using Portal to break out of any overflow:hidden containers
     return createPortal(
@@ -116,7 +186,7 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
                             <div className="overflow-y-auto flex-grow custom-scrollbar p-2 space-y-0.5">
                                 {filteredIndustries.map(industry => (
                                     <button 
-                                        key={industry.name} 
+                                        key={industry.id} 
                                         onClick={() => handleIndustrySelect(industry.name)} 
                                         className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-all flex justify-between items-center group ${
                                             filters.industry === industry.name 
@@ -158,16 +228,16 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
                                 ) : (
                                     availableFields.map(field => (
                                         <button 
-                                            key={field.name} 
-                                            onClick={() => handleFieldSelect(field.name)} 
+                                            key={field.id} 
+                                            onClick={() => handleFieldSelect(field.displayName || field.label)} 
                                             className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-all flex justify-between items-center ${
-                                                filters.field === field.name 
+                                                filters.field === (field.displayName || field.label) 
                                                     ? 'bg-white border-primary-200 text-primary-700 font-bold shadow-sm border' 
                                                     : 'text-text-default hover:bg-white hover:shadow-sm font-medium border border-transparent'
                                             }`}
                                         >
-                                            <span className="truncate">{field.name}</span>
-                                            {filters.field === field.name && <div className="w-1.5 h-1.5 rounded-full bg-primary-500"></div>}
+                                            <span className="truncate">{field.displayName || field.label}</span>
+                                            {filters.field === (field.displayName || field.label) && <div className="w-1.5 h-1.5 rounded-full bg-primary-500"></div>}
                                         </button>
                                     ))
                                 )}
@@ -232,7 +302,15 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
                          <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-text-muted hover:bg-bg-hover transition-colors">
                             ביטול
                         </button>
-                        <button onClick={onClose} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">
+                        <button
+                            onClick={() => {
+                                if (onApply) {
+                                    onApply();
+                                }
+                                onClose();
+                            }}
+                            className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20"
+                        >
                             החל סינון
                         </button>
                     </div>

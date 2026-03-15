@@ -3,6 +3,7 @@ const tagService = require('../services/tagService');
 const Tag = require('../models/Tag');
 const TagHistory = require('../models/TagHistory');
 const CandidateTag = require('../models/CandidateTag');
+const Candidate = require('../models/Candidate');
 const { sequelize } = require('../config/db');
 const candidateTagService = require('../services/candidateTagService');
 const tagEmbeddingService = require('../services/tagEmbeddingService');
@@ -263,7 +264,39 @@ const listPending = async (_req, res) => {
       where: { status: 'pending' },
       order: [['createdAt', 'DESC']],
     });
-    res.json(entries);
+    const tagIds = entries.map((t) => t.id);
+    if (tagIds.length === 0) {
+      return res.json(entries);
+    }
+    const candidateTags = await CandidateTag.findAll({
+      where: { tag_id: { [Op.in]: tagIds } },
+      attributes: ['tag_id', 'candidate_id'],
+    });
+    const candidateIds = [...new Set(candidateTags.map((ct) => ct.candidate_id))];
+    const candidates =
+      candidateIds.length === 0
+        ? []
+        : await Candidate.findAll({
+            where: { id: { [Op.in]: candidateIds } },
+            attributes: ['id', 'fullName', 'email'],
+          });
+    const candidateMap = new Map(candidates.map((c) => [c.id, c.get({ plain: true })]));
+    const tagToCandidates = new Map();
+    for (const tagId of tagIds) {
+      tagToCandidates.set(tagId, []);
+    }
+    for (const ct of candidateTags) {
+      const c = candidateMap.get(ct.candidate_id);
+      if (!c) continue;
+      const list = tagToCandidates.get(ct.tag_id);
+      if (!list.some((x) => x.id === c.id)) list.push(c);
+    }
+    const payload = entries.map((tag) => {
+      const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
+      plain.candidates = tagToCandidates.get(tag.id) || [];
+      return plain;
+    });
+    res.json(payload);
   } catch (err) {
     console.error('[tagController] listPending error', err);
     res.status(500).json({ message: 'Failed to load pending tags' });
@@ -312,13 +345,23 @@ const resolvePending = async (req, res) => {
         await row.update({ tag_id: targetTag.id });
       }
     }
-    // Ensure target tag is linked for every candidate that had the pending tag (when we add to aliases below, the candidate must have the targetTag in CandidateTag)
+    // Ensure target tag is linked and active for every candidate that had the pending tag
     for (const cid of candidateIds) {
-      await CandidateTag.findOrCreate({
+      const existingLink = await CandidateTag.findOne({
         where: { candidate_id: cid, tag_id: targetTag.id },
-        defaults: { candidate_id: cid, tag_id: targetTag.id },
-        isActive: true,
       });
+
+      if (!existingLink) {
+        // No row yet for this candidate+targetTag -> create it explicitly as active
+        await CandidateTag.create({
+          candidate_id: cid,
+          tag_id: targetTag.id,
+          is_active: true,
+        });
+      } else if (existingLink.is_active === false) {
+        // Row exists but is inactive -> reactivate it
+        await existingLink.update({ is_active: true });
+      }
     }
   }
 

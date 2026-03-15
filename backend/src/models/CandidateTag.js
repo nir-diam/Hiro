@@ -55,6 +55,10 @@ const CandidateTag = sequelize.define(
       allowNull: false,
       defaultValue: true,
     },
+    created_by: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
   },
   {
     tableName: 'candidate_tags',

@@ -180,6 +180,9 @@ ${contextParts.join('\n')}
 `.trim();
 };
 
+const CandidateOrganization = require('../models/CandidateOrganization');
+const Organization = require('../models/Organization');
+
 const ensureOrganizationsFromExperience = async (experience, candidateId = null) => {
   const companyNames = extractCompanyNames(experience);
   if (!companyNames.length) return;
@@ -190,6 +193,12 @@ const ensureOrganizationsFromExperience = async (experience, candidateId = null)
         console.debug('[candidateController] ensuring organization', { name });
         const org = await organizationService.findOrCreateByName(name, { candidateId });
         console.debug('[candidateController] ensured organization', { name, orgId: org?.id });
+        // Only create link when we got a real Organization instance (not OrganizationTmp)
+        if (candidateId && org && org.id && org instanceof Organization) {
+          await CandidateOrganization.findOrCreate({
+            where: { candidateId, organizationId: org.id },
+          });
+        }
         return org;
       }),
     );
@@ -318,8 +327,14 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
   "title": string|null,
   "professionalSummary": string|null,
   "skills": { "soft": string[], "technical": string[] },
-  "tags": string[],
-  "languages": [{ "name": string, "level": string|number|null, "levelText": string|null }],
+ "tags": [{
+    "name": string,
+    "raw_type": "role" | "skill" | "industry" | "tool" | "degree" | "certification" | "language" | "seniority" |  "soft_skill" ,
+    "is_current": boolean,
+    "is_in_summary": boolean,
+    "confidence_score": float
+  }],
+   "languages": [{ "name": string, "level": string|number|null, "levelText": string|null }],
   "workExperience": [{
     "title": string|null,
     "company": string|null,
@@ -335,7 +350,7 @@ Rules:
 - Do NOT invent facts. If unknown, use null/empty.
 - Extract multiple work/education entries when present.
 - You MUST ALWAYS include the "skills" key with BOTH arrays: skills.soft and skills.technical (even if empty).
-- If the user mentions skills, roles, tools, or other professional tags,also include them under the \`tags\` field so the backend can synchronize candidate_tag rows. candidate_tag  scehma:${candidate_tag } (must implement in candidate_tag from the llm: raw_type: (String) הסיווג מה-LLM (Role, Skill, etc). context: (String) האם זה Core, Tool או Degree.  is_current: (Boolean) האם מופיע בניסיון האחרון.  is_in_summary: (Boolean) האם מופיע בפתיח.  confidence_score: (Float) רמת הביטחון של ה-AI.)
+- If the user mentions skills, roles, tools, or other professional tags,also include them under the \`tags\` field so the backend can synchronize candidate_tag rows. candidate_tag  scehma:${candidate_tag } (must implement in candidate_tag from the llm: raw_type: (String) הסיווג מה-LLM (Role, Skill, industry, tool, certification, language, seniority, domain, soft_skill, education). context: (String) האם זה Core, Tool או Degree.  is_current: (Boolean) האם מופיע בניסיון האחרון.  is_in_summary: (Boolean) האם מופיע בפתיח.  confidence_score: (Float) רמת הביטחון של ה-AI.)
 - If the CV contains any skills/tools/technologies/traits, you MUST extract them into the relevant list (do not leave both lists empty).
 - skills.soft = interpersonal/behavioral skills (e.g., תקשורת בין-אישית, עבודת צוות, מנהיגות, שירותיות, סדר וארגון, פתרון בעיות). Max 30.
 - skills.technical = tools/technologies/platforms/methods/certifications (e.g., Excel, SQL, Python, React, Salesforce, Google Ads, Power BI, Jira, AWS, Docker). Max 30.
@@ -413,6 +428,31 @@ const list = async (req, res) => {
   } catch (err) {
     console.error('[candidateController.list]', err.message || err);
     res.status(err.status || 400).json({ message: err.message || 'Failed to list candidates' });
+  }
+};
+
+/** List candidates filtered by worked-at-company (organizationId). Optional: yearsExperience, employmentStatus, yearsLeftAgo (for future use). */
+const listByWorkedAtCompany = async (req, res) => {
+  try {
+    const organizationId = String(req.query.organizationId || '').trim();
+    const yearsExperience = req.query.yearsExperience != null ? Number(req.query.yearsExperience) : undefined;
+    const employmentStatus = String(req.query.employmentStatus || '').trim() || undefined;
+    const yearsLeftAgo = req.query.yearsLeftAgo != null ? Number(req.query.yearsLeftAgo) : undefined;
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 500));
+    if (!organizationId) {
+      return res.status(400).json({ message: 'organizationId is required' });
+    }
+    const { rows, count } = await candidateService.listByWorkedAtOrganization({
+      organizationId,
+      yearsExperience,
+      employmentStatus,
+      yearsLeftAgo,
+      limit,
+    });
+    res.json({ data: rows, total: count });
+  } catch (err) {
+    console.error('[candidateController.listByWorkedAtCompany]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list candidates by worked-at-company' });
   }
 };
 
@@ -566,9 +606,6 @@ const createFromAi = async (req, res) => {
 const update = async (req, res) => {
   try {
     const candidate = await candidateService.update(req.params.id, req.body);
-    if (Array.isArray(req.body.tags) && req.body.tags.length) {
-      await candidateTagService.syncTagsForCandidate(candidate.id, req.body.tags);
-    }
     const embedText = [
       candidate.fullName,
       candidate.professionalSummary,
@@ -1266,6 +1303,7 @@ const freeSearch = async (req, res) => {
 
 module.exports = {
   list,
+  listByWorkedAtCompany,
   getByUser,
   get,
   create,

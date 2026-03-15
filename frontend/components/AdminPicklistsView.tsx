@@ -23,6 +23,7 @@ interface PicklistCategory {
 interface PicklistValue {
     id: string | number;
     label: string;
+    displayName?: string;
     value: string; // Internal key
     color: string; // Hex code or empty string
     isActive: boolean;
@@ -209,6 +210,7 @@ const ValueModal: React.FC<{
     const [formData, setFormData] = useState<PicklistValue>({
         id: '',
         label: '',
+        displayName: '',
         value: '',
         color: '',
         isActive: true,
@@ -223,6 +225,7 @@ const ValueModal: React.FC<{
             else setFormData({
                 id: '',
                 label: '',
+                displayName: '',
                 value: '',
                 color: '',
                 isActive: true,
@@ -259,6 +262,16 @@ const ValueModal: React.FC<{
                             className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
                             required
                             autoFocus
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-bold text-text-muted mb-1.5">שם לתצוגה (Display Name)</label>
+                        <input 
+                            type="text" 
+                            value={formData.displayName ?? ''} 
+                            onChange={e => setFormData({...formData, displayName: e.target.value})}
+                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                            placeholder="שם להצגה בממשק"
                         />
                     </div>
                     <div>
@@ -372,6 +385,7 @@ const AdminPicklistsView: React.FC = () => {
                         mapUpdates[cat.key] = valuesData.map((val: any) => ({
                             id: val.id,
                             label: val.label || val.value,
+                            displayName: val.displayName ?? '',
                             value: val.value || val.label,
                             color: val.color || '',
                             isActive: typeof val.isActive === 'boolean' ? val.isActive : true,
@@ -562,6 +576,7 @@ const AdminPicklistsView: React.FC = () => {
             const payload = {
                 label: newValue.label,
                 value: newValue.value,
+                displayName: newValue.displayName || null,
                 color: newValue.color || '',
                 isActive: Boolean(newValue.isActive),
                 order: typeof newValue.order === 'number' ? newValue.order : Number(newValue.order) || 0,
@@ -986,6 +1001,7 @@ const AdminPicklistsView: React.FC = () => {
                                 <tr>
                                     <th className="p-4 w-16 text-center">צבע</th>
                                     <th className="p-4">שם (Label)</th>
+                                    <th className="p-4">שם לתצוגה</th>
                                     <th className="p-4">מזהה (Value)</th>
                                     {parentCategory && <th className="p-4 text-blue-800">שייך ל ({parentCategory.name})</th>}
                                     <th className="p-4 w-24 text-center">פעיל</th>
@@ -1005,6 +1021,7 @@ const AdminPicklistsView: React.FC = () => {
                                                 )}
                                             </td>
                                             <td className="p-4 font-bold text-text-default">{val.label}</td>
+                                            <td className="p-4 text-text-muted">{val.displayName || '—'}</td>
                                             <td className="p-4 font-mono text-xs text-text-muted">{val.value}</td>
                                             {parentCategory && (
                                                 <td className="p-4">
@@ -1038,7 +1055,7 @@ const AdminPicklistsView: React.FC = () => {
                                 })}
                                 {filteredValues.length === 0 && (
                                     <tr>
-                                        <td colSpan={parentCategory ? 6 : 5} className="p-12 text-center text-text-muted">
+                                        <td colSpan={parentCategory ? 7 : 6} className="p-12 text-center text-text-muted">
                                             <div className="flex flex-col items-center justify-center gap-2">
                                                 <TagIcon className="w-10 h-10 opacity-20"/>
                                                 <span>

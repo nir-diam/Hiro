@@ -44,10 +44,10 @@ const Job = sequelize.define(
     activeProcess: DataTypes.INTEGER,
     openDate: { type: DataTypes.DATE, defaultValue: DataTypes.NOW },
     recruiter: DataTypes.STRING,
-    location: DataTypes.STRING,
+    location: DataTypes.TEXT,
     jobType: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     description: DataTypes.TEXT,
-    requirements: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    requirements: { type: DataTypes.ARRAY(DataTypes.TEXT), defaultValue: [] },
     rating: DataTypes.INTEGER,
     healthProfile: {
       type: DataTypes.ENUM('standard', 'high_volume', 'executive', 'disabled'),
@@ -58,6 +58,7 @@ const Job = sequelize.define(
     contacts: { type: DataTypes.JSONB, defaultValue: [] },
     recruitmentSources: { type: DataTypes.JSONB, defaultValue: [] },
     telephoneQuestions: { type: DataTypes.JSONB, defaultValue: [] },
+    digitalQuestions: { type: DataTypes.JSONB, defaultValue: [] },
     languages: { type: DataTypes.JSONB, defaultValue: [] },
   },
   {

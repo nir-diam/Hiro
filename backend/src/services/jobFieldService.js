@@ -38,6 +38,12 @@ const list = async () => {
         id: r.id,
         value: r.value,
         synonyms: r.synonyms || [],
+        tags: (r.tags || []).map((t) => ({
+          id: t.id,
+          tagKey: t.tagKey,
+          displayNameHe: t.displayNameHe,
+          displayNameEn: t.displayNameEn,
+        })),
       })),
     })),
   }));

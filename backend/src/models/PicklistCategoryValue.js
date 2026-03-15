@@ -18,6 +18,11 @@ const PicklistCategoryValue = sequelize.define(
       type: DataTypes.STRING,
       allowNull: false,
     },
+    displayName: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      field: 'display_name',
+    },
     color: DataTypes.STRING,
     isActive: {
       type: DataTypes.BOOLEAN,

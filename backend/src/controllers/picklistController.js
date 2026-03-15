@@ -118,6 +118,7 @@ const createCategoryValue = async (req, res) => {
     const payload = {
       label: req.body.label,
       value: req.body.value,
+      displayName: req.body.displayName || null,
       color: req.body.color || '',
       isActive: typeof req.body.isActive === 'boolean' ? req.body.isActive : true,
       order: req.body.order || 0,
@@ -136,6 +137,7 @@ const updateCategoryValue = async (req, res) => {
     const updates = {
       label: req.body.label,
       value: req.body.value,
+      displayName: req.body.displayName !== undefined ? req.body.displayName : undefined,
       color: req.body.color,
       isActive: typeof req.body.isActive === 'boolean' ? req.body.isActive : undefined,
       order: typeof req.body.order === 'number' ? req.body.order : undefined,
@@ -176,6 +178,7 @@ const createDomainValue = async (req, res) => {
     const payload = {
       label: req.body.label,
       value: req.body.value,
+      displayName: req.body.displayName || null,
       color: req.body.color || '',
       isActive: typeof req.body.isActive === 'boolean' ? req.body.isActive : true,
       order: req.body.order || 0,
@@ -195,6 +198,7 @@ const updateDomainValue = async (req, res) => {
     const updates = {
       label: req.body.label,
       value: req.body.value,
+      displayName: req.body.displayName !== undefined ? req.body.displayName : undefined,
       color: req.body.color,
       isActive: typeof req.body.isActive === 'boolean' ? req.body.isActive : undefined,
       order: typeof req.body.order === 'number' ? req.body.order : undefined,

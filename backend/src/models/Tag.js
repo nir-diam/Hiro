@@ -21,10 +21,8 @@ const Tag = sequelize.define(
         'certification',
         'language',
         'seniority',
-        'domain',
-        'hard_skill',
-        'soft_skill',
-        'education',
+        'degree',
+        'soft_skill'
       ),
       defaultValue: 'role',
     },

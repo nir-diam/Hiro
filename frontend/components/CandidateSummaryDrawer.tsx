@@ -5,7 +5,7 @@ import {
     BriefcaseIcon, CalendarDaysIcon, DocumentTextIcon,
     CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon,
     DocumentIcon, PhotoIcon, UserGroupIcon, BellIcon, Cog6ToothIcon, WhatsappIcon, ChatBubbleBottomCenterTextIcon, PlusIcon, BookmarkIcon, BookmarkIconSolid,
-    PaperAirplaneIcon
+    PaperAirplaneIcon, ChevronLeftIcon, ChevronRightIcon
 } from './Icons';
 import type { Candidate } from './CandidatesListView';
 interface CandidateWithExtras extends Candidate {
@@ -301,6 +301,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
   const [loadingCandidate, setLoadingCandidate] = useState(false);
   const [candidateError, setCandidateError] = useState<string | null>(null);
   const [resumeUploadState, setResumeUploadState] = useState({ inProgress: false, message: '' });
+  const [isExpanded, setIsExpanded] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -567,10 +568,20 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="fixed top-0 left-0 h-full w-full max-w-md bg-bg-card shadow-2xl flex flex-col transform transition-transform text-text-default"
+        className={`fixed top-0 left-0 h-full bg-bg-card shadow-2xl flex flex-col transform transition-all duration-300 text-text-default ${isExpanded ? 'w-[75vw] max-w-[75vw]' : 'w-full max-w-md'}`}
         onClick={(e) => e.stopPropagation()}
         style={{ animation: 'slideIn 0.3s forwards' }}
       >
+        {/* Expand/collapse: on right edge of drawer, vertically centered — always visible */}
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); setIsExpanded((prev) => !prev); }}
+          className="absolute top-1/2 -translate-y-1/2 right-3 z-[70] w-10 h-10 flex items-center justify-center rounded-full border-2 border-primary-300 bg-primary-100 text-primary-700 hover:bg-primary-200 hover:border-primary-400 shadow-md transition-all"
+          title={isExpanded ? 'החזר לגודל רגיל' : 'הרחב ל־75%'}
+          aria-label={isExpanded ? 'החזר לגודל רגיל' : 'הרחב ל־75%'}
+        >
+          {isExpanded ? <ChevronLeftIcon className="w-5 h-5" /> : <ChevronRightIcon className="w-5 h-5" />}
+        </button>
         <header className="p-4 border-b border-border-default flex items-center justify-between bg-bg-card z-10">
           <div className="flex items-center gap-2">
              <button 

@@ -1,10 +1,27 @@
 const { Op } = require('sequelize');
 const Organization = require('../models/Organization');
+const CandidateOrganization = require('../models/CandidateOrganization');
 const { sendChat } = require('./geminiService');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const picklistService = require('./picklistService');
 
-const list = async () => Organization.findAll();
+const list = async () => {
+  const orgs = await Organization.findAll();
+  const links = await CandidateOrganization.findAll({ attributes: ['organizationId'], raw: true });
+  const countByOrg = links.reduce((acc, row) => {
+    const id = row.organizationId != null ? String(row.organizationId).toLowerCase() : null;
+    if (id) {
+      acc[id] = (acc[id] || 0) + 1;
+    }
+    return acc;
+  }, {});
+  return orgs.map((o) => {
+    const json = o.toJSON ? o.toJSON() : { ...o.get() };
+    const orgKey = o.id != null ? String(o.id).toLowerCase() : null;
+    json.candidateCount = orgKey ? (countByOrg[orgKey] ?? 0) : 0;
+    return json;
+  });
+};
 
 const getById = async (id) => {
   const org = await Organization.findByPk(id);

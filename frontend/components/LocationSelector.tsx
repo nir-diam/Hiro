@@ -1,6 +1,7 @@
-
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon, MinusIcon, MapPinIcon, EyeIcon, XMarkIcon } from './Icons';
+
+const API_BASE = (import.meta.env.VITE_API_BASE as string) || '';
 
 export type LocationType = 'region' | 'city' | 'radius';
 export interface LocationItem {
@@ -9,56 +10,55 @@ export interface LocationItem {
     radius?: number;
 }
 
-// --- DATA ---
-export const locationHierarchy = [
-  { 
-      region: "גוש דן", 
-      cities: ["תל אביב-יפו", "רמת גן", "גבעתיים", "בני ברק", "חולון", "בת ים", "פתח תקווה", "קריית אונו", "אור יהודה"] 
-  },
-  { 
-      region: "אזור השרון", 
-      cities: ["נתניה", "הרצליה", "כפר סבא", "רעננה", "הוד השרון", "רמת השרון", "חדרה", "קיסריה", "פרדס חנה-כרכור"] 
-  },
-  { 
-      region: "שפלה", 
-      cities: ["ראשון לציון", "רחובות", "נס ציונה", "לוד", "רמלה", "מודיעין", "יבנה", "גדרה"] 
-  },
-  { 
-      region: "דרום", 
-      cities: ["אשדוד", "אשקלון", "באר שבע", "דימונה", "אילת", "קריית גת", "שדרות", "נתיבות"] 
-  },
-  { 
-      region: "ירושלים והסביבה", 
-      cities: ["ירושלים", "בית שמש", "מבשרת ציון", "מעלה אדומים", "מודיעין עילית"] 
-  },
-  { 
-      region: "צפון", 
-      cities: ["חיפה", "קריות", "עכו", "נהריה", "כרמיאל", "טבריה", "עפולה", "נצרת", "צפת", "קריית שמונה"] 
-  },
-];
+export interface LocationGroup {
+    region: string;
+    cities: string[];
+}
 
-const allCitiesFlat = locationHierarchy.flatMap(r => r.cities).sort();
+// No mock data – regions/cities come from backend /api/cities (search 2+ chars)
+export const locationHierarchy: LocationGroup[] = [];
 
 interface LocationSelectorProps {
     selectedLocations: LocationItem[];
     onChange: (locations: LocationItem[]) => void;
     placeholder?: string;
     className?: string;
+    /** If true, summary shows city names instead of radius text like "ירושלים +2 ק\"מ" */
+    summarizeAsCityNames?: boolean;
 }
 
-const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, onChange, placeholder = 'מיקום', className = '' }) => {
+const LocationSelector: React.FC<LocationSelectorProps> = ({
+    selectedLocations,
+    onChange,
+    placeholder = 'מיקום',
+    className = '',
+    summarizeAsCityNames = false,
+}) => {
     const [isOpen, setIsOpen] = useState(false);
     const [isSummaryOpen, setIsSummaryOpen] = useState(false);
     const [activeTab, setActiveTab] = useState<'regions' | 'radius'>('regions');
-    
+    const [isDropdownExpanded, setIsDropdownExpanded] = useState(false);
+
     // Search / Filter
     const [searchTerm, setSearchTerm] = useState('');
     const [expandedRegions, setExpandedRegions] = useState<Set<string>>(new Set());
-    
-    // Radius Logic
+
+    // Backend cities API results (אזורים וערים) – fetched when search >= 2 chars
+    const [cityResults, setCityResults] = useState<LocationGroup[]>([]);
+    const [citiesLoading, setCitiesLoading] = useState(false);
+
+    // Radius Logic – city input options from backend /api/cities
     const [radiusCity, setRadiusCity] = useState('');
     const [radiusDist, setRadiusDist] = useState(20);
-    
+    const [radiusCityOptions, setRadiusCityOptions] = useState<string[]>([]);
+    const [radiusCityOptionsLoading, setRadiusCityOptionsLoading] = useState(false);
+    // Radius Logic – cities inside chosen radius (for chips selection)
+    const [radiusAreaCities, setRadiusAreaCities] = useState<string[]>([]);
+    const [selectedRadiusAreaCities, setSelectedRadiusAreaCities] = useState<string[]>([]);
+    const [radiusAreaLoading, setRadiusAreaLoading] = useState(false);
+    const [showAllRadiusArea, setShowAllRadiusArea] = useState(false);
+    const [radiusCitiesFilter, setRadiusCitiesFilter] = useState('');
+
     const containerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -116,35 +116,181 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, 
     };
 
     const applyRadius = () => {
-        if (radiusCity) {
-            onChange([{ type: 'radius', value: radiusCity, radius: radiusDist }]);
-            setIsOpen(false);
-        }
+        if (!radiusCity) return;
+
+        // Keep existing non-radius selections
+        const base = selectedLocations.filter(l => l.type !== 'radius');
+        const existingCityValues = new Set(
+            base.filter(l => l.type === 'city').map(l => l.value),
+        );
+
+        // Add all cities that are currently selected in the radius chips
+        const cityItems: LocationItem[] = selectedRadiusAreaCities.length
+            ? selectedRadiusAreaCities
+                  .filter((name) => !existingCityValues.has(name))
+                  .map(
+                      (name) =>
+                          ({
+                              type: 'city',
+                              value: name,
+                          } as LocationItem),
+                  )
+            : [];
+
+        const radiusItem: LocationItem = {
+            type: 'radius',
+            value: radiusCity,
+            radius: radiusDist,
+        };
+
+        onChange([...base, radiusItem, ...cityItems]);
+        setIsOpen(false);
     };
 
-    const filteredHierarchy = useMemo(() => {
-        if (!searchTerm) return locationHierarchy;
-        return locationHierarchy.map(group => {
-            const matchesRegion = group.region.includes(searchTerm);
-            const matchingCities = group.cities.filter(c => c.includes(searchTerm));
-            
-            if (matchesRegion) return group; 
-            if (matchingCities.length > 0) return { ...group, cities: matchingCities };
-            return null;
-        }).filter(Boolean) as typeof locationHierarchy;
-    }, [searchTerm]);
-    
+    // Fetch from backend /api/cities when user types 2+ characters
     useEffect(() => {
-        if (searchTerm) {
-            setExpandedRegions(new Set(filteredHierarchy.map(g => g.region)));
+        const q = searchTerm.trim();
+        if (q.length < 2) { 
+            setCityResults([]);
+            return;
         }
-    }, [searchTerm, filteredHierarchy]);
+        let cancelled = false;
+        setCitiesLoading(true);
+        const url = `${API_BASE}/api/cities?search=${encodeURIComponent(q)}`;
+        fetch(url)
+            .then((res) => res.json())
+            .then((data) => {
+                if (cancelled || !Array.isArray(data)) {
+                    return;
+                }
+                const byRegion = new Map<string, Set<string>>();
+                const records = data as Array<{ cityName?: string; city?: string; column4?: string }>;
+                for (const row of records) {
+                    const name = (row.cityName || row.city || '').trim();
+                    if (!name) continue;
+                    const region = (row.column4 || 'ערים').trim() || 'ערים';
+                    if (!byRegion.has(region)) byRegion.set(region, new Set());
+                    byRegion.get(region)!.add(name);
+                }
+                const groups: LocationGroup[] = Array.from(byRegion.entries()).map(([region, cities]) => ({
+                    region,
+                    cities: Array.from(cities).sort((a, b) => a.localeCompare(b)),
+                }));
+                setCityResults(groups);
+            })
+            .catch(() => {
+                if (!cancelled) setCityResults([]);
+            })
+            .finally(() => {
+                if (!cancelled) setCitiesLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [searchTerm]);
+
+    // Radius tab: fetch city options from backend for "עיר מרכזית" datalist (search 2+ chars)
+    useEffect(() => {
+        const q = radiusCity.trim();
+        if (q.length < 2) {
+            setRadiusCityOptions([]);
+            return;
+        }
+        let cancelled = false;
+        const t = setTimeout(() => {
+            setRadiusCityOptionsLoading(true);
+            const url = `${API_BASE}/api/cities?search=${encodeURIComponent(q)}`;
+            fetch(url)
+                .then((res) => res.json())
+                .then((data) => {
+                    if (cancelled || !Array.isArray(data)) return;
+                    const names = new Set<string>();
+                    const records = data as Array<{ cityName?: string; city?: string }>;
+                    for (const row of records) {
+                        const name = (row.cityName || row.city || '').trim();
+                        if (name) names.add(name);
+                    }
+                    setRadiusCityOptions(Array.from(names).sort((a, b) => a.localeCompare(b)));
+                })
+                .catch(() => {
+                    if (!cancelled) setRadiusCityOptions([]);
+                })
+                .finally(() => {
+                    if (!cancelled) setRadiusCityOptionsLoading(false);
+                });
+        }, 300);
+        return () => {
+            cancelled = true;
+            clearTimeout(t);
+        };
+    }, [radiusCity]);
+
+    const filteredHierarchy = useMemo(() => cityResults, [cityResults]);
+
+    // Radius tab: fetch list of cities inside radius from backend when city or radius changes
+    useEffect(() => {
+        const center = radiusCity.trim();
+        if (center.length < 2) {
+            setRadiusAreaCities([]);
+            setSelectedRadiusAreaCities([]);
+            return;
+        }
+        let cancelled = false;
+        const t = setTimeout(() => {
+            setRadiusAreaLoading(true);
+            const url = `${API_BASE}/api/cities/radius?city=${encodeURIComponent(center)}&radius=${radiusDist}`;
+            fetch(url)
+                .then((res) => res.json())
+                .then((data) => {
+                    if (cancelled || !Array.isArray(data)) return;
+                    const names = new Set<string>();
+                    const records = data as Array<{ cityName?: string; city?: string }>;
+                    for (const row of records) {
+                        const name = (row.cityName || row.city || '').trim();
+                        if (name) names.add(name);
+                    }
+                    const list = Array.from(names).sort((a, b) => a.localeCompare(b));
+                    setRadiusAreaCities(list);
+                    setSelectedRadiusAreaCities(list);
+                    setShowAllRadiusArea(false);
+                })
+                .catch(() => {
+                    if (!cancelled) {
+                        setRadiusAreaCities([]);
+                        setSelectedRadiusAreaCities([]);
+                    }
+                })
+                .finally(() => {
+                    if (!cancelled) setRadiusAreaLoading(false);
+                });
+        }, 300);
+        return () => {
+            cancelled = true;
+            clearTimeout(t);
+        };
+    }, [radiusCity, radiusDist]);
+
+    useEffect(() => {
+        if (filteredHierarchy.length > 0) {
+            setExpandedRegions(new Set(filteredHierarchy.map((g) => g.region)));
+        }
+    }, [filteredHierarchy]);
 
     // Display Logic
     const radiusSelection = selectedLocations.find(l => l.type === 'radius');
+    const selectedCityNames = useMemo(
+        () => selectedLocations.filter((l) => l.type === 'city').map((l) => l.value),
+        [selectedLocations],
+    );
     let displayValue = placeholder;
     
-    if (radiusSelection) {
+    if (summarizeAsCityNames) {
+        if (radiusSelection) {
+            displayValue = `${radiusSelection.value} + ${radiusSelection.radius} ק"מ`;
+        } else if (selectedCityNames.length > 0) {
+            displayValue = selectedCityNames.join(', ');
+        }
+    } else if (radiusSelection) {
         displayValue = `${radiusSelection.value} +${radiusSelection.radius} ק"מ`;
     } else if (selectedLocations.length === 1) {
         displayValue = selectedLocations[0].value;
@@ -192,8 +338,28 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, 
 
             {/* Selection Dropdown */}
             {isOpen && (
-                <div className="absolute top-full right-0 mt-1 bg-white border border-border-default rounded-xl shadow-2xl z-50 w-[300px] md:w-[350px] flex flex-col max-h-[450px] animate-fade-in overflow-hidden">
-                    <div className="flex border-b border-border-default bg-bg-subtle/30">
+                <div
+                    className={`absolute top-full right-0 mt-1 bg-white border border-border-default rounded-xl shadow-2xl z-50 flex flex-col animate-fade-in overflow-hidden transition-all duration-300 ease-in-out ${
+                        isDropdownExpanded ? 'w-[640px] md:w-[700px] max-h-[900px]' : 'w-[300px] md:w-[350px] max-h-[450px]'
+                    }`}
+                >
+                    <div className="flex border-b border-border-default bg-bg-subtle/30 relative">
+                        <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); setIsDropdownExpanded((prev) => !prev); }}
+                            className="absolute left-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg hover:bg-bg-hover text-text-subtle hover:text-primary-600 transition-colors"
+                            title={isDropdownExpanded ? 'כווץ תצוגה' : 'הרחב תצוגה'}
+                        >
+                            {isDropdownExpanded ? (
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V4.5M9 9H4.5M9 9L3.75 3.75M9 15v4.5M9 15H4.5M9 15l-5.25 5.25M15 9h4.5M15 9V4.5M15 9l5.25-5.25M15 15h4.5M15 15v4.5M15 15l5.25 5.25" />
+                                </svg>
+                            ) : (
+                                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 3.75v4.5m0-4.5h4.5m-4.5 0L9 9M3.75 20.25v-4.5m0 4.5h4.5m-4.5 0L9 15M20.25 3.75h-4.5m4.5 0v4.5m0-4.5L15 9m5.25 11.25h-4.5m4.5 0v-4.5m0 4.5L15 15" />
+                                </svg>
+                            )}
+                        </button>
                         <button 
                             onClick={() => setActiveTab('regions')} 
                             className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'regions' ? 'text-primary-600 border-b-2 border-primary-600 bg-white' : 'text-text-muted hover:text-text-default'}`}
@@ -224,7 +390,13 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, 
                                     </div>
                                 </div>
                                 <div className="p-2 space-y-1">
-                                    {filteredHierarchy.map(group => {
+                                    {searchTerm.trim().length < 2 && (
+                                        <div className="p-4 text-center text-text-muted text-sm">הקלד לפחות 2 תווים לחיפוש ערים ואזורים</div>
+                                    )}
+                                    {searchTerm.trim().length >= 2 && citiesLoading && (
+                                        <div className="p-4 text-center text-text-muted text-sm">טוען...</div>
+                                    )}
+                                    {searchTerm.trim().length >= 2 && !citiesLoading && filteredHierarchy.length > 0 && filteredHierarchy.map(group => {
                                         const isFullySelected = isRegionFullySelected(group.region, group.cities);
                                         const isPartiallySelected = isRegionPartiallySelected(group.region, group.cities);
                                         const isExpanded = expandedRegions.has(group.region);
@@ -269,7 +441,9 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, 
                                             </div>
                                         );
                                     })}
-                                    {filteredHierarchy.length === 0 && <div className="p-4 text-center text-text-muted text-sm">לא נמצאו תוצאות</div>}
+                                    {searchTerm.trim().length >= 2 && !citiesLoading && filteredHierarchy.length === 0 && (
+                                        <div className="p-4 text-center text-text-muted text-sm">לא נמצאו תוצאות</div>
+                                    )}
                                 </div>
                             </>
                         )}
@@ -278,31 +452,70 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, 
                             <div className="p-4 space-y-6">
                                 <div>
                                     <label className="block text-sm font-bold text-text-default mb-2">1. בחר עיר מרכזית</label>
-                                    <div className="relative">
-                                        <input 
-                                            list="cities-datalist"
-                                            type="text"
-                                            value={radiusCity}
-                                            onChange={(e) => setRadiusCity(e.target.value)}
-                                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 transition-all"
-                                            placeholder="לדוגמה: תל אביב"
-                                        />
-                                        <datalist id="cities-datalist">
-                                            {allCitiesFlat.map(c => <option key={c} value={c} />)}
-                                        </datalist>
+                                    <div className="p-3 sticky top-0 bg-white z-10 border-b border-border-subtle">
+                                        <div className="relative">
+                                            <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+                                            <input
+                                                type="text"
+                                                value={radiusCity}
+                                                onChange={(e) => setRadiusCity(e.target.value)}
+                                                placeholder="חפש עיר או אזור..."
+                                                className="w-full bg-bg-subtle/50 border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="p-2 space-y-1">
+                                        {radiusCity.trim().length < 2 && (
+                                            <div className="p-4 text-center text-text-muted text-sm">הקלד לפחות 2 תווים לחיפוש ערים ואזורים</div>
+                                        )}
+                                        {radiusCity.trim().length >= 2 && radiusCityOptionsLoading && (
+                                            <div className="p-4 text-center text-text-muted text-sm">טוען...</div>
+                                        )}
+                                        {radiusCity.trim().length >= 2 && !radiusCityOptionsLoading && radiusCityOptions.length > 0 && radiusCityOptions.map((c) => (
+                                            <div
+                                                key={c}
+                                                className="flex items-center justify-between p-2 rounded-lg hover:bg-bg-hover cursor-pointer transition-colors"
+                                                onClick={() => setRadiusCity(c)}
+                                            >
+                                                <span className="text-sm text-text-default">{c}</span>
+                                            </div>
+                                        ))}
+                                        {radiusCity.trim().length >= 2 && !radiusCityOptionsLoading && radiusCityOptions.length === 0 && (
+                                            <div className="p-4 text-center text-text-muted text-sm">לא נמצאו תוצאות</div>
+                                        )}
                                     </div>
                                 </div>
 
                                 <div>
                                     <div className="flex justify-between items-center mb-2">
                                         <label className="text-sm font-bold text-text-default">2. טווח (רדיוס)</label>
-                                        <span className="text-sm font-bold text-primary-600 bg-primary-50 px-2 py-0.5 rounded">{radiusDist} ק"מ</span>
+                                        <div className="flex items-center gap-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setRadiusDist((prev) => Math.max(1, prev - 1))}
+                                                className="w-7 h-7 flex items-center justify-center rounded-full border border-border-default text-sm font-bold text-text-default hover:bg-bg-subtle disabled:opacity-40 disabled:cursor-not-allowed"
+                                                disabled={radiusDist <= 1}
+                                            >
+                                                -
+                                            </button>
+                                            <span className="text-sm font-bold text-primary-600 bg-primary-50 px-2 py-0.5 rounded">
+                                                {radiusDist} ק"מ
+                                            </span>
+                                            <button
+                                                type="button"
+                                                onClick={() => setRadiusDist((prev) => Math.min(100, prev + 1))}
+                                                className="w-7 h-7 flex items-center justify-center rounded-full border border-border-default text-sm font-bold text-text-default hover:bg-bg-subtle disabled:opacity-40 disabled:cursor-not-allowed"
+                                                disabled={radiusDist >= 100}
+                                            >
+                                                +
+                                            </button>
+                                        </div>
                                     </div>
                                     <input 
                                         type="range" 
-                                        min="5" 
+                                        min="1" 
                                         max="100" 
-                                        step="5" 
+                                        step="1" 
                                         value={radiusDist} 
                                         onChange={(e) => setRadiusDist(Number(e.target.value))}
                                         className="w-full accent-primary-600 h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer"
@@ -311,6 +524,76 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({ selectedLocations, 
                                         <span>5 ק"מ</span>
                                         <span>100 ק"מ</span>
                                     </div>
+
+                                    {/* Free filter for radius cities */}
+                                    {!radiusAreaLoading && selectedRadiusAreaCities.length > 0 && (
+                                        <div className="mt-3 max-w-md">
+                                            <div className="relative">
+                                                <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2.5 top-1/2 -translate-y-1/2" />
+                                                <input
+                                                    type="text"
+                                                    placeholder="סנן רשימה..."
+                                                    value={radiusCitiesFilter}
+                                                    onChange={(e) => setRadiusCitiesFilter(e.target.value)}
+                                                    className="w-full bg-bg-subtle/30 border border-border-default rounded-md py-1.5 pl-2 pr-8 text-xs focus:ring-1 focus:ring-primary-500 outline-none"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {/* Cities inside radius – selectable chips */}
+                                    {radiusAreaLoading && radiusCity.trim().length >= 2 && (
+                                        <div className="mt-3 text-xs text-text-muted">טוען יישובים בטווח...</div>
+                                    )}
+                                    {!radiusAreaLoading && selectedRadiusAreaCities.length > 0 && (
+                                        <div className="mr-6 pt-1 pb-2">
+                                            <div className="flex flex-wrap gap-1.5">
+                                                {(
+                                                    radiusCitiesFilter.trim()
+                                                        ? selectedRadiusAreaCities.filter((name) =>
+                                                              name.toLowerCase().includes(radiusCitiesFilter.toLowerCase()),
+                                                          )
+                                                        : showAllRadiusArea
+                                                        ? selectedRadiusAreaCities
+                                                        : selectedRadiusAreaCities.slice(0, 10)
+                                                ).map((name) => (
+                                                    <span
+                                                        key={name}
+                                                        className="inline-flex items-center gap-1 bg-white border border-border-default px-2 py-1 rounded-md text-[11px] text-text-default shadow-sm group"
+                                                    >
+                                                        {name}
+                                                        <button
+                                                            type="button"
+                                                            className="text-text-subtle hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                            title="הסר מהרשימה"
+                                                            onClick={() =>
+                                                                setSelectedRadiusAreaCities((prev) =>
+                                                                    prev.filter((n) => n !== name),
+                                                                )
+                                                            }
+                                                        >
+                                                            <XMarkIcon className="w-3 h-3" />
+                                                        </button>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            {radiusCitiesFilter.trim().length === 0 &&
+                                                selectedRadiusAreaCities.length > 10 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setShowAllRadiusArea((prev) => !prev)}
+                                                    className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                                >
+                                                    {showAllRadiusArea
+                                                        ? 'הצג פחות'
+                                                        : `+ עוד ${selectedRadiusAreaCities.length - 10} יישובים`}
+                                                    <ChevronDownIcon
+                                                        className={`w-3 h-3 ${showAllRadiusArea ? 'rotate-180' : ''}`}
+                                                    />
+                                                </button>
+                                            )}
+                                        </div>
+                                    )}
                                 </div>
 
                                 <button 

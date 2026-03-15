@@ -1,5 +1,16 @@
 const jobService = require('../services/jobService');
 const jobCandidateService = require('../services/jobCandidateService');
+const Job = require('../models/Job');
+
+const analyzeDescription = async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    const result = await jobService.analyzeRawDescription(text);
+    res.json({ data: result });
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'AI analysis failed' });
+  }
+};
 
 const list = async (_req, res) => {
   const jobs = await jobService.list();
@@ -17,7 +28,22 @@ const get = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const job = await jobService.create(req.body);
+    let postingCode;
+    let exists = true;
+    const maxAttempts = 50;
+    let attempts = 0;
+    while (exists && attempts < maxAttempts) {
+      postingCode = String(Math.floor(1 + Math.random() * 999999));
+      const existing = await Job.findOne({ where: { postingCode } });
+      exists = !!existing;
+      attempts++;
+    }
+    if (exists) {
+      return res.status(500).json({ message: 'Could not generate unique posting code' });
+    }
+    const uniqueEmail = `humand+${postingCode}@app.hiro.co.il`;
+    const payload = { ...req.body, postingCode, uniqueEmail };
+    const job = await jobService.create(payload);
     res.status(201).json(job);
   } catch (err) {
     res.status(400).json({ message: err.message || 'Create failed' });
@@ -52,5 +78,5 @@ const getCandidates = async (req, res) => {
   }
 };
 
-module.exports = { list, get, create, update, remove, getCandidates };
+module.exports = { list, get, create, update, remove, getCandidates, analyzeDescription };
 

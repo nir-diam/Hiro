@@ -35,6 +35,8 @@ const connectDb = async () => {
   require('../models/OrganizationHistory');
   require('../models/BusinessLogicRule');
   require('../models/EmailUpload');
+  require('../models/City');
+  require('../models/CandidateOrganization');
 
   await sequelize.sync();
   console.log('PostgreSQL connected & models synced');

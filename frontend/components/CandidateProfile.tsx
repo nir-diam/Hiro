@@ -641,13 +641,36 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
     const softSkillEntries = ensureArray(candidateData.skills?.soft)
       .map((softSkill) => {
-        const label = (typeof softSkill === 'string' ? softSkill : '').trim();
+        const label = (
+          typeof softSkill === 'string'
+            ? softSkill
+            : (softSkill as any)?.name ?? (softSkill as any)?.label ?? (softSkill as any)?.displayNameHe ?? ''
+        )
+          .toString()
+          .trim();
         if (!label) return null;
+        let detail = tagDetailLookup.get(label) as CandidateTagDetail | undefined;
+        if (!detail && typeof softSkill === 'object' && softSkill !== null) {
+          const o = softSkill as any;
+          detail = {
+            tagKey: label,
+            displayNameHe: label,
+            displayNameEn: o.displayNameEn,
+            rawType: 'soft_skill',
+            context: o.context,
+            isCurrent: o.isCurrent ?? o.is_current,
+            isInSummary: o.isInSummary ?? o.is_in_summary,
+            confidenceScore: typeof (o.confidenceScore ?? o.confidence_score) === 'number' ? (o.confidenceScore ?? o.confidence_score) : undefined,
+            finalScore: typeof (o.finalScore ?? o.final_score) === 'number' ? (o.finalScore ?? o.final_score) : undefined,
+          };
+        }
+        const customTooltip = detail ? buildTagTooltipText(label, detail) : undefined;
         return {
           label,
           type: 'soft' as SmartTagType,
-          isVerified: false,
+          isVerified: Boolean(detail?.isCurrent),
           isAiSuggested: false,
+          customTooltip,
         } as SmartTagData;
       })
       .filter(Boolean) as SmartTagData[];
@@ -663,7 +686,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     });
 
     return base;
-  }, [candidateData.tags, tagDetailLookup, getTagTooltip]);
+  }, [candidateData.tags, candidateData.skills, candidateData.languages, tagDetailLookup, getTagTooltip]);
 
   const handleRowTagSelectorOpen = (rowId: string) => {
     const category = ROW_CATEGORY_MAP[rowId] || 'role';

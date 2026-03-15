@@ -3,6 +3,8 @@ const router = express.Router();
 const candidateTagController = require('../controllers/candidateTagController');
 
 router.get('/', candidateTagController.listForCandidate);
+// Search candidate-tags by tag name ?name=xxxx
+router.get('/by-name', candidateTagController.listByTagName);
 router.get('/:candidateId', candidateTagController.listForCandidate);
 router.post('/', candidateTagController.create);
 router.post('/bulk-create', candidateTagController.bulkCreate);

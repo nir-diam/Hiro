@@ -14,6 +14,120 @@ const fireAndForget = (promise) => {
   });
 };
 
+const isConnectionError = (err) =>
+  err && (err.name === 'SequelizeConnectionError' || err.name === 'SequelizeConnectionAcquireTimeoutError' || (err.original && err.original.code === 'ECONNRESET'));
+
+const withConnectionRetry = async (fn, maxAttempts = 2) => {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts && isConnectionError(err)) {
+        await new Promise((r) => setTimeout(r, 300));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+};
+
+/**
+ * When a tag is updated from draft to active: find pending tags whose name matches
+ * the activated tag's main name (tagKey, displayNameHe, displayNameEn) or any alias/synonym;
+ * migrate their candidate_tags to the activated tag, then delete the pending tags.
+ */
+const migratePendingTagsToActivated = async (activatedTag) => {
+  const primaryNames = [
+    activatedTag.tagKey,
+    activatedTag.displayNameHe,
+    activatedTag.displayNameEn,
+  ].map((v) => (v || '').toString().trim()).filter(Boolean);
+
+  const aliases = Array.isArray(activatedTag.aliases) ? activatedTag.aliases : [];
+  const synonyms = Array.isArray(activatedTag.synonyms) ? activatedTag.synonyms : [];
+  const aliasNames = aliases.map((a) => (a || '').toString().trim()).filter(Boolean);
+  const synonymPhrases = (synonyms || []).map((s) => (typeof s === 'string' ? s : (s && s.phrase) || '').toString().trim()).filter(Boolean);
+
+  const namesToMatch = [...new Set([...primaryNames, ...aliasNames, ...synonymPhrases])];
+  if (namesToMatch.length === 0) return;
+
+  const conditions = namesToMatch.flatMap((name) => {
+    const lower = name.toLowerCase();
+    return [
+      sequelize.where(sequelize.fn('LOWER', sequelize.col('tag_key')), lower),
+      sequelize.where(sequelize.fn('LOWER', sequelize.col('display_name_he')), lower),
+      sequelize.where(sequelize.fn('LOWER', sequelize.col('display_name_en')), lower),
+    ];
+  });
+
+  const pendingTags = await withConnectionRetry(() =>
+    Tag.findAll({
+      where: {
+        status: 'pending',
+        id: { [Op.ne]: activatedTag.id },
+        [Op.or]: conditions,
+      },
+    })
+  );
+
+  for (const pendingTag of pendingTags) {
+    await withConnectionRetry(async () => {
+      const transaction = await sequelize.transaction();
+      try {
+        const candidateTags = await CandidateTag.findAll({
+          where: { tag_id: pendingTag.id },
+          transaction,
+        });
+
+        // 1. Create new CandidateTag linking each candidate to the activated tag (findOrCreate to avoid duplicate). Use activatedTag for tag-derived fields; use ct values when present for the rest.
+        for (const ct of candidateTags) {
+          const hasNumber = (v) => typeof v === 'number' && !Number.isNaN(v);
+          const hasBoolean = (v) => typeof v === 'boolean';
+          await CandidateTag.findOrCreate({
+            where: { candidate_id: ct.candidate_id, tag_id: activatedTag.id },
+            defaults: {
+              candidate_id: ct.candidate_id,
+              tag_id: activatedTag.id,
+              raw_type: activatedTag.type ?? ct.raw_type ?? null,
+              context: activatedTag.context ?? ct.context ?? null,
+              is_current: hasBoolean(ct.is_current) ? ct.is_current : true,
+              is_in_summary: hasBoolean(ct.is_in_summary) ? ct.is_in_summary : true,
+              confidence_score: hasNumber(ct.confidence_score) ? ct.confidence_score : null,
+              calculated_weight: hasNumber(ct.calculated_weight) ? ct.calculated_weight : null,
+              final_score: hasNumber(ct.final_score) ? ct.final_score : null,
+              is_active: true,
+            },
+            transaction,
+          });
+        }
+
+        // 2. Remove old CandidateTag rows that pointed to the pending tag
+        await CandidateTag.destroy({
+          where: { tag_id: pendingTag.id },
+          transaction,
+        });
+
+        // 3. Remove tag_histories that reference the pending tag (FK constraint)
+        await TagHistory.destroy({
+          where: { tag_id: pendingTag.id },
+          transaction,
+        });
+
+        // 4. Delete the pending tag
+        await pendingTag.destroy({ transaction });
+        await transaction.commit();
+      } catch (err) {
+        await transaction.rollback();
+        console.error('[tagService.migratePendingTagsToActivated]', pendingTag.id, err?.message || err);
+        throw err;
+      }
+    });
+  }
+};
+
 const cleanupPendingCorrections = async (values = [], options = {}) => {
   const terms = Array.from(
     new Set(
@@ -284,18 +398,29 @@ const update = async (id, payload, options = {}) => {
   if (payload.synonyms) {
     payload.synonyms = normalizeSynonyms(payload.synonyms);
   }
-  await cleanupPendingCorrections(
-    [
-      payload.tagKey,
-      payload.displayNameHe,
-      payload.displayNameEn,
-      ...(payload.synonyms || []).map((syn) => syn.phrase),
-      ...(payload.aliases || tag.aliases || []),
-    ],
-    { excludeIds: [id] },
-  );
+
+
+  const wasDraft = (beforeState.status || '').toLowerCase() === 'draft';
+  const becomingActive = (payload.status || '').toLowerCase() === 'active';
+  const wasActive = (beforeState.status || '').toLowerCase() === 'active';
+  const becomingDraft = (payload.status || '').toLowerCase() === 'draft';
 
   await tag.update(payload);
+
+  if (wasDraft && becomingActive) {
+    await migratePendingTagsToActivated(tag);
+    await CandidateTag.update({ is_active: true }, { where: { tag_id: tag.id } });
+  }
+  if (wasActive && becomingDraft) {
+    await CandidateTag.update({ is_active: false }, { where: { tag_id: tag.id } });
+  }
+
+
+
+ 
+
+ 
+
   fireAndForget(recordTagHistory({
     tagId: tag.id,
     action: 'update',
