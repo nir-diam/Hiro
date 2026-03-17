@@ -2128,6 +2128,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         const created = await persistJob();
         if (created) {
             alert('המשרה נוצרה בהצלחה');
+            // After first save of a new job, move to edit mode for this job (PUT on next saves)
+            navigate(`/jobs/edit/${created.id}`);
         }
     };
 

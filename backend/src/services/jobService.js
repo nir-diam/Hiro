@@ -40,6 +40,9 @@ const analyzeRawDescription = async (rawText) => {
     throw err;
   }
 
+  // eslint-disable-next-line no-console
+  console.log('[jobService.analyzeRawDescription] incoming text length', String(rawText).length);
+
   const apiKey =
     process.env.GIMINI_KEY ||
     process.env.GEMINI_KEY ||
@@ -55,12 +58,18 @@ const analyzeRawDescription = async (rawText) => {
   }
   const systemPrompt = promptRow.template.trim();
 
+  // eslint-disable-next-line no-console
+  console.log('[jobService.analyzeRawDescription] calling sendChat with prompt length', systemPrompt.length);
+
   const rawResponse = await sendChat({
     apiKey,
     systemPrompt,
     history: [],
     message: String(rawText),
   });
+
+  // eslint-disable-next-line no-console
+  console.log('[jobService.analyzeRawDescription] received raw AI response length', String(rawResponse || '').length);
 
   let parsed;
   try {

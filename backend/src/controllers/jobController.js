@@ -6,49 +6,29 @@ const Tag = require('../models/Tag');
 const analyzeDescription = async (req, res) => {
   try {
     const { text } = req.body || {};
+    // eslint-disable-next-line no-console
+    console.log('[jobController.analyzeDescription] incoming request', {
+      method: req.method,
+      url: req.originalUrl || req.url,
+      host: req.headers.host,
+      textLength: text ? String(text).length : 0,
+    });
+
     const result = await jobService.analyzeRawDescription(text);
 
-    // If AI returned languages, try to map them to existing language tags
-    if (Array.isArray(result.languages) && result.languages.length > 0) {
-      const normalized = await Promise.all(
-        result.languages.map(async (lang) => {
-          const rawName = (lang.language || lang.name || '').toString().trim();
-          if (!rawName) return null;
+    
 
-          const tag = await Tag.findOne({
-            where: {
-              type: 'language',
-              [require('sequelize').Op.or]: [
-                { displayNameHe: rawName },
-                { displayNameEn: rawName },
-                { tagKey: rawName },
-              ],
-            },
-          });
-
-          if (!tag) return null;
-
-          const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
-          return {
-            id: plain.id,
-            name: rawName,
-            key: plain.tagKey || rawName,
-            mode: 'mandatory',
-            source: 'manual',
-            tagType: 'language',
-          };
-        }),
-      );
-
-      const languageSkills = normalized.filter(Boolean);
-      if (languageSkills.length) {
-        const existingSkills = Array.isArray(result.skills) ? result.skills : [];
-        result.skills = [...existingSkills, ...languageSkills];
-      }
-    }
+    // eslint-disable-next-line no-console
+    console.log('[jobController.analyzeDescription] success, returning result keys', Object.keys(result || {}));
 
     res.json({ data: result });
   } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[jobController.analyzeDescription] error', {
+      message: err?.message,
+      status: err?.status,
+      stack: err?.stack,
+    });
     res.status(err.status || 500).json({ message: err.message || 'AI analysis failed' });
   }
 };
@@ -84,6 +64,54 @@ const create = async (req, res) => {
     }
     const uniqueEmail = `humand+${postingCode}@app.hiro.co.il`;
     const payload = { ...req.body, postingCode, uniqueEmail };
+
+    // Normalize languages into skills (language-tag skills) before skills normalization
+    if (Array.isArray(payload.languages) && payload.languages.length > 0) {
+      const existingSkills = Array.isArray(payload.skills) ? payload.skills : [];
+      const existingKeys = new Set(
+        existingSkills
+          .map((s) => (s && typeof s.key === 'string' ? s.key.trim() : null))
+          .filter(Boolean),
+      );
+
+      const languageSkills = await Promise.all(
+        payload.languages.map(async (lang) => {
+          const rawName = (lang.language || lang.name || '').toString().trim();
+          if (!rawName) return null;
+
+          const tag = await Tag.findOne({
+            where: {
+              type: 'language',
+              [require('sequelize').Op.or]: [
+                { displayNameHe: rawName },
+                { displayNameEn: rawName },
+                { tagKey: rawName },
+              ],
+            },
+          });
+
+          if (!tag) return null;
+
+          const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
+          const key = (plain.tagKey || rawName).toString().trim();
+          if (existingKeys.has(key)) return null;
+
+          return {
+            id: plain.id,
+            name: rawName,
+            key,
+            mode: 'mandatory',
+            source: 'manual',
+            tagType: 'language',
+          };
+        }),
+      );
+
+      const toAdd = languageSkills.filter(Boolean);
+      if (toAdd.length) {
+        payload.skills = [...existingSkills, ...toAdd];
+      }
+    }
 
     // Normalize skills against Tag table: ensure each skill has status from Tag,
     // and create missing tags with pending status.
@@ -139,7 +167,57 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const job = await jobService.update(req.params.id, req.body);
+    const payload = { ...req.body };
+
+    // Normalize languages into skills on update as well
+    if (Array.isArray(payload.languages) && payload.languages.length > 0) {
+      const existingSkills = Array.isArray(payload.skills) ? payload.skills : [];
+      const existingKeys = new Set(
+        existingSkills
+          .map((s) => (s && typeof s.key === 'string' ? s.key.trim() : null))
+          .filter(Boolean),
+      );
+
+      const languageSkills = await Promise.all(
+        payload.languages.map(async (lang) => {
+          const rawName = (lang.language || lang.name || '').toString().trim();
+          if (!rawName) return null;
+
+          const tag = await Tag.findOne({
+            where: {
+              type: 'language',
+              [require('sequelize').Op.or]: [
+                { displayNameHe: rawName },
+                { displayNameEn: rawName },
+                { tagKey: rawName },
+              ],
+            },
+          });
+
+          if (!tag) return null;
+
+          const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
+          const key = (plain.tagKey || rawName).toString().trim();
+          if (existingKeys.has(key)) return null;
+
+          return {
+            id: plain.id,
+            name: rawName,
+            key,
+            mode: 'mandatory',
+            source: 'manual',
+            tagType: 'language',
+          };
+        }),
+      );
+
+      const toAdd = languageSkills.filter(Boolean);
+      if (toAdd.length) {
+        payload.skills = [...existingSkills, ...toAdd];
+      }
+    }
+
+    const job = await jobService.update(req.params.id, payload);
     res.json(job);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
