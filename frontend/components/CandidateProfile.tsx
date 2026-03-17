@@ -1212,7 +1212,48 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                  smartTags={candidateData.industryAnalysis?.smartTags}
               />
 
-              
+              {/* --- ACTION BUTTONS (same as tmp/CandidateProfile) --- */}
+              <div className="mt-6 flex flex-col gap-4">
+                  <div className="flex items-center justify-between gap-3">
+                        {candidateData.phone && (
+                        <a href={`tel:${candidateData.phone}`} title={candidateData.phone} className="w-10 h-10 flex items-center justify-center bg-white border border-border-default text-text-muted rounded-xl hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm">
+                            <PhoneIcon className="w-5 h-5" />
+                        </a>
+                        )}
+                        <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}><EnvelopeIcon className="w-5 h-5" /></SocialButton>
+                        <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}><WhatsappIcon className="w-5 h-5" /></SocialButton>
+                        <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}><ChatBubbleBottomCenterTextIcon className="w-5 h-5" /></SocialButton>
+                        <div className="h-6 w-px bg-border-default"></div>
+                        <a href={candidateData.linkedInUrl || candidateData.linkedIn || '#'} target="_blank" rel="noopener noreferrer" title="LinkedIn Profile" className="w-10 h-10 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-xl hover:bg-[#0077b5]/20 transition-all">
+                            <LinkedInIcon className="w-5 h-5" />
+                        </a>
+                  </div>
+                  {!hideActions && (
+                      <div className="flex flex-col gap-3">
+                          <DevAnnotation
+                              title="AI Matching"
+                              description="Calculates relevance score based on candidate skills vs job requirements."
+                              logic={["Vectors Embedding for skills", "Industry overlap analysis"]}
+                              position="top-left"
+                          >
+                              <button
+                                  onClick={(e) => { e.stopPropagation(); onMatchJobsClick(); }}
+                                  className="w-full flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition-all shadow-lg shadow-primary-500/20"
+                              >
+                                  <MatchIcon className="w-5 h-5" />
+                                  <span>{t('profile.matches')} ({jobMatchesCount})</span>
+                              </button>
+                          </DevAnnotation>
+                          <button
+                              onClick={(e) => { e.stopPropagation(); onScreenCandidateClick(); }}
+                              className="w-full flex items-center justify-center gap-2 bg-white border border-border-default text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-all shadow-sm"
+                          >
+                              <ClipboardDocumentListIcon className="w-5 h-5 text-text-muted" />
+                              <span>{t('profile.screen_candidate')}</span>
+                          </button>
+                      </div>
+                  )}
+              </div>
           </div>
         </div>
       </div>

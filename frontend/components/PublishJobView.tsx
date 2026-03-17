@@ -6,11 +6,12 @@ import {
     LinkIcon, PencilIcon, SparklesIcon, ArrowLeftIcon, PlusIcon, TrashIcon, XMarkIcon, 
     ClipboardDocumentIcon, CheckIcon, ChevronDownIcon, ChevronUpIcon, PaperAirplaneIcon,
     ShareIcon, WhatsappIcon, EnvelopeIcon, ChartBarIcon, EyeIcon, UserGroupIcon,
-    TableCellsIcon, FunnelIcon
+    TableCellsIcon, FunnelIcon, ClockIcon
 } from './Icons';
 import AccordionSection from './AccordionSection';
 import { AvatarIcon } from './Icons';
 import HiroAIChat from './HiroAIChat';
+import { useLanguage } from '../context/LanguageContext';
 
 interface Message {
     role: 'user' | 'model';
@@ -131,18 +132,23 @@ const ToggleSwitch: React.FC<{ label: string; name: string; checked: boolean; on
 );
 
 
-const PublishJobView: React.FC = () => {
+interface PublishJobViewProps {
+    job?: any;
+}
+
+const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) => {
     const { jobId } = useParams();
     const navigate = useNavigate();
+    const { t } = useLanguage();
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [job, setJob] = useState(mockJob);
+    const [job, setJob] = useState(jobFromParent || mockJob);
     const [jobLoading, setJobLoading] = useState(false);
     const [jobError, setJobError] = useState<string | null>(null);
 
     const [fallbackPostingCode] = useState(() => String(Math.floor(100000 + Math.random() * 900000)));
-    const publishingCode = job.postingCode || fallbackPostingCode;
+    const publishingCode = (job as any).postingCode || fallbackPostingCode;
     const [copySuccess, setCopySuccess] = useState(false);
-    const [publicJobTitle, setPublicJobTitle] = useState(job.jobTitle);
+    const [publicJobTitle, setPublicJobTitle] = useState((job as any).jobTitle || (job as any).title || '');
     const [publicJobDescription, setPublicJobDescription] = useState(job.description);
     const [publicJobRequirements, setPublicJobRequirements] = useState(job.requirements.join('\n'));
     
@@ -150,7 +156,10 @@ const PublishJobView: React.FC = () => {
     const [isAddParamOpen, setIsAddParamOpen] = useState(false);
     const addParamRef = useRef<HTMLDivElement>(null);
 
-    const [screeningQuestions, setScreeningQuestions] = useState(job.screeningQuestions);
+    const initialScreeningQuestions: ScreeningQuestion[] = Array.isArray((job as any).screeningQuestions)
+        ? (job as any).screeningQuestions
+        : [];
+    const [screeningQuestions, setScreeningQuestions] = useState<ScreeningQuestion[]>(initialScreeningQuestions);
     
     // Enhanced state for tracking links with analytics
     const [trackingLinks, setTrackingLinks] = useState([
@@ -180,7 +189,9 @@ const PublishJobView: React.FC = () => {
         }
     }, []);
 
+    // If no job was passed from parent, fetch by jobId from route
     useEffect(() => {
+        if (jobFromParent) return;
         let active = true;
         if (!jobId || !apiBase) {
             return;
@@ -209,12 +220,20 @@ const PublishJobView: React.FC = () => {
         return () => {
             active = false;
         };
-    }, [apiBase, jobId]);
+    }, [apiBase, jobId, jobFromParent]);
+
+    // If parent updates the job prop, sync it into local state
+    useEffect(() => {
+        if (jobFromParent) {
+            setJob(jobFromParent);
+        }
+    }, [jobFromParent]);
 
     useEffect(() => {
-        setPublicJobTitle(job.jobTitle);
-        setPublicJobDescription(job.description);
-        const requirements = Array.isArray(job.requirements) ? job.requirements : [];
+        const anyJob: any = job;
+        setPublicJobTitle(anyJob.jobTitle || anyJob.title || '');
+        setPublicJobDescription(anyJob.description || '');
+        const requirements = Array.isArray(anyJob.requirements) ? anyJob.requirements : (anyJob.requirements ? [anyJob.requirements] : []);
         setPublicJobRequirements(requirements.join('\n'));
         setScreeningQuestions(Array.isArray(job.screeningQuestions) ? job.screeningQuestions : []);
     }, [job]);
@@ -424,6 +443,8 @@ const PublishJobView: React.FC = () => {
                     </button>
                 </div>
             </header>
+
+           
             {jobLoading && (
                 <p className="text-xs text-text-muted">טוען נתוני משרה...</p>
             )}

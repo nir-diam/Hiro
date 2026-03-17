@@ -37,7 +37,7 @@ const Tag = sequelize.define(
       defaultValue: 'initial_detection',
     },
     source: {
-      type: DataTypes.ENUM('system', 'admin', 'user', 'ai', 'manual'),
+      type: DataTypes.ENUM('system', 'admin', 'user', 'ai', 'manual','job'),
       defaultValue: 'manual',
     },
     internalNote: {

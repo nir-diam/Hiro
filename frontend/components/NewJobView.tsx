@@ -6,8 +6,11 @@ import {
     PencilIcon, SparklesIcon, GenderMaleIcon, GenderFemaleIcon, MapPinIcon, TrashIcon, XMarkIcon,
     BellIcon, ShareIcon, CheckCircleIcon, UserIcon, NoSymbolIcon, TagIcon, InformationCircleIcon,
     MagnifyingGlassIcon, BuildingOffice2Icon, GlobeAmericasIcon, ChevronUpIcon, ExclamationTriangleIcon, CheckIcon,
-    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon
+    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon, BoldIcon, ItalicIcon, ListBulletIcon,
+    UnderlineIcon, LinkIcon, ListNumberIcon, AcademicCapIcon, WrenchScrewdriverIcon
 } from './Icons';
+import { SmartTagType } from './SmartTagTypes';
+import TagSelectorModal, { TagOption as GlobalTagOption } from './TagSelectorModal';
 import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
@@ -23,8 +26,10 @@ type QuestionType = 'text' | 'yes_no' | 'multiple_choice' | 'video';
 interface JobSkill {
     id: string;
     name: string;
+    key?: string; // stable tag key used by backend (tagKey)
     mode: TagMode;
     source: TagSource;
+    tagType?: SmartTagType; // for same categories/colors as CandidateProfile
 }
 
 interface QuestionOption {
@@ -90,6 +95,189 @@ const mapJobGenderSelection = (gender?: string): ('male' | 'female')[] => {
     if (gender === 'זכר') return ['male'];
     if (gender === 'נקבה') return ['female'];
     return ['male', 'female'];
+};
+
+const stripHtml = (html: string): string => {
+    if (!html || typeof html !== 'string') return '';
+    const div = typeof document !== 'undefined' ? document.createElement('div') : null;
+    if (div) {
+        div.innerHTML = html;
+        return (div.textContent || div.innerText || '').trim();
+    }
+    return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+};
+
+// Plain text with \n → HTML with <br> / <p> so it displays with proper line breaks (not one block)
+const normalizeValueForEditor = (value: string): string => {
+    if (!value || typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    // If it looks like plain text (no HTML tags), convert newlines to blocks for pretty display
+    if (!/<\s*[a-zA-Z][^>]*>/.test(trimmed)) {
+        const paragraphs = trimmed.split(/\n\s*\n/); // double newline = new paragraph
+        return paragraphs
+            .map((p) => {
+                const line = p.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+                if (!line) return '';
+                const withBr = line.replace(/\n/g, '<br>');
+                return `<p>${withBr}</p>`;
+            })
+            .filter(Boolean)
+            .join('') || trimmed.replace(/\n/g, '<br>');
+    }
+    return value;
+};
+
+const richTextSyncEffect = (editorRef: React.RefObject<HTMLDivElement | null>, value: string, isUserInput: React.MutableRefObject<boolean>, onChange: (html: string) => void) => {
+    if (!editorRef.current) return;
+    if (isUserInput.current) { isUserInput.current = false; return; }
+    const next = normalizeValueForEditor(value ?? '');
+    if (editorRef.current.innerHTML !== next) editorRef.current.innerHTML = next;
+};
+
+const RICH_TEXT_BUTTON = 'p-2 rounded-lg hover:bg-black/8 hover:text-text-default text-text-muted transition-colors';
+const RICH_TEXT_TOOLBAR_BASE = 'flex items-center gap-1 p-2 border-b border-border-default flex-wrap';
+
+const FONT_FAMILIES = [
+    { label: 'ברירת מחדל', value: '' },
+    { label: 'Heebo', value: 'Heebo' },
+    { label: 'Assistant', value: 'Assistant' },
+    { label: 'Rubik', value: 'Rubik' },
+    { label: 'Arial', value: 'Arial' },
+    { label: 'David', value: 'David' },
+];
+const FONT_SIZES = [
+    { label: 'קטן', value: '1' },
+    { label: 'רגיל', value: '3' },
+    { label: 'בינוני', value: '4' },
+    { label: 'גדול', value: '5' },
+    { label: 'כותרת', value: '6' },
+];
+const TEXT_COLORS = [
+    { label: 'שחור', color: '#111827' },
+    { label: 'אפור כהה', color: '#4b5563' },
+    { label: 'כחול', color: '#1d4ed8' },
+    { label: 'ירוק', color: '#15803d' },
+    { label: 'אדום', color: '#b91c1c' },
+    { label: 'סגול', color: '#6b21a8' },
+];
+
+const RichTextArea: React.FC<{
+    value: string;
+    onChange: (html: string) => void;
+    placeholder?: string;
+    rows?: number;
+    className?: string;
+    toolbarClassName?: string;
+    editorClassName?: string;
+    minHeight?: string;
+    fullToolbar?: boolean;
+}> = ({ value, onChange, placeholder, minHeight = '120px', className = '', toolbarClassName = '', editorClassName = '', fullToolbar = false }) => {
+    const editorRef = React.useRef<HTMLDivElement>(null);
+    const isUserInput = React.useRef(false);
+    React.useEffect(() => { richTextSyncEffect(editorRef, value, isUserInput, onChange); }, [value]);
+    const execCmd = (cmd: string, arg?: string) => {
+        try {
+            if (cmd === 'fontName' && arg) document.execCommand('fontName', false, arg);
+            else if (cmd === 'fontSize' && arg) document.execCommand('fontSize', false, arg);
+            else if (cmd === 'foreColor' && arg) document.execCommand('foreColor', false, arg);
+            else document.execCommand(cmd, false, arg);
+        } catch (_) {}
+        if (editorRef.current) onChange(editorRef.current.innerHTML);
+        editorRef.current?.focus();
+    };
+    const toolbar = (
+        <div className={`${RICH_TEXT_TOOLBAR_BASE} ${toolbarClassName}`}>
+            <select
+                title="גופן"
+                onChange={(e) => { const v = e.target.value; if (v) { editorRef.current?.focus(); execCmd('fontName', v); } }}
+                className="text-xs border border-border-default rounded-lg px-2 py-1.5 bg-white text-text-default min-w-0 max-w-[110px] cursor-pointer"
+            >
+                {FONT_FAMILIES.map((f) => (
+                    <option key={f.value || 'default'} value={f.value || undefined}>{f.label}</option>
+                ))}
+            </select>
+            <select
+                title="גודל גופן"
+                onChange={(e) => { const v = e.target.value; editorRef.current?.focus(); execCmd('fontSize', v); }}
+                defaultValue="3"
+                className="text-xs border border-border-default rounded-lg px-2 py-1.5 bg-white text-text-default min-w-0 max-w-[90px] cursor-pointer"
+            >
+                {FONT_SIZES.map((s) => (
+                    <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+            </select>
+            <div className="flex items-center gap-0.5" title="צבע טקסט">
+                {TEXT_COLORS.map((c) => (
+                    <button
+                        key={c.color}
+                        type="button"
+                        onMouseDown={(e) => { e.preventDefault(); execCmd('foreColor', c.color); }}
+                        className="w-6 h-6 rounded border border-border-default hover:ring-2 hover:ring-offset-1 ring-primary-400 transition-all"
+                        style={{ backgroundColor: c.color }}
+                        title={c.label}
+                    />
+                ))}
+            </div>
+            <span className="w-px h-5 bg-border-default mx-0.5" />
+            <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('bold'); }} className={RICH_TEXT_BUTTON} title="מודגש"><BoldIcon className="w-4 h-4" /></button>
+            <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('italic'); }} className={RICH_TEXT_BUTTON} title="נטוי"><ItalicIcon className="w-4 h-4" /></button>
+            {fullToolbar && (
+                <>
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('underline'); }} className={RICH_TEXT_BUTTON} title="קו תחתון"><UnderlineIcon className="w-4 h-4" /></button>
+                    <span className="w-px h-5 bg-border-default mx-0.5" />
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('formatBlock', 'h2'); }} className={`${RICH_TEXT_BUTTON} text-xs font-bold`} title="כותרת 2">H2</button>
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('formatBlock', 'h3'); }} className={`${RICH_TEXT_BUTTON} text-xs font-bold`} title="כותרת 3">H3</button>
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('formatBlock', 'p'); }} className={`${RICH_TEXT_BUTTON} text-xs`} title="פסקה">P</button>
+                    <span className="w-px h-5 bg-border-default mx-0.5" />
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('insertUnorderedList'); }} className={RICH_TEXT_BUTTON} title="רשימת תבליטים"><ListBulletIcon className="w-4 h-4" /></button>
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('insertOrderedList'); }} className={RICH_TEXT_BUTTON} title="רשימה ממוספרת"><ListNumberIcon className="w-4 h-4" /></button>
+                    <button type="button" onMouseDown={(e) => { e.preventDefault(); const url = window.prompt('הזן קישור URL:'); if (url) execCmd('createLink', url); }} className={RICH_TEXT_BUTTON} title="קישור"><LinkIcon className="w-4 h-4" /></button>
+                </>
+            )}
+            {!fullToolbar && (
+                <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('insertUnorderedList'); }} className={RICH_TEXT_BUTTON} title="רשימה"><ListBulletIcon className="w-4 h-4" /></button>
+            )}
+        </div>
+    );
+    return (
+        <div className={`border-2 rounded-2xl overflow-hidden shadow-sm transition-shadow focus-within:shadow-md ${className}`}>
+            {toolbar}
+            <div
+                ref={editorRef}
+                contentEditable
+                onInput={() => {
+                    if (editorRef.current) {
+                        isUserInput.current = true;
+                        onChange(editorRef.current.innerHTML);
+                    }
+                }}
+                data-placeholder={placeholder}
+                className={`rich-text-editor-content outline-none p-4 overflow-y-auto text-right w-full resize-y rich-text-area-empty ${editorClassName}`}
+                style={{
+                    minHeight,
+                    direction: 'rtl',
+                    fontFamily: 'Heebo, Assistant, Rubik, Arial, sans-serif',
+                    fontSize: '15px',
+                    lineHeight: 1.65,
+                    color: 'var(--color-text-default, #111827)',
+                }}
+            />
+            <style>{`
+                .rich-text-area-empty:empty::before { content: attr(data-placeholder); color: var(--color-text-muted, #6b7280); font-size: 0.9375rem; }
+                .rich-text-editor-content p { margin-bottom: 1em; line-height: 1.7; display: block; }
+                .rich-text-editor-content p:last-child { margin-bottom: 0; }
+                .rich-text-editor-content p + p { margin-top: 0.25em; }
+                .rich-text-editor-content br { display: block; content: ''; margin-bottom: 0.35em; line-height: 1.7; }
+                .rich-text-editor-content h2 { font-size: 1.25rem; font-weight: 700; margin-top: 1em; margin-bottom: 0.4em; line-height: 1.35; display: block; }
+                .rich-text-editor-content h3 { font-size: 1.1rem; font-weight: 700; margin-top: 0.85em; margin-bottom: 0.35em; line-height: 1.4; display: block; }
+                .rich-text-editor-content ul, .rich-text-editor-content ol { margin: 0.5em 0 0.75em 1.25em; padding-right: 0.5em; }
+                .rich-text-editor-content li { margin-bottom: 0.35em; line-height: 1.6; }
+                .rich-text-editor-content div { margin-bottom: 0.5em; line-height: 1.65; }
+                .rich-text-editor-content br + br { display: block; content: ''; margin-top: 0.5em; }
+            `}</style>
+        </div>
+    );
 };
 
 const LOCATION_SEP = ', ';
@@ -645,44 +833,61 @@ const DoubleRangeSlider: React.FC<{
     );
 };
 
+// Same categories/colors as CandidateProfile - border + text only, no background fill
+const SMART_TAG_TYPE_STYLES: Record<SmartTagType, string> = {
+    role: "bg-transparent text-primary-600 border-primary-400 font-bold",
+    seniority: "bg-transparent text-primary-600 border-primary-300 font-bold",
+    skill: "bg-transparent text-sky-700 border-sky-200 font-semibold",
+    tool: "bg-transparent text-gray-700 border-gray-300 font-semibold",
+    soft: "bg-transparent text-slate-600 border-slate-200 italic font-medium",
+    industry: "bg-transparent text-emerald-700 border-emerald-200 font-bold",
+    certification: "bg-transparent text-orange-700 border-orange-200 font-bold",
+    language: "bg-transparent text-pink-600 border-pink-200 font-medium",
+};
+
+const SMART_TAG_TYPE_LABELS: Record<SmartTagType, string> = {
+    role: "תפקיד",
+    seniority: "בכירות",
+    skill: "מיומנות",
+    tool: "כלי עבודה",
+    soft: "כישורים רכים",
+    industry: "תעשייה",
+    certification: "השכלה/הסמכה",
+    language: "שפה",
+};
+
+// Same category rows as CandidateProfile (TagRowGroup)
+const JOB_TAG_ROW_CONFIG: Array<{ id: string; label: string; icon: React.ComponentType<{ className?: string }>; iconColor: string; types: SmartTagType[] }> = [
+    { id: 'roles', label: 'תפקיד והקשר', icon: BriefcaseIcon, iconColor: 'text-purple-500', types: ['role', 'seniority', 'industry'] },
+    { id: 'qualifications', label: 'השכלה ושפות', icon: AcademicCapIcon, iconColor: 'text-orange-500', types: ['certification', 'language'] },
+    { id: 'tools', label: 'כלים ומיומנויות', icon: WrenchScrewdriverIcon, iconColor: 'text-blue-600', types: ['skill', 'tool'] },
+    { id: 'soft', label: 'כישורים רכים', icon: SparklesIcon, iconColor: 'text-amber-500', types: ['soft'] },
+];
+
 const SmartTag: React.FC<{ 
     tag: JobSkill; 
     onToggle: (id: string) => void; 
     onRemove: (id: string) => void; 
 }> = ({ tag, onToggle, onRemove }) => {
-    let baseStyles = "inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-sm font-medium transition-all duration-200 cursor-pointer select-none border";
-    let icon = null;
-    let titleText = "";
+    const type = tag.tagType ?? 'skill';
+    const styleByType = SMART_TAG_TYPE_STYLES[type];
+    const titleText = SMART_TAG_TYPE_LABELS[type];
 
-    if (tag.mode === 'mandatory') {
-        baseStyles += " bg-green-100 text-green-800 border-green-200 hover:bg-green-200";
-        icon = <CheckCircleIcon className="w-3.5 h-3.5" />;
-        titleText = "תגית חובה (Must Have)";
-    } else if (tag.mode === 'negative') {
-        baseStyles += " bg-red-100 text-red-800 border-red-200 line-through decoration-red-800/50 hover:bg-red-200";
-        icon = <NoSymbolIcon className="w-3.5 h-3.5" />;
-        titleText = "תגית שוללת (Killer)";
-    } else {
-        if (tag.source === 'global') {
-             baseStyles += " bg-purple-50 text-purple-700 border-purple-200 hover:bg-purple-100";
-             icon = <SparklesIcon className="w-3.5 h-3.5 text-purple-500"/>;
-             titleText = "תגית גלובאלית (כוללת מילים נרדפות)";
-        } else if (tag.source === 'company') {
-             baseStyles += " bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100";
-             icon = <BuildingOffice2Icon className="w-3.5 h-3.5 text-blue-500"/>;
-             titleText = "תגית חברה (מוגדרת ע\"י הארגון)";
-        } else {
-             baseStyles += " bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200";
-             icon = <TagIcon className="w-3.5 h-3.5 text-gray-500" />;
-             titleText = "מילת מפתח (טקסט חופשי)";
-        }
-    }
+    const modeBorderClass =
+        tag.mode === 'mandatory'
+            ? 'border-green-500'
+            : tag.mode === 'negative'
+                ? 'border-red-500'
+                : '';
 
     return (
-        <div className={baseStyles} onClick={() => onToggle(tag.id)} title={`${titleText} - לחץ לשינוי מצב`}>
-            {icon}
+        <div
+            className={`inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-pointer select-none border whitespace-nowrap hover:shadow-md ${styleByType} ${modeBorderClass}`}
+            onClick={() => onToggle(tag.id)}
+            title={`${titleText} - לחץ לשינוי מצב`}
+        >
             <span>{tag.name}</span>
-            <button 
+            <button
                 onClick={(e) => { e.stopPropagation(); onRemove(tag.id); }}
                 className="ml-1 p-0.5 rounded-full hover:bg-black/10 focus:outline-none"
             >
@@ -1193,6 +1398,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [isParsing, setIsParsing] = useState(false);
     const [isAIModalOpen, setIsAIModalOpen] = useState(false);
     const [parseSuccess, setParseSuccess] = useState(false);
+  const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
     
     const [newLanguageName, setNewLanguageName] = useState('');
     const [newLanguageLevel, setNewLanguageLevel] = useState('טובה מאוד');
@@ -1251,6 +1457,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 uniqueEmail: jobData.postingCode ? `humand+${jobData.postingCode}@app.hiro.co.il` : (jobData.uniqueEmail || prev.uniqueEmail),
                 creationDate: jobData.openDate ? new Date(jobData.openDate).toLocaleDateString('he-IL') : prev.creationDate,
              }));
+             if (jobData.aiRawDescription) {
+                 setPastedJobText(jobData.aiRawDescription);
+             }
              if (jobData.client) setIsClientConfirmed(true);
         }
     }, [isEditing, jobData]);
@@ -1313,13 +1522,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const handleParseJob = async () => {
-        if (!pastedJobText.trim() || !apiBase) return;
+        const textToSend = pastedJobText.trim();
+        if (!textToSend || !apiBase) return;
         setIsParsing(true);
         try {
             const res = await fetch(`${apiBase}/api/jobs/ai/analyze`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text: pastedJobText }),
+                body: JSON.stringify({ text: textToSend }),
             });
 
             if (!res.ok) {
@@ -1349,6 +1559,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             if (Array.isArray(extractedData.languages) && extractedData.languages.length > 0) { filled.add('languages'); filledList.push('שפות'); } else missingList.push('שפות');
             if (extractedData.drivingLicense) { filled.add('drivingLicense'); filledList.push('רישיון נהיגה'); } else missingList.push('רישיון נהיגה');
             if (extractedData.mobility) { filled.add('mobility'); filledList.push('דרישות ניידות'); } else missingList.push('דרישות ניידות');
+            if (extractedData.gender) { filled.add('gender'); filledList.push('מין'); } else missingList.push('מין');
+            const aiTagsSource = Array.isArray(extractedData.tags) && extractedData.tags.length > 0
+                ? extractedData.tags
+                : (Array.isArray(extractedData.skills) ? extractedData.skills : []);
+            if (aiTagsSource.length > 0) { filled.add('skills'); filledList.push('כישורים ותגיות חכמות'); } else missingList.push('כישורים ותגיות חכמות');
 
             const screeningOrDigital = extractedData.screeningQuestions ?? extractedData.digitalQuestions ?? [];
             if (screeningOrDigital.length > 0) {
@@ -1388,10 +1603,70 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 disqualificationReason: q.disqualificationReason,
             }));
 
+            const apiRequirements = Array.isArray(extractedData.requirements)
+                ? extractedData.requirements
+                : (extractedData.requirements ? [extractedData.requirements] : []);
+            const desc = extractedData.jobDescription || '';
+            const reqText = apiRequirements.length
+                ? '\n\nדרישות:\n' + apiRequirements.map((r: string) => '• ' + String(r).trim()).join('\n')
+                : '';
+            const jobDescriptionWithReqs = (desc + reqText).trim() || undefined;
+
+            const rawTypeToSmartTagType = (raw: string): SmartTagType => {
+                const r = (raw || '').toLowerCase();
+                if (r.includes('role')) return 'role';
+                if (r.includes('seniority') || r.includes('level')) return 'seniority';
+                if (r.includes('industry')) return 'industry';
+                if (r.includes('certification') || r.includes('degree') || r.includes('education')) return 'certification';
+                if (r.includes('language')) return 'language';
+                if (r.includes('tool')) return 'tool';
+                if (r.includes('soft')) return 'soft';
+                if (r.includes('skill')) return 'skill';
+                return 'skill';
+            };
+            const apiTagsRaw: any[] = Array.isArray(extractedData.tags) && extractedData.tags.length > 0
+                ? (extractedData.tags as any[])
+                : (Array.isArray(extractedData.skills) ? (extractedData.skills as any[]) : []);
+
+            const apiTags: JobSkill[] = apiTagsRaw
+                .map((t: any, i: number) => {
+                    const baseName = String(t.raw_value ?? t.name ?? '').trim();
+                    if (!baseName) return null;
+
+                    const baseTagType = t.tagType
+                        ? (String(t.tagType) as SmartTagType)
+                        : rawTypeToSmartTagType(t.raw_type ?? t.rawType ?? '');
+
+                    // Prefer explicit key from AI, otherwise derive from name
+                    const explicitKey = typeof t.key === 'string' && t.key.trim() ? t.key.trim() : undefined;
+                    const derivedKey = baseName
+                        .toString()
+                        .trim()
+                        .toLowerCase()
+                        .replace(/\s+/g, '_');
+
+                    // Always start AI-imported tags in 'normal' visual mode,
+                    // so the first click clearly turns them green (mandatory),
+                    // second click red (negative), third back to normal.
+                    const mode: TagMode = 'normal';
+
+                    return {
+                        id: t.id ?? `ai-${Date.now()}-${i}`,
+                        name: baseName,
+                        key: explicitKey || derivedKey,
+                        mode,
+                        source: (t.source as TagSource) || 'manual',
+                        tagType: baseTagType,
+                    } as JobSkill;
+                })
+                .filter((t): t is JobSkill => Boolean(t));
+
+            const genderSelection = mapJobGenderSelection(extractedData.gender);
+
             setFormData(prev => ({
                 ...prev,
                 jobTitle: extractedData.jobTitle || prev.jobTitle,
-                jobDescription: extractedData.jobDescription || prev.jobDescription,
+                jobDescription: jobDescriptionWithReqs || prev.jobDescription,
                 requirements: extractedData.requirements || prev.requirements,
                 internalNotes: extractedData.internalNotes || prev.internalNotes,
                 salaryMin: typeof extractedData.salaryMin === 'number' ? extractedData.salaryMin : prev.salaryMin,
@@ -1402,6 +1677,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 languages: aiLanguages.length ? aiLanguages : prev.languages,
                 drivingLicense: extractedData.drivingLicense || prev.drivingLicense,
                 mobility: extractedData.mobility || prev.mobility,
+                gender: genderSelection.length ? genderSelection : prev.gender,
+                skills: apiTags.length ? [...(prev.skills || []), ...apiTags] : prev.skills,
                 digitalQuestions: newQuestions,
                 enableDigitalScreening: true,
                 telephoneQuestions: newTelephoneQuestions.length > 0 ? newTelephoneQuestions : prev.telephoneQuestions,
@@ -1415,7 +1692,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             setTimeout(() => {
                 setParseSuccess(false);
                 setIsAIModalOpen(false);
-                setPastedJobText('');
+                // keep pastedJobText so the original description remains visible
                 setShowParseSummary(true);
             }, 1000);
         } catch (error) {
@@ -1510,8 +1787,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
          const newTag: JobSkill = {
             id: Date.now().toString(),
             name: tag.name,
+            key: tag.id || tag.name,
             mode: 'normal',
-            source: source
+            source,
+            tagType: 'skill',
         };
         setFormData(prev => ({
             ...prev,
@@ -1527,8 +1806,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             const newTag: JobSkill = {
                 id: Date.now().toString(),
                 name: newSkillText.trim(),
+                key: newSkillText.trim().toLowerCase().replace(/\s+/g, '_'),
                 mode: 'normal',
-                source: 'manual'
+                source: 'manual',
+                tagType: 'skill',
             };
             setFormData(prev => ({
                 ...prev,
@@ -1560,6 +1841,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             skills: prev.skills.filter(tag => tag.id !== id)
         }));
     };
+
+    const groupedJobTags = useMemo(() => {
+        const skills = formData.skills || [];
+        return JOB_TAG_ROW_CONFIG.map((row) => ({
+            ...row,
+            tags: skills.filter((tag) => {
+                const t = tag.tagType ?? 'skill';
+                return row.types.includes(t);
+            }),
+        }));
+    }, [formData.skills]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -1768,6 +2060,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             rating: 0,
             healthProfile: data.healthProfile,
             internalNotes: data.internalNotes,
+            aiRawDescription: pastedJobText || undefined,
             uniqueEmail: data.uniqueEmail,
             contacts: contactObjects,
             recruitmentSources: (data.recruitmentSources || []).map((source: { id: string; name: string; status: string; alertDays: number | null }) => ({
@@ -1779,6 +2072,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             telephoneQuestions: data.telephoneQuestions,
             digitalQuestions: data.digitalQuestions,
             languages: data.languages,
+            skills: Array.isArray(data.skills) ? data.skills : [],
         };
     };
 
@@ -1871,14 +2165,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         <SparklesIcon className="w-5 h-5"/>
                         <span>{t('new_job.smart_import')}</span>
                     </button>
-                     <button
-                        type="button"
-                        onClick={handleSaveAndContinue}
-                        disabled={isSaving}
-                        className={`bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
-                    >
-                        {isSaving ? 'שומר...' : t('new_job.save_continue')}
-                    </button>
+                    
                 </div>
             </div>
 
@@ -1918,15 +2205,15 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             <textarea
                                 value={pastedJobText}
                                 onChange={(e) => setPastedJobText(e.target.value)}
-                                rows={8}
-                                className="w-full bg-bg-input border border-border-default rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary-500 resize-none"
                                 placeholder={t('new_job.paste_here')}
+                                rows={8}
                                 disabled={isParsing}
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-4 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 resize-none min-h-[200px]"
                             />
                         </div>
                         <div className="p-4 bg-bg-subtle border-t border-border-default flex justify-end gap-3">
                             <button type="button" onClick={() => setIsAIModalOpen(false)} className="px-5 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">{t('new_job.cancel')}</button>
-                            <button type="button" onClick={handleParseJob} disabled={isParsing || !pastedJobText} className="px-6 py-2.5 bg-primary-600 text-white rounded-xl font-bold hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
+                            <button type="button" onClick={handleParseJob} disabled={isParsing || !pastedJobText.trim()} className="px-6 py-2.5 bg-primary-600 text-white rounded-xl font-bold hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2">
                                 {isParsing ? t('new_job.analyzing') : t('new_job.analyze_btn')}
                                 {parseSuccess && <CheckCircleIcon className="w-5 h-5"/>}
                             </button>
@@ -2107,12 +2394,28 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="relative">
                                 <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.job_description')}</label>
-                                <textarea name="jobDescription" value={formData.jobDescription} onChange={handleChange} rows={8} className={getInputClass('jobDescription', "w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm focus:ring-primary-500 focus:border-primary-500 resize-y")} placeholder="פירוט תחומי אחריות..."></textarea>
+                                <RichTextArea
+                                    value={formData.jobDescription}
+                                    onChange={(html) => setFormData(prev => ({ ...prev, jobDescription: html }))}
+                                    placeholder="פירוט תחומי אחריות..."
+                                    minHeight="240px"
+                                    toolbarClassName="bg-primary-50/70 border-primary-200"
+                                    editorClassName="bg-white"
+                                    className={getInputClass('jobDescription', 'border-primary-200 focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-200 bg-bg-input')}
+                                />
                                 <AIIndicator name="jobDescription" />
                             </div>
                             <div>
                                 <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.internal_notes')}</label>
-                                <textarea name="internalNotes" value={formData.internalNotes} onChange={handleChange} rows={8} className="w-full bg-yellow-50 border border-yellow-200 text-text-default text-sm rounded-xl p-3 focus:ring-yellow-500 focus:border-yellow-500 resize-y" placeholder="דגשים לצוות הגיוס..."></textarea>
+                                <RichTextArea
+                                    value={formData.internalNotes}
+                                    onChange={(html) => setFormData(prev => ({ ...prev, internalNotes: html }))}
+                                    placeholder="דגשים לצוות הגיוס..."
+                                    minHeight="220px"
+                                    toolbarClassName="bg-primary-50/70 border-primary-200"
+                                    editorClassName="bg-white"
+                                    className="border-primary-200 focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-200 bg-bg-input"
+                                />
                             </div>
                         </div>
                     </div>
@@ -2121,22 +2424,21 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 <SectionCard id="conditions-reqs" title={t('new_job.section_requirements')} icon={<UserGroupIcon className="w-5 h-5"/>}>
                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                          
-                         <div className="lg:col-span-3">
-                             <h4 className="text-sm font-bold text-text-default mb-2">{t('new_job.skills_tags')}</h4>
+                            <div className="lg:col-span-3">
+                             <div className="flex items-center justify-between mb-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setIsTagSelectorOpen(true)}
+                                    className="inline-flex items-center gap-1 text-xs font-semibold text-primary-700 bg-primary-50 px-3 py-1.5 rounded-lg border border-primary-100 hover:bg-primary-100 transition-colors"
+                                >
+                                    <TagIcon className="w-4 h-4" />
+                                    <span>פתח ספריית תגיות</span>
+                                </button>
+                             </div>
                              <div className="relative mb-3">
                                  <div className="flex items-center gap-2">
                                      <div className="relative flex-grow max-w-md">
-                                        <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                        <input 
-                                            ref={skillInputRef}
-                                            type="text" 
-                                            value={newSkillText} 
-                                            onChange={handleSkillInputChange} 
-                                            onKeyDown={(e) => e.key === 'Enter' && handleAddManualTag()}
-                                            onFocus={() => { if(newSkillText) setIsSuggestionsOpen(true) }}
-                                            placeholder="הקלד תגית (למשל 'React', 'ניהול')..." 
-                                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg py-2.5 pl-3 pr-10 focus:ring-primary-500 focus:border-primary-500"
-                                        />
+                                        
                                         
                                         {isSuggestionsOpen && (suggestions.global.length > 0 || suggestions.company.length > 0) && (
                                             <div className="absolute top-full right-0 w-full mt-1 bg-bg-card border border-border-default rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto">
@@ -2194,42 +2496,42 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                             </div>
                                         )}
                                      </div>
-                                     <button 
-                                        type="button" 
-                                        onClick={handleAddManualTag} 
-                                        disabled={!newSkillText} 
-                                        className="bg-bg-subtle border border-border-default text-text-default p-2.5 rounded-lg hover:bg-bg-hover disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1 min-w-fit"
-                                        title="הוסף כמילת מפתח (טקסט חופשי)"
-                                    >
-                                        <PlusIcon className="w-4 h-4"/>
-                                        <span className="text-xs font-semibold hidden md:inline">הוסף כטקסט</span>
-                                    </button>
+                                  
                                  </div>
                              </div>
                              
-                             <div className="flex flex-wrap gap-2 min-h-[40px] p-2 bg-bg-subtle/30 rounded-lg border border-border-default/50">
+                             <div className="space-y-4 pt-2">
                                 {formData.skills && formData.skills.length > 0 ? (
-                                    formData.skills.map(tag => (
-                                        <SmartTag 
-                                            key={tag.id} 
-                                            tag={tag} 
-                                            onToggle={handleToggleSmartTag} 
-                                            onRemove={handleRemoveSmartTag} 
-                                        />
+                                    groupedJobTags.map((row) => (
+                                        <div key={row.id} className="space-y-2">
+                                            <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-text-muted">
+                                                <row.icon className={`w-4 h-4 ${row.iconColor}`} />
+                                                <span>{row.label}</span>
+                                            </div>
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                {row.tags.length === 0 ? (
+                                                    <span className="text-[11px] text-text-subtle italic">לא קיימות תגיות</span>
+                                                ) : (
+                                                    row.tags.map((tag) => (
+                                                        <SmartTag
+                                                            key={tag.id}
+                                                            tag={tag}
+                                                            onToggle={handleToggleSmartTag}
+                                                            onRemove={handleRemoveSmartTag}
+                                                        />
+                                                    ))
+                                                )}
+                                            </div>
+                                        </div>
                                     ))
                                 ) : (
-                                    <span className="text-text-muted text-sm italic p-1">לא נוספו תגיות.</span>
+                                    <div className="min-h-[40px] p-2 bg-bg-subtle/30 rounded-lg border border-border-default/50">
+                                        <span className="text-text-muted text-sm italic p-1">לא נוספו תגיות.</span>
+                                    </div>
                                 )}
                              </div>
                              
-                             <div className="flex items-center gap-4 mt-2 text-xs text-text-subtle flex-wrap">
-                                <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-gray-200 border border-gray-300"></div> רגיל (עדיפות)</span>
-                                <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-green-200 border border-green-300"></div><CheckCircleIcon className="w-3 h-3 text-green-600"/> חובה (Must)</span>
-                                <span className="flex items-center gap-1"><div className="w-2 h-2 rounded-full bg-red-200 border border-red-300"></div><NoSymbolIcon className="w-3 h-3 text-red-600"/> שלילה (Killer)</span>
-                                <span className="flex items-center gap-1 mr-2 border-r border-border-subtle pr-2"><SparklesIcon className="w-3 h-3 text-purple-500"/> מערכת</span>
-                                <span className="flex items-center gap-1 mr-2"><BuildingOffice2Icon className="w-3 h-3 text-blue-500"/> חברה</span>
-                                <span className="flex items-center gap-1"><TagIcon className="w-3 h-3 text-gray-500"/> ידני</span>
-                             </div>
+                         
                          </div>
 
                          <div className="lg:col-span-3 mt-4 border-t border-border-default pt-4">
@@ -2561,6 +2863,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     )}
                     <button
                         type="button"
+                        onClick={handleSaveAndContinue}
+                        disabled={isSaving}
+                        className={`bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
+                    >
+                        {'פרסום משרה'}
+                    </button>
+                    <button
+                        type="button"
                         onClick={handleJustSave}
                         disabled={isSaving}
                         className={`bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
@@ -2570,6 +2880,40 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     {/* Ensure floating AI button (z-40) is not covered. This bar is z-30. */}
                 </div>
             </div>
+        <TagSelectorModal
+            isOpen={isTagSelectorOpen}
+            onClose={() => setIsTagSelectorOpen(false)}
+            existingTags={(formData.skills || []).map((s) => s.key || s.name)}
+            initialCategory="all"
+            onSave={(selected: GlobalTagOption[]) => {
+                        const existingKeys = new Set((formData.skills || []).map((s) => s.key || s.name));
+                const newTags: JobSkill[] = selected
+                    .filter((t) => !existingKeys.has(t.id))
+                    .map((t) => ({
+                        id: t.id,
+                        name: t.nameHe || t.nameEn,
+                        key: t.tagKey || t.nameEn || t.nameHe,
+                        mode: 'normal',
+                        source: 'global',
+                        tagType: ((): SmartTagType => {
+                            const cat = t.category;
+                            if (cat === 'role') return 'role';
+                            if (cat === 'seniority') return 'seniority';
+                            if (cat === 'industry') return 'industry';
+                            if (cat === 'certification' || cat === 'education') return 'certification';
+                            if (cat === 'language') return 'language';
+                            if (cat === 'tool') return 'tool';
+                            if (cat === 'soft_skill') return 'soft';
+                            return 'skill';
+                        })(),
+                    }));
+                setFormData((prev) => ({
+                    ...prev,
+                    skills: [...(prev.skills || []), ...newTags],
+                }));
+                setIsTagSelectorOpen(false);
+            }}
+        />
         </div>
     );
 };

@@ -87,7 +87,7 @@ import CandidateProfile from './components/CandidateProfile';
 import MainContent from './components/MainContent';
 import ResumeViewer from './components/ResumeViewer';
 import JobMatchingView from './components/JobMatchingView';
-import CandidateScreeningView, { screeningJobsData } from './components/CandidateScreeningView';
+import CandidateScreeningView from './components/CandidateScreeningView';
 import InterestedInJobs, { jobsData as interestedJobsData } from './components/InterestedInJobs';
 import ReferralsView from './components/ReferralsView';
 import EventsView, { type Event as EventsViewEvent } from './components/EventsView';
@@ -660,7 +660,13 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             return <JobMatchingView onBack={() => props.handleSetActiveView('details')} candidateName={formData.fullName} />;
         }
         if (props.isScreening) {
-            return <CandidateScreeningView onBack={() => props.handleSetActiveView('details')} />;
+            return (
+                <CandidateScreeningView
+                    onBack={() => props.handleSetActiveView('details')}
+                    candidateId={formData.backendId || formData.id}
+                    candidate={formData}
+                />
+            );
         }
 
         switch (props.activeView) {

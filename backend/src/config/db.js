@@ -17,6 +17,7 @@ const connectDb = async () => {
   require('../models/Candidate');
   require('../models/Job');
   require('../models/JobCandidate');
+  require('../models/JobCandidateScreening');
   require('../models/MessageLog');
   require('../models/Organization');
   require('../models/Client');

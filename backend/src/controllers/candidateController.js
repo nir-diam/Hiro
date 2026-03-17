@@ -2,8 +2,13 @@ const path = require('path');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const candidateService = require('../services/candidateService');
-const { embedCandidateAndSave, searchCandidates } = require('../services/vectorSearchService');
+const { embedCandidateAndSave, searchCandidates, buildSearchDocument, cosineSimilarity, normalizeEmbedding } = require('../services/vectorSearchService');
+const { embedText } = require('../services/embeddingService');
 const { sendChat, sendSingleTurnChat } = require('../services/geminiService');
+const Job = require('../models/Job');
+const JobCandidate = require('../models/JobCandidate');
+const JobCandidateScreening = require('../models/JobCandidateScreening');
+const Candidate = require('../models/Candidate');
 const organizationService = require('../services/organizationService');
 const promptService = require('../services/promptService');
 const candidateTagService = require('../services/candidateTagService');
@@ -1301,6 +1306,218 @@ const freeSearch = async (req, res) => {
   }
 };
 
+// Generate internal opinion (חוות דעת פנימית) via LLM for candidate + job context
+const generateInternalOpinion = async (req, res) => {
+  try {
+    const candidate = await candidateService.getById(req.params.id);
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ message: 'Gemini API key not configured' });
+    }
+
+    let promptRow;
+    try {
+      promptRow = await promptService.getById('internal_opinion');
+    } catch {
+      promptRow = null;
+    }
+    const template = promptRow?.template || `אתה מומחה גיוס בכיר. כתוב חוות דעת פנימית מקצועית בעברית על מועמד בהתאם למשרה.
+החזר HTML עם <p>, <h3>, <ul>, <li>, <strong>. נתוני המועמד: {{candidate_summary}}. נתוני המשרה: {{job_context}}.`;
+
+    const candidateSummary = [
+      `שם: ${candidate.fullName || 'לא צוין'}`,
+      `תפקיד נוכחי: ${candidate.title || 'לא צוין'}`,
+      `סיכום: ${candidate.professionalSummary || 'אין'}`,
+      `ניסיון: ${JSON.stringify(candidate.workExperience || [], null, 0)}`,
+      `כישורים: ${JSON.stringify(candidate.skills || {}, null, 0)}`,
+    ].join('\n');
+
+    const body = req.body || {};
+    const jobContext = body.jobTitle || body.title
+      ? [
+          `משרה: ${body.jobTitle || body.title}`,
+          `תיאור: ${body.jobDescription || body.description || 'אין'}`,
+          `דרישות: ${Array.isArray(body.requirements) ? body.requirements.join('; ') : (body.requirements || 'אין')}`,
+        ].join('\n')
+      : 'לא סופקה משרה ספציפית. כתוב חוות דעת כללית על המועמד.';
+
+    const systemPrompt = template
+      .replace(/\{\{candidate_summary\}\}/g, candidateSummary)
+      .replace(/\{\{job_context\}\}/g, jobContext);
+
+    const text = await sendChat({
+      apiKey,
+      systemPrompt,
+      history: [],
+      message: 'צור את חוות הדעת המקצועית עכשיו בפורמט HTML.',
+    });
+
+    const html = (text && text.trim()) ? text.trim() : '<p>לא התקבלה תשובה מהמערכת.</p>';
+    res.json({ html });
+  } catch (err) {
+    console.error('[generateInternalOpinion]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to generate internal opinion' });
+  }
+};
+
+// Get 1–5 most relevant jobs for this candidate (from JobCandidate + Job by fit), with match percentage.
+// Uses this candidate's embedding only so each candidate gets their own ranked list. No caching.
+const getRelevantJobs = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 5, 10);
+
+    // Load this candidate's embedding directly from DB (avoid any mapping that could drop it)
+    let candidateRow = await Candidate.findByPk(candidateId, {
+      attributes: ['id', 'embedding', 'matchScore'],
+    });
+    if (!candidateRow) {
+      return res.status(404).json({ message: 'Candidate not found' });
+    }
+
+    let candidateEmb = normalizeEmbedding(candidateRow.embedding);
+    if (!candidateEmb || !candidateEmb.length) {
+      try {
+        await embedCandidateAndSave(candidateId);
+        candidateRow = await Candidate.findByPk(candidateId, { attributes: ['id', 'embedding', 'matchScore'] });
+        candidateEmb = normalizeEmbedding(candidateRow?.embedding);
+      } catch (e) {
+        console.warn('[getRelevantJobs] embedding rebuild failed', e.message);
+      }
+    }
+
+    const seenJobIds = new Set();
+    const results = [];
+    const defaultMatch = candidateRow.matchScore != null ? candidateRow.matchScore : 85;
+
+    // 1) Jobs already linked to this candidate (JobCandidate) – candidate-specific
+    const jobCandidateRecords = await JobCandidate.findAll({
+      where: { candidateId },
+      include: [{ model: Job, as: 'job', required: true }],
+    });
+
+    for (const jc of jobCandidateRecords) {
+      const job = jc.job;
+      if (!job || seenJobIds.has(job.id)) continue;
+      seenJobIds.add(job.id);
+      const jobData = job.toJSON ? job.toJSON() : job;
+      results.push({
+        job: jobData,
+        matchPercentage: typeof jc.matchScore === 'number' ? jc.matchScore : defaultMatch,
+        source: 'job_candidate',
+      });
+    }
+
+    // 2) Open jobs scored by similarity to THIS candidate's embedding only
+    const allJobs = await Job.findAll({
+      where: { openPositions: 1 },
+      limit: 100,
+    });
+
+    if (candidateEmb && candidateEmb.length) {
+      const scored = [];
+      for (const job of allJobs) {
+        if (seenJobIds.has(job.id)) continue;
+        const jobText = [
+          job.title,
+          job.description,
+          Array.isArray(job.requirements) ? job.requirements.join(' ') : '',
+        ].filter(Boolean).join(' ');
+        if (!jobText.trim()) continue;
+        try {
+          const jobEmb = await embedText(jobText.slice(0, 8000));
+          if (!jobEmb || !jobEmb.length || jobEmb.length !== candidateEmb.length) continue;
+          const sim = cosineSimilarity(candidateEmb, jobEmb);
+          if (sim < 0.2) continue;
+          const matchPercentage = Math.round(Math.max(0, Math.min(100, (sim + 0.3) * 80)));
+          scored.push({ job, matchPercentage });
+        } catch (e) {
+          // skip job on embed error
+        }
+      }
+      scored.sort((a, b) => b.matchPercentage - a.matchPercentage);
+      const toTake = limit - results.length;
+      for (const { job, matchPercentage } of scored.slice(0, toTake)) {
+        const jobData = job.toJSON ? job.toJSON() : job;
+        results.push({ job: jobData, matchPercentage, source: 'match' });
+      }
+    }
+
+    // Sort full list by match percentage descending so order is always by relevance for this candidate
+    results.sort((a, b) => (b.matchPercentage ?? 0) - (a.matchPercentage ?? 0));
+    const out = results
+      .slice(0, limit)
+      .map((r) => ({ ...r.job, matchPercentage: r.matchPercentage }));
+
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+    res.json(out);
+  } catch (err) {
+    console.error('[getRelevantJobs]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to get relevant jobs' });
+  }
+};
+
+// Get all screening data for a candidate (keyed by jobId)
+const getScreeningData = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const rows = await JobCandidateScreening.findAll({
+      where: { candidateId },
+      attributes: ['jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'],
+    });
+    const byJob = {};
+    for (const r of rows) {
+      const jid = r.jobId;
+      byJob[jid] = {
+        screeningAnswers: r.screeningAnswers || [],
+        telephoneImpression: r.telephoneImpression || '',
+        internalOpinion: r.internalOpinion || '',
+      };
+    }
+    res.json(byJob);
+  } catch (err) {
+    console.error('[getScreeningData]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to get screening data' });
+  }
+};
+
+// Upsert screening data for one candidate + job (triggered after user stops typing)
+const saveScreeningData = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const { jobId, screeningAnswers, telephoneImpression, internalOpinion } = req.body || {};
+    if (!jobId) {
+      return res.status(400).json({ message: 'jobId is required' });
+    }
+    const answers = Array.isArray(screeningAnswers) ? screeningAnswers : [];
+    const impression = typeof telephoneImpression === 'string' ? telephoneImpression : '';
+    const opinion = typeof internalOpinion === 'string' ? internalOpinion : null;
+
+    const [row] = await JobCandidateScreening.findOrCreate({
+      where: { candidateId, jobId },
+      defaults: { screeningAnswers: answers, telephoneImpression: impression, internalOpinion: opinion },
+    });
+    const updates = {};
+    if (Array.isArray(screeningAnswers)) updates.screeningAnswers = answers;
+    if (typeof telephoneImpression === 'string') updates.telephoneImpression = impression;
+    if (typeof internalOpinion === 'string') updates.internalOpinion = internalOpinion;
+    if (!row.isNewRecord && Object.keys(updates).length) {
+      await row.update(updates);
+    }
+    res.json({
+      jobId,
+      screeningAnswers: row.screeningAnswers,
+      telephoneImpression: row.telephoneImpression,
+      internalOpinion: row.internalOpinion || '',
+    });
+  } catch (err) {
+    console.error('[saveScreeningData]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to save screening data' });
+  }
+};
+
 module.exports = {
   list,
   listByWorkedAtCompany,
@@ -1320,6 +1537,10 @@ module.exports = {
   generateExperienceSummary,
   fetchResumeText,
   buildParsedUpdates,
+  generateInternalOpinion,
+  getRelevantJobs,
+  getScreeningData,
+  saveScreeningData,
 };
 
 

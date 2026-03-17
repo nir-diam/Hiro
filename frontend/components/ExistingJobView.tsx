@@ -11,6 +11,7 @@ import {
 } from './Icons';
 import JobCandidatesView from './JobCandidatesView';
 import JobEventsView, { mockJobEvents as initialJobEvents, JobEvent } from './JobEventsView';
+import PublishJobView from './PublishJobView';
 import { mockExistingJob, mockJobCandidates } from '../data/mockJobData';
 import HiroAIChat from './HiroAIChat';
 import InviteManagerModal from './InviteManagerModal';
@@ -68,7 +69,7 @@ interface ExistingJobViewProps {
 
 const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, openSummaryDrawer }) => {
     const { t } = useLanguage();
-    const [mainView, setMainView] = useState<'edit' | 'events' | 'candidates'>('candidates');
+    const [mainView, setMainView] = useState<'edit' | 'events' | 'candidates' | 'publish'>('edit');
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
     const [isSidebarExpanded, setIsSidebarExpanded] = useState(window.innerWidth >= 1024);
@@ -339,6 +340,13 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                             <ClockIcon className="w-5 h-5" />
                             {t('job.tab_journal')}
                         </button>
+                        <button
+                            type="button"
+                            onClick={() => setMainView('publish')}
+                            className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'publish' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
+                        >
+                            { 'פרסום משרה'}
+                        </button>
                     </div>
 
                     <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm min-h-[600px]">
@@ -355,6 +363,11 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                             </div>
                         )}
                         {mainView === 'events' && <JobEventsView externalEvents={jobEvents} onAddEvent={(e) => setJobEvents(prev => [e, ...prev])} />}
+                        {mainView === 'publish' && (
+                            <div className="p-6">
+                                <PublishJobView job={jobDataState} />
+                            </div>
+                        )}
                     </div>
                 </div>
             </div>

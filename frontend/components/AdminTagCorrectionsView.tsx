@@ -8,6 +8,7 @@ import {
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
+import JobDetailsDrawer from './JobDetailsDrawer';
 
 // --- TYPES ---
 interface UnmatchedTag {
@@ -70,9 +71,12 @@ const AdminTagCorrectionsView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [allTags, setAllTags] = useState<TagOption[]>([]);
     const [linkedCandidates, setLinkedCandidates] = useState<{ id: string; name: string }[]>([]);
+    const [linkedJobs, setLinkedJobs] = useState<{ id: string; title: string }[]>([]);
     const [linkedCandidatesLoading, setLinkedCandidatesLoading] = useState(false);
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const [drawerJob, setDrawerJob] = useState<any | null>(null);
+    const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
     const topRef = useRef<HTMLDivElement | null>(null);
 
 const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
@@ -217,31 +221,54 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
         let active = true;
         if (!selectedGroup || !apiBase) {
             setLinkedCandidates([]);
+            setLinkedJobs([]);
             setLinkedCandidatesLoading(false);
             return;
         }
         setLinkedCandidatesLoading(true);
         setLinkedCandidates([]);
+        setLinkedJobs([]);
         const loadCandidates = async () => {
             try {
                 const responses = await Promise.all(
                     selectedGroup.ids.map(async (id) => {
                         const res = await fetch(`${apiBase}/api/tags/${id}/candidates`);
-                        if (!res.ok) return [];
-                        return res.json();
+                        if (!res.ok) return { candidates: [], jobs: [] };
+                        const body = await res.json();
+                        if (Array.isArray(body)) {
+                            // Backwards compatibility: older backend returned a plain array of candidates
+                            return { candidates: body, jobs: [] };
+                        }
+                        return {
+                            candidates: Array.isArray(body.candidates) ? body.candidates : [],
+                            jobs: Array.isArray(body.jobs) ? body.jobs : [],
+                        };
                     }),
                 );
                 if (!active) return;
-                const entries = responses.flat().filter(Boolean);
-                const normalized = entries.map((entry: any) => ({
+
+                const allCandidates = responses.flatMap((r: any) => r.candidates || []).filter(Boolean);
+                const allJobs = responses.flatMap((r: any) => r.jobs || []).filter(Boolean);
+
+                const normalizedCandidates = allCandidates.map((entry: any) => ({
                     id: entry.candidate_id || entry.candidateId || entry.id,
                     name: entry.full_name || entry.fullName || entry.email || entry.phone || 'מועמד',
                 }));
-                const unique = Array.from(new Map(normalized.map((item) => [item.id, item])).values());
-                setLinkedCandidates(unique);
+                const uniqueCandidates = Array.from(new Map(normalizedCandidates.map((item) => [item.id, item])).values());
+                setLinkedCandidates(uniqueCandidates);
+
+                const normalizedJobs = allJobs.map((job: any) => ({
+                    id: job.id,
+                    title: job.title || job.name || 'משרה',
+                }));
+                const uniqueJobs = Array.from(new Map(normalizedJobs.map((item) => [item.id, item])).values());
+                setLinkedJobs(uniqueJobs);
             } catch (err) {
                 console.error('[AdminTagCorrectionsView] failed to load candidate info', err);
-                if (active) setLinkedCandidates([]);
+                if (active) {
+                    setLinkedCandidates([]);
+                    setLinkedJobs([]);
+                }
             } finally {
                 if (active) setLinkedCandidatesLoading(false);
             }
@@ -312,6 +339,14 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             name: name || linkedCandidates[0]?.name || 'מועמד',
         });
         setIsDrawerOpen(true);
+    };
+
+    const handleOpenJobDrawer = (job: { id: string; title: string }) => {
+        setDrawerJob({
+            id: job.id,
+            title: job.title,
+        });
+        setIsJobDrawerOpen(true);
     };
 
     return (
@@ -488,6 +523,26 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                                     ))}
                                                 </div>
                                             )}
+                                            {linkedCandidates.length === 0 && linkedJobs.length > 0 && (
+                                                <div className="mt-3">
+                                                    <div className="text-sm text-text-muted mb-2">
+                                                        התגית משויכת ל-{linkedJobs.length} משרות:
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-2 justify-center">
+                                                        {linkedJobs.map(job => (
+                                                            <button
+                                                                key={job.id}
+                                                                type="button"
+                                                                onClick={() => handleOpenJobDrawer(job)}
+                                                                className="inline-flex items-center gap-1 text-xs text-text-muted bg-white px-3 py-1 rounded-full border border-border-default shadow-sm hover:text-primary-600 hover:border-primary-300 transition-colors"
+                                                            >
+                                                                <TagIcon className="w-3.5 h-3.5" />
+                                                                {job.title}
+                                                            </button>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
                                         </>
                                     )}
                                   
@@ -630,6 +685,13 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             isFavorite={false}
             onToggleFavorite={() => {}}
         />
+        {drawerJob && (
+            <JobDetailsDrawer
+                job={drawerJob}
+                isOpen={isJobDrawerOpen}
+                onClose={() => setIsJobDrawerOpen(false)}
+            />
+        )}
         </>
     );
 };

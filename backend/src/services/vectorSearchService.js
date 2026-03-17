@@ -175,6 +175,8 @@ module.exports = {
   buildSearchDocument,
   embedCandidateAndSave,
   searchCandidates,
+  cosineSimilarity,
+  normalizeEmbedding,
 };
 
 

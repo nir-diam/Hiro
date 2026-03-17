@@ -17,6 +17,7 @@ export interface TagOption {
     description?: string;
     synonyms?: string[];
     rawType?: string;
+    tagKey?: string;
 }
 
 interface TagSelectorModalProps {
@@ -120,6 +121,7 @@ const TagSelectorModal: React.FC<TagSelectorModalProps> = (props) => {
                             description: tag.descriptionHe || tag.descriptionEn || '',
                             synonyms: Array.isArray(tag.synonyms) ? tag.synonyms : [],
                             rawType: tag.type,
+                            tagKey: tag.tagKey,
                         } as TagOption;
                     })
                     .filter((tag) => tag.nameHe);

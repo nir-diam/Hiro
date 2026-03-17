@@ -60,6 +60,12 @@ const Job = sequelize.define(
     telephoneQuestions: { type: DataTypes.JSONB, defaultValue: [] },
     digitalQuestions: { type: DataTypes.JSONB, defaultValue: [] },
     languages: { type: DataTypes.JSONB, defaultValue: [] },
+    skills: {
+      type: DataTypes.JSONB,
+      defaultValue: [],
+      comment: 'Array of { id, name, mode, source } for כישורים ותגיות חכמות',
+    },
+    aiRawDescription: DataTypes.TEXT,
   },
   {
     tableName: 'jobs',

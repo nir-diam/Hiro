@@ -66,8 +66,27 @@ const ensureIndustryPicklistEntries = async (mainField, subField) => {
   return mainCategory;
 };
 
+// Empty string "" is invalid for numeric columns; normalize to null
+const sanitizePayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return payload;
+  const out = { ...payload };
+  const numericFields = ['latitude', 'longitude'];
+  numericFields.forEach((key) => {
+    if (key in out && (out[key] === '' || (typeof out[key] === 'string' && out[key].trim() === ''))) {
+      out[key] = null;
+    }
+    if (key in out && out[key] != null) {
+      const n = Number(out[key]);
+      if (Number.isNaN(n)) out[key] = null;
+      else out[key] = n;
+    }
+  });
+  return out;
+};
+
 const create = async (payload) => {
-  const existing = await findByAnyName(payload);
+  const clean = sanitizePayload(payload);
+  const existing = await findByAnyName(clean);
   if (existing) {
     const err = new Error('Company already exists in the global database');
     err.status = 409;
@@ -79,14 +98,15 @@ const create = async (payload) => {
     };
     throw err;
   }
-  await ensureIndustryPicklistEntries(payload.mainField, payload.subField);
-  return Organization.create(payload);
+  await ensureIndustryPicklistEntries(clean.mainField, clean.subField);
+  return Organization.create(clean);
 };
 
 const update = async (id, payload) => {
   const org = await getById(id);
-  await ensureIndustryPicklistEntries(payload.mainField || org.mainField, payload.subField || org.subField);
-  await org.update(payload);
+  const clean = sanitizePayload(payload);
+  await ensureIndustryPicklistEntries(clean.mainField || org.mainField, clean.subField || org.subField);
+  await org.update(clean);
   return org;
 };
 

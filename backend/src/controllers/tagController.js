@@ -4,6 +4,7 @@ const Tag = require('../models/Tag');
 const TagHistory = require('../models/TagHistory');
 const CandidateTag = require('../models/CandidateTag');
 const Candidate = require('../models/Candidate');
+const Job = require('../models/Job');
 const { sequelize } = require('../config/db');
 const candidateTagService = require('../services/candidateTagService');
 const tagEmbeddingService = require('../services/tagEmbeddingService');
@@ -204,6 +205,30 @@ const listTagCandidatesHelper = async (tagId) => {
     }));
 };
 
+const listTagJobsHelper = async (tagId) => {
+  // Find jobs whose JSONB skills array contains an element with name matching the tag key/display name
+  const tag = await Tag.findByPk(tagId);
+  if (!tag) return [];
+
+  const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
+  const rawName = plain.displayNameHe || plain.displayNameEn || plain.tagKey;
+  const tagName = (rawName || '').toString().trim();
+  if (!tagName) return [];
+
+  const [rows] = await sequelize.query(
+    `SELECT id, title, status, client, "postingCode"
+     FROM jobs
+     WHERE skills IS NOT NULL
+       AND EXISTS (
+         SELECT 1
+         FROM jsonb_array_elements(skills) elem
+         WHERE elem ->> 'name' = :tagName
+       )`,
+    { replacements: { tagName } },
+  );
+  return rows;
+};
+
 const cleanupPendingTagCorrections = async (terms = []) => {
   const normalizedTerms = Array.from(
     new Set(
@@ -232,8 +257,15 @@ const listTagCandidates = async (req, res) => {
   }
 
   try {
-    const rows = await listTagCandidatesHelper(tagId);
-    res.json(rows);
+    const candidates = await listTagCandidatesHelper(tagId);
+
+    // If tag is not linked to any candidates, check if it is used on jobs (Job.skills JSONB)
+    if (!candidates.length) {
+      const jobs = await listTagJobsHelper(tagId);
+      return res.json({ candidates: [], jobs });
+    }
+
+    res.json({ candidates, jobs: [] });
   } catch (err) {
     console.error('[tagController.listTagCandidates]', err);
     res.status(500).json({ message: 'Failed to load candidate tags for this tag' });
@@ -379,6 +411,83 @@ const resolvePending = async (req, res) => {
         entry.source = entry.source || 'ai';
         await entry.save({ fields: ['status', 'qualityState', 'source'] });
         continue;
+      }
+
+      if (action === 'link' && targetTag) {
+        // Also update any jobs' skills entries that still reference this pending tag
+        const pendingPlain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
+        const pendingRawName = pendingPlain.displayNameHe || pendingPlain.displayNameEn || pendingPlain.tagKey;
+        const pendingName = (pendingRawName || '').toString().trim();
+        const pendingKey = (pendingPlain.tagKey || '').toString().trim();
+
+        const targetPlain = targetTag.toJSON ? targetTag.toJSON() : targetTag.get({ plain: true });
+        const targetRawName =
+          targetPlain.displayNameHe || targetPlain.displayNameEn || targetPlain.tagKey;
+        const targetName = (targetRawName || '').toString().trim();
+        const targetKey = (targetPlain.tagKey || '').toString().trim();
+        const targetType = targetPlain.type; // matches Job.skills.tagType domain (role, skill, industry, ...)
+
+        if (pendingName || pendingKey) {
+          const jobs = await listTagJobsHelper(entry.id);
+          for (const jobRow of jobs) {
+            const jobInstance = await Job.findByPk(jobRow.id);
+            if (!jobInstance) continue;
+
+            const currentSkills = Array.isArray(jobInstance.skills) ? jobInstance.skills : [];
+            let changed = false;
+            const updatedSkills = currentSkills.map((skill) => {
+              if (
+                !skill ||
+                (typeof skill.name !== 'string' && typeof skill.key !== 'string')
+              ) {
+                return skill;
+              }
+
+              const skillName = (skill.name || '').toString().trim();
+              const skillKey = (skill.key || '').toString().trim();
+
+              const matchesByName =
+                pendingName && skillName && skillName === pendingName;
+              const matchesByKey =
+                pendingKey && skillKey && skillKey === pendingKey;
+
+              if (!matchesByName && !matchesByKey) return skill;
+
+              changed = true;
+              return {
+                ...skill,
+                key: targetKey || skill.key,
+                name: targetName || skill.name,
+                tagType: targetType || skill.tagType,
+              };
+            });
+
+            if (changed) {
+              await jobInstance.update({ skills: updatedSkills });
+            }
+          }
+        }
+      }
+
+      if (action === 'ignore') {
+        // Also remove this tag from any jobs' skills arrays where its name appears
+        const plain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
+        const rawName = plain.displayNameHe || plain.displayNameEn || plain.tagKey;
+        const tagName = (rawName || '').toString().trim();
+        if (tagName) {
+          const jobs = await listTagJobsHelper(entry.id);
+          for (const jobRow of jobs) {
+            const jobInstance = await Job.findByPk(jobRow.id);
+            if (!jobInstance) continue;
+            const currentSkills = Array.isArray(jobInstance.skills) ? jobInstance.skills : [];
+            const filtered = currentSkills.filter(
+              (skill) => !skill || typeof skill.name !== 'string' || skill.name.trim() !== tagName,
+            );
+            if (filtered.length !== currentSkills.length) {
+              await jobInstance.update({ skills: filtered });
+            }
+          }
+        }
       }
 
       if (action === 'link' && targetTag) {
