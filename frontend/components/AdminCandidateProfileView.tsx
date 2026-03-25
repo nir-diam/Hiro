@@ -116,10 +116,16 @@ const AdminCandidateProfileView: React.FC = () => {
     const fetchCandidateTags = useCallback(async () => {
         if (!candidateIdentifier || !apiBase) return;
         try {
-            const res = await fetch(`${apiBase}/api/admin/candidate-tags?candidateId=${candidateIdentifier}`);
+            const params = new URLSearchParams({
+                candidateId: candidateIdentifier,
+                limit: '2000',
+                offset: '0',
+            });
+            const res = await fetch(`${apiBase}/api/admin/candidate-tags?${params.toString()}`);
             if (!res.ok) throw new Error('Failed to load candidate tags');
-            const data = await res.json();
-            setCandidateTags(data);
+            const body = await res.json();
+            const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+            setCandidateTags(list);
         } catch (err) {
             console.error('Failed to load candidate tags', err);
         }

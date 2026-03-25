@@ -9,26 +9,65 @@ import { useLanguage } from '../context/LanguageContext';
 
 interface ClientFinanceTabProps {
     clientName: string;
+    clientId: string;
 }
 
-const ClientFinanceTab: React.FC<ClientFinanceTabProps> = ({ clientName }) => {
+const ClientFinanceTab: React.FC<ClientFinanceTabProps> = ({ clientName, clientId }) => {
     const { t } = useLanguage();
     const [isEditing, setIsEditing] = useState(false); // Can be used to toggle read-only mode if needed
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     
-    // Mock Data State
     const [financeData, setFinanceData] = useState({
-        vatNumber: '512345678',
+        vatNumber: '',
         paymentTerms: 'שוטף + 30',
-        commissionRate: 100, // Default 100%
-        agreementType: 'השמה מלאה (100%)',
-        hasSignedContract: true,
-        contractDate: '31/12/2026'
+        commissionRate: 100,
+        agreementType: '',
+        hasSignedContract: false,
+        contractDate: ''
     });
 
-    const handleSave = () => {
+    React.useEffect(() => {
+        if (!apiBase || !clientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients/${clientId}/finance`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load finance');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const d = (data && typeof data === 'object') ? data : {};
+                setFinanceData({
+                    vatNumber: d.vatNumber || '',
+                    paymentTerms: d.paymentTerms || 'שוטף + 30',
+                    commissionRate: Number(d.commissionRate ?? 100),
+                    agreementType: d.agreementType || '',
+                    hasSignedContract: Boolean(d.hasSignedContract ?? false),
+                    contractDate: d.contractDate || '',
+                });
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Failed to load finance');
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase, clientId]);
+
+    const handleSave = async () => {
         setIsEditing(false);
-        // Save logic here (API call)
-        console.log("Saved finance data:", financeData);
+        if (!apiBase || !clientId) return;
+        await fetch(`${apiBase}/api/clients/${clientId}/finance`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(financeData),
+        }).catch(() => null);
     };
 
     const adjustCommission = (amount: number) => {

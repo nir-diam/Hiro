@@ -1,30 +1,68 @@
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import AccordionSection from './AccordionSection';
-import { BuildingOffice2Icon, UserCircleIcon, PencilIcon, PhoneIcon, EnvelopeIcon, LinkIcon, MapPinIcon } from './Icons';
+import { BuildingOffice2Icon, UserCircleIcon, PencilIcon, PhoneIcon, EnvelopeIcon, LinkIcon, MapPinIcon, PlusIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
+const staticFallbackIndustryOptions = [
+    { value: 'other', label: 'אחר (הזן ידנית)' }
+];
+
+type OrganizationOption = {
+    id: string;
+    name: string;
+    aliases?: string[];
+    mainField?: string;
+    website?: string;
+    phone?: string;
+    address?: string;
+    location?: string;
+};
+
 // --- Reusable Form Components ---
-const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; type?: string; placeholder?: string; required?: boolean; }> = ({ label, name, value, onChange, type = 'text', placeholder, required = false }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label} {required && <span className="text-red-500">*</span>}</label>
-        <input type={type} name={name} value={value} onChange={onChange} placeholder={placeholder} required={required} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm" />
+const FormInput: React.FC<{ 
+    label: string; 
+    name: string; 
+    value: string; 
+    onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; 
+    type?: string; 
+    placeholder?: string; 
+    required?: boolean; 
+    onFocus?: () => void;
+    onBlur?: () => void;
+    autoComplete?: string;
+}> = ({ label, name, value, onChange, type = 'text', placeholder, required = false, onFocus, onBlur, autoComplete }) => (
+    <div className="flex flex-col">
+        <label className="text-sm font-bold text-text-default mb-2">{label} {required && <span className="text-red-500">*</span>}</label>
+        <input 
+            type={type} 
+            name={name} 
+            value={value} 
+            onChange={onChange} 
+            onFocus={onFocus}
+            onBlur={onBlur}
+            autoComplete={autoComplete}
+            placeholder={placeholder} 
+            required={required} 
+            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm" 
+        />
     </div>
 );
 
 const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode; }> = ({ label, name, value, onChange, children }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <select name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm">
+    <div className="flex flex-col">
+        <label className="text-sm font-bold text-text-default mb-2">{label}</label>
+        <select name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm">
             {children}
         </select>
     </div>
 );
 
 const FormTextArea: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void; rows?: number; placeholder?: string; }> = ({ label, name, value, onChange, rows = 3, placeholder }) => (
-    <div className="md:col-span-2">
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <textarea name={name} value={value} onChange={onChange} rows={rows} placeholder={placeholder} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"></textarea>
+    <div className="md:col-span-2 flex flex-col">
+        <label className="text-sm font-bold text-text-default mb-2">{label}</label>
+        <textarea name={name} value={value} onChange={onChange} rows={rows} placeholder={placeholder} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3.5 transition-all outline-none hover:border-border-strong shadow-sm resize-y"></textarea>
     </div>
 );
 
@@ -35,9 +73,21 @@ interface NewClientViewProps {
 
 const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
     const { t } = useLanguage();
+    const navigate = useNavigate();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [isSaving, setIsSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [orgs, setOrgs] = useState<OrganizationOption[]>([]);
+    const [isOrgsLoading, setIsOrgsLoading] = useState(false);
+    const [industryOptions, setIndustryOptions] = useState<Array<{ value: string; label: string }>>(staticFallbackIndustryOptions);
+    const [isIndustryLoading, setIsIndustryLoading] = useState(false);
+    const [showDropdown, setShowDropdown] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+    
     const [formData, setFormData] = useState({
         clientName: '',
         industry: '',
+        customIndustry: '',
         website: '',
         companyPhone: '',
         address: '',
@@ -49,58 +99,308 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
         notes: '',
     });
 
+    // Handle clicking outside to close dropdown
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setShowDropdown(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        let active = true;
+        setIsOrgsLoading(true);
+        fetch(`${apiBase}/api/organizations`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load organizations');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                const mapped: OrganizationOption[] = list.map((o: any) => ({
+                    id: String(o.id),
+                    name: o.name || o.legalName || o.nameEn || 'Company',
+                    aliases: Array.isArray(o.aliases) ? o.aliases : [],
+                    mainField: o.mainField,
+                    website: o.website,
+                    phone: o.phone,
+                    address: o.address || o.location,
+                    location: o.location,
+                }));
+                setOrgs(mapped);
+            })
+            .catch(() => {
+                if (!active) return;
+                setOrgs([]);
+            })
+            .finally(() => {
+                if (active) setIsOrgsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase]);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        let active = true;
+        const categoryId = '7605ff08-fc40-49ef-9e90-4c6490c5c25c';
+        setIsIndustryLoading(true);
+        fetch(`${apiBase}/api/picklists/categories/${categoryId}/values`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load industries');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                const mapped = list
+                    .filter((v: any) => v && (v.isActive === undefined || v.isActive === true))
+                    .sort((a: any, b: any) => Number(a.order ?? 0) - Number(b.order ?? 0))
+                    .map((v: any) => ({
+                        value: String(v.value ?? v.label ?? ''),
+                        label: String(v.displayName || v.label || v.value || ''),
+                    }))
+                    .filter((opt: any) => opt.value && opt.label);
+                setIndustryOptions(mapped.length ? mapped : staticFallbackIndustryOptions);
+            })
+            .catch(() => {
+                if (!active) return;
+                setIndustryOptions(staticFallbackIndustryOptions);
+            })
+            .finally(() => {
+                if (active) setIsIndustryLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase]);
+
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
         setFormData(prev => ({ ...prev, [name]: value }));
+        
+        if (name === 'clientName') {
+            setShowDropdown(true);
+        }
     };
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        onSave(formData);
+    const handleSelectCompany = (company: any) => {
+        setFormData(prev => ({
+            ...prev,
+            clientName: company.name,
+            industry: prev.industry || company.mainField || '',
+            website: prev.website || company.website,
+            companyPhone: prev.companyPhone || company.phone,
+            address: prev.address || company.address || company.location || ''
+        }));
+        setShowDropdown(false);
     };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        const finalData = { ...formData };
+        if (finalData.industry === 'other') {
+            finalData.industry = finalData.customIndustry;
+        }
+        // Remove customIndustry from the final payload if desired
+        // delete finalData.customIndustry;
+        setIsSaving(true);
+        setError(null);
+        try {
+            const payload = {
+                name: finalData.clientName,
+                industry: finalData.industry,
+                phone: finalData.companyPhone,
+                email: finalData.contactEmail || undefined,
+                status: finalData.status,
+                mainContactName: finalData.contactName,
+                mainContactEmail: finalData.contactEmail,
+                mainContactPhone: finalData.contactPhone,
+                metadata: {
+                    website: finalData.website,
+                    address: finalData.address,
+                    contactRole: finalData.contactRole,
+                    notes: finalData.notes,
+                },
+            };
+            if (!apiBase) throw new Error('Missing API base (VITE_API_BASE)');
+            const res = await fetch(`${apiBase}/api/clients`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'Create failed');
+            }
+            const created = await res.json();
+            onSave(created);
+            navigate('/clients');
+        } catch (e: any) {
+            setError(e?.message || 'Create failed');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    const searchQuery = formData.clientName.toLowerCase();
+    const filteredCompanies = orgs.map(company => {
+        const matchName = company.name.toLowerCase().includes(searchQuery);
+        const matchedAlias = company.aliases?.find(alias => alias.toLowerCase().includes(searchQuery));
+        
+        if (matchName || matchedAlias) {
+            return { ...company, matchedAlias: matchName ? null : matchedAlias };
+        }
+        return null;
+    }).filter(Boolean);
 
     return (
-        <form onSubmit={handleSubmit} className="space-y-6">
-             <div id="client-details">
-                <AccordionSection title={t('client_form.section_company')} icon={<BuildingOffice2Icon className="w-5 h-5"/>} defaultOpen>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                        <FormInput label={t('client_form.field_client_name')} name="clientName" value={formData.clientName} onChange={handleChange} required placeholder={t('client_form.placeholder_name')} />
-                        <FormInput label={t('client_form.field_industry')} name="industry" value={formData.industry} onChange={handleChange} placeholder={t('client_form.placeholder_industry')} />
-                        <FormInput label={t('client_form.field_website')} name="website" value={formData.website} onChange={handleChange} type="url" placeholder="https://www.company.com" />
-                        <FormInput label={t('client_form.field_company_phone')} name="companyPhone" value={formData.companyPhone} onChange={handleChange} type="tel" />
-                        <FormInput label={t('client_form.field_address')} name="address" value={formData.address} onChange={handleChange} />
-                        <FormSelect label={t('client_form.field_status')} name="status" value={formData.status} onChange={handleChange}>
-                            <option value="פעיל">פעיל</option>
-                            <option value="לא פעיל">לא פעיל</option>
-                            <option value="בהקפאה">בהקפאה</option>
-                        </FormSelect>
-                    </div>
-                </AccordionSection>
+        <div className="max-w-4xl mx-auto pb-24 w-full px-4 sm:px-6 lg:px-8 animate-fade-in">
+            {/* Header Section */}
+            <div className="mb-8 mt-6">
+                <h1 className="text-3xl sm:text-4xl font-extrabold text-text-default mb-3 tracking-tight">{t('client_form.title_new')}</h1>
+                <p className="text-text-muted text-base sm:text-lg max-w-2xl leading-relaxed">
+                    הזן את פרטי החברה כדי להוסיף אותה למאגר הלקוחות של המערכת. ניתן להשתמש בהשלמה האוטומטית לאיתור חברות קיימות ולהעשרת נתונים מהירה.
+                </p>
             </div>
 
-            <div id="contact-person">
-                <AccordionSection title={t('client_form.section_contact')} icon={<UserCircleIcon className="w-5 h-5"/>} defaultOpen>
-                     <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4">
-                        <FormInput label={t('client_form.field_contact_name')} name="contactName" value={formData.contactName} onChange={handleChange} required />
-                        <FormInput label={t('client_form.field_contact_role')} name="contactRole" value={formData.contactRole} onChange={handleChange} />
-                        <FormInput label={t('client_form.field_contact_email')} name="contactEmail" value={formData.contactEmail} onChange={handleChange} type="email" required />
-                        <FormInput label={t('client_form.field_contact_phone')} name="contactPhone" value={formData.contactPhone} onChange={handleChange} type="tel" />
+            <form onSubmit={handleSubmit} className="space-y-6 sm:space-y-8">
+                 <div id="client-details">
+                    <AccordionSection title={t('client_form.section_company')} icon={<BuildingOffice2Icon className="w-5 h-5"/>} defaultOpen>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                            <div className="relative md:col-span-2 lg:col-span-1" ref={dropdownRef}>
+                                <FormInput 
+                                    label={t('client_form.field_client_name')} 
+                                    name="clientName" 
+                                    value={formData.clientName} 
+                                    onChange={handleChange} 
+                                    onFocus={() => setShowDropdown(true)}
+                                    autoComplete="off"
+                                    required 
+                                    placeholder={t('client_form.placeholder_name')} 
+                                />
+                                
+                                {/* Autocomplete Dropdown */}
+                                {showDropdown && formData.clientName && (
+                                    <div className="absolute z-50 w-full mt-2 bg-bg-card border border-border-default rounded-2xl shadow-2xl max-h-[22rem] overflow-hidden animate-fade-in flex flex-col ring-1 ring-black/5">
+                                        {filteredCompanies.length > 0 && (
+                                            <div className="px-4 py-3 text-xs font-bold text-text-muted bg-bg-subtle/90 sticky top-0 backdrop-blur-md z-10 border-b border-border-subtle uppercase tracking-wider">
+                                                תוצאות ממאגר הארגונים
+                                            </div>
+                                        )}
+                                        {isOrgsLoading && (
+                                            <div className="px-4 py-3 text-xs font-bold text-text-muted bg-bg-subtle/50 border-b border-border-subtle">
+                                                טוען...
+                                            </div>
+                                        )}
+                                        <div className="flex-1 overflow-y-auto">
+                                            {filteredCompanies.map(company => (
+                                                <div 
+                                                    key={company.id} 
+                                                    className="p-4 hover:bg-bg-hover cursor-pointer border-b border-border-subtle last:border-0 flex justify-between items-center transition-colors group"
+                                                    onClick={() => handleSelectCompany(company)}
+                                                >
+                                                    <div className="flex items-center gap-4">
+                                                        <div className="w-12 h-12 rounded-xl bg-bg-subtle flex items-center justify-center text-text-muted border border-border-default group-hover:border-primary-500/30 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors shadow-sm">
+                                                            <BuildingOffice2Icon className="w-6 h-6" />
+                                                        </div>
+                                                        <div className="flex flex-col">
+                                                            <div className="font-bold text-text-default text-base group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">{company.name}</div>
+                                                            <div className="text-sm text-text-muted flex items-center gap-2 mt-0.5">
+                                                                <span className="truncate max-w-[120px] sm:max-w-xs">
+                                                                    {String(company.website || '').replace('https://www.', '').replace('http://www.', '').replace('https://', '').replace('http://', '')}
+                                                                </span>
+                                                                {company.matchedAlias && (
+                                                                    <>
+                                                                        <span className="w-1 h-1 rounded-full bg-border-strong"></span>
+                                                                        <span className="text-primary-600 font-medium truncate max-w-[100px] sm:max-w-xs">מוכר גם כ: {company.matchedAlias}</span>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <span className="hidden sm:inline-block text-xs font-bold bg-primary-500/10 text-primary-600 dark:text-primary-400 px-3 py-1.5 rounded-full border border-primary-500/20 whitespace-nowrap">
+                                                        {industryOptions.find(opt => opt.value === company.mainField)?.label || company.mainField || '—'}
+                                                    </span>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <div 
+                                            className="p-4 bg-bg-subtle hover:bg-primary-500/5 cursor-pointer text-primary-600 dark:text-primary-400 font-bold flex items-center gap-3 transition-colors border-t border-border-default sticky bottom-0 z-10"
+                                            onClick={() => setShowDropdown(false)}
+                                        >
+                                            <div className="w-10 h-10 rounded-full bg-primary-500/10 flex items-center justify-center text-primary-600 dark:text-primary-400 shadow-sm">
+                                                <PlusIcon className="w-5 h-5" />
+                                            </div>
+                                            <span className="text-base">צור לקוח חדש: "{formData.clientName}"</span>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="flex flex-col gap-4 md:col-span-2 lg:col-span-1">
+                                <FormSelect label={t('client_form.field_industry')} name="industry" value={formData.industry} onChange={handleChange}>
+                                    <option value="">בחר תעשייה...</option>
+                                    {industryOptions.map(opt => (
+                                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                    ))}
+                                </FormSelect>
+                                {formData.industry === 'other' && (
+                                    <FormInput label="שם תעשייה (מותאם אישית)" name="customIndustry" value={formData.customIndustry} onChange={handleChange} required />
+                                )}
+                            </div>
+                            <FormInput label={t('client_form.field_website')} name="website" value={formData.website} onChange={handleChange} type="url" placeholder="https://www.company.com" />
+                            <FormInput label={t('client_form.field_company_phone')} name="companyPhone" value={formData.companyPhone} onChange={handleChange} type="tel" />
+                            <FormInput label={t('client_form.field_address')} name="address" value={formData.address} onChange={handleChange} />
+                            <FormSelect label={t('client_form.field_status')} name="status" value={formData.status} onChange={handleChange}>
+                                <option value="פעיל">פעיל</option>
+                                <option value="לא פעיל">לא פעיל</option>
+                                <option value="בהקפאה">בהקפאה</option>
+                            </FormSelect>
+                        </div>
+                    </AccordionSection>
+                </div>
+
+                <div id="contact-person">
+                    <AccordionSection title={t('client_form.section_contact')} icon={<UserCircleIcon className="w-5 h-5"/>} defaultOpen>
+                         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+                            <FormInput label={t('client_form.field_contact_name')} name="contactName" value={formData.contactName} onChange={handleChange} required />
+                            <FormInput label={t('client_form.field_contact_role')} name="contactRole" value={formData.contactRole} onChange={handleChange} />
+                            <FormInput label={t('client_form.field_contact_email')} name="contactEmail" value={formData.contactEmail} onChange={handleChange} type="email" required />
+                            <FormInput label={t('client_form.field_contact_phone')} name="contactPhone" value={formData.contactPhone} onChange={handleChange} type="tel" />
+                        </div>
+                    </AccordionSection>
+                </div>
+                
+                 <div id="internal-notes">
+                    <AccordionSection title={t('client_form.section_notes')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
+                        <FormTextArea label={t('client_form.field_notes')} name="notes" value={formData.notes} onChange={handleChange} placeholder={t('client_form.placeholder_notes')} />
+                    </AccordionSection>
+                </div>
+                
+                {/* Sticky Footer Actions */}
+                <div className="fixed bottom-0 left-0 right-0 bg-bg-card/90 backdrop-blur-md border-t border-border-default p-4 z-40 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+                    <div className="max-w-4xl mx-auto flex justify-end items-center gap-4 px-4 sm:px-6 lg:px-8">
+                        <button type="button" onClick={onCancel} className="text-text-muted font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-colors">{t('client_form.cancel')}</button>
+                        <button
+                            type="submit"
+                            disabled={isSaving}
+                            className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition-all shadow-md hover:shadow-lg hover:-translate-y-0.5 disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            {isSaving ? 'שומר...' : t('client_form.save')}
+                        </button>
                     </div>
-                </AccordionSection>
-            </div>
-            
-             <div id="internal-notes">
-                <AccordionSection title={t('client_form.section_notes')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
-                    <FormTextArea label={t('client_form.field_notes')} name="notes" value={formData.notes} onChange={handleChange} placeholder={t('client_form.placeholder_notes')} />
-                </AccordionSection>
-            </div>
-            
-            <div className="flex justify-end items-center p-3 border-t border-border-default bg-bg-card gap-3 rounded-lg mt-4">
-                <button type="button" onClick={onCancel} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition">{t('client_form.cancel')}</button>
-                <button type="submit" className="bg-primary-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-primary-700 transition">{t('client_form.save')}</button>
-            </div>
-        </form>
+                </div>
+            </form>
+            {error && (
+                <div className="mt-4 text-sm text-red-600 font-semibold">
+                    {error}
+                </div>
+            )}
+        </div>
     );
 };
 
 export default NewClientView;
+

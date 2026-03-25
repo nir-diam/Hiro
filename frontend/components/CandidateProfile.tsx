@@ -4,7 +4,7 @@ import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, Lin
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
-import { SmartTagType, SmartTagData } from './SmartTagTypes';
+import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 
@@ -385,6 +385,12 @@ type CandidateTagDetail = {
     isInSummary?: boolean;
     confidenceScore?: number;
     finalScore?: number;
+    category?: string;
+    evidence?: string | string[];
+    rawTypeReason?: string;
+    tagReason?: string;
+    descriptionHe?: string;
+    createdAt?: string;
 };
 
 const getLabelCaseInsensitive = (labels: Record<string, string>, key: string): string | undefined => {
@@ -405,45 +411,170 @@ const normalizeTagDetail = (d: any): CandidateTagDetail => ({
     isInSummary: d?.isInSummary ?? d?.is_in_summary,
     confidenceScore: typeof (d?.confidenceScore ?? d?.confidence_score) === 'number' ? (d?.confidenceScore ?? d?.confidence_score) : undefined,
     finalScore: typeof (d?.finalScore ?? d?.final_score) === 'number' ? (d?.finalScore ?? d?.final_score) : undefined,
+    category: d?.category,
+    evidence: d?.evidence,
+    rawTypeReason: d?.rawTypeReason ?? d?.raw_type_reason,
+    tagReason: d?.tagReason ?? d?.tag_reason,
+    descriptionHe: d?.descriptionHe ?? d?.description_he,
+    createdAt: d?.createdAt ?? d?.created_at,
 });
 
-const formatConfidenceLabel = (value?: number) => {
-    if (typeof value !== 'number' || Number.isNaN(value)) return undefined;
-    if (value >= 0.95) return 'בביטחון גבוה';
-    if (value >= 0.8) return 'בביטחון בינוני';
-    if (value >= 0.6) return 'בביטחון נמוך';
-    return 'בביטחון מוגבל';
-};
-
-const formatFinalScoreLabel = (value?: number): string | undefined => {
-    if (typeof value !== 'number' || Number.isNaN(value)) return undefined;
-    const v = Math.max(100, Math.min(350, value));
-    const level = v >= 250 ? 'גבוהה' : v >= 150 ? 'בינוני' : 'נמוך';
-    return `ביטחון: ${level}`;
-};
-
-const buildTagTooltipText = (tag: string, detail?: CandidateTagDetail) => {
-    if (!detail) return undefined;
-    const descriptorParts: string[] = [];
-    if (detail.rawType && detail.rawType !== tag) {
-        const labelHe = getLabelCaseInsensitive(RAW_TYPE_LABELS, detail.rawType);
-        if (labelHe && labelHe !== detail.rawType) descriptorParts.push(labelHe);
+const parseMonthYear = (value?: string): Date | null => {
+    if (!value || typeof value !== 'string') return null;
+    const clean = value.trim();
+    const monthYearMatch = clean.match(/^(\d{1,2})[/-](\d{4})$/);
+    if (monthYearMatch) {
+        const month = Number(monthYearMatch[1]);
+        const year = Number(monthYearMatch[2]);
+        if (month >= 1 && month <= 12) return new Date(year, month - 1, 1);
     }
-    const contextLabel = detail.context ? (getLabelCaseInsensitive(CONTEXT_LABELS, detail.context) || detail.context) : undefined;
-    const temporalLabel = detail.isCurrent ? 'נוכחי' : 'ניסיון עבר';
-    const summaryLabel = detail.isInSummary ? 'נכלל בסיכום' : 'לא נכלל בסיכום';
-    const confidenceFromScore = formatConfidenceLabel(detail.confidenceScore);
-    const finalScoreLabel = formatFinalScoreLabel(detail.finalScore) ?? confidenceFromScore;
-    const descriptor = descriptorParts.length ? `זוהה כ${descriptorParts.join(' ')}` : 'זוהה';
-    const parts = [
-        descriptor,
-        contextLabel ? `בהקשר ${contextLabel}` : undefined,
-        temporalLabel,
-        summaryLabel,
-        finalScoreLabel,
-    ].filter(Boolean);
-    return parts.length ? parts.join(' · ') : undefined;
+    const yearMatch = clean.match(/^(\d{4})$/);
+    if (yearMatch) {
+        return new Date(Number(yearMatch[1]), 0, 1);
+    }
+    const parsed = new Date(clean);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
 };
+
+const estimateExperienceYears = (detail: CandidateTagDetail, workExperience: any[] = []): number | undefined => {
+    if (!Array.isArray(workExperience) || !workExperience.length) return undefined;
+    const needle = (detail.displayNameHe || detail.displayNameEn || detail.tagKey || '').toLowerCase().trim();
+    if (!needle) return undefined;
+    let totalMonths = 0;
+    workExperience.forEach((exp) => {
+        const haystack = [exp?.title, exp?.description, exp?.companyField, exp?.company]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+        if (!haystack.includes(needle)) return;
+        const start = parseMonthYear(exp?.startDate);
+        const end = parseMonthYear(exp?.endDate) || new Date();
+        if (!start || end < start) return;
+        const months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth()) + 1;
+        totalMonths += Math.max(0, months);
+    });
+    if (!totalMonths) return detail.isCurrent ? 1 : undefined;
+    return Math.max(1, Math.round((totalMonths / 12) * 10) / 10);
+};
+
+const formatConfidenceLevel = (detail: CandidateTagDetail): string => {
+    const score = typeof detail.confidenceScore === 'number' ? detail.confidenceScore : undefined;
+    const final = typeof detail.finalScore === 'number' ? detail.finalScore : undefined;
+    if ((score !== undefined && score >= 0.95) || (final !== undefined && final >= 250)) {
+        return 'ביטחון: גבוהה (זיהוי מפורש)';
+    }
+    if ((score !== undefined && score >= 0.75) || (final !== undefined && final >= 150)) {
+        return 'ביטחון: בינונית (הסקה מהקשר)';
+    }
+    return 'ביטחון: נמוכה (הסקה כללית)';
+};
+
+const parseConfidenceParts = (
+    detail: CandidateTagDetail
+): { label: string; sub: string; tone: 'high' | 'medium' | 'low' } => {
+    const score = typeof detail.confidenceScore === 'number' ? detail.confidenceScore : undefined;
+    const final = typeof detail.finalScore === 'number' ? detail.finalScore : undefined;
+    if ((score !== undefined && score >= 0.95) || (final !== undefined && final >= 250)) {
+        return { label: 'גבוהה', sub: 'זיהוי מפורש', tone: 'high' };
+    }
+    if ((score !== undefined && score >= 0.75) || (final !== undefined && final >= 150)) {
+        return { label: 'בינונית', sub: 'הסקה מהקשר', tone: 'medium' };
+    }
+    return { label: 'נמוכה', sub: 'הסקה כללית', tone: 'low' };
+};
+
+const formatCreatedAt = (value?: string): string | undefined => {
+    if (!value) return undefined;
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return undefined;
+    return d.toLocaleString('he-IL');
+};
+
+const formatTooltipFooterDate = (value?: string): string | undefined => {
+    if (!value) return undefined;
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return undefined;
+    return d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
+};
+
+const buildTagTooltipText = (tag: string, detail?: CandidateTagDetail, workExperience: any[] = []) => {
+    if (!detail) return undefined;
+    const typeLabel = detail.rawType ? (getLabelCaseInsensitive(RAW_TYPE_LABELS, detail.rawType) || detail.rawType) : 'Tag';
+    const tagName = detail.displayNameHe || detail.displayNameEn || tag;
+
+    const evidenceTokens = Array.isArray(detail.evidence)
+        ? detail.evidence
+        : (typeof detail.evidence === 'string' ? [detail.evidence] : []);
+   
+
+    const hierarchyLine = `נתיב: ${detail.category || 'ללא קטגוריה'} > ${detail.context || typeLabel}`;
+    const years = estimateExperienceYears(detail, workExperience);
+    const durationLine = `ניסיון: ${detail.isCurrent ? 'נוכחי' : 'ניסיון עבר'} | ${years ? `${years} שנים` : 'לא זמין'}`;
+    const confidenceLine = formatConfidenceLevel(detail);
+
+    const extra = [
+        detail.rawTypeReason ? `סיבה לבחירת סוג תגית: ${detail.rawTypeReason}` : undefined,
+        detail.tagReason ? `סיבה לבחירת התגית: ${detail.tagReason}` : undefined,
+        detail.descriptionHe ? `תיאור: ${detail.descriptionHe}` : undefined,
+        formatCreatedAt(detail.createdAt) ? `תאריך יצירה: ${formatCreatedAt(detail.createdAt)}` : undefined,
+    ].filter(Boolean);
+
+    return [`${tagName} (${typeLabel})`, hierarchyLine, durationLine, confidenceLine, ...extra].join('\n');
+};
+
+const buildTagTooltipPanel = (
+    tag: string,
+    detail: CandidateTagDetail | undefined,
+    workExperience: any[] = []
+): SmartTagTooltipPanel | undefined => {
+    if (!detail) return undefined;
+    const typeLabel = detail.rawType
+        ? getLabelCaseInsensitive(RAW_TYPE_LABELS, detail.rawType) || detail.rawType
+        : 'תגית';
+    const tagName = detail.displayNameHe || detail.displayNameEn || tag;
+    const years = estimateExperienceYears(detail, workExperience);
+    const confidence = parseConfidenceParts(detail);
+
+    const evidenceTokens = Array.isArray(detail.evidence)
+        ? detail.evidence
+        : typeof detail.evidence === 'string'
+          ? [detail.evidence]
+          : [];
+    const cvQuote = evidenceTokens.map((t) => String(t).trim()).find(Boolean);
+
+    const hierarchyParts = ['קורות חיים'];
+    if (detail.category) hierarchyParts.push(detail.category);
+    hierarchyParts.push(detail.context || typeLabel);
+    const sourcePath = hierarchyParts.join(' > ');
+
+    const logic = detail.rawTypeReason?.trim();
+    const desc = detail.descriptionHe?.trim();
+    const classificationLogic = logic || (!logic && desc ? desc : undefined);
+    const professionalSummary = desc && desc !== logic ? desc : undefined;
+
+    return {
+        categoryLabel: typeLabel,
+        title: tagName,
+        experienceLabel: 'ניסיון מצטבר',
+        experienceYears: years != null ? `${years} שנים` : undefined,
+        experienceIsCurrent: Boolean(detail.isCurrent),
+        confidenceLabel: confidence.label,
+        confidenceSub: confidence.sub,
+        confidenceTone: confidence.tone,
+        sourcePath,
+        classificationLogic,
+        selectionReason: detail.tagReason?.trim() || undefined,
+        cvQuote: cvQuote || undefined,
+        professionalSummary,
+        footerDate: formatTooltipFooterDate(detail.createdAt),
+    };
+};
+
+const buildLanguageTooltipPanel = (label: string, level?: string): SmartTagTooltipPanel => ({
+    categoryLabel: 'שפה',
+    title: label,
+    professionalSummary: level ? `רמה: ${level}` : undefined,
+});
 
 const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     const raw = (detail?.rawType || '').toLowerCase();
@@ -516,8 +647,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const getTagTooltip = useCallback((tag: string) => {
     const detail = tagDetailLookup.get(tag);
-    return buildTagTooltipText(tag, detail);
-  }, [tagDetailLookup]);
+    return buildTagTooltipText(tag, detail, candidateData.workExperience);
+  }, [tagDetailLookup, candidateData.workExperience]);
 
   const apiBase = import.meta.env.VITE_API_BASE || '';
   const resumeInputRef = useRef<HTMLInputElement>(null);
@@ -613,6 +744,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         isVerified: Boolean(detail?.isCurrent),
         isAiSuggested: false,
         customTooltip: getTagTooltip(tag),
+        tooltipPanel: detail ? buildTagTooltipPanel(tag, detail, candidateData.workExperience) : undefined,
       };
       if (!base[type]) {
         base[type] = [];
@@ -635,6 +767,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           isVerified: false,
           isAiSuggested: false,
           customTooltip: descriptor ? `רמה: ${descriptor}` : undefined,
+          tooltipPanel: buildLanguageTooltipPanel(label, descriptor ? String(descriptor) : undefined),
         } as SmartTagData;
       })
       .filter(Boolean) as SmartTagData[];
@@ -664,13 +797,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             finalScore: typeof (o.finalScore ?? o.final_score) === 'number' ? (o.finalScore ?? o.final_score) : undefined,
           };
         }
-        const customTooltip = detail ? buildTagTooltipText(label, detail) : undefined;
+        const customTooltip = detail ? buildTagTooltipText(label, detail, candidateData.workExperience) : undefined;
         return {
           label,
           type: 'soft' as SmartTagType,
           isVerified: Boolean(detail?.isCurrent),
           isAiSuggested: false,
           customTooltip,
+          tooltipPanel: detail ? buildTagTooltipPanel(label, detail, candidateData.workExperience) : undefined,
         } as SmartTagData;
       })
       .filter(Boolean) as SmartTagData[];
@@ -686,7 +820,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     });
 
     return base;
-  }, [candidateData.tags, candidateData.skills, candidateData.languages, tagDetailLookup, getTagTooltip]);
+  }, [candidateData.tags, candidateData.skills, candidateData.languages, candidateData.workExperience, tagDetailLookup, getTagTooltip]);
 
   const handleRowTagSelectorOpen = (rowId: string) => {
     const category = ROW_CATEGORY_MAP[rowId] || 'role';
@@ -1127,7 +1261,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                  
                         
 
-                      <div className="w-full mt-auto">
+                      <div className="w-full mt-auto relative z-[1000]">
                       <TagRowGroup
                           groupedSmartTags={groupedSmartTags}
                           onQualificationAdd={() => {

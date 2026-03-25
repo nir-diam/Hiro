@@ -6,7 +6,7 @@ import {
     LinkIcon, PencilIcon, SparklesIcon, ArrowLeftIcon, PlusIcon, TrashIcon, XMarkIcon, 
     ClipboardDocumentIcon, CheckIcon, ChevronDownIcon, ChevronUpIcon, PaperAirplaneIcon,
     ShareIcon, WhatsappIcon, EnvelopeIcon, ChartBarIcon, EyeIcon, UserGroupIcon,
-    TableCellsIcon, FunnelIcon, ClockIcon
+    TableCellsIcon, FunnelIcon, ClockIcon, ArrowPathIcon
 } from './Icons';
 import AccordionSection from './AccordionSection';
 import { AvatarIcon } from './Icons';
@@ -144,11 +144,13 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const [job, setJob] = useState(jobFromParent || mockJob);
     const [jobLoading, setJobLoading] = useState(false);
     const [jobError, setJobError] = useState<string | null>(null);
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
 
     const [fallbackPostingCode] = useState(() => String(Math.floor(100000 + Math.random() * 900000)));
     const publishingCode = (job as any).postingCode || fallbackPostingCode;
     const [copySuccess, setCopySuccess] = useState(false);
-    const [publicJobTitle, setPublicJobTitle] = useState((job as any).jobTitle || (job as any).title || '');
+    const [publicJobTitle, setPublicJobTitle] = useState((job as any).publicJobTitle || '');
     const [publicJobDescription, setPublicJobDescription] = useState(job.description);
     const [publicJobRequirements, setPublicJobRequirements] = useState(job.requirements.join('\n'));
     
@@ -231,7 +233,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
 
     useEffect(() => {
         const anyJob: any = job;
-        setPublicJobTitle(anyJob.jobTitle || anyJob.title || '');
+        setPublicJobTitle(anyJob.publicJobTitle || '');
         setPublicJobDescription(anyJob.description || '');
         const requirements = Array.isArray(anyJob.requirements) ? anyJob.requirements : (anyJob.requirements ? [anyJob.requirements] : []);
         setPublicJobRequirements(requirements.join('\n'));
@@ -417,6 +419,49 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
         }
     };
 
+    const handleSavePublishingSettings = async () => {
+        if (!apiBase) {
+            setSaveFeedback('לא הוגדר API בסיסי');
+            return;
+        }
+        const targetJobId = (job as any)?.id || jobId;
+        if (!targetJobId) {
+            setSaveFeedback('לא נמצא מזהה משרה לשמירה');
+            return;
+        }
+
+        setIsSaving(true);
+        setSaveFeedback(null);
+        try {
+            const requirementsArray = publicJobRequirements
+                .split('\n')
+                .map((line) => line.trim())
+                .filter(Boolean);
+
+            const payload = {
+                publicJobTitle: publicJobTitle.trim() || null,
+                description: publicJobDescription,
+                requirements: requirementsArray,
+                screeningQuestions,
+            };
+
+            const res = await fetch(`${apiBase}/api/jobs/${targetJobId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error('שמירת השינויים נכשלה');
+
+            const updatedJob = await res.json();
+            setJob(updatedJob);
+            setSaveFeedback('השינויים נשמרו בהצלחה');
+        } catch (err: any) {
+            setSaveFeedback(err?.message || 'שמירת השינויים נכשלה');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
     const filteredCandidates = useMemo(() => {
         if (!selectedSourceFilter) return mockSourceCandidates;
         return mockSourceCandidates.filter(c => c.source === selectedSourceFilter);
@@ -430,6 +475,14 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                     <p className="text-sm text-text-muted">הגדר את עמוד הנחיתה, שאלות הסינון וקישורי המעקב עבור המשרה.</p>
                 </div>
                 <div className="flex gap-2">
+                    <button
+                        onClick={handleSavePublishingSettings}
+                        disabled={isSaving}
+                        className="flex items-center gap-2 bg-primary-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-primary-700 disabled:opacity-60 disabled:cursor-not-allowed transition shadow-sm"
+                    >
+                        {isSaving ? <ArrowPathIcon className="w-5 h-5 animate-spin" /> : <CheckIcon className="w-5 h-5" />}
+                        <span>{isSaving ? 'שומר...' : 'שמור שינויים'}</span>
+                    </button>
                     <button 
                         onClick={() => { initializeChat(); setIsChatOpen(true); }}
                         className="flex items-center gap-2 bg-white text-primary-600 border border-primary-100 font-bold py-2 px-4 rounded-lg hover:bg-primary-50 transition shadow-sm"
@@ -450,6 +503,11 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             )}
             {jobError && (
                 <p className="text-xs text-red-600">{jobError}</p>
+            )}
+            {saveFeedback && (
+                <p className={`text-xs ${saveFeedback.includes('בהצלחה') ? 'text-green-600' : 'text-red-600'}`}>
+                    {saveFeedback}
+                </p>
             )}
 
             <AccordionSection title="פרטי משרה לפרסום" icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>

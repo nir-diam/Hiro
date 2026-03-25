@@ -1003,6 +1003,7 @@ const PICKLIST_CATEGORY_ID = '7605ff08-fc40-49ef-9e90-4c6490c5c25c';
 const AdminTagsView: React.FC = () => {
     const [tags, setTags] = useState<Tag[]>([]);
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
     const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
     const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
     const [selectedStatuses, setSelectedStatuses] = useState<TagStatus[]>([]);
@@ -1066,6 +1067,11 @@ const AdminTagsView: React.FC = () => {
     const [pageSize, setPageSize] = useState(100);
     const [page, setPage] = useState(1);
     const [totalRecords, setTotalRecords] = useState(0);
+
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearchTerm(searchTerm.trim()), 300);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
     const resolveSuggestedType = useCallback((suggestion: any) => {
         const normalize = (value?: string) => (value || '').toString().trim().toLowerCase();
         const picklist = typePicklistOptions || [];
@@ -1322,7 +1328,7 @@ const AdminTagsView: React.FC = () => {
             const params = new URLSearchParams();
             params.set('page', String(page));
             params.set('limit', String(pageSize));
-            if (searchTerm.trim()) params.set('search', searchTerm.trim());
+            if (debouncedSearchTerm) params.set('search', debouncedSearchTerm);
             if (synonymFilter.trim()) params.set('synonym', synonymFilter.trim());
             if (selectedTypes.length) params.set('types', selectedTypes.join(','));
             if (selectedCategories.length) params.set('categories', selectedCategories.join(','));
@@ -1359,7 +1365,7 @@ const AdminTagsView: React.FC = () => {
         apiBase,
         page,
         pageSize,
-        searchTerm,
+        debouncedSearchTerm,
         synonymFilter,
         selectedTypes,
         selectedCategories,
@@ -1443,7 +1449,7 @@ const AdminTagsView: React.FC = () => {
 
     useEffect(() => {
         setPage(1);
-    }, [searchTerm, selectedTypes, selectedCategories, selectedStatuses, synonymFilter, sourceFilter, createdFrom, createdTo, updatedFrom, updatedTo, sortConfig.key, sortConfig.direction, pageSize]);
+    }, [debouncedSearchTerm, selectedTypes, selectedCategories, selectedStatuses, synonymFilter, sourceFilter, createdFrom, createdTo, updatedFrom, updatedTo, sortConfig.key, sortConfig.direction, pageSize]);
 
     const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
     useEffect(() => {

@@ -4,10 +4,30 @@ const Tag = require('../models/Tag');
 const listForCandidate = async (req, res) => {
   try {
     const candidateId = req.query.candidateId || req.params.candidateId;
-    const tags = candidateId
-      ? await candidateTagService.listCandidateTags(candidateId)
-      : await candidateTagService.listAllCandidateTags();
-    res.json(tags);
+    const rawLimit = Number(req.query.limit);
+    const rawOffset = Number(req.query.offset);
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 500;
+    const offset = Number.isFinite(rawOffset) ? rawOffset : 0;
+    const search = typeof req.query.search === 'string' ? req.query.search : '';
+    let isActive = 'all';
+    if (req.query.isActive === 'true') isActive = true;
+    if (req.query.isActive === 'false') isActive = false;
+
+    const result = await candidateTagService.listCandidateTagsPaginatedForAdmin({
+      candidateId: candidateId ? String(candidateId).trim() : undefined,
+      limit,
+      offset,
+      search,
+      isActive,
+    });
+
+    res.json({
+      data: result.rows,
+      total: result.count,
+      limit: result.limit,
+      offset: result.offset,
+      hasMore: result.hasMore,
+    });
   } catch (err) {
     console.error('[candidateTagController.list]', err);
     res.status(500).json({ message: err.message || 'Failed to list candidate tags' });

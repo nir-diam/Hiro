@@ -382,6 +382,12 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 onClose={() => setIsInviteModalOpen(false)}
                 onInvite={(d) => alert('הזמנה נשלחה')}
                 jobTitle={jobDataState.title}
+                contacts={(jobDataState?.contacts || []).map((c) => ({
+                    id: c.id,
+                    name: c.name,
+                    email: c.email,
+                    role: c.role,
+                }))}
             />
 
              {/* Only show floating button if chat is closed */}

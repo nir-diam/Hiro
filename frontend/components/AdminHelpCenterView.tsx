@@ -181,6 +181,13 @@ const RichTextEditor: React.FC<{
 
 // --- MAIN COMPONENT ---
 
+const authJsonHeaders = (): Record<string, string> => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const h: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
+    if (token) h.Authorization = `Bearer ${token}`;
+    return h;
+};
+
 const AdminHelpCenterView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [articles, setArticles] = useState<HelpArticle[]>([]);
@@ -216,10 +223,24 @@ const AdminHelpCenterView: React.FC = () => {
         if (!apiBase) return;
         setIsFetching(true);
         try {
-            const res = await fetch(`${apiBase}/api/help-center/articles`);
-            if (!res.ok) throw new Error('לא ניתן לטעון את מרכז העזרה.');
+            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+            const headers: Record<string, string> = {
+                Accept: 'application/json',
+                'Cache-Control': 'no-cache',
+            };
+            if (token) headers.Authorization = `Bearer ${token}`;
+            // Avoid 304: fetch treats 304 as !ok and response body is often empty — tree would not update
+            const res = await fetch(`${apiBase}/api/help-center/articles`, {
+                cache: 'no-store',
+                credentials: 'include',
+                headers,
+            });
+            if (!res.ok) {
+                const text = await res.text().catch(() => '');
+                throw new Error(text || `שגיאה ${res.status}`);
+            }
             const payload = await res.json();
-            setArticles(payload);
+            setArticles(Array.isArray(payload) ? payload : []);
         } catch (err: any) {
             console.error('Failed to fetch help articles', err);
             setArticles([]);
@@ -267,10 +288,12 @@ const AdminHelpCenterView: React.FC = () => {
 
     const selectedArticle = articles.find(a => a.id === selectedId);
 
+    const normParent = (p: string | null | undefined) => (p == null || p === '' ? null : p);
+
     // Tree Rendering Logic
     const renderTree = (parentId: string | null = null, depth = 0) => {
         const nodes = articles
-            .filter((a) => a.parentId === parentId)
+            .filter((a) => normParent(a.parentId) === parentId)
             .sort((a, b) => {
                 if (a.order === b.order) return a.title.localeCompare(b.title);
                 return a.order - b.order;
@@ -317,11 +340,13 @@ const AdminHelpCenterView: React.FC = () => {
                 type,
             content: '',
             videoUrl: '',
-                order: articles.filter((a) => a.parentId === parentId).length + 1,
+                order: articles.filter((a) => normParent(a.parentId) === parentId).length + 1,
             };
             const res = await fetch(`${apiBase}/api/help-center/articles`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders(),
+                credentials: 'include',
+                cache: 'no-store',
                 body: JSON.stringify(payload),
             });
             if (!res.ok) {
@@ -353,7 +378,9 @@ const AdminHelpCenterView: React.FC = () => {
             };
             const res = await fetch(`${apiBase}/api/help-center/articles/${selectedId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders(),
+                credentials: 'include',
+                cache: 'no-store',
                 body: JSON.stringify(payload),
             });
             if (!res.ok) {
@@ -379,6 +406,9 @@ const AdminHelpCenterView: React.FC = () => {
         try {
             const res = await fetch(`${apiBase}/api/help-center/articles/${selectedId}`, {
                 method: 'DELETE',
+                headers: { Accept: 'application/json', ...authJsonHeaders() },
+                credentials: 'include',
+                cache: 'no-store',
             });
             if (!res.ok) {
                 const text = await res.text().catch(() => '');

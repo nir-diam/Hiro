@@ -120,6 +120,12 @@ const mapCandidateWithTags = (candidate) => {
     calculatedWeight: ct.calculated_weight,
     finalScore: ct.final_score,
     status: ct.status,
+    descriptionHe: ct.tag?.descriptionHe,
+    category: ct.tag?.category,
+    rawTypeReason: ct.raw_type_reason,
+    tagReason: ct.tag_reason,
+    createdAt: ct.created_at,
+    updatedAt: ct.updated_at,
   }));
   delete payload.candidateTags;
   return payload;
@@ -146,6 +152,8 @@ const listPaginated = async ({ page = 1, limit = 100, search = '' } = {}) => {
   const { rows, count } = await Candidate.findAndCountAll({
     include: includeCandidateTags,
     where,
+    distinct: true,
+    col: 'id',
     limit: safeLimit,
     offset,
     order: [['updatedAt', 'DESC']],

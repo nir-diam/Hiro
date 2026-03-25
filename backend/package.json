@@ -27,6 +27,7 @@
     "mammoth": "^1.6.0",
     "ml-pca": "^4.1.1",
     "node-fetch": "^3.3.2",
+    "nodemailer": "^8.0.3",
     "pdf-parse": "^1.1.1",
     "pg": "^8.13.1",
     "pg-hstore": "^2.3.4",

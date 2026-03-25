@@ -6,7 +6,6 @@ import {
     BuildingOffice2Icon, UserGroupIcon, ChatBubbleBottomCenterTextIcon, TagIcon, ChevronLeftIcon,
     WrenchScrewdriverIcon, UserCircleIcon, BriefcaseIcon, DocumentTextIcon
 } from './Icons';
-import { notificationsData } from './NotificationCenter';
 import { specs } from '../data/specs';
 import SpecDrawer from './SpecDrawer';
 import HelpCenterDrawer from './HelpCenterDrawer';
@@ -83,7 +82,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
     
     const userMenuRef = useRef<HTMLDivElement>(null);
     const settingsMenuRef = useRef<HTMLDivElement>(null);
-    const unreadCount = notificationsData.filter(n => !n.isRead).length;
+    const unreadCount = 0;
 
     // Check if current route has a spec
     const currentSpec = specs[location.pathname];

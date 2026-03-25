@@ -20,6 +20,7 @@ const AdminLayout: React.FC = () => {
         { to: '/admin/picklists', label: 'ניהול picklists', icon: <ListBulletIcon className="w-5 h-5" /> },
         { to: '/admin/help-center', label: 'מרכז עזרה', icon: <DocumentTextIcon className="w-5 h-5" /> },
         { to: '/admin/settings/prompts', label: 'AI Prompts', icon: <SparklesIcon className="w-5 h-5" /> },
+        { to: '/admin/settings/matching-engine', label: 'מנוע התאמה', icon: <SparklesIcon className="w-5 h-5" /> },
     ];
 
     return (

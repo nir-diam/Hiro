@@ -35,6 +35,20 @@ const JobCandidateScreening = sequelize.define(
       allowNull: true,
       comment: 'AI-generated internal opinion (HTML) for this candidate+job',
     },
+    screeningStatus: {
+      type: DataTypes.STRING(32),
+      allowNull: false,
+      defaultValue: 'open',
+      comment: 'open | rejected',
+    },
+    rejectionReason: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
+    rejectionNotes: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
   },
   {
     tableName: 'job_candidate_screening',

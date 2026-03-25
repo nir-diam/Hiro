@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PlusIcon, MagnifyingGlassIcon, PencilIcon, FunnelIcon, XMarkIcon, ChartBarIcon } from './Icons';
 
@@ -17,6 +17,21 @@ interface Client {
   packageType: 'starter' | 'pro' | 'enterprise';
   isActive: boolean;
 }
+
+// --- API shape: backend Client model ---
+const normalizeClient = (raw: any): Client => ({
+  id: String(raw.id),
+  name: raw.displayName || raw.name || 'לקוח',
+  creationDate: raw.creationDate || raw.createdAt || new Date().toISOString(),
+  jobsUsed: Number(raw.jobsUsed ?? 0),
+  jobsTotal: Number(raw.jobsTotal ?? 0),
+  coordinatorsUsed: Number(raw.coordinatorsUsed ?? 0),
+  coordinatorsTotal: Number(raw.coordinatorsTotal ?? 0),
+  smsUsed: Number(raw.smsUsed ?? 0),
+  smsTotal: Number(raw.smsTotal ?? 0),
+  packageType: (raw.packageType as any) || 'starter',
+  isActive: Boolean(raw.isActive ?? raw.contactIsActive ?? true),
+});
 
 const UsageCell: React.FC<{ used: number; total: number; warningThreshold?: number }> = ({ used, total, warningThreshold = 0.9 }) => {
     const percentage = total > 0 ? (used / total) : 0;
@@ -62,42 +77,33 @@ const AdminClientsView: React.FC = () => {
     const navigate = useNavigate();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [clients, setClients] = useState<Client[]>([]);
-    const [loading, setLoading] = useState(false);
+    const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const mapClient = useCallback((c: any): Client => ({
-        id: (c.id || '').toString(),
-        name: c.name || c.displayName || 'ללא שם',
-        creationDate: c.creationDate || c.createdAt || new Date().toISOString(),
-        jobsUsed: c.jobsUsed || 0,
-        jobsTotal: c.jobsTotal || 0,
-        coordinatorsUsed: c.coordinatorsUsed || c.usersUsed || 0,
-        coordinatorsTotal: c.coordinatorsTotal || c.usersTotal || 0,
-        smsUsed: c.smsUsed || c.smsMonthly || 0,
-        smsTotal: c.smsTotal || c.smsBackup || 0,
-        packageType: c.packageType || 'starter',
-        isActive: typeof c.isActive === 'boolean' ? c.isActive : c.status !== 'לא פעיל',
-    }), []);
-
-    const loadClients = useCallback(async () => {
-        if (!apiBase) return;
-        setLoading(true);
-        setError(null);
-        try {
-            const res = await fetch(`${apiBase}/api/clients`);
-            if (!res.ok) throw new Error('Failed to load clients');
-            const data = await res.json();
-            setClients(Array.isArray(data) ? data.map(mapClient) : []);
-        } catch (err: any) {
-            setError(err.message || 'Load failed');
-        } finally {
-            setLoading(false);
-        }
-    }, [apiBase, mapClient]);
-
     useEffect(() => {
-        loadClients();
-    }, [loadClients]);
+        if (!apiBase) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load clients');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                setClients(list.map(normalizeClient));
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Failed to load clients');
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase]);
     
     // Filters
     const [searchTerm, setSearchTerm] = useState('');
@@ -116,21 +122,24 @@ const AdminClientsView: React.FC = () => {
     }, [clients, searchTerm, filterPackage, filterStatus]);
 
     const handleStatusToggle = async (clientId: string) => {
-        const target = clients.find(c => c.id === clientId);
-        if (!target) return;
-        const nextActive = !target.isActive;
-        setClients(prev => prev.map(client => 
-            client.id === clientId ? { ...client, isActive: nextActive } : client
+        const current = clients.find((c) => c.id === clientId);
+        if (!current || !apiBase) return;
+        const nextIsActive = !current.isActive;
+        setClients(prev => prev.map(client =>
+            client.id === clientId ? { ...client, isActive: nextIsActive } : client
         ));
         try {
-            if (!apiBase) return;
-            await fetch(`${apiBase}/api/clients/${clientId}`, {
+            const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ isActive: nextActive, status: nextActive ? 'פעיל' : 'לא פעיל' }),
+                body: JSON.stringify({ isActive: nextIsActive }),
             });
-        } catch {
-            // ignore revert for now
+            if (!res.ok) throw new Error('Update failed');
+        } catch (e) {
+            // rollback optimistic update
+            setClients(prev => prev.map(client =>
+                client.id === clientId ? { ...client, isActive: !nextIsActive } : client
+            ));
         }
     };
 
@@ -140,7 +149,6 @@ const AdminClientsView: React.FC = () => {
                 <div>
                     <h1 className="text-2xl font-bold text-text-default">ניהול לקוחות</h1>
                     <p className="text-sm text-text-muted">סה"כ {filteredClients.length} לקוחות במערכת</p>
-                    {error && <p className="text-xs text-red-600 mt-1">{error}</p>}
                 </div>
                 <button onClick={() => navigate('/admin/client/new')} className="bg-primary-600 text-white font-bold py-2 px-4 rounded-xl hover:bg-primary-700 transition shadow-md flex items-center gap-2">
                     <PlusIcon className="w-5 h-5"/>

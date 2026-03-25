@@ -50,6 +50,8 @@ const CandidateTag = sequelize.define(
       type: DataTypes.FLOAT,
       allowNull: true,
     },
+    raw_type_reason: DataTypes.STRING,
+    tag_reason: DataTypes.STRING,
     is_active: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

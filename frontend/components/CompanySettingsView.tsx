@@ -370,6 +370,7 @@ const CompanySettingsView: React.FC = () => {
     const { t } = useLanguage();
     const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults'>('details');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
+    const [matchingEnginePreset, setMatchingEnginePreset] = useState<'balanced' | 'skills' | 'experience'>('balanced');
 
     const renderContent = () => {
         switch (activeTab) {
@@ -385,6 +386,47 @@ const CompanySettingsView: React.FC = () => {
                             <SettingsInput label={t('company_settings.field_verified_phones')} value="0527372555" />
                         </div>
                         
+                        {/* Matching Engine Preset Section */}
+                        <div className="bg-bg-subtle/50 p-5 rounded-xl border border-border-default mt-6">
+                            <div className="flex items-center gap-2 mb-4 text-primary-700">
+                                <CalculatorIcon className="w-6 h-6" />
+                                <h3 className="text-lg font-bold">תבנית מנוע התאמות (Matching Engine Preset)</h3>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                <button
+                                    onClick={() => setMatchingEnginePreset('balanced')}
+                                    className={`p-4 rounded-xl border text-right transition-all ${matchingEnginePreset === 'balanced' ? 'bg-primary-50 border-primary-500 ring-1 ring-primary-500' : 'bg-bg-input border-border-default hover:border-primary-300'}`}
+                                >
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="text-xl">⚖️</span>
+                                        <span className={`font-bold text-base ${matchingEnginePreset === 'balanced' ? 'text-primary-700' : 'text-text-default'}`}>מאוזן (Balanced)</span>
+                                    </div>
+                                    <p className="text-sm text-text-muted">שילוב קלאסי של כישורים, ניסיון והשכלה.</p>
+                                </button>
+                                <button
+                                    onClick={() => setMatchingEnginePreset('skills')}
+                                    className={`p-4 rounded-xl border text-right transition-all ${matchingEnginePreset === 'skills' ? 'bg-primary-50 border-primary-500 ring-1 ring-primary-500' : 'bg-bg-input border-border-default hover:border-primary-300'}`}
+                                >
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="text-xl">⚡</span>
+                                        <span className={`font-bold text-base ${matchingEnginePreset === 'skills' ? 'text-primary-700' : 'text-text-default'}`}>מבוסס כישורים</span>
+                                    </div>
+                                    <p className="text-sm text-text-muted">התמקדות במיומנויות, התאמה סמנטית וכישורים רכים.</p>
+                                </button>
+                                <button
+                                    onClick={() => setMatchingEnginePreset('experience')}
+                                    className={`p-4 rounded-xl border text-right transition-all ${matchingEnginePreset === 'experience' ? 'bg-primary-50 border-primary-500 ring-1 ring-primary-500' : 'bg-bg-input border-border-default hover:border-primary-300'}`}
+                                >
+                                    <div className="flex items-center gap-2 mb-2">
+                                        <span className="text-xl">💼</span>
+                                        <span className={`font-bold text-base ${matchingEnginePreset === 'experience' ? 'text-primary-700' : 'text-text-default'}`}>מבוסס ניסיון</span>
+                                    </div>
+                                    <p className="text-sm text-text-muted">משקל גבוה לוותק, תעשייה והשכלה פורמלית.</p>
+                                </button>
+                            </div>
+                            <p className="text-xs text-text-muted mt-3">* קובע את משקלי ברירת המחדל של מנוע ההתאמות עבור הארגון. משפיע על אופן דירוג המועמדים למשרות.</p>
+                        </div>
+
                         {/* Goals Section */}
                         <div className="bg-bg-subtle/50 p-5 rounded-xl border border-border-default mt-6">
                             <div className="flex items-center gap-2 mb-4 text-primary-700">

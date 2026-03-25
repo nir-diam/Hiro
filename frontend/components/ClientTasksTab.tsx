@@ -8,8 +8,6 @@ import {
     BuildingOffice2Icon, MagnifyingGlassIcon, FunnelIcon, CalendarDaysIcon,
     FlagIcon, UserIcon, ArrowRightIcon
 } from './Icons';
-import { useLanguage } from '../context/LanguageContext';
-
 // --- TYPES ---
 
 type TaskType = 'sales' | 'retention';
@@ -23,7 +21,7 @@ export interface TaskHistoryItem {
 }
 
 export interface ClientTask {
-    id: number;
+    id: string;
     type: TaskType;
     status: TaskStatus;
     priority: TaskPriority;
@@ -33,7 +31,7 @@ export interface ClientTask {
     assignee: string; // Name
     isOverdue?: boolean;
     clientName?: string;
-    clientId?: number; // Added for navigation
+    clientId?: string; // Added for navigation
     contactName?: string;
     processStage?: string; // Linked to pipeline stage
     history?: TaskHistoryItem[]; // Added history
@@ -64,77 +62,18 @@ const pipelines = [
     }
 ];
 
-const teamMembers = ['אני', 'דנה כהן', 'אביב לוי', 'יעל שחר', 'מיכל אלקבץ', 'גיא רוזן'];
+const fallbackAssignees = ['אני'];
 
-// --- MOCK DATA GENERATOR ---
-const generateTasks = (): ClientTask[] => {
-    const clients = ['גטר גרופ', 'Wix', 'אל-על', 'בזק', 'תנובה', 'שטראוס', 'בנק הפועלים', 'Fiverr', 'Nice', 'Amdocs', 'Monday', 'IronSource'];
-    const tasksTitles = [
-        'שליחת טיוטת חוזה', 'תיאום פגישת היכרות', 'Follow-up להצעת מחיר', 
-        'בדיקת שביעות רצון', 'שיחת חתך רבעונית', 'עדכון סטטוס משרה', 
-        'שליחת קורות חיים', 'הכנת מצגת ללקוח', 'פתרון בעיית חיוב'
-    ];
-
-    const baseTasks: ClientTask[] = [];
-
-    // Generate 30 tasks
-    for (let i = 1; i <= 30; i++) {
-        const type = Math.random() > 0.4 ? 'sales' : 'retention';
-        const pipeline = pipelines.find(p => p.id === type);
-        const stage = pipeline ? pipeline.stages[Math.floor(Math.random() * pipeline.stages.length)].id : 'lead';
-        
-        const priorityRand = Math.random();
-        const priority = priorityRand > 0.7 ? 'high' : (priorityRand > 0.4 ? 'medium' : 'low');
-        
-        const status = Math.random() > 0.8 ? 'done' : 'pending';
-        const clientIndex = Math.floor(Math.random() * clients.length);
-        const client = clients[clientIndex];
-        const clientId = clientIndex + 1; // Mock ID
-        const title = tasksTitles[Math.floor(Math.random() * tasksTitles.length)];
-
-        // Date logic
-        const date = new Date();
-        const offset = Math.floor(Math.random() * 30) - 10; // -10 to +20 days
-        date.setDate(date.getDate() + offset);
-        const dateStr = date.toISOString().split('T')[0];
-        
-        // Overdue logic
-        const isOverdue = status === 'pending' && offset < 0;
-
-        // Mock History
-        const assignee = teamMembers[Math.floor(Math.random() * teamMembers.length)];
-        const history: TaskHistoryItem[] = [
-            { date: new Date(Date.now() - 100000000).toISOString(), user: 'מערכת', action: 'המשימה נוצרה' }
-        ];
-        
-        if (status === 'done') {
-             history.push({ date: new Date().toISOString(), user: assignee, action: 'סימון כבוצע' });
-        } else if (isOverdue) {
-             history.push({ date: new Date(Date.now() - 5000000).toISOString(), user: 'מערכת', action: 'התראה: משימה באיחור' });
-        }
-
-        baseTasks.push({
-            id: i,
-            type,
-            status,
-            priority,
-            title: `${title} - ${client}`,
-            description: `תיאור מפורט למשימה מספר ${i}. יש לוודא שהלקוח מרוצה ולעדכן את המערכת בהתאם.`,
-            dueDate: dateStr,
-            assignee: assignee,
-            clientName: client,
-            clientId: clientId,
-            isOverdue: isOverdue,
-            processStage: stage,
-            history: history
-        });
-    }
-    
-    // Sort by date
-    return baseTasks.sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+const computeIsOverdue = (task: ClientTask) => {
+    if (task.status !== 'pending') return false;
+    if (!task.dueDate) return false;
+    const due = new Date(task.dueDate);
+    if (Number.isNaN(due.getTime())) return false;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    due.setHours(0, 0, 0, 0);
+    return due.getTime() < today.getTime();
 };
-
-const initialTasks = generateTasks();
 
 // --- MODAL COMPONENT ---
 
@@ -143,16 +82,32 @@ interface TaskFormModalProps {
     onClose: () => void;
     onSave: (task: ClientTask) => void;
     taskToEdit?: ClientTask | null;
+    assignees: string[];
+    /** When creating a task across all clients, user must pick which client it belongs to. */
+    aggregateMode?: boolean;
+    clientPickerOptions?: { id: string; name: string }[];
+    pickedClientId?: string;
+    onPickedClientIdChange?: (id: string) => void;
 }
 
-const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, taskToEdit }) => {
+const TaskFormModal: React.FC<TaskFormModalProps> = ({
+    isOpen,
+    onClose,
+    onSave,
+    taskToEdit,
+    assignees,
+    aggregateMode,
+    clientPickerOptions = [],
+    pickedClientId,
+    onPickedClientIdChange,
+}) => {
     const [formData, setFormData] = useState<Partial<ClientTask>>({
         title: '',
         description: '',
         type: 'sales',
         priority: 'medium',
         dueDate: new Date().toISOString().split('T')[0],
-        assignee: 'אני',
+        assignee: assignees?.[0] || 'אני',
         status: 'pending',
         clientName: '',
         processStage: ''
@@ -169,25 +124,29 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
                     type: 'sales',
                     priority: 'medium',
                     dueDate: new Date().toISOString().split('T')[0],
-                    assignee: 'אני',
+                    assignee: assignees?.[0] || 'אני',
                     status: 'pending',
                     clientName: '',
                     processStage: pipelines[0].stages[0].id
                 });
             }
         }
-    }, [isOpen, taskToEdit]);
+    }, [isOpen, taskToEdit, assignees]);
 
     if (!isOpen) return null;
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!formData.title) return;
-        
+        if (aggregateMode && !taskToEdit && !pickedClientId) return;
+
+        const picked = clientPickerOptions.find((c) => c.id === pickedClientId);
         onSave({
-            id: taskToEdit ? taskToEdit.id : Date.now(),
+            id: taskToEdit ? taskToEdit.id : `tmp-${Date.now()}`,
             ...formData as ClientTask,
-            history: taskToEdit?.history || [{ date: new Date().toISOString(), user: 'אני', action: 'יצירת משימה' }]
+            clientId: taskToEdit?.clientId || pickedClientId || formData.clientId,
+            clientName: taskToEdit?.clientName || picked?.name || formData.clientName,
+            history: taskToEdit?.history || [{ date: new Date().toISOString(), user: 'אני', action: 'יצירת משימה' }],
         });
         onClose();
     };
@@ -195,68 +154,90 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
     const activePipeline = pipelines.find(p => p.id === formData.type) || pipelines[0];
 
     return (
-        <div className="fixed inset-0 bg-black/50 z-[100] flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-            <div className="bg-bg-card w-full max-w-md rounded-2xl shadow-xl border border-border-default overflow-hidden animate-fade-in" onClick={e => e.stopPropagation()}>
-                <div className="flex justify-between items-center p-4 border-b border-border-default bg-bg-subtle/30">
-                    <h3 className="font-bold text-lg text-text-default">{taskToEdit ? 'עריכת משימה' : 'משימה חדשה'}</h3>
-                    <button onClick={onClose} className="p-1 rounded-full text-text-muted hover:bg-bg-hover"><XMarkIcon className="w-5 h-5"/></button>
+        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
+            <div className="bg-bg-card w-full max-w-lg rounded-3xl shadow-2xl border border-border-default overflow-hidden animate-slide-up" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-center p-6 border-b border-border-default/50 relative">
+                    <h3 className="font-black text-xl text-text-default text-center w-full">{taskToEdit ? 'עריכת משימה' : 'משימה חדשה'}</h3>
+                    <button onClick={onClose} className="absolute left-6 p-2 rounded-full text-text-muted hover:bg-bg-hover hover:text-text-default transition-colors">
+                        <XMarkIcon className="w-6 h-6"/>
+                    </button>
                 </div>
-                <form onSubmit={handleSubmit} className="p-6 space-y-4">
+                <form onSubmit={handleSubmit} className="p-8 space-y-6">
+                    {aggregateMode && !taskToEdit && clientPickerOptions.length > 0 && (
+                        <div>
+                            <label className="block text-sm font-bold text-text-default mb-2">לקוח</label>
+                            <select
+                                value={pickedClientId || ''}
+                                onChange={(e) => onPickedClientIdChange?.(e.target.value)}
+                                required
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all shadow-sm"
+                            >
+                                <option value="">בחר לקוח…</option>
+                                {clientPickerOptions.map((c) => (
+                                    <option key={c.id} value={c.id}>
+                                        {c.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
                     <div>
-                        <label className="block text-sm font-bold text-text-muted mb-1.5">כותרת המשימה</label>
+                        <label className="block text-sm font-bold text-text-default mb-2">כותרת המשימה</label>
                         <input 
                             type="text" 
                             required
                             value={formData.title}
                             onChange={e => setFormData({...formData, title: e.target.value})}
-                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                            className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all shadow-sm"
                             placeholder="מה צריך לבצע?"
                             autoFocus
                         />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 gap-5">
                         <div>
-                            <label className="block text-sm font-bold text-text-muted mb-1.5">לקוח רלוונטי</label>
+                            <label className="block text-sm font-bold text-text-default mb-2">לקוח רלוונטי</label>
                             <input 
                                 type="text" 
                                 value={formData.clientName}
                                 onChange={e => setFormData({...formData, clientName: e.target.value})}
-                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                                 placeholder="שם הלקוח..."
                             />
                         </div>
                         <div>
-                             <label className="block text-sm font-bold text-text-muted mb-1.5">הקצאה ל-</label>
+                             <label className="block text-sm font-bold text-text-default mb-2">הקצאה ל-</label>
                              <select 
                                 value={formData.assignee}
                                 onChange={e => setFormData({...formData, assignee: e.target.value})}
-                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                              >
-                                 {teamMembers.map(member => (
+                                 {Array.from(new Set([...(assignees || []), String(formData.assignee || '')].filter(Boolean))).map(member => (
                                      <option key={member} value={member}>{member}</option>
                                  ))}
                              </select>
                         </div>
                     </div>
                     
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 gap-5">
                         <div>
-                            <label className="block text-sm font-bold text-text-muted mb-1.5">תאריך יעד</label>
-                            <input 
-                                type="date" 
-                                required
-                                value={formData.dueDate}
-                                onChange={e => setFormData({...formData, dueDate: e.target.value})}
-                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
-                            />
+                            <label className="block text-sm font-bold text-text-default mb-2">תאריך יעד</label>
+                            <div className="relative">
+                                <input 
+                                    type="date" 
+                                    required
+                                    value={formData.dueDate}
+                                    onChange={e => setFormData({...formData, dueDate: e.target.value})}
+                                    className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
+                                />
+                            </div>
                         </div>
                         <div>
-                             <label className="block text-sm font-bold text-text-muted mb-1.5">דחיפות</label>
+                             <label className="block text-sm font-bold text-text-default mb-2">דחיפות</label>
                              <select 
                                 value={formData.priority}
                                 onChange={e => setFormData({...formData, priority: e.target.value as TaskPriority})}
-                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                              >
                                  <option value="high">גבוהה (דחוף)</option>
                                  <option value="medium">בינונית (רגיל)</option>
@@ -265,9 +246,9 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 gap-5">
                         <div>
-                             <label className="block text-sm font-bold text-text-muted mb-1.5">תהליך (Type)</label>
+                             <label className="block text-sm font-bold text-text-default mb-2">תהליך (Type)</label>
                              <select 
                                 value={formData.type}
                                 onChange={e => {
@@ -279,7 +260,7 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
                                         processStage: newPipeline ? newPipeline.stages[0].id : ''
                                     });
                                 }}
-                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                              >
                                  {pipelines.map(p => (
                                      <option key={p.id} value={p.id}>{p.name}</option>
@@ -287,11 +268,11 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
                              </select>
                         </div>
                         <div>
-                             <label className="block text-sm font-bold text-text-muted mb-1.5">שלב בתהליך</label>
+                             <label className="block text-sm font-bold text-text-default mb-2">שלב בתהליך</label>
                              <select 
                                 value={formData.processStage}
                                 onChange={e => setFormData({...formData, processStage: e.target.value})}
-                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                              >
                                  {activePipeline.stages.map(s => (
                                      <option key={s.id} value={s.id}>{s.name}</option>
@@ -299,23 +280,23 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
                              </select>
                         </div>
                     </div>
-
+                    
                     <div>
-                        <label className="block text-sm font-bold text-text-muted mb-1.5">תיאור והערות</label>
+                        <label className="block text-sm font-bold text-text-default mb-2">תיאור והערות</label>
                         <textarea 
                             rows={3}
                             value={formData.description}
                             onChange={e => setFormData({...formData, description: e.target.value})}
-                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm resize-none"
+                            className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm resize-none focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                             placeholder="פרטים נוספים..."
                         />
                     </div>
 
-                    <div className="flex justify-end gap-3 pt-2">
-                        <button type="button" onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-subtle rounded-lg">ביטול</button>
-                        <button type="submit" className="px-6 py-2 text-sm font-bold text-white bg-primary-600 hover:bg-primary-700 rounded-lg shadow-sm">
+                    <div className="flex justify-center gap-4 pt-6 mt-2 border-t border-border-default/50">
+                        <button type="submit" className="w-full max-w-[200px] bg-primary-600 text-white font-bold py-3.5 px-6 rounded-xl hover:bg-primary-700 transition-all shadow-md hover:shadow-lg transform hover:-translate-y-0.5 text-base">
                             {taskToEdit ? 'שמור שינויים' : 'צור משימה'}
                         </button>
+                        <button type="button" onClick={onClose} className="w-full max-w-[200px] py-3.5 px-6 font-bold text-text-default hover:bg-bg-subtle rounded-xl transition-all border border-transparent hover:border-border-default text-base">ביטול</button>
                     </div>
                 </form>
             </div>
@@ -325,11 +306,11 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({ isOpen, onClose, onSave, 
 
 // --- SUB-COMPONENTS ---
 
-const TaskCard: React.FC<{ 
-    task: ClientTask; 
-    onToggle: (id: number) => void; 
-    onDelete: (id: number) => void; 
-    onEdit: (task: ClientTask) => void; 
+const TaskCard: React.FC<{
+    task: ClientTask;
+    onToggle: (id: string) => void;
+    onDelete: (id: string) => void;
+    onEdit: (task: ClientTask) => void;
 }> = ({ task, onToggle, onDelete, onEdit }) => {
     const navigate = useNavigate();
     const [isExpanded, setIsExpanded] = useState(false);
@@ -379,9 +360,9 @@ const TaskCard: React.FC<{
                     <div className="flex items-center justify-between gap-2">
                          <div className="flex items-center gap-2 overflow-hidden">
                              {task.type === 'sales' ? (
-                                <BanknotesIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-green-600'}`} title="מכירות" />
+                                <span title="מכירות"><BanknotesIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-green-600'}`} /></span>
                             ) : (
-                                <UserGroupIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-blue-600'}`} title="שימור/שירות" />
+                                <span title="שימור/שירות"><UserGroupIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-blue-600'}`} /></span>
                             )}
                              <span className={`text-sm font-bold truncate ${isDone ? 'line-through text-text-muted' : 'text-text-default'}`}>
                                 {task.title}
@@ -487,11 +468,96 @@ const TaskCard: React.FC<{
 
 interface ClientTasksTabProps {
     showPipeline?: boolean;
+    /** Omit to load and manage tasks for all clients (admin list view). */
+    clientId?: string;
+    /** Used when `clientId` is omitted — required to create new tasks (pick target client). */
+    clientPickerOptions?: { id: string; name: string }[];
 }
 
-const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) => {
-    const { t } = useLanguage();
-    const [tasks, setTasks] = useState<ClientTask[]>(initialTasks);
+const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
+    showPipeline = true,
+    clientId,
+    clientPickerOptions = [],
+}) => {
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [tasks, setTasks] = useState<ClientTask[]>([]);
+    const [assignees, setAssignees] = useState<string[]>(fallbackAssignees);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const aggregateMode = !clientId;
+
+    useEffect(() => {
+        if (!apiBase) return;
+        if (!aggregateMode && !clientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        const tasksUrl = aggregateMode
+            ? `${apiBase}/api/clients/all-tasks`
+            : `${apiBase}/api/clients/${clientId}/tasks`;
+        const contactsUrl = aggregateMode
+            ? `${apiBase}/api/clients/all-contacts`
+            : `${apiBase}/api/clients/${clientId}/contacts`;
+        Promise.all([
+            fetch(tasksUrl).then((r) => {
+                if (!r.ok) throw new Error('Failed to load tasks');
+                return r.json();
+            }),
+            fetch(contactsUrl).then((r) => {
+                if (!r.ok) return [];
+                return r.json();
+            }),
+        ])
+            .then(([tasksData, contactsData]) => {
+                if (!active) return;
+                const list = Array.isArray(tasksData) ? tasksData : (tasksData?.data ?? []);
+                const mapped: ClientTask[] = list
+                    .map((row: any) => {
+                        const cli = row.client;
+                        const resolvedClientId = String(row.clientId || clientId || cli?.id || '');
+                        const clientName = cli
+                            ? String(cli.displayName || cli.name || '').trim()
+                            : '';
+                        return {
+                            id: String(row.id),
+                            type: (row.type as TaskType) || 'sales',
+                            status: (row.status as TaskStatus) || 'pending',
+                            priority: (row.priority as TaskPriority) || 'medium',
+                            title: row.title || '',
+                            description: row.description || '',
+                            dueDate: row.dueDate || new Date().toISOString().split('T')[0],
+                            assignee: row.assignee || '',
+                            clientId: resolvedClientId,
+                            clientName,
+                            processStage: row.processStage || '',
+                            history: Array.isArray(row.history) ? row.history : [],
+                        };
+                    })
+                    .map((t) => ({
+                        ...t,
+                        assignee: t.assignee || fallbackAssignees[0],
+                        isOverdue: computeIsOverdue(t),
+                    }));
+                setTasks(mapped);
+
+                const cList = Array.isArray(contactsData) ? contactsData : (contactsData?.data ?? []);
+                const names = cList.map((c: any) => String(c?.name || '').trim()).filter(Boolean);
+                setAssignees(names.length ? Array.from(new Set(names)) : fallbackAssignees);
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Failed to load tasks');
+                setTasks([]);
+                setAssignees(fallbackAssignees);
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => {
+            active = false;
+        };
+    }, [apiBase, clientId, aggregateMode]);
     
     // Filters State
     const [searchTerm, setSearchTerm] = useState('');
@@ -503,6 +569,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
     // Modal State
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingTask, setEditingTask] = useState<ClientTask | null>(null);
+    const [pickedClientIdForNewTask, setPickedClientIdForNewTask] = useState('');
     
     // Derived filtering options
     const activePipeline = pipelines.find(p => p.id === filterProcess);
@@ -545,28 +612,53 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
         });
     }, [filteredTasks]);
 
-    const handleToggleTask = (id: number) => {
-        setTasks(prev => prev.map(t => {
-             if (t.id === id) {
-                 const newStatus = t.status === 'done' ? 'pending' : 'done';
-                 const newHistory = [
-                     ...(t.history || []),
-                     { date: new Date().toISOString(), user: 'אני', action: newStatus === 'done' ? 'סימון כבוצע' : 'סימון כפתוח' }
-                 ];
-                 return { ...t, status: newStatus, history: newHistory };
-             }
-             return t;
-        }));
+    const handleToggleTask = async (id: string) => {
+        const prevTask = tasks.find(t => t.id === id);
+        if (!prevTask) return;
+        const newStatus: TaskStatus = prevTask.status === 'done' ? 'pending' : 'done';
+        const newHistory = [
+            ...(prevTask.history || []),
+            { date: new Date().toISOString(), user: 'אני', action: newStatus === 'done' ? 'סימון כבוצע' : 'סימון כפתוח' }
+        ];
+
+        setTasks(prev => prev.map(t => t.id === id ? ({ ...t, status: newStatus, history: newHistory, isOverdue: computeIsOverdue({ ...t, status: newStatus }) }) : t));
+
+        const targetClientId = clientId || prevTask.clientId;
+        if (!apiBase || !targetClientId) return;
+        try {
+            const res = await fetch(`${apiBase}/api/clients/${targetClientId}/tasks/${id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: newStatus, history: newHistory }),
+            });
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            setTasks(prev => prev.map(t => t.id === id ? ({ ...t, status: prevTask.status, history: prevTask.history, isOverdue: computeIsOverdue(prevTask) }) : t));
+        }
     };
 
-    const handleDeleteTask = (id: number) => {
-        if (window.confirm('האם למחוק משימה זו?')) {
-            setTasks(prev => prev.filter(t => t.id !== id));
+    const handleDeleteTask = async (id: string) => {
+        if (!window.confirm('האם למחוק משימה זו?')) return;
+        const prevTasks = tasks;
+        const row = tasks.find((t) => t.id === id);
+        const targetClientId = clientId || row?.clientId;
+        setTasks(prev => prev.filter(t => t.id !== id));
+        if (!apiBase || !targetClientId) return;
+        try {
+            const res = await fetch(`${apiBase}/api/clients/${targetClientId}/tasks/${id}`, { method: 'DELETE' });
+            if (!res.ok) throw new Error('Delete failed');
+        } catch (_e) {
+            setTasks(prevTasks);
         }
     };
 
     const handleCreateTask = () => {
         setEditingTask(null);
+        if (aggregateMode && clientPickerOptions.length > 0) {
+            setPickedClientIdForNewTask(clientPickerOptions[0].id);
+        } else {
+            setPickedClientIdForNewTask('');
+        }
         setIsModalOpen(true);
     };
 
@@ -575,26 +667,93 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
         setIsModalOpen(true);
     };
 
-    const handleSaveTask = (task: ClientTask) => {
+    const handleSaveTask = async (task: ClientTask) => {
+        if (!apiBase) return;
+        const saveClientId = clientId || task.clientId || pickedClientIdForNewTask;
+        if (!saveClientId) return;
+
         if (editingTask) {
-             // For update, we append to history
-             const updatedTask = {
-                 ...task,
-                 history: [
-                     ...(editingTask.history || []),
-                     { date: new Date().toISOString(), user: 'אני', action: 'עריכת משימה' }
-                 ]
-             };
+            const updatedTask: ClientTask = {
+                ...task,
+                history: [
+                    ...(editingTask.history || []),
+                    { date: new Date().toISOString(), user: 'אני', action: 'עריכת משימה' }
+                ]
+            };
+            updatedTask.isOverdue = computeIsOverdue(updatedTask);
             setTasks(prev => prev.map(t => t.id === task.id ? updatedTask : t));
+            try {
+                const res = await fetch(`${apiBase}/api/clients/${saveClientId}/tasks/${task.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        type: updatedTask.type,
+                        status: updatedTask.status,
+                        priority: updatedTask.priority,
+                        title: updatedTask.title,
+                        description: updatedTask.description,
+                        dueDate: updatedTask.dueDate,
+                        assignee: updatedTask.assignee,
+                        processStage: updatedTask.processStage,
+                        history: updatedTask.history || [],
+                    }),
+                });
+                if (!res.ok) throw new Error('Update failed');
+            } catch (_e) {
+                // keep optimistic update for now
+            }
         } else {
-            setTasks(prev => [task, ...prev]);
+            const createPayload = {
+                type: task.type,
+                status: task.status,
+                priority: task.priority,
+                title: task.title,
+                description: task.description,
+                dueDate: task.dueDate,
+                assignee: task.assignee,
+                processStage: task.processStage,
+                history: task.history || [{ date: new Date().toISOString(), user: 'אני', action: 'יצירת משימה' }],
+            };
+            try {
+                const res = await fetch(`${apiBase}/api/clients/${saveClientId}/tasks`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(createPayload),
+                });
+                if (!res.ok) throw new Error('Create failed');
+                const created = await res.json();
+                const createdTask: ClientTask = {
+                    id: String(created.id),
+                    type: (created.type as TaskType) || task.type,
+                    status: (created.status as TaskStatus) || task.status,
+                    priority: (created.priority as TaskPriority) || task.priority,
+                    title: created.title || task.title,
+                    description: created.description || task.description,
+                    dueDate: created.dueDate || task.dueDate,
+                    assignee: created.assignee || task.assignee,
+                    clientId: String(created.clientId || saveClientId),
+                    clientName: task.clientName,
+                    processStage: created.processStage || task.processStage,
+                    history: Array.isArray(created.history) ? created.history : createPayload.history,
+                };
+                createdTask.isOverdue = computeIsOverdue(createdTask);
+                setTasks(prev => [createdTask, ...prev]);
+            } catch (_e) {
+                // keep modal open? for now close and do nothing
+            }
         }
         setIsModalOpen(false);
     };
 
     return (
         <div className="h-full flex flex-col animate-fade-in relative max-w-5xl mx-auto w-full">
-            
+            {isLoading && (
+                <div className="text-center text-sm text-text-muted py-6">טוען משימות…</div>
+            )}
+            {error && !isLoading && (
+                <div className="text-center text-sm text-red-600 py-4 px-4">{error}</div>
+            )}
+
             {/* Main Action Bar (Sticky) */}
             <div className="sticky top-0 z-20 bg-bg-default/95 backdrop-blur-md pb-4 pt-2">
                 <div className="flex flex-col md:flex-row gap-3 items-center justify-between p-2 bg-white rounded-2xl shadow-sm border border-border-default">
@@ -682,9 +841,12 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
                          
                          <div className="w-px h-6 bg-border-default mx-1 hidden md:block"></div>
 
-                         <button 
+                         <button
+                            type="button"
                             onClick={handleCreateTask}
-                            className="bg-primary-600 text-white font-bold py-2 px-5 rounded-full hover:bg-primary-700 transition shadow-md shadow-primary-500/20 flex items-center gap-2 whitespace-nowrap text-sm"
+                            disabled={aggregateMode && clientPickerOptions.length === 0}
+                            title={aggregateMode && clientPickerOptions.length === 0 ? 'טען לקוחות כדי ליצור משימה' : undefined}
+                            className="bg-primary-600 text-white font-bold py-2 px-5 rounded-full hover:bg-primary-700 transition shadow-md shadow-primary-500/20 flex items-center gap-2 whitespace-nowrap text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             <PlusIcon className="w-4 h-4" />
                             <span className="hidden sm:inline">משימה חדשה</span>
@@ -703,7 +865,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
 
             {/* Task List */}
             <div className="space-y-3 pb-20">
-                {sortedTasks.length > 0 ? (
+                {!isLoading && sortedTasks.length > 0 ? (
                     sortedTasks.map(task => (
                         <TaskCard 
                             key={task.id} 
@@ -713,7 +875,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
                             onEdit={handleEditTask} 
                         />
                     ))
-                ) : (
+                ) : !isLoading ? (
                     <div className="text-center py-16 flex flex-col items-center justify-center text-text-muted">
                         <div className="w-16 h-16 bg-bg-subtle rounded-full flex items-center justify-center mb-4">
                             <CheckCircleIcon className="w-8 h-8 text-gray-300" />
@@ -724,7 +886,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
                             נקה סינון
                         </button>
                     </div>
-                )}
+                ) : null}
             </div>
 
             {/* TASK FORM MODAL */}
@@ -733,6 +895,11 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({ showPipeline = true }) 
                 onClose={() => setIsModalOpen(false)}
                 onSave={handleSaveTask}
                 taskToEdit={editingTask}
+                assignees={assignees}
+                aggregateMode={aggregateMode && !editingTask}
+                clientPickerOptions={clientPickerOptions}
+                pickedClientId={pickedClientIdForNewTask}
+                onPickedClientIdChange={setPickedClientIdForNewTask}
             />
         </div>
     );

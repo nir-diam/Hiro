@@ -12,7 +12,7 @@ interface HistoryEntry {
 export type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
 export type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 export interface Event {
-  id: number;
+  id: string;
   type: EventType;
   title: string;
   date: string;
@@ -23,51 +23,10 @@ export interface Event {
   history?: HistoryEntry[];
 }
 
-// --- MOCK DATA ---
-const initialClientEventsData: Event[] = [
-    { id: 101, type: 'פגישה', title: 'פגישת היכרות עם מנהל גיוס חדש', date: '2025-08-10T11:00:00', coordinator: 'אביב לוי', status: 'הושלם', linkedTo: { type: 'לקוח', name: 'גטר גרופ' }, description: 'פגישה עם ישראל ישראלי, המנהל החדש.', history: [
-        { user: 'אביב לוי', timestamp: '2025-08-10T11:00:00', summary: 'יצר את האירוע' }
-    ]},
-    { id: 102, type: 'תזכורת', title: 'לשלוח סיכום פגישה', date: '2025-08-10T14:00:00', coordinator: 'אביב לוי', status: 'הושלם', linkedTo: null, description: 'לשלוח לאבי לוי את סיכום הפגישה עם גטר גרופ.', history: [
-        { user: 'אביב לוי', timestamp: '2025-08-10T14:00:00', summary: 'יצר את האירוע' }
-    ]},
-    { id: 103, type: 'פגישה', title: 'פגישת סטטוס רבעונית', date: '2025-09-22T10:00:00', coordinator: 'אביב לוי', status: 'עתידי', linkedTo: { type: 'לקוח', name: 'גטר גרופ' }, description: 'סקירת הפעילות ברבעון Q3 ותכנון Q4.', history: [
-        { user: 'אביב לוי', timestamp: '2025-09-20T15:00:00', summary: 'יצר את האירוע' }
-    ]},
-    {
-        id: 104,
-        type: 'משימת מערכת',
-        title: 'בדיקת חוזה התקשרות שנתי',
-        date: '2025-09-25T12:00:00',
-        coordinator: 'דנה כהן',
-        status: 'עתידי',
-        linkedTo: null,
-        description: 'לוודא שכל הסעיפים החדשים נכללים בחוזה לפני שליחה לחתימה.',
-        history: [ { user: 'דנה כהן', timestamp: '2025-09-23T10:00:00', summary: 'יצר את האירוע' } ]
-    },
-    {
-        id: 105,
-        type: 'פגישה',
-        title: 'פגישת תכנון גיוס למשרות חדשות',
-        date: '2025-10-05T15:00:00',
-        coordinator: 'אביב לוי',
-        status: 'עתידי',
-        linkedTo: { type: 'לקוח', name: 'גטר גרופ' },
-        description: 'פגישה עם ישראל ישראלי לדון במשרות החדשות שנפתחו בתחום הלוגיסטיקה.',
-        history: [ { user: 'אביב לוי', timestamp: '2025-09-28T11:00:00', summary: 'יצר את האירוע' } ]
-    },
-    {
-        id: 106,
-        type: 'משימת מערכת',
-        title: 'עדכון פרטי איש קשר',
-        date: '2025-08-11T16:00:00',
-        coordinator: 'מערכת',
-        status: 'הושלם',
-        linkedTo: null,
-        description: 'פרטי הקשר של דנה כהן עודכנו במערכת.',
-         history: [ { user: 'מערכת', timestamp: '2025-08-11T16:00:00', summary: 'אירוע אוטומטי' } ]
-    }
-];
+interface ClientEventsTabProps {
+    clientId: string;
+    clientName: string;
+}
 
 const eventTypeStyles: { [key in EventType]: { bg: string; text: string; border: string; } } = {
   'ראיון': { bg: 'bg-secondary-100', text: 'text-secondary-800', border: 'border-secondary-500' },
@@ -113,8 +72,23 @@ const eventTypeOptions = ['הכל', 'פגישה', 'ראיון', 'תזכורת', 
 const coordinatorOptions = ['הכל', 'דנה כהן', 'אביב לוי', 'יעל שחר', 'אני', 'מערכת'];
 
 
-const ClientEventsTab: React.FC = () => {
-    const [events, setEvents] = useState<Event[]>(initialClientEventsData);
+const normalizeEvent = (row: any): Event => ({
+    id: String(row.id),
+    type: row.type,
+    title: row.title,
+    date: row.date,
+    coordinator: row.coordinator,
+    status: row.status,
+    linkedTo: row.linkedTo ?? null,
+    description: row.description || '',
+    history: Array.isArray(row.history) ? row.history : [],
+});
+
+const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName }) => {
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [events, setEvents] = useState<Event[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [filters, setFilters] = useState({
         eventType: 'הכל',
         coordinator: 'הכל',
@@ -124,9 +98,9 @@ const ClientEventsTab: React.FC = () => {
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingEvent, setEditingEvent] = useState<Event | null>(null);
-    const [openMenuId, setOpenMenuId] = useState<number | null>(null);
-    const [expandedRowId, setExpandedRowId] = useState<number | null>(null);
-    const [historyVisibleEventId, setHistoryVisibleEventId] = useState<number | null>(null);
+    const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+    const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+    const [historyVisibleEventId, setHistoryVisibleEventId] = useState<string | null>(null);
     const menuRef = useRef<HTMLDivElement>(null);
     
     const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
@@ -154,7 +128,7 @@ const ClientEventsTab: React.FC = () => {
         setFilters(prev => ({ ...prev, [name]: value }));
     };
 
-    const toggleRow = (id: number) => {
+    const toggleRow = (id: string) => {
         setExpandedRowId(prevId => (prevId === id ? null : id));
         if (expandedRowId !== id) {
             setHistoryVisibleEventId(null);
@@ -172,49 +146,82 @@ const ClientEventsTab: React.FC = () => {
         setOpenMenuId(null);
     };
 
-    const handleDeleteEvent = (eventId: number) => {
+    const handleDeleteEvent = async (eventId: string) => {
         if (window.confirm('האם אתה בטוח שברצונך למחוק את האירוע?')) {
             setEvents(events.filter(e => e.id !== eventId));
+            if (apiBase && clientId) {
+                await fetch(`${apiBase}/api/clients/${clientId}/events/${eventId}`, { method: 'DELETE' }).catch(() => null);
+            }
         }
         setOpenMenuId(null);
     };
 
-     const handleSaveEvent = (eventData: Omit<Event, 'id' | 'status' | 'linkedTo'> & { id?: number }) => {
+     const handleSaveEvent = async (eventData: Omit<Event, 'id' | 'status' | 'linkedTo'> & { id?: string }) => {
+        if (!apiBase || !clientId) return;
         if (eventData.id) {
-            setEvents(events.map(e => {
-                if (e.id === eventData.id) {
-                    const oldEvent = e;
-                    const changes: string[] = [];
-                    if (oldEvent.title !== eventData.title) changes.push(`שינה את הכותרת מ-"${oldEvent.title}" ל-"${eventData.title}"`);
-                    if (oldEvent.type !== eventData.type) changes.push(`שינה את סוג האירוע מ-"${oldEvent.type}" ל-"${eventData.type}"`);
-                    const oldDateStr = new Date(oldEvent.date).toLocaleString('he-IL');
-                    const newDateStr = new Date(eventData.date).toLocaleString('he-IL');
-                    if (oldDateStr !== newDateStr) changes.push(`שינה את התאריך מ-${oldDateStr} ל-${newDateStr}`);
-                    if (oldEvent.description !== eventData.description) changes.push('עדכן את התיאור');
-                    
-                    const newHistoryEntry = changes.length > 0 ? { user: 'אני', timestamp: new Date().toISOString(), summary: changes.join(', ') } : null;
-                    const updatedHistory = newHistoryEntry ? [newHistoryEntry, ...(oldEvent.history || [])] : oldEvent.history;
+            const oldEvent = events.find(e => e.id === eventData.id);
+            const changes: string[] = [];
+            if (oldEvent && oldEvent.title !== eventData.title) changes.push(`שינה את הכותרת מ-"${oldEvent.title}" ל-"${eventData.title}"`);
+            if (oldEvent && oldEvent.type !== eventData.type) changes.push(`שינה את סוג האירוע מ-"${oldEvent.type}" ל-"${eventData.type}"`);
+            if (oldEvent) {
+                const oldDateStr = new Date(oldEvent.date).toLocaleString('he-IL');
+                const newDateStr = new Date(eventData.date).toLocaleString('he-IL');
+                if (oldDateStr !== newDateStr) changes.push(`שינה את התאריך מ-${oldDateStr} ל-${newDateStr}`);
+                if (oldEvent.description !== eventData.description) changes.push('עדכן את התיאור');
+            }
+            const newHistoryEntry = changes.length > 0 ? { user: 'אני', timestamp: new Date().toISOString(), summary: changes.join(', ') } : null;
+            const updatedHistory = newHistoryEntry ? [newHistoryEntry, ...(oldEvent?.history || [])] : (oldEvent?.history || []);
 
-                    return { ...oldEvent, ...eventData, coordinator: 'אני', history: updatedHistory } as Event;
-                }
-                return e;
-            }));
+            const payload = { ...eventData, coordinator: 'אני', history: updatedHistory };
+            const res = await fetch(`${apiBase}/api/clients/${clientId}/events/${eventData.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (res.ok) {
+                const updated = normalizeEvent(await res.json());
+                setEvents(events.map(e => e.id === updated.id ? updated : e));
+            }
         } else {
-            const newEvent: Event = {
-                id: Date.now(),
+            const payload = {
                 title: eventData.title,
                 type: eventData.type,
                 date: eventData.date,
                 description: eventData.description || '',
-                coordinator: 'אני', 
+                coordinator: 'אני',
                 status: 'עתידי',
-                linkedTo: { type: 'לקוח', name: 'גטר גרופ' },
-                history: [{ user: 'אני', timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }]
+                linkedTo: { type: 'לקוח', name: clientName },
+                history: [{ user: 'אני', timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }],
             };
-            setEvents([newEvent, ...events]);
+            const res = await fetch(`${apiBase}/api/clients/${clientId}/events`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (res.ok) {
+                const created = normalizeEvent(await res.json());
+                setEvents([created, ...events]);
+            }
         }
         setIsModalOpen(false);
     };
+
+    useEffect(() => {
+        if (!apiBase || !clientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients/${clientId}/events`)
+            .then(r => { if (!r.ok) throw new Error('Failed to load events'); return r.json(); })
+            .then(data => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                setEvents(list.map(normalizeEvent));
+            })
+            .catch((e: any) => { if (!active) return; setError(e?.message || 'Failed to load events'); setEvents([]); })
+            .finally(() => { if (active) setIsLoading(false); });
+        return () => { active = false; };
+    }, [apiBase, clientId]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {

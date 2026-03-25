@@ -59,7 +59,14 @@ const AdminTagCorrectionsView: React.FC = () => {
     const [unmatched, setUnmatched] = useState<UnmatchedTag[]>([]);
     const [selectedGroup, setSelectedGroup] = useState<GroupedTag | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearch, setDebouncedSearch] = useState('');
     const [statusMessage, setStatusMessage] = useState('');
+    const [page, setPage] = useState(1);
+    const [pageSize] = useState(25);
+    const [listTotal, setListTotal] = useState(0);
+    const [listTotalPages, setListTotalPages] = useState(1);
+    const [listLoading, setListLoading] = useState(false);
+    const [globalStats, setGlobalStats] = useState<{ totalPending: number; pendingUsageSum: number } | null>(null);
     
     // Filters State
     const [filterType, setFilterType] = useState<string>('all');
@@ -69,7 +76,8 @@ const AdminTagCorrectionsView: React.FC = () => {
     const [linkSearchTerm, setLinkSearchTerm] = useState('');
     const [selectedExistingTag, setSelectedExistingTag] = useState<TagOption | null>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [allTags, setAllTags] = useState<TagOption[]>([]);
+    const [linkTagResults, setLinkTagResults] = useState<TagOption[]>([]);
+    const [linkTagSearchLoading, setLinkTagSearchLoading] = useState(false);
     const [linkedCandidates, setLinkedCandidates] = useState<{ id: string; name: string }[]>([]);
     const [linkedJobs, setLinkedJobs] = useState<{ id: string; title: string }[]>([]);
     const [linkedCandidatesLoading, setLinkedCandidatesLoading] = useState(false);
@@ -94,50 +102,94 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
 });
 
     const stats = useMemo(() => ({
-        total: unmatched.length,
-        highConfidence: unmatched.filter(u => u.confidence > 90).length,
-        totalOccurrences: unmatched.reduce((acc, curr) => acc + curr.occurrences, 0)
-    }), [unmatched]);
+        total: globalStats?.totalPending ?? listTotal,
+        highConfidence: unmatched.filter((u) => u.confidence > 90).length,
+        totalOccurrences: globalStats?.pendingUsageSum ?? unmatched.reduce((acc, curr) => acc + curr.occurrences, 0),
+    }), [globalStats, listTotal, unmatched]);
+
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 300);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
+    useEffect(() => {
+        setPage(1);
+    }, [debouncedSearch, filterType, minOccurrences]);
 
     const loadUnmatched = useCallback(async () => {
         if (!apiBase) return;
+        setListLoading(true);
         try {
-            const res = await fetch(`${apiBase}/api/tags/pending`);
+            const params = new URLSearchParams();
+            params.set('page', String(page));
+            params.set('limit', String(pageSize));
+            if (debouncedSearch) params.set('search', debouncedSearch);
+            if (filterType !== 'all') params.set('type', filterType);
+            if (minOccurrences > 1) params.set('minUsage', String(minOccurrences));
+            const res = await fetch(`${apiBase}/api/tags/pending?${params.toString()}`);
             if (!res.ok) return;
-            const data = await res.json();
-            if (!Array.isArray(data)) return;
-            setUnmatched(data.map(mapPendingTagEntry));
+            const body = await res.json();
+            const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+            setUnmatched(list.map(mapPendingTagEntry));
+            setListTotal(typeof body.total === 'number' ? body.total : list.length);
+            setListTotalPages(typeof body.totalPages === 'number' ? body.totalPages : 1);
+            if (body.stats) {
+                setGlobalStats({
+                    totalPending: Number(body.stats.totalPending) || 0,
+                    pendingUsageSum: Number(body.stats.pendingUsageSum) || 0,
+                });
+            }
         } catch (err) {
             console.error('Failed to load tag corrections', err);
+        } finally {
+            setListLoading(false);
         }
-    }, [apiBase]);
+    }, [apiBase, page, pageSize, debouncedSearch, filterType, minOccurrences]);
 
-    const loadAllTags = useCallback(async () => {
-        if (!apiBase) return;
-        try {
-            const res = await fetch(`${apiBase}/api/tags`);
-            if (!res.ok) return;
-            const payload = await res.json();
-            const list = Array.isArray(payload) ? payload : (payload?.data ?? []);
-            const normalized = list
-                .filter((tag: any) => tag.status === 'active')
-                .map((tag: any) => ({
+    useEffect(() => {
+        void loadUnmatched();
+    }, [loadUnmatched]);
+
+    const loadLinkTagOptions = useCallback(
+        async (q: string) => {
+            if (!apiBase || !q.trim()) {
+                setLinkTagResults([]);
+                return;
+            }
+            setLinkTagSearchLoading(true);
+            try {
+                const params = new URLSearchParams();
+                params.set('search', q.trim());
+                params.set('limit', '40');
+                params.set('page', '1');
+                params.set('statuses', 'active');
+                const res = await fetch(`${apiBase}/api/tags?${params.toString()}`);
+                if (!res.ok) {
+                    setLinkTagResults([]);
+                    return;
+                }
+                const payload = await res.json();
+                const list = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+                const normalized = list.map((tag: any) => ({
                     id: tag.id,
                     name: String(tag.displayNameHe || tag.displayNameEn || tag.tagKey || 'תגית').trim(),
                 }));
-            setAllTags(normalized);
-        } catch (err) {
-            console.error('Failed to load tags list', err);
-        }
-    }, [apiBase]);
+                setLinkTagResults(normalized);
+            } catch {
+                setLinkTagResults([]);
+            } finally {
+                setLinkTagSearchLoading(false);
+            }
+        },
+        [apiBase],
+    );
 
     useEffect(() => {
-        loadUnmatched();
-    }, [loadUnmatched]);
-
-    useEffect(() => {
-        loadAllTags();
-    }, [loadAllTags]);
+        const t = setTimeout(() => {
+            void loadLinkTagOptions(linkSearchTerm);
+        }, 280);
+        return () => clearTimeout(t);
+    }, [linkSearchTerm, loadLinkTagOptions]);
 
     useEffect(() => {
         if (!selectedGroup) return;
@@ -146,23 +198,9 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
         }
     }, [selectedGroup]);
 
-    const existingTagNames = useMemo(
-        () => new Set(allTags.map(tag => tag.name)),
-        [allTags],
-    );
-
-    const filteredUnmatched = useMemo(() => {
-        return unmatched.filter(u => {
-            const matchesSearch = u.originalTerm.toLowerCase().includes(searchTerm.toLowerCase());
-            const matchesType = filterType === 'all' || u.detectedType === filterType;
-            const matchesOccurrences = u.occurrences >= minOccurrences;
-            return matchesSearch && matchesType && matchesOccurrences;
-        });
-    }, [unmatched, searchTerm, filterType, minOccurrences]);
-
     const groupedTags = useMemo(() => {
         const map = new Map<string, GroupedTag>();
-        filteredUnmatched.forEach(tag => {
+        unmatched.forEach(tag => {
             const existing = map.get(tag.originalTerm);
             if (existing) {
                 existing.ids.push(tag.id);
@@ -181,11 +219,7 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             }
         });
         return Array.from(map.values());
-    }, [filteredUnmatched]);
-
-    const filteredExistingTags = useMemo(() => 
-        linkSearchTerm ? allTags.filter(t => t.name.toLowerCase().includes(linkSearchTerm.toLowerCase())) : [],
-    [linkSearchTerm, allTags]);
+    }, [unmatched]);
 
     // Effects
     useEffect(() => {
@@ -201,16 +235,23 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
     }, [groupedTags]);
 
     useEffect(() => {
-        // Auto-fill search with AI suggestion when selection changes
-        if (selectedGroup?.aiSuggestion) {
-            setLinkSearchTerm(selectedGroup.aiSuggestion);
-            const match = allTags.find((tag) => tag.name === selectedGroup.aiSuggestion);
-            setSelectedExistingTag(match || null);
-        } else {
+        if (!selectedGroup) {
             setLinkSearchTerm('');
             setSelectedExistingTag(null);
+            return;
         }
-    }, [selectedGroup, allTags]);
+        const seed = selectedGroup.aiSuggestion || selectedGroup.term || '';
+        setLinkSearchTerm(seed);
+        setSelectedExistingTag(null);
+    }, [selectedGroup]);
+
+    useEffect(() => {
+        if (!selectedGroup || selectedExistingTag) return;
+        const want = (selectedGroup.aiSuggestion || selectedGroup.term || '').trim().toLowerCase();
+        if (!want || !linkTagResults.length) return;
+        const hit = linkTagResults.find((t) => t.name.trim().toLowerCase() === want);
+        if (hit) setSelectedExistingTag(hit);
+    }, [selectedGroup, linkTagResults, selectedExistingTag]);
 
     const flashStatus = (message: string) => {
         setStatusMessage(message);
@@ -299,9 +340,6 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
             throw new Error(body || 'הפעולה נכשלה');
         }
         await loadUnmatched();
-        if (action !== 'ignore') {
-            await loadAllTags();
-        }
         setLinkSearchTerm('');
         setSelectedExistingTag(null);
     };
@@ -348,6 +386,36 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
         });
         setIsJobDrawerOpen(true);
     };
+
+    const renderListPagination = (variant: 'top' | 'bottom') => (
+        <div
+            className={`p-3 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted ${
+                variant === 'top' ? 'border-b border-border-default' : 'border-t border-border-default'
+            }`}
+        >
+            <span>
+                {listTotal.toLocaleString()} רשומות · עמוד {page} / {listTotalPages}
+            </span>
+            <div className="flex gap-2">
+                <button
+                    type="button"
+                    disabled={page <= 1}
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    className="px-2 py-1 rounded-lg border border-border-default disabled:opacity-40"
+                >
+                    הקודם
+                </button>
+                <button
+                    type="button"
+                    disabled={page >= listTotalPages}
+                    onClick={() => setPage((p) => p + 1)}
+                    className="px-2 py-1 rounded-lg border border-border-default disabled:opacity-40"
+                >
+                    הבא
+                </button>
+            </div>
+        </div>
+    );
 
     return (
         <>
@@ -402,7 +470,7 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                             <input 
                                 type="text" 
-                                placeholder="סינון רשימה..." 
+                                placeholder="חיפוש בשרת — נקה לעמוד ראשון" 
                                 value={searchTerm}
                                 onChange={e => setSearchTerm(e.target.value)}
                                 className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 transition-all"
@@ -442,8 +510,12 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                              </div>
                         </div>
                     </div>
-                    <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar bg-bg-subtle/20">
-                        {groupedTags.map(group => (
+                    {renderListPagination('top')}
+                    <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar bg-bg-subtle/20 min-h-[200px]">
+                        {listLoading ? (
+                            <div className="text-center text-sm text-text-muted py-8">טוען רשימה…</div>
+                        ) : (
+                            groupedTags.map((group) => (
                             <div 
                                 key={group.term} 
                                 onClick={() => setSelectedGroup(group)}
@@ -477,13 +549,15 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                     </div>
                                 </div>
                             </div>
-                        ))}
-                        {groupedTags.length === 0 && (
+                            ))
+                        )}
+                        {!listLoading && groupedTags.length === 0 && (
                             <div className="text-center p-8 text-text-muted text-sm">
-                                לא נמצאו תגיות לטיפול
+                                לא נמצאו תגיות לטיפול בעמוד זה
                             </div>
                         )}
                     </div>
+                    {renderListPagination('bottom')}
                 </div>
 
                 {/* RIGHT COLUMN: Action Workspace */}
@@ -596,8 +670,11 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                             {/* Results Dropdown: filter from allTags loaded on page load */}
                                             {linkSearchTerm && !selectedExistingTag && (
                                                 <div className="border border-border-default rounded-lg bg-white shadow-sm max-h-40 overflow-y-auto mb-4 custom-scrollbar">
-                                                    {filteredExistingTags.length > 0 ? (
-                                                        filteredExistingTags.map(tag => (
+                                                    {linkTagSearchLoading && (
+                                                        <div className="p-3 text-center text-xs text-text-muted">מחפש תגיות…</div>
+                                                    )}
+                                                    {!linkTagSearchLoading && linkTagResults.length > 0 ? (
+                                                        linkTagResults.map(tag => (
                                                             <button
                                                                 key={tag.id}
                                                                 type="button"
@@ -607,9 +684,9 @@ const mapPendingTagEntry = (entry: any): UnmatchedTag => ({
                                                                 {tag.name}
                                                             </button>
                                                         ))
-                                                    ) : (
+                                                    ) : !linkTagSearchLoading ? (
                                                         <div className="p-3 text-center text-xs text-text-muted">לא נמצאו תגיות</div>
-                                                    )}
+                                                    ) : null}
                                                 </div>
                                             )}
 

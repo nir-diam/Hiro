@@ -15,6 +15,7 @@ import ActivityLogModal from './ActivityLogModal';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import ContactDrawer from './ContactDrawer';
+import ClientDetailsDrawer from './ClientDetailsDrawer';
 import SearchableSelect from './SearchableSelect'; 
 import ClientTasksTab from './ClientTasksTab'; 
 
@@ -23,7 +24,7 @@ type ClientStatus = 'פעיל' | 'לא פעיל' | 'בהקפאה' | 'ליד חד
 type ClientTier = 'VIP' | 'Gold' | 'Silver' | 'Standard';
 
 export interface Client {
-  id: number;
+  id: string;
   name: string;
   contactPerson: string;
   phone: string;
@@ -45,13 +46,16 @@ export interface Client {
   activePlacements: number; // Successful hires in warranty
   notes?: string;
   isContactProcess?: boolean;
+  logo?: string;
 }
 
 export interface Contact {
-    id: number;
+    id: string;
+    clientId?: string;
     name: string;
     role: string;
     clientName: string;
+    clientLogo?: string;
     phone: string;
     email: string;
     lastContact: string;
@@ -103,43 +107,47 @@ const pipelines: Pipeline[] = [
 // --- RICH MOCK DATA ---
 export const clientsData: Client[] = [
   { 
-      id: 1, name: 'גטר גרופ', contactPerson: 'ישראל ישראלי', phone: '050-1112222', email: 'israel@getter.co.il', 
+      id: '1', name: 'גטר גרופ', contactPerson: 'ישראל ישראלי', phone: '050-1112222', email: 'israel@getter.co.il', 
       openJobs: 3, status: 'פעיל', accountManager: 'ישראל ישראלי', city: 'פתח תקווה', region: 'מרכז', industry: 'מסחר וקמעונאות', tier: 'VIP', 
       pipelineStage: 'negotiation', pipelineValue: 45000, 
       lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString(), // 2 days ago
       daysSinceLastContact: 2,
       nextScheduledActivity: new Date(Date.now() + 1000 * 60 * 60 * 24 * 3).toISOString(), // in 3 days
-      activePlacements: 5
+      activePlacements: 5,
+      logo: 'https://logo.clearbit.com/getter.co.il'
   },
   { 
-      id: 2, name: 'נעמן גרופ', contactPerson: 'דנה כהן', phone: '052-3334444', email: 'dana@naaman.co.il', 
+      id: '2', name: 'נעמן גרופ', contactPerson: 'דנה כהן', phone: '052-3334444', email: 'dana@naaman.co.il', 
       openJobs: 8, status: 'פעיל', accountManager: 'אביב לוי', city: 'ראש העין', region: 'מרכז', industry: 'מסחר וקמעונאות', tier: 'Gold', 
       pipelineStage: 'proposal', pipelineValue: 120000, 
       lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 5).toISOString(), // 5 days ago
       daysSinceLastContact: 5,
       nextScheduledActivity: null, // Risk factor: No future activity
-      activePlacements: 2
+      activePlacements: 2,
+      logo: 'https://logo.clearbit.com/naaman-vardinon.co.il'
   },
   { 
-      id: 3, name: 'שטראוס מים', contactPerson: 'אביב לוי', phone: '053-5556666', email: 'aviv@strauss.com', 
+      id: '3', name: 'שטראוס מים', contactPerson: 'אביב לוי', phone: '053-5556666', email: 'aviv@strauss.com', 
       openJobs: 1, status: 'בהקפאה', accountManager: 'ישראל ישראלי', city: 'פתח תקווה', region: 'מרכז', industry: 'תעשייה וייצור', tier: 'Silver', 
       pipelineStage: 'risk', pipelineValue: 15000, 
       lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 45).toISOString(), // 45 days ago
       daysSinceLastContact: 45,
       nextScheduledActivity: null,
-      activePlacements: 0
+      activePlacements: 0,
+      logo: 'https://logo.clearbit.com/strauss-water.com'
   },
   { 
-      id: 4, name: 'FedEx', contactPerson: 'יעל שחר', phone: '054-7778888', email: 'yael@fedex.co.il', 
+      id: '4', name: 'FedEx', contactPerson: 'יעל שחר', phone: '054-7778888', email: 'yael@fedex.co.il', 
       openJobs: 0, status: 'לא פעיל', accountManager: 'שרית בן חיים', city: 'נתב"ג', region: 'מרכז', industry: 'תחבורה ולוגיסטיקה', tier: 'Standard', 
       pipelineStage: 'lead', pipelineValue: 0, 
       lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 120).toISOString(), 
       daysSinceLastContact: 120,
       nextScheduledActivity: null,
-      activePlacements: 0
+      activePlacements: 0,
+      logo: 'https://logo.clearbit.com/fedex.com'
   },
   { 
-      id: 5, name: 'צ\'יטה שליחויות', contactPerson: 'משה משה', phone: '058-9990000', email: 'moshe@chita.co.il', 
+      id: '5', name: 'צ\'יטה שליחויות', contactPerson: 'משה משה', phone: '058-9990000', email: 'moshe@chita.co.il', 
       openJobs: 2, status: 'פעיל', accountManager: 'אביב לוי', city: 'חיפה', region: 'צפון', industry: 'תחבורה ולוגיסטיקה', tier: 'Gold', 
       pipelineStage: 'won', pipelineValue: 80000, 
       lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 14).toISOString(), // 14 days ago
@@ -149,13 +157,95 @@ export const clientsData: Client[] = [
   },
 ];
 
-const contactsData: Contact[] = [
-    { id: 1, name: 'ישראל ישראלי', role: 'סמנכ"ל משאבי אנוש', clientName: 'גטר גרופ', phone: '050-1112222', email: 'israel@getter.co.il', lastContact: 'לפני יומיים', avatar: 'יי', pipelineId: 'sales', stageId: 'negotiation' },
-    { id: 2, name: 'דנה כהן', role: 'מנהלת גיוס', clientName: 'נעמן גרופ', phone: '052-3334444', email: 'dana@naaman.co.il', lastContact: 'אתמול', avatar: 'דכ', pipelineId: 'sales', stageId: 'proposal' },
-    { id: 3, name: 'אביב לוי', role: 'מנהל תפעול', clientName: 'שטראוס מים', phone: '053-5556666', email: 'aviv@strauss.com', lastContact: 'לפני שבוע', avatar: 'אל', pipelineId: 'retention', stageId: 'active' },
-    { id: 4, name: 'יעל שחר', role: 'רכזת גיוס', clientName: 'FedEx', phone: '054-7778888', email: 'yael@fedex.co.il', lastContact: 'לפני חודש', avatar: 'יש' },
-    { id: 5, name: 'משה משה', role: 'מנכ"ל', clientName: 'צ\'יטה שליחויות', phone: '058-9990000', email: 'moshe@chita.co.il', lastContact: 'היום', avatar: 'ממ', pipelineId: 'sales', stageId: 'won' },
-];
+const normalizeClient = (raw: any): Client => {
+    const lastContactDate = raw?.metadata?.lastContactDate || raw?.metadata?.lastContact || raw?.createdAt || new Date().toISOString();
+    const daysSinceLastContact = Math.max(
+        0,
+        Math.floor((Date.now() - new Date(lastContactDate).getTime()) / (1000 * 60 * 60 * 24))
+    );
+    return {
+        id: String(raw.id),
+        name: raw.displayName || raw.name || 'לקוח',
+        contactPerson: raw.contactPerson || raw.mainContactName || '',
+        phone: raw.phone || raw.mainContactPhone || '',
+        email: raw.email || raw.mainContactEmail || '',
+        openJobs: Number(raw.openJobs ?? 0),
+        status: (raw.status as any) || (raw.isActive === false ? 'לא פעיל' : 'פעיל'),
+        accountManager: raw.accountManager || '',
+        city: raw.city || '',
+        region: raw.region || '',
+        industry: raw.industry || '',
+        tier: (raw.metadata?.tier as any) || 'Standard',
+        pipelineStage: raw.metadata?.pipelineStage || 'lead',
+        pipelineValue: Number(raw.metadata?.pipelineValue ?? 0),
+        lastContactDate,
+        daysSinceLastContact,
+        nextScheduledActivity: raw.metadata?.nextScheduledActivity || null,
+        activePlacements: Number(raw.metadata?.activePlacements ?? 0),
+        notes: raw.metadata?.notes,
+        isContactProcess: Boolean(raw.metadata?.isContactProcess),
+        logo: raw.logoUrl || raw.metadata?.logo,
+    };
+};
+
+function inferPipelineIdForStage(stageId: string | undefined): string | undefined {
+    if (!stageId) return undefined;
+    for (const p of pipelines) {
+        if (p.stages.some((s) => s.id === stageId)) return p.id;
+    }
+    return undefined;
+}
+
+function formatRelativeHebrew(iso: string | undefined): string {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '—';
+    const now = new Date();
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / 86400000);
+    if (diffDays <= 0) return 'היום';
+    if (diffDays === 1) return 'אתמול';
+    if (diffDays < 7) return `לפני ${diffDays} ימים`;
+    return d.toLocaleDateString('he-IL');
+}
+
+function mapServerContactToListContact(row: any, clientsById: Map<string, Client>): Contact {
+    const clientRow = row.client;
+    const cid = String(row.clientId || clientRow?.id || '');
+    const fallback = cid ? clientsById.get(cid) : undefined;
+    const clientName = String(clientRow?.displayName || clientRow?.name || fallback?.name || 'לקוח').trim();
+    const logo = clientRow?.logoUrl || fallback?.logo;
+    const stageFromMeta = clientRow?.metadata?.pipelineStage || fallback?.pipelineStage;
+    const nm = String(row.name || '').trim();
+    const initials =
+        nm
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 2)
+            .map((w) => w[0])
+            .join('') || '?';
+    const createdRaw = row.createdAt || row.updatedAt;
+    const createdAt =
+        typeof createdRaw === 'string'
+            ? createdRaw
+            : createdRaw
+              ? new Date(createdRaw).toISOString()
+              : undefined;
+    return {
+        id: String(row.id),
+        clientId: cid || undefined,
+        name: nm,
+        role: row.role || '',
+        clientName,
+        clientLogo: logo,
+        phone: row.phone || row.mobilePhone || '',
+        email: row.email || '',
+        lastContact: formatRelativeHebrew(row.updatedAt || row.createdAt),
+        avatar: initials,
+        pipelineId: inferPipelineIdForStage(stageFromMeta),
+        stageId: stageFromMeta || undefined,
+        createdAt,
+    };
+}
 
 const statusStyles: { [key in ClientStatus]: { text: string; bg: string; border: string; } } = {
   'פעיל': { text: 'text-green-700', bg: 'bg-green-50', border: 'border-green-200' },
@@ -168,12 +258,12 @@ const statusStyles: { [key in ClientStatus]: { text: string; bg: string; border:
 const allClientColumns = [
     { id: 'health', label: 'דופק' },
     { id: 'name', label: 'לקוח' },
-    { id: 'lastContact', label: 'קשר אחרון' }, // NEW
-    { id: 'nextActivity', label: 'פעילות הבאה' }, // NEW
-    { id: 'openJobs', label: 'משרות' },
+    { id: 'lastContact', label: 'קשר אחרון' },
+    { id: 'nextActivity', label: 'פעילות הבאה' },
     { id: 'status', label: 'סטטוס' },
     { id: 'pipelineStage', label: 'שלב מכירה' },
     { id: 'contactPerson', label: 'איש קשר' },
+    { id: 'phone', label: 'טלפון' },
     { id: 'actions', label: 'פעולות' }
 ];
 
@@ -265,8 +355,8 @@ const StageUpdateModal: React.FC<{
     isOpen: boolean; 
     onClose: () => void; 
     client: Client | null; 
-    onSave: (clientId: number, newStage: string, notes: string) => void; 
-    onNavigateToProfile: (id: number) => void;
+    onSave: (clientId: string, newStage: string, notes: string) => void; 
+    onNavigateToProfile: (id: string) => void;
     pipelines: Pipeline[];
     activePipelineId: string;
 }> = ({ isOpen, onClose, client, onSave, onNavigateToProfile, pipelines, activePipelineId }) => {
@@ -289,6 +379,13 @@ const StageUpdateModal: React.FC<{
                 <div className="p-5 border-b border-border-default flex justify-between items-start bg-bg-subtle/30">
                     <div>
                         <div className="flex items-center gap-2 mb-1">
+                            <div className="w-6 h-6 rounded bg-bg-subtle border border-border-default flex items-center justify-center text-[10px] font-bold text-text-muted shrink-0 overflow-hidden">
+                                {client.logo ? (
+                                    <img src={client.logo} alt={client.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                ) : (
+                                    client.name.substring(0, 2)
+                                )}
+                            </div>
                             <h3 className="text-xl font-bold text-text-default">{client.name}</h3>
                             <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${statusStyles[client.status]?.bg || 'bg-gray-100'} ${statusStyles[client.status]?.text || 'text-gray-700'} ${statusStyles[client.status]?.border || 'border-gray-200'}`}>
                                 {client.status}
@@ -373,7 +470,16 @@ const KanbanCard: React.FC<{ client: Client; onClick: () => void; onDragStart: (
         <div className={`absolute top-0 right-0 w-1.5 h-full ${client.status === 'פעיל' ? 'bg-green-500' : client.status === 'בהקפאה' ? 'bg-amber-500' : 'bg-gray-300'}`}></div>
         <div className="pr-3">
             <div className="flex justify-between items-start mb-2">
-                 <h4 className="font-bold text-text-default text-sm truncate">{client.name}</h4>
+                 <div className="flex items-center gap-2">
+                     <div className="w-6 h-6 rounded bg-bg-subtle border border-border-default flex items-center justify-center text-[10px] font-bold text-text-muted shrink-0 overflow-hidden">
+                        {client.logo ? (
+                            <img src={client.logo} alt={client.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        ) : (
+                            client.name.substring(0, 2)
+                        )}
+                     </div>
+                     <h4 className="font-bold text-text-default text-sm truncate">{client.name}</h4>
+                 </div>
                  {client.tier === 'VIP' && <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded border border-purple-200 font-bold">VIP</span>}
                  {client.isContactProcess && <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-bold">איש קשר</span>}
             </div>
@@ -437,7 +543,7 @@ const ContactGridCard: React.FC<{
                         <EllipsisVerticalIcon className="w-5 h-5" />
                     </button>
                     {isMenuOpen && (
-                        <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-border-default rounded-lg shadow-xl z-20 overflow-hidden animate-fade-in">
+                        <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-border-default rounded-lg shadow-xl z-50 overflow-hidden animate-fade-in">
                             <button 
                                 onClick={(e) => { e.stopPropagation(); setIsMenuOpen(false); onViewProfile(contact); }}
                                 className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2"
@@ -475,7 +581,16 @@ const ContactGridCard: React.FC<{
                 </div>
                 <h4 className="font-bold text-text-default text-lg">{contact.name}</h4>
                 <p className="text-primary-600 font-medium text-sm">{contact.role}</p>
-                <p className="text-text-muted text-xs mt-1">{contact.clientName}</p>
+                <div className="flex items-center justify-center gap-1.5 mt-1.5 bg-bg-subtle px-2 py-1 rounded-md">
+                    <div className="w-4 h-4 rounded bg-white border border-border-default flex items-center justify-center text-[8px] font-bold text-text-muted shrink-0 overflow-hidden">
+                        {contact.clientLogo ? (
+                            <img src={contact.clientLogo} alt={contact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        ) : (
+                            contact.clientName.substring(0, 2)
+                        )}
+                    </div>
+                    <p className="text-text-muted text-xs font-medium">{contact.clientName}</p>
+                </div>
             </div>
 
             <div className="space-y-2 mb-4 text-sm text-text-muted">
@@ -503,7 +618,18 @@ const ClientGridCard: React.FC<{
     onClick: () => void;
     stageName: string;
     activePipelineColor: string;
-}> = ({ client, onClick, stageName, activePipelineColor }) => (
+    onStatusChange: (clientId: number, newStatus: ClientStatus) => void;
+    onStageChange: (clientId: number, newStage: string) => void;
+}> = ({ client, onClick, stageName, activePipelineColor, onStatusChange, onStageChange }) => {
+    let currentPipeline = pipelines[0];
+    for (const pipeline of pipelines) {
+        if (pipeline.stages.some(s => s.id === client.pipelineStage)) {
+            currentPipeline = pipeline;
+            break;
+        }
+    }
+
+    return (
     <div onClick={onClick} className="bg-bg-card border border-border-default rounded-xl p-4 shadow-sm hover:shadow-md transition-all cursor-pointer group flex flex-col h-full relative overflow-hidden">
         {/* Risk Indicator Strip */}
         {client.daysSinceLastContact > 14 && (
@@ -513,13 +639,26 @@ const ClientGridCard: React.FC<{
         <div className="flex justify-between items-start mb-3 pt-2">
              <div>
                 <h4 className="font-bold text-text-default text-lg group-hover:text-primary-700 transition-colors">{client.name}</h4>
-                <span className={`text-xs px-2 py-0.5 rounded-full border ${statusStyles[client.status]?.bg || 'bg-gray-100'} ${statusStyles[client.status]?.text || 'text-gray-700'} ${statusStyles[client.status]?.border || 'border-gray-200'}`}>
-                    {client.status}
-                </span>
+                <div className="relative inline-block mt-1" onClick={(e) => e.stopPropagation()}>
+                    <select
+                        value={client.status}
+                        onChange={(e) => onStatusChange(client.id, e.target.value as ClientStatus)}
+                        className={`appearance-none inline-flex items-center pr-2.5 pl-6 py-0.5 rounded-full text-xs font-bold border cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary-500 ${statusStyles[client.status]?.bg || 'bg-gray-100'} ${statusStyles[client.status]?.text || 'text-gray-700'} ${statusStyles[client.status]?.border || 'border-gray-200'}`}
+                    >
+                        {(Object.keys(statusStyles) as ClientStatus[]).map(status => (
+                            <option key={status} value={status}>{status}</option>
+                        ))}
+                    </select>
+                    <ChevronDownIcon className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none opacity-50" />
+                </div>
              </div>
              <div className="flex flex-col items-end gap-1">
-                 <div className="bg-bg-subtle p-2 rounded-lg">
-                    <BuildingOffice2Icon className="w-5 h-5 text-text-muted"/>
+                 <div className="w-10 h-10 rounded-lg bg-bg-subtle border border-border-default flex items-center justify-center text-sm font-bold text-text-muted shrink-0 overflow-hidden">
+                    {client.logo ? (
+                        <img src={client.logo} alt={client.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                        client.name.substring(0, 2)
+                    )}
                  </div>
                  <ClientHealthIndicator client={client} />
              </div>
@@ -553,7 +692,21 @@ const ClientGridCard: React.FC<{
 
         <div className="pt-3 border-t border-border-default mt-auto">
              <div className="flex justify-between items-center text-xs">
-                <span className="text-text-subtle">שלב: <span className="font-medium text-text-default">{stageName}</span></span>
+                <div className="flex items-center gap-1">
+                    <span className="text-text-subtle">שלב:</span>
+                    <div className="relative inline-block" onClick={(e) => e.stopPropagation()}>
+                         <select
+                             value={client.pipelineStage}
+                             onChange={(e) => onStageChange(client.id, e.target.value)}
+                             className={`appearance-none inline-flex items-center pr-2 pl-5 py-0.5 rounded-md text-xs font-bold border cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary-500 ${activePipelineColor} ${activePipelineColor.replace('border-', 'bg-').replace('500', '50')} text-text-default`}
+                         >
+                             {currentPipeline.stages.map(stage => (
+                                 <option key={stage.id} value={stage.id}>{stage.name}</option>
+                             ))}
+                         </select>
+                         <ChevronDownIcon className="w-3 h-3 absolute left-1 top-1/2 -translate-y-1/2 pointer-events-none opacity-50" />
+                     </div>
+                </div>
                 <span className="font-bold text-text-default">₪{(client.pipelineValue / 1000).toFixed(0)}k</span>
              </div>
              <div className={`h-1 w-full mt-2 rounded-full bg-gray-100 overflow-hidden`}>
@@ -562,6 +715,7 @@ const ClientGridCard: React.FC<{
         </div>
     </div>
 );
+};
 
 const QuickAddClientModal: React.FC<{
     isOpen: boolean;
@@ -621,7 +775,63 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks'>('companies');
 
     // --- Clients Data & State ---
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const [clients, setClients] = useState<Client[]>(clientsData);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load clients');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                setClients(list.map(normalizeClient));
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Failed to load clients');
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase]);
+
+    useEffect(() => {
+        if (!apiBase || activeTab !== 'contacts') return;
+        let active = true;
+        setContactsLoading(true);
+        setContactsError(null);
+        fetch(`${apiBase}/api/clients/all-contacts`)
+            .then((r) => {
+                if (!r.ok) throw new Error('טעינת אנשי קשר נכשלה');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : [];
+                const byId = new Map<string, Client>(clients.map((c) => [c.id, c]));
+                setContacts(list.map((row: any) => mapServerContactToListContact(row, byId)));
+            })
+            .catch((e: any) => {
+                if (active) setContactsError(e?.message || 'טעינת אנשי קשר נכשלה');
+            })
+            .finally(() => {
+                if (active) setContactsLoading(false);
+            });
+        return () => {
+            active = false;
+        };
+    }, [apiBase, activeTab, clients]);
+
     const [viewMode, setViewMode] = useState<'table' | 'grid' | 'board'>('table');
     const [activePipelineId, setActivePipelineId] = useState<string>('all'); // Changed default to 'all'
     const [activeStageId, setActiveStageId] = useState<string>('all'); // New State for Stage Filter
@@ -629,9 +839,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [isStageModalOpen, setIsStageModalOpen] = useState(false);
 
     // --- Contacts Data & State ---
-    const [contacts, setContacts] = useState<Contact[]>(contactsData);
+    const [contacts, setContacts] = useState<Contact[]>([]);
+    const [contactsLoading, setContactsLoading] = useState(false);
+    const [contactsError, setContactsError] = useState<string | null>(null);
     const [contactsViewMode, setContactsViewMode] = useState<'table' | 'grid'>('table');
-    const [selectedContactIds, setSelectedContactIds] = useState<Set<number>>(new Set());
+    const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
     const [contactVisibleColumns, setContactVisibleColumns] = useState<string[]>(['name', 'role', 'clientName', 'phone', 'email', 'lastContact', 'actions']);
     const [isColumnPopoverOpen, setIsColumnPopoverOpen] = useState(false);
     const [contactSortConfig, setContactSortConfig] = useState<{ key: keyof Contact; direction: 'asc' | 'desc' } | null>(null);
@@ -639,12 +851,16 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     // New Contact Drawer State
     const [selectedContactForDrawer, setSelectedContactForDrawer] = useState<Contact | null>(null);
     const [isContactDrawerOpen, setIsContactDrawerOpen] = useState(false);
-    const [activeActionMenuId, setActiveActionMenuId] = useState<number | null>(null);
+    const [activeActionMenuId, setActiveActionMenuId] = useState<string | null>(null);
+
+    // New Client Drawer State
+    const [selectedClientForDrawer, setSelectedClientForDrawer] = useState<Client | null>(null);
+    const [isClientDrawerOpen, setIsClientDrawerOpen] = useState(false);
 
 
     // --- Clients Table State ---
     // Added 'health', 'lastContact', 'nextActivity'
-    const [clientVisibleColumns, setClientVisibleColumns] = useState<string[]>(['health', 'name', 'status', 'pipelineStage', 'lastContact', 'nextActivity', 'contactPerson', 'phone', 'openJobs', 'actions']);
+    const [clientVisibleColumns, setClientVisibleColumns] = useState<string[]>(['health', 'name', 'status', 'pipelineStage', 'lastContact', 'nextActivity', 'contactPerson', 'phone', 'actions']);
     const [clientSortConfig, setClientSortConfig] = useState<{ key: keyof Client; direction: 'asc' | 'desc' } | null>(null);
     const [isClientColumnPopoverOpen, setIsClientColumnPopoverOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
@@ -792,13 +1008,19 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             const matchesPipeline = filterContactPipeline === 'all' || c.pipelineId === filterContactPipeline;
             const matchesStage = filterContactStage === 'all' || c.stageId === filterContactStage;
             
-            // Date Filter (Using lastContact as proxy for createdAt for this demo, or createdAt if exists)
-            // Assuming simplified date string 'YYYY-MM-DD' or comparable
-            // For mock demo, we'll skip complex date parsing if data is missing, but structure is here.
             let matchesDate = true;
             if (filterContactDateFrom || filterContactDateTo) {
-                 // Logic would go here. For now, pass all to avoid breaking mock demo.
-                 matchesDate = true; 
+                const created = c.createdAt ? new Date(c.createdAt).getTime() : NaN;
+                if (!Number.isNaN(created)) {
+                    if (filterContactDateFrom) {
+                        const from = new Date(filterContactDateFrom).setHours(0, 0, 0, 0);
+                        if (created < from) matchesDate = false;
+                    }
+                    if (filterContactDateTo) {
+                        const to = new Date(filterContactDateTo).setHours(23, 59, 59, 999);
+                        if (created > to) matchesDate = false;
+                    }
+                }
             }
 
             return matchesSearch && matchesRole && matchesClient && matchesPipeline && matchesStage && matchesDate;
@@ -878,18 +1100,38 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     };
 
     // --- Drag & Drop Handlers (Kanban - Clients) ---
-    const handleKanbanDragStart = (e: React.DragEvent, clientId: number) => {
-        e.dataTransfer.setData('clientId', clientId.toString());
+    const handleKanbanDragStart = (e: React.DragEvent, clientId: string) => {
+        e.dataTransfer.setData('clientId', clientId);
     };
 
     const handleKanbanDragOver = (e: React.DragEvent) => {
         e.preventDefault();
     };
 
-    const handleKanbanDrop = (e: React.DragEvent, stageId: string) => {
-        const clientId = Number(e.dataTransfer.getData('clientId'));
-        if (clientId) {
-            setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: stageId } : c));
+    const handleKanbanDrop = async (e: React.DragEvent, stageId: string) => {
+        const clientId = String(e.dataTransfer.getData('clientId') || '');
+        if (!clientId) return;
+
+        const prevClient = clients.find(c => c.id === clientId);
+        const prevStage = prevClient?.pipelineStage;
+
+        setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: stageId } : c));
+
+        if (!apiBase || clientId.startsWith('tmp-')) return;
+
+        try {
+            const clientAfter = prevClient ? { ...prevClient, pipelineStage: stageId } : null;
+            const metadata = clientAfter ? buildClientMetadataPatch(clientAfter) : { pipelineStage: stageId };
+            const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ metadata }),
+            });
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            if (prevStage) {
+                setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: prevStage } : c));
+            }
         }
     };
 
@@ -910,12 +1152,101 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         setIsStageModalOpen(true);
     };
 
-    const handleSaveStage = (clientId: number, newStage: string, notes: string) => {
+    const handleSaveStage = async (clientId: string, newStage: string, notes: string) => {
+        const prevClient = clients.find(c => c.id === clientId);
+        const prevStage = prevClient?.pipelineStage;
+        const prevNotes = prevClient?.notes;
+
         setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: newStage, notes } : c));
+
+        if (!apiBase || clientId.startsWith('tmp-')) return;
+
+        try {
+            const clientAfter = prevClient ? { ...prevClient, pipelineStage: newStage, notes } : null;
+            const metadata = clientAfter ? buildClientMetadataPatch(clientAfter) : { pipelineStage: newStage, notes };
+            const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ metadata }),
+            });
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: prevStage || c.pipelineStage, notes: prevNotes } : c));
+        }
     };
 
-    const handleNavigateToProfile = (id: number) => {
+    const handleNavigateToProfile = (id: string) => {
         navigate(`/clients/${id}`);
+    };
+
+    const handleOpenClientDrawer = (client: Client) => {
+        setSelectedClientForDrawer(client);
+        setIsClientDrawerOpen(true);
+    };
+
+    const buildClientMetadataPatch = (client: Client) => ({
+        pipelineStage: client.pipelineStage,
+        pipelineValue: client.pipelineValue,
+        nextScheduledActivity: client.nextScheduledActivity,
+        activePlacements: client.activePlacements,
+        notes: client.notes,
+        isContactProcess: client.isContactProcess,
+        lastContactDate: client.lastContactDate,
+        tier: client.tier,
+        logo: client.logo,
+    });
+
+    const handleStatusChange = async (clientId: string, newStatus: ClientStatus) => {
+        if (!apiBase || clientId.startsWith('tmp-')) {
+            setClients(prev => prev.map(c => c.id === clientId ? { ...c, status: newStatus } : c));
+            return;
+        }
+
+        const prevClient = clients.find(c => c.id === clientId);
+        const prevStatus = prevClient?.status;
+
+        setClients(prev => prev.map(c => c.id === clientId ? { ...c, status: newStatus } : c));
+
+        try {
+            const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ status: newStatus }),
+            });
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            if (prevStatus) {
+                setClients(prev => prev.map(c => c.id === clientId ? { ...c, status: prevStatus } : c));
+            }
+        }
+    };
+
+    const handleStageChange = async (clientId: string, newStage: string) => {
+        if (!apiBase || clientId.startsWith('tmp-')) {
+            setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: newStage } : c));
+            return;
+        }
+
+        const prevClient = clients.find(c => c.id === clientId);
+        const prevStage = prevClient?.pipelineStage;
+
+        setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: newStage } : c));
+
+        try {
+            const clientAfter = (prevClient ? { ...prevClient, pipelineStage: newStage } : null);
+            const metadata = clientAfter ? buildClientMetadataPatch(clientAfter) : { pipelineStage: newStage };
+
+            const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ metadata }),
+            });
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            if (prevStage) {
+                setClients(prev => prev.map(c => c.id === clientId ? { ...c, pipelineStage: prevStage } : c));
+            }
+        }
     };
     
     const handleQuickAdd = (clientData: Partial<Client>) => {
@@ -923,7 +1254,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         const defaultStage = targetPipeline.stages[0].id;
 
         const newClient: Client = {
-            id: Date.now(),
+            id: `tmp-${Date.now()}`,
             name: clientData.name || 'לקוח חדש',
             contactPerson: clientData.contactPerson || '',
             phone: '',
@@ -959,7 +1290,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         }
     };
 
-    const handleContactSelect = (id: number) => {
+    const handleContactSelect = (id: string) => {
         setSelectedContactIds(prev => {
             const next = new Set(prev);
             if (next.has(id)) next.delete(id);
@@ -1030,7 +1361,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const handleStartProcess = (contact: Contact, type: 'sales' | 'retention') => {
         // 1. Create a "Client" like entity for the Kanban board representing this contact interaction
         const newProcessItem: Client = {
-            id: Date.now(),
+            id: `tmp-${Date.now()}`,
             name: `${contact.name} (${contact.clientName})`, // Combine name
             contactPerson: contact.name,
             phone: contact.phone,
@@ -1088,9 +1419,18 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 return <ClientHealthIndicator client={client} />;
             case 'name':
                 return (
-                    <div>
-                         <div className="font-bold text-text-default text-base">{client.name}</div>
-                         <div className="text-xs text-text-muted">{client.industry}</div>
+                    <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-lg bg-bg-subtle border border-border-default flex items-center justify-center text-sm font-bold text-text-muted shrink-0 overflow-hidden">
+                            {client.logo ? (
+                                <img src={client.logo} alt={client.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            ) : (
+                                client.name.substring(0, 2)
+                            )}
+                        </div>
+                        <div>
+                             <div className="font-bold text-text-default text-base">{client.name}</div>
+                             <div className="text-xs text-text-muted">{client.industry}</div>
+                        </div>
                     </div>
                 );
             case 'lastContact':
@@ -1109,15 +1449,25 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 );
             case 'status':
                 return (
-                     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold border ${statusStyles[client.status]?.bg || 'bg-gray-100'} ${statusStyles[client.status]?.text || 'text-gray-700'} ${statusStyles[client.status]?.border || 'border-gray-200'}`}>
-                        {client.status}
-                    </span>
+                    <div className="relative inline-block" onClick={(e) => e.stopPropagation()}>
+                        <select
+                            value={client.status}
+                            onChange={(e) => handleStatusChange(client.id, e.target.value as ClientStatus)}
+                            className={`appearance-none inline-flex items-center pr-2.5 pl-6 py-0.5 rounded-full text-xs font-bold border cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary-500 ${statusStyles[client.status]?.bg || 'bg-gray-100'} ${statusStyles[client.status]?.text || 'text-gray-700'} ${statusStyles[client.status]?.border || 'border-gray-200'}`}
+                        >
+                            {(Object.keys(statusStyles) as ClientStatus[]).map(status => (
+                                <option key={status} value={status}>{status}</option>
+                            ))}
+                        </select>
+                        <ChevronDownIcon className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none opacity-50" />
+                    </div>
                 );
             case 'pipelineStage':
                 // Find stage name even if pipeline is 'all', by searching all pipelines
                 let stageName = client.pipelineStage;
                 let stageColor = 'border-gray-200';
                 let stageBg = 'bg-gray-50';
+                let currentPipeline = pipelines[0];
 
                 // Try to find stage in any pipeline
                 for (const pipeline of pipelines) {
@@ -1126,14 +1476,24 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                         stageName = foundStage.name;
                         stageColor = foundStage.color;
                         stageBg = foundStage.bg;
+                        currentPipeline = pipeline;
                         break;
                     }
                 }
                 
                  return (
-                     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-bold border ${stageColor} ${stageBg} text-text-default`}>
-                         {stageName}
-                     </span>
+                     <div className="relative inline-block" onClick={(e) => e.stopPropagation()}>
+                         <select
+                             value={client.pipelineStage}
+                             onChange={(e) => handleStageChange(client.id, e.target.value)}
+                             className={`appearance-none inline-flex items-center pr-2.5 pl-6 py-0.5 rounded-md text-xs font-bold border cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary-500 ${stageColor} ${stageBg} text-text-default`}
+                         >
+                             {currentPipeline.stages.map(stage => (
+                                 <option key={stage.id} value={stage.id}>{stage.name}</option>
+                             ))}
+                         </select>
+                         <ChevronDownIcon className="w-3 h-3 absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none opacity-50" />
+                     </div>
                  );
             case 'contactPerson':
                 return client.contactPerson;
@@ -1143,7 +1503,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 return <span className="inline-block bg-primary-50 text-primary-700 px-2 py-1 rounded text-xs font-bold">{client.openJobs}</span>;
             case 'actions':
                 return (
-                    <div className="relative flex items-center justify-center" data-menu-trigger>
+                    <div className="relative flex items-center justify-end" data-menu-trigger>
                         <button
                             onClick={(e) => {
                                 e.stopPropagation();
@@ -1221,7 +1581,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                         <p className="text-sm text-text-muted">ניהול קשרי לקוחות, אנשי קשר ותהליכי מכירה</p>
                     </div>
                     <button 
-                        onClick={() => { setQuickAddStageId(pipelines[0].stages[0].id); setIsQuickAddOpen(true); }}
+                        onClick={() => navigate('/clients/new')}
                         className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md flex items-center gap-2 w-full md:w-auto justify-center"
                     >
                         <PlusIcon className="w-5 h-5"/>
@@ -1297,7 +1657,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
              {/* Toolbar & View Controls */}
              {activeTab !== 'tasks' && (
-             <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm flex flex-col items-center gap-4">
+             <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm flex flex-col items-center gap-4 relative z-30">
                  
                  {/* Top Row: Search */}
                  <div className="w-full flex items-center gap-4">
@@ -1515,7 +1875,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                     <Cog6ToothIcon className="w-5 h-5 text-text-muted" />
                                 </button>
                                 {isClientColumnPopoverOpen && (
-                                    <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-xl shadow-xl border border-border-default z-20 p-4 animate-fade-in">
+                                    <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-xl shadow-xl border border-border-default z-50 p-4 animate-fade-in">
                                         <p className="font-bold text-text-default mb-2 text-sm border-b border-border-default pb-2">בחר עמודות להצגה</p>
                                         <div className="space-y-2 max-h-60 overflow-y-auto">
                                             {allClientColumns.map(col => (
@@ -1571,7 +1931,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                     <Cog6ToothIcon className="w-5 h-5 text-text-muted" />
                                 </button>
                                 {isColumnPopoverOpen && (
-                                    <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-xl shadow-xl border border-border-default z-20 p-4 animate-fade-in">
+                                    <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-xl shadow-xl border border-border-default z-50 p-4 animate-fade-in">
                                         <p className="font-bold text-text-default mb-2 text-sm border-b border-border-default pb-2">בחר עמודות להצגה</p>
                                         <div className="space-y-2 max-h-60 overflow-y-auto">
                                             {allContactColumns.map(col => (
@@ -1624,7 +1984,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                              return (
                                                  <th 
                                                     key={col.id} 
-                                                    className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors select-none ${draggingColumn === col.id ? 'dragging' : ''}`}
+                                                    className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors select-none ${draggingColumn === col.id ? 'dragging' : ''} ${col.id === 'actions' ? 'text-left' : ''}`}
                                                     draggable
                                                     onDragStart={() => handleDragStart(index, col.id, 'clients')}
                                                     onDragEnter={() => handleDragEnter(index, 'clients')}
@@ -1643,8 +2003,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                          return (
                                              <tr 
                                                  key={client.id} 
-                                                 className={`hover:bg-bg-hover transition-colors group cursor-pointer ${activeActionMenuId === client.id ? 'z-20 relative' : ''}`}
-                                                 onClick={() => handleNavigateToProfile(client.id)}
+                                                 className={`hover:bg-bg-hover transition-colors group cursor-pointer ${activeActionMenuId === client.id ? 'z-50 relative' : ''}`}
+                                                 onClick={() => handleOpenClientDrawer(client)}
                                              >
                                                  {clientVisibleColumns.map(colId => (
                                                      <td key={colId} className="p-4">
@@ -1689,9 +2049,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                         <ClientGridCard 
                                             key={client.id}
                                             client={client}
-                                            onClick={() => handleCardClick(client)}
+                                            onClick={() => handleOpenClientDrawer(client)}
                                             stageName={displayStageName}
                                             activePipelineColor={displayStageColor}
+                                            onStatusChange={handleStatusChange}
+                                            onStageChange={handleStageChange}
                                         />
                                     );
                                 })}
@@ -1741,7 +2103,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                         <KanbanCard 
                                                             key={client.id} 
                                                             client={client} 
-                                                            onClick={() => handleCardClick(client)}
+                                                            onClick={() => handleOpenClientDrawer(client)}
                                                             onDragStart={(e) => handleKanbanDragStart(e, client.id)}
                                                         />
                                                     ))}
@@ -1759,8 +2121,15 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                          </div>
                      )
                  ) : activeTab === 'contacts' ? (
-                     // --- CONTACTS VIEW ---
-                     contactsViewMode === 'table' ? (
+                     // --- CONTACTS VIEW (API: all-contacts) ---
+                     contactsLoading ? (
+                        <div className="flex flex-col items-center justify-center py-16 text-text-muted">
+                            <UserGroupIcon className="w-12 h-12 mb-3 opacity-30" />
+                            <p className="text-sm font-medium">טוען אנשי קשר מכל הלקוחות…</p>
+                        </div>
+                     ) : contactsError ? (
+                        <div className="text-center py-16 text-red-600 text-sm px-4">{contactsError}</div>
+                     ) : contactsViewMode === 'table' ? (
                         <div className="overflow-y-auto custom-scrollbar bg-bg-card">
                              <table className="w-full text-sm text-right border-collapse min-w-[900px]">
                                  <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-20 border-b border-border-default shadow-sm">
@@ -1823,7 +2192,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                     <EllipsisVerticalIcon className="w-5 h-5" />
                                                                 </button>
                                                                 {activeActionMenuId === contact.id && (
-                                                                    <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-border-default rounded-lg shadow-xl z-20 overflow-hidden animate-fade-in">
+                                                                    <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-border-default rounded-lg shadow-xl z-50 overflow-hidden animate-fade-in">
                                                                         <button 
                                                                             onClick={(e) => { e.stopPropagation(); setActiveActionMenuId(null); handleOpenContactDrawer(contact); }}
                                                                             className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2"
@@ -1848,6 +2217,22 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                         </td>
                                                     );
                                                 }
+                                                if (colId === 'clientName') {
+                                                    return (
+                                                        <td key={colId} className="p-4 text-text-default">
+                                                            <div className="flex items-center gap-2 justify-end">
+                                                                <span>{contact.clientName}</span>
+                                                                <div className="w-6 h-6 rounded-md bg-bg-subtle border border-border-default flex items-center justify-center text-[10px] font-bold text-text-muted shrink-0 overflow-hidden">
+                                                                    {contact.clientLogo ? (
+                                                                        <img src={contact.clientLogo} alt={contact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                                                    ) : (
+                                                                        contact.clientName.substring(0, 2)
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </td>
+                                                    );
+                                                }
                                                 return (
                                                      <td key={colId} className="p-4 text-text-default">
                                                         {/* @ts-ignore */}
@@ -1859,12 +2244,23 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                      ))}
                                  </tbody>
                              </table>
+                             {sortedContacts.length === 0 && (
+                                <div className="text-center py-12 flex flex-col items-center justify-center text-text-muted border-t border-border-subtle">
+                                    <UserGroupIcon className="w-12 h-12 mb-3 opacity-20" />
+                                    <p>לא נמצאו אנשי קשר התואמים לסינון.</p>
+                                </div>
+                             )}
                         </div>
                      ) : (
                          // CONTACTS GRID
                          <div className="overflow-y-auto custom-scrollbar p-6">
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                                {sortedContacts.map(contact => (
+                                {sortedContacts.length === 0 ? (
+                                    <div className="col-span-full text-center py-12 text-text-muted">
+                                        לא נמצאו אנשי קשר התואמים לסינון.
+                                    </div>
+                                ) : (
+                                sortedContacts.map(contact => (
                                     <ContactGridCard 
                                         key={contact.id} 
                                         contact={contact} 
@@ -1874,13 +2270,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                         onStartProcess={handleStartProcess}
                                         onViewProfile={handleOpenContactDrawer}
                                     />
-                                ))}
+                                ))
+                                )}
                             </div>
                          </div>
                      )
                  ) : (
-                    // --- TASKS VIEW (NEW) ---
-                    <ClientTasksTab showPipeline={false} />
+                    // --- TASKS VIEW: all clients ---
+                    <ClientTasksTab
+                        showPipeline={false}
+                        clientPickerOptions={clients.map((c) => ({ id: c.id, name: c.name }))}
+                    />
                  )}
              </div>
 
@@ -1953,6 +2353,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 onStartProcess={(type) => {
                     if (selectedContactForDrawer) handleStartProcess(selectedContactForDrawer, type);
                 }}
+                openMessageModal={openMessageModal}
+            />
+            <ClientDetailsDrawer 
+                client={selectedClientForDrawer}
+                isOpen={isClientDrawerOpen}
+                onClose={() => setIsClientDrawerOpen(false)}
             />
         </div>
     );

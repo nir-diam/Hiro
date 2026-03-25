@@ -722,8 +722,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setIsRemoteLoading(true);
         try {
             const params = new URLSearchParams({
-                page: '1',
-                limit: '10000',
+                page: String(page),
+                limit: String(pageSize),
             });
             const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
             if (!res.ok) throw new Error('failed to load');
@@ -735,13 +735,56 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     : [];
             const mapped = list.map(mapCandidate);
             setCandidates(mapped);
+            setTotalCandidates(Number(payload?.total || mapped.length || 0));
         } catch (e) {
             setCandidates([]);
+            setTotalCandidates(0);
         } finally {
             setIsRemoteLoading(false);
             setHasInitiallyLoaded(true);
         }
-    }, [apiBase, mapCandidate]);
+    }, [apiBase, mapCandidate, page, pageSize]);
+
+    // Poll backend for updates every 10s on current page
+    useEffect(() => {
+        if (!apiBase || !hasInitiallyLoaded) return;
+        let cancelled = false;
+        let inFlight = false;
+
+        const poll = async () => {
+            if (cancelled || inFlight) return;
+            inFlight = true;
+            try {
+                const params = new URLSearchParams({ page: String(page), limit: String(pageSize) });
+                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, {
+                    cache: 'no-store',
+                } as any);
+                if (cancelled) return;
+                if (res.status === 304) return;
+                if (!res.ok) return;
+                const payload = await res.json().catch(() => null);
+                const list = payload && Array.isArray(payload.data)
+                    ? payload.data
+                    : payload && Array.isArray(payload.rows)
+                        ? payload.rows
+                        : [];
+                const mapped = list.map(mapCandidate);
+                setCandidates(mapped);
+                setTotalCandidates(Number(payload?.total || mapped.length || 0));
+            } finally {
+                inFlight = false;
+            }
+        };
+
+        // run once shortly after mount, then every 10 seconds
+        const t0 = window.setTimeout(poll, 1000);
+        const id = window.setInterval(poll, 10_000);
+        return () => {
+            cancelled = true;
+            window.clearTimeout(t0);
+            window.clearInterval(id);
+        };
+    }, [apiBase, hasInitiallyLoaded, mapCandidate, page, pageSize]);
 
     const goToPage = useCallback((target: number) => {
         const normalized = Math.max(1, Math.min(totalPages, target));
@@ -775,10 +818,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         } catch {
             // ignore restore errors
         }
-        if (!restored) {
-            fetchCandidates();
-        }
-    }, [fetchCandidates]);
+        // Always refresh from backend on mount so data stays fresh.
+        // If we restored state, this shows the lightweight loader while updating.
+        fetchCandidates();
+    }, []);
+
+    useEffect(() => {
+        if (!hasInitiallyLoaded) return;
+        fetchCandidates();
+    }, [page, pageSize]);
 
     // Persist current view state (candidates + filters + paging) into sessionStorage
     // so that navigation to profile and back restores the exact same view.
@@ -1155,16 +1203,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         return sortableItems;
     }, [candidates, searchTerm, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
 
-    // Paginate processed candidates on the client
+    // Server already returns paginated candidates for the selected page.
     const paginatedCandidates = useMemo(() => {
-        const start = (page - 1) * pageSize;
-        const end = start + pageSize;
-        return processedCandidates.slice(start, end);
-    }, [processedCandidates, page, pageSize]);
-
-    // Keep totalCandidates in sync with the number of processed candidates (for pagination)
-    useEffect(() => {
-        setTotalCandidates(processedCandidates.length);
+        return processedCandidates;
     }, [processedCandidates]);
 
     const areAllVisibleSelected = useMemo(() => {
@@ -1769,7 +1810,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                  </div>
             )}
 
-            <main className="bg-bg-card rounded-2xl shadow-sm overflow-hidden border border-border-default">
+            <main className="relative bg-bg-card rounded-2xl shadow-sm overflow-hidden border border-border-default">
                 {isRemoteLoading && !hasInitiallyLoaded ? (
                     <div className="flex flex-col items-center justify-center min-h-[320px] gap-4 p-8">
                         <ArrowPathIcon className="w-10 h-10 text-primary-500 animate-spin" aria-hidden />
@@ -1896,6 +1937,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 </div>
                             );
                         })}
+                    </div>
+                )}
+                {isRemoteLoading && hasInitiallyLoaded && (
+                    <div className="absolute inset-0 z-20 flex items-start justify-center bg-bg-card/45 backdrop-blur-[1px] pointer-events-none">
+                        <div className="mt-4 inline-flex items-center gap-2 rounded-full bg-white/95 px-3 py-1.5 border border-border-default shadow-sm text-xs font-medium text-text-muted">
+                            <ArrowPathIcon className="w-4 h-4 text-primary-500 animate-spin" aria-hidden />
+                            <span>טוען נתונים...</span>
+                        </div>
                     </div>
                 )}
             </main>

@@ -9,6 +9,27 @@ const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const Candidate = require('../models/Candidate');
+const { sequelize } = require('../config/db');
+
+/** Until DB migration runs (add_job_candidate_screening_rejection.sql), skip rejection columns */
+let screeningRejectionColumnsCache = null;
+async function jobCandidateScreeningHasRejectionColumns() {
+  if (screeningRejectionColumnsCache !== null) return screeningRejectionColumnsCache;
+  try {
+    const [rows] = await sequelize.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = current_schema()
+         AND table_name = 'job_candidate_screening'
+         AND column_name = 'screeningStatus'
+       LIMIT 1`,
+    );
+    screeningRejectionColumnsCache = Array.isArray(rows) && rows.length > 0;
+  } catch (e) {
+    console.warn('[jobCandidateScreeningHasRejectionColumns]', e.message);
+    screeningRejectionColumnsCache = false;
+  }
+  return screeningRejectionColumnsCache;
+}
 const organizationService = require('../services/organizationService');
 const promptService = require('../services/promptService');
 const candidateTagService = require('../services/candidateTagService');
@@ -100,6 +121,44 @@ const normalizeWorkExperience = (arr) => {
       };
     })
     .filter(Boolean);
+};
+
+const normalizeRoleKey = (value) =>
+  String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+const ensureRoleTagCoverage = (existingTags = [], workExperience = []) => {
+  const sourceTags = Array.isArray(existingTags) ? existingTags : [];
+  const experienceList = Array.isArray(workExperience) ? workExperience : [];
+  const roleNameSet = new Set(
+    sourceTags
+      .filter((tag) => tag && typeof tag === 'object' && String(tag.raw_type || '').toLowerCase() === 'role')
+      .map((tag) => normalizeRoleKey(tag.name))
+      .filter(Boolean),
+  );
+
+  const merged = [...sourceTags];
+  for (const exp of experienceList) {
+    const title = String(exp?.title || '').trim();
+    if (!title) continue;
+    const normalizedTitle = normalizeRoleKey(title);
+    if (!normalizedTitle || roleNameSet.has(normalizedTitle)) continue;
+    merged.push({
+      name: title,
+      evidence: title,
+      raw_type: 'Role',
+      context: 'Core',
+      raw_type_reason: 'Direct job title from workExperience entry.',
+      tag_reason: 'Auto-added to guarantee at least one Role tag per workExperience title.',
+      is_current: !exp?.endDate,
+      confidence_score: 1,
+    });
+    roleNameSet.add(normalizedTitle);
+  }
+
+  return merged;
 };
 
 const normalizeEducation = (arr) => {
@@ -424,9 +483,16 @@ const list = async (req, res) => {
       limit: clampedLimit,
       search,
     });
+    const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
+      if (!row || typeof row !== 'object') return row;
+      const out = { ...row };
+      delete out.embedding;
+      delete out.searchText;
+      return out;
+    });
     res.json({
-      data: payload.rows,
-      total: Number(payload.count) || 0,
+      data: safeRows,
+      total: payload.count || 0,
       page: payload.page,
       limit: payload.limit,
     });
@@ -559,15 +625,34 @@ const createFromAi = async (req, res) => {
       techSkills = heuristic.technical;
     }
 
-    let tags = normalizeStringArray(aiResult.tags);
+    const normalizedWorkExperience = normalizeWorkExperience(aiResult.workExperience || fallback.workExperience);
+
+    const aiTagObjects = Array.isArray(aiResult.tags)
+      ? aiResult.tags
+          .map((entry) => {
+            if (typeof entry === 'string') return { name: entry };
+            if (!entry || typeof entry !== 'object') return null;
+            const name = String(entry.name || entry.displayNameHe || entry.displayNameEn || '').trim();
+            if (!name) return null;
+            return {
+              ...entry,
+              name,
+              raw_type_reason: entry.raw_type_reason || null,
+              tag_reason: entry.tag_reason || null,
+            };
+          })
+          .filter(Boolean)
+      : [];
+    const roleCoveredTags = ensureRoleTagCoverage(aiTagObjects, normalizedWorkExperience);
+
+    let tags = normalizeStringArray(roleCoveredTags.map((t) => t.name));
     if (!tags.length && (softSkills.length || techSkills.length)) {
       tags = Array.from(new Set([...softSkills, ...techSkills])).slice(0, 50);
     }
 
-    const aiTagsForSync =
-      Array.isArray(aiResult.tags) && aiResult.tags.length
-        ? aiResult.tags
-        : tags.map((name) => ({ name }));
+    const aiTagsForSync = roleCoveredTags.length
+      ? roleCoveredTags
+      : tags.map((name) => ({ name, raw_type_reason: null, tag_reason: null }));
 
     const candidatePayload = {
       fullName: aiResult.fullName || fallback.fullName || 'מועמד חדש',
@@ -582,7 +667,7 @@ const createFromAi = async (req, res) => {
         technical: techSkills.slice(0, 50),
       },
       tags,
-      workExperience: normalizeWorkExperience(aiResult.workExperience || fallback.workExperience),
+      workExperience: normalizedWorkExperience,
       education: normalizeEducation(aiResult.education || fallback.education),
       languages: normalizeLanguages(aiResult.languages || fallback.languages),
       industryAnalysis: aiResult.industryAnalysis || fallback.industryAnalysis || {},
@@ -1386,6 +1471,15 @@ const getRelevantJobs = async (req, res) => {
       }
     }
 
+    let rejectedJobIds = new Set();
+    if (await jobCandidateScreeningHasRejectionColumns()) {
+      const rejectedRows = await JobCandidateScreening.findAll({
+        where: { candidateId, screeningStatus: 'rejected' },
+        attributes: ['jobId'],
+      });
+      rejectedJobIds = new Set(rejectedRows.map((r) => String(r.jobId)));
+    }
+
     const seenJobIds = new Set();
     const results = [];
     const defaultMatch = candidateRow.matchScore != null ? candidateRow.matchScore : 85;
@@ -1398,7 +1492,7 @@ const getRelevantJobs = async (req, res) => {
 
     for (const jc of jobCandidateRecords) {
       const job = jc.job;
-      if (!job || seenJobIds.has(job.id)) continue;
+      if (!job || seenJobIds.has(job.id) || rejectedJobIds.has(String(job.id))) continue;
       seenJobIds.add(job.id);
       const jobData = job.toJSON ? job.toJSON() : job;
       results.push({
@@ -1417,7 +1511,7 @@ const getRelevantJobs = async (req, res) => {
     if (candidateEmb && candidateEmb.length) {
       const scored = [];
       for (const job of allJobs) {
-        if (seenJobIds.has(job.id)) continue;
+        if (seenJobIds.has(job.id) || rejectedJobIds.has(String(job.id))) continue;
         const jobText = [
           job.title,
           job.description,
@@ -1463,9 +1557,14 @@ const getRelevantJobs = async (req, res) => {
 const getScreeningData = async (req, res) => {
   try {
     const candidateId = req.params.id;
+    const baseAttrs = ['jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
+    const hasReject = await jobCandidateScreeningHasRejectionColumns();
+    const attrs = hasReject
+      ? [...baseAttrs, 'screeningStatus', 'rejectionReason', 'rejectionNotes']
+      : baseAttrs;
     const rows = await JobCandidateScreening.findAll({
       where: { candidateId },
-      attributes: ['jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'],
+      attributes: attrs,
     });
     const byJob = {};
     for (const r of rows) {
@@ -1474,6 +1573,9 @@ const getScreeningData = async (req, res) => {
         screeningAnswers: r.screeningAnswers || [],
         telephoneImpression: r.telephoneImpression || '',
         internalOpinion: r.internalOpinion || '',
+        screeningStatus: hasReject ? (r.screeningStatus || 'open') : 'open',
+        rejectionReason: hasReject ? (r.rejectionReason || '') : '',
+        rejectionNotes: hasReject ? (r.rejectionNotes || '') : '',
       };
     }
     res.json(byJob);
@@ -1487,30 +1589,88 @@ const getScreeningData = async (req, res) => {
 const saveScreeningData = async (req, res) => {
   try {
     const candidateId = req.params.id;
-    const { jobId, screeningAnswers, telephoneImpression, internalOpinion } = req.body || {};
+    const {
+      jobId,
+      screeningAnswers,
+      telephoneImpression,
+      internalOpinion,
+      screeningStatus,
+      rejectionReason,
+      rejectionNotes,
+    } = req.body || {};
     if (!jobId) {
       return res.status(400).json({ message: 'jobId is required' });
     }
     const answers = Array.isArray(screeningAnswers) ? screeningAnswers : [];
     const impression = typeof telephoneImpression === 'string' ? telephoneImpression : '';
     const opinion = typeof internalOpinion === 'string' ? internalOpinion : null;
+    const hasReject = await jobCandidateScreeningHasRejectionColumns();
+
+    const coreFields = ['candidateId', 'jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
+
+    if (!hasReject) {
+      let row = await JobCandidateScreening.findOne({
+        where: { candidateId, jobId },
+        attributes: coreFields,
+      });
+      if (row) {
+        await row.update(
+          { screeningAnswers: answers, telephoneImpression: impression, internalOpinion: opinion },
+          { fields: ['screeningAnswers', 'telephoneImpression', 'internalOpinion'] },
+        );
+      } else {
+        row = await JobCandidateScreening.create(
+          {
+            candidateId,
+            jobId,
+            screeningAnswers: answers,
+            telephoneImpression: impression,
+            internalOpinion: opinion,
+          },
+          { fields: coreFields },
+        );
+      }
+      return res.json({
+        jobId,
+        screeningAnswers: row.screeningAnswers,
+        telephoneImpression: row.telephoneImpression,
+        internalOpinion: row.internalOpinion || '',
+        screeningStatus: 'open',
+        rejectionReason: '',
+        rejectionNotes: '',
+      });
+    }
 
     const [row] = await JobCandidateScreening.findOrCreate({
       where: { candidateId, jobId },
-      defaults: { screeningAnswers: answers, telephoneImpression: impression, internalOpinion: opinion },
+      defaults: {
+        screeningAnswers: answers,
+        telephoneImpression: impression,
+        internalOpinion: opinion,
+        screeningStatus: typeof screeningStatus === 'string' ? screeningStatus : 'open',
+        rejectionReason: typeof rejectionReason === 'string' ? rejectionReason : null,
+        rejectionNotes: typeof rejectionNotes === 'string' ? rejectionNotes : null,
+      },
     });
     const updates = {};
     if (Array.isArray(screeningAnswers)) updates.screeningAnswers = answers;
     if (typeof telephoneImpression === 'string') updates.telephoneImpression = impression;
     if (typeof internalOpinion === 'string') updates.internalOpinion = internalOpinion;
-    if (!row.isNewRecord && Object.keys(updates).length) {
+    if (typeof screeningStatus === 'string') updates.screeningStatus = screeningStatus;
+    if (typeof rejectionReason === 'string') updates.rejectionReason = rejectionReason;
+    if (typeof rejectionNotes === 'string') updates.rejectionNotes = rejectionNotes;
+    if (Object.keys(updates).length > 0) {
       await row.update(updates);
+      await row.reload();
     }
     res.json({
       jobId,
       screeningAnswers: row.screeningAnswers,
       telephoneImpression: row.telephoneImpression,
       internalOpinion: row.internalOpinion || '',
+      screeningStatus: row.screeningStatus || 'open',
+      rejectionReason: row.rejectionReason || '',
+      rejectionNotes: row.rejectionNotes || '',
     });
   } catch (err) {
     console.error('[saveScreeningData]', err);

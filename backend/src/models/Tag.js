@@ -27,6 +27,8 @@ const Tag = sequelize.define(
       defaultValue: 'role',
     },
     category: DataTypes.STRING,
+   
+
     descriptionHe: DataTypes.TEXT,
     status: {
       type: DataTypes.ENUM('active', 'draft', 'deprecated', 'archived', 'pending'),

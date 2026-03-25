@@ -1,7 +1,6 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { mockContacts } from './ClientContactsTab'; // Assuming mockContacts is exported
 import { 
     PhoneIcon, EnvelopeIcon, LinkedInIcon, WhatsappIcon, ChatBubbleBottomCenterTextIcon,
     PencilIcon, BriefcaseIcon, CalendarDaysIcon
@@ -33,16 +32,50 @@ interface ContactProfileViewProps {
 }
 
 const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModal }) => {
-    const { contactId } = useParams<{ contactId: string }>();
+    const { clientId, contactId } = useParams<{ clientId: string; contactId: string }>();
     const [activeTab, setActiveTab] = useState<Tab>('details');
 
-    const contact = mockContacts.find(c => c.id === Number(contactId));
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [contact, setContact] = useState<any | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-    if (!contact) {
-        return <div className="text-center p-8">איש קשר לא נמצא.</div>;
-    }
+    useEffect(() => {
+        if (!apiBase || !clientId || !contactId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients/${clientId}/contacts`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load contacts');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                const found = list.find((c: any) => String(c.id) === String(contactId));
+                if (!found) throw new Error('איש קשר לא נמצא.');
+                setContact(found);
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'איש קשר לא נמצא.');
+                setContact(null);
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase, clientId, contactId]);
+
+    if (isLoading) return <div className="text-center p-8">טוען...</div>;
+    if (error || !contact) return <div className="text-center p-8">{error || 'איש קשר לא נמצא.'}</div>;
 
     const [formData, setFormData] = useState(contact);
+
+    useEffect(() => {
+        setFormData(contact);
+    }, [contact]);
 
     const handleFormChange = (updatedData: any) => {
         setFormData(updatedData);

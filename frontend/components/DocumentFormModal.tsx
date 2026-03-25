@@ -4,7 +4,7 @@ import { XMarkIcon, ArrowUpTrayIcon } from './Icons';
 export type DocumentType = 'קורות חיים' | 'תעודה' | 'מסמך זיהוי' | 'חוזה' | 'הסכם' | 'חשבונית' | 'אחר';
 
 export interface Document {
-  id: number;
+  id: string | number;
   name: string;
   type: DocumentType;
   uploadDate: string;
@@ -16,13 +16,13 @@ export interface Document {
 interface DocumentFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (doc: Omit<Document, 'id' | 'uploadDate' | 'fileSize'> & { id?: number }) => void;
+  onSave: (doc: Omit<Document, 'id' | 'uploadDate' | 'fileSize'> & { id?: string | number; file?: File | null }) => void;
   document: Document | null;
   context?: 'candidate' | 'client';
   contextName?: string;
 }
 
-const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, document, context, contextName }) => {
+const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, onSave, document, context, contextName }) => {
   const [formData, setFormData] = useState({
     name: '',
     type: 'קורות חיים' as DocumentType,
@@ -30,6 +30,7 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
     uploadedBy: 'דנה כהן',
   });
   const [fileName, setFileName] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
 
   useEffect(() => {
     if (document) {
@@ -49,6 +50,7 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
         uploadedBy: 'דנה כהן',
       });
       setFileName(null);
+      setFile(null);
     }
   }, [document, isOpen, context]);
 
@@ -56,11 +58,12 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
-      setFileName(file.name);
+      const nextFile = e.target.files[0];
+      setFile(nextFile);
+      setFileName(nextFile.name);
       // Pre-fill name field if it's empty
       if (!formData.name) {
-        setFormData(prev => ({ ...prev, name: file.name.split('.').slice(0, -1).join('.') }));
+        setFormData(prev => ({ ...prev, name: nextFile.name.split('.').slice(0, -1).join('.') }));
       }
     }
   };
@@ -77,12 +80,13 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
         return;
     }
     const extension = fileName ? fileName.split('.').pop() : '';
-    // onSave({
-    //   id: document?.id,
-    //   ...formData,
-    //   name: `${formData.name}.${extension}`,
-    // });
-    onClose(); // Mocking save
+    onSave({
+      id: document?.id,
+      ...formData,
+      name: `${formData.name}.${extension}`,
+      file: file,
+    });
+    onClose();
   };
 
   return (

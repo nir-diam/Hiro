@@ -66,6 +66,9 @@ const Client = sequelize.define(
     modules: { type: DataTypes.JSONB, defaultValue: {} },
     users: { type: DataTypes.JSONB, defaultValue: [] },
     metadata: { type: DataTypes.JSONB, defaultValue: {} },
+    events: { type: DataTypes.JSONB, defaultValue: [] },
+    documents: { type: DataTypes.JSONB, defaultValue: [] },
+    finance: { type: DataTypes.JSONB, defaultValue: {} },
   },
   {
     tableName: 'clients',

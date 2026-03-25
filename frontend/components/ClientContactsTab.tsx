@@ -12,7 +12,7 @@ import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface Contact {
-  id: number;
+  id: string;
   name: string;
   phone: string;
   mobilePhone: string;
@@ -22,27 +22,33 @@ interface Contact {
   username: string;
   isActive: boolean;
   notes: string;
+  hasSystemAccess?: boolean;
+  isInvited?: boolean;
+  groupId?: string | null;
 }
 
 interface ContactGroup {
     id: string;
     name: string;
-    contactIds: number[];
 }
 
-// --- MOCK DATA ---
-export const mockContacts: Contact[] = [
-    { id: 1, name: 'ישראל ישראלי', phone: '054-1234567', mobilePhone: '050-1112222', email: 'israel@getter.co.il', role: 'מנהל גיוס', linkedin: 'https://linkedin.com/in/israel', username: '', isActive: true, notes: 'איש קשר ראשי לכל המשרות הטכנולוגיות.' },
-    { id: 2, name: 'דנה כהן', phone: '052-7654321', mobilePhone: '050-3334444', email: 'dana@getter.co.il', role: 'רכזת גיוס', linkedin: 'https://linkedin.com/in/dana', username: '', isActive: true, notes: 'לתאם מולה ראיונות טכניים.' },
-    { id: 3, name: 'אבי לוי', phone: '050-9876543', mobilePhone: '050-5556666', email: 'avi@getter.co.il', role: 'מנהל תיק לקוח', linkedin: 'https://linkedin.com/in/avi', username: '', isActive: false, notes: 'לא פעיל כרגע.' },
-];
+const normalizeContact = (row: any): Contact => ({
+    id: String(row.id),
+    name: row.name || '',
+    phone: row.phone || '',
+    mobilePhone: row.mobilePhone || '',
+    email: row.email || '',
+    role: row.role || '',
+    linkedin: row.linkedin || '',
+    username: row.username || '',
+    isActive: Boolean(row.isActive ?? true),
+    notes: row.notes || '',
+    hasSystemAccess: Boolean(row.hasSystemAccess ?? false),
+    isInvited: Boolean(row.isInvited ?? false),
+    groupId: row.groupId ? String(row.groupId) : null,
+});
 
-const initialGroups: ContactGroup[] = [
-    { id: 'vip', name: 'מנהלים בכירים (VIP)', contactIds: [1] },
-    { id: 'tech', name: 'מגייסי טכנולוגיה', contactIds: [1, 2] }
-];
-
-const defaultVisibleColumns = ['name', 'role', 'actions', 'phone', 'email', 'isActive'];
+const defaultVisibleColumns = ['name', 'role', 'actions', 'phone', 'email', 'isActive', 'system_access'];
 
 // --- Sub-components ---
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; }> = ({ label, name, value, onChange }) => (
@@ -111,8 +117,11 @@ interface ClientContactsTabProps {
 
 const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenMessageModal }) => {
     const { t } = useLanguage();
-    const [contacts, setContacts] = useState(mockContacts);
-    const [groups, setGroups] = useState<ContactGroup[]>(initialGroups);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [contacts, setContacts] = useState<Contact[]>([]);
+    const [groups, setGroups] = useState<ContactGroup[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [editingContact, setEditingContact] = useState<Contact | null>(null);
     const [contactToDelete, setContactToDelete] = useState<Contact | null>(null);
@@ -125,7 +134,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     
     // Group & Selection State
-    const [selectedContactIds, setSelectedContactIds] = useState<Set<number>>(new Set());
+    const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
     const [filterGroupId, setFilterGroupId] = useState<string>('all');
     const [isGroupMenuOpen, setIsGroupMenuOpen] = useState(false);
     const [newGroupName, setNewGroupName] = useState('');
@@ -143,6 +152,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         { id: 'mobilePhone', header: t('contacts.col_mobile') },
         { id: 'email', header: t('contacts.col_email') },
         { id: 'isActive', header: t('contacts.col_status') },
+        { id: 'system_access', header: 'גישה למערכת' },
     ], [t]);
 
 
@@ -172,14 +182,39 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    useEffect(() => {
+        if (!apiBase || !clientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        Promise.all([
+            fetch(`${apiBase}/api/clients/${clientId}/contacts`).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load contacts'))),
+            fetch(`${apiBase}/api/clients/${clientId}/contact-groups`).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load groups'))),
+        ])
+            .then(([contactsData, groupsData]) => {
+                if (!active) return;
+                const cList = Array.isArray(contactsData) ? contactsData : (contactsData?.data ?? []);
+                const gList = Array.isArray(groupsData) ? groupsData : (groupsData?.data ?? []);
+                setContacts(cList.map(normalizeContact));
+                setGroups(gList.map((g: any) => ({ id: String(g.id), name: String(g.name || '') })));
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Failed to load');
+                setContacts([]);
+                setGroups([]);
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase, clientId]);
+
     // Filter Logic
     const filteredContacts = useMemo(() => {
         let items = contacts;
         if (filterGroupId !== 'all') {
-            const group = groups.find(g => g.id === filterGroupId);
-            if (group) {
-                items = items.filter(c => group.contactIds.includes(c.id));
-            }
+            items = items.filter(c => String(c.groupId || '') === filterGroupId);
         }
         return items;
     }, [contacts, filterGroupId, groups]);
@@ -222,20 +257,89 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     const handleDragEnd = () => { dragItemIndex.current = null; setDraggingColumn(null); };
 
     useEffect(() => { if (editingContact) { setFormData(editingContact); } }, [editingContact]);
-    const handleAdd = () => { setEditingContact({ id: 0, name: '', phone: '', mobilePhone: '', email: '', role: '', linkedin: '', username: '', isActive: true, notes: '' }); setIsDrawerOpen(true); };
+    const handleAdd = () => {
+        setEditingContact({
+            id: 'tmp-new',
+            name: '',
+            phone: '',
+            mobilePhone: '',
+            email: '',
+            role: '',
+            linkedin: '',
+            username: '',
+            isActive: true,
+            notes: '',
+            groupId: null,
+            isInvited: false,
+            hasSystemAccess: false,
+        });
+        setIsDrawerOpen(true);
+    };
     const handleEdit = (contact: Contact) => { setEditingContact(contact); setIsDrawerOpen(true); };
-    const handleSave = () => {
+    const handleSave = async () => {
         if (!formData) return;
-        if (formData.id === 0) { setContacts([...contacts, { ...formData, id: Date.now() }]); } 
-        else { setContacts(contacts.map(c => c.id === formData.id ? formData : c)); }
+        if (!apiBase || !clientId) return;
+
+        const payload = {
+            name: formData.name,
+            phone: formData.phone,
+            mobilePhone: formData.mobilePhone,
+            email: formData.email,
+            role: formData.role,
+            linkedin: formData.linkedin,
+            username: formData.username,
+            isActive: formData.isActive,
+            notes: formData.notes,
+            hasSystemAccess: Boolean(formData.hasSystemAccess),
+            isInvited: Boolean(formData.isInvited),
+            groupId: formData.groupId || null,
+        };
+
+        if (String(formData.id).startsWith('tmp-')) {
+            const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (res.ok) {
+                const created = await res.json();
+                setContacts([...contacts, normalizeContact(created)]);
+            }
+        } else {
+            const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts/${formData.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (res.ok) {
+                const updated = await res.json();
+                const normalized = normalizeContact(updated);
+                setContacts(contacts.map(c => c.id === normalized.id ? normalized : c));
+            }
+        }
         closeDrawer();
     };
     const closeDrawer = () => { setIsDrawerOpen(false); setEditingContact(null); setFormData(null); };
     const handleDelete = (contact: Contact) => { setContactToDelete(contact); };
-    const confirmDelete = () => { if (contactToDelete) { setContacts(prev => prev.filter(c => c.id !== contactToDelete.id)); setContactToDelete(null); } };
-    const handleStatusToggle = (e: React.SyntheticEvent, contactId: number) => { 
+    const confirmDelete = async () => {
+        if (!contactToDelete) return;
+        const id = contactToDelete.id;
+        setContacts(prev => prev.filter(c => c.id !== id));
+        setContactToDelete(null);
+        if (!apiBase || !clientId) return;
+        await fetch(`${apiBase}/api/clients/${clientId}/contacts/${id}`, { method: 'DELETE' }).catch(() => null);
+    };
+    const handleStatusToggle = async (e: React.SyntheticEvent, contactId: string) => { 
         e.stopPropagation();
-        setContacts(prev => prev.map(c => c.id === contactId ? { ...c, isActive: !c.isActive } : c)); 
+        const prev = contacts.find(c => c.id === contactId);
+        const next = !prev?.isActive;
+        setContacts(prevList => prevList.map(c => c.id === contactId ? { ...c, isActive: next } : c)); 
+        if (!apiBase || !clientId) return;
+        await fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isActive: next }),
+        }).catch(() => null);
     };
 
     const handleActionClick = (mode: 'email' | 'sms' | 'whatsapp', contact: Contact) => {
@@ -247,7 +351,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     };
     
     // Selection Handlers
-    const handleSelectContact = (id: number) => {
+    const handleSelectContact = (id: string) => {
         setSelectedContactIds(prev => {
             const next = new Set(prev);
             if(next.has(id)) next.delete(id);
@@ -262,31 +366,74 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     }
 
     // Group Handlers
-    const handleAddToGroup = (groupId: string) => {
+    const handleAddToGroup = async (groupId: string) => {
         const idsToAdd = Array.from(selectedContactIds);
-        setGroups(prev => prev.map(g => {
-            if (g.id === groupId) {
-                // Add unique IDs
-                const newIds = [...new Set([...g.contactIds, ...idsToAdd])];
-                return { ...g, contactIds: newIds };
-            }
-            return g;
-        }));
-        setIsGroupMenuOpen(false);
-        setSelectedContactIds(new Set()); // Optional: clear selection
-    };
-
-    const handleCreateGroup = () => {
-        if (!newGroupName.trim()) return;
-        const newGroup: ContactGroup = {
-            id: Date.now().toString(),
-            name: newGroupName,
-            contactIds: Array.from(selectedContactIds)
-        };
-        setGroups(prev => [...prev, newGroup]);
-        setNewGroupName('');
+        setContacts(prev => prev.map(c => idsToAdd.includes(c.id) ? ({ ...c, groupId }) : c));
         setIsGroupMenuOpen(false);
         setSelectedContactIds(new Set());
+
+        if (!apiBase || !clientId) return;
+        await Promise.all(
+            idsToAdd.map((contactId) =>
+                fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ groupId }),
+                }).catch(() => null)
+            )
+        );
+    };
+
+    const handleCreateGroup = async () => {
+        if (!newGroupName.trim()) return;
+        if (!apiBase || !clientId) return;
+        try {
+            const res = await fetch(`${apiBase}/api/clients/${clientId}/contact-groups`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newGroupName }),
+            });
+            if (!res.ok) throw new Error('Create group failed');
+            const created = await res.json();
+            const newGroup: ContactGroup = { id: String(created.id), name: String(created.name || newGroupName) };
+            setGroups(prev => [...prev, newGroup]);
+            setNewGroupName('');
+            setIsGroupMenuOpen(false);
+            // assign selected to the new group
+            if (selectedContactIds.size) await handleAddToGroup(newGroup.id);
+        } catch (_e) {
+            // ignore for now
+        }
+    };
+
+    const handleSystemAccessToggle = async (e: React.SyntheticEvent, contactId: string) => {
+        e.stopPropagation();
+        const prev = contacts.find(c => c.id === contactId);
+        const next = !prev?.hasSystemAccess;
+        setContacts(prevList => prevList.map(c => c.id === contactId ? { ...c, hasSystemAccess: next } : c));
+        if (!apiBase || !clientId) return;
+        await fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ hasSystemAccess: next }),
+        }).catch(() => null);
+    };
+
+    const handleInviteToSystem = async (e: React.SyntheticEvent, contactId: string) => {
+        e.stopPropagation();
+        setContacts(prev => prev.map(c => c.id === contactId ? { ...c, isInvited: true, hasSystemAccess: true } : c));
+        alert('הזמנה למערכת נשלחה בהצלחה');
+        if (!apiBase || !clientId) return;
+        await fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ isInvited: true, hasSystemAccess: true }),
+        }).catch(() => null);
+    };
+
+    const handleResetPassword = (e: React.SyntheticEvent, _contactId: string) => {
+        e.stopPropagation();
+        alert('קישור לאיפוס סיסמה נשלח לאיש הקשר');
     };
 
     const renderCell = (contact: Contact, columnId: string) => {
@@ -298,6 +445,25 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
             );
             case 'name': return <Link to={`/clients/${clientId}/contacts/${contact.id}`} onClick={e => e.stopPropagation()} className="font-semibold text-primary-700 hover:underline">{contact.name}</Link>;
             case 'isActive': return <label onClick={e => e.stopPropagation()} className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={contact.isActive} onChange={(e) => handleStatusToggle(e, contact.id)} className="sr-only peer" /><div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-primary-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div></label>;
+            case 'system_access': return (
+                <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                    {!contact.isInvited ? (
+                        <button onClick={(e) => handleInviteToSystem(e, contact.id)} className="text-xs bg-primary-100 text-primary-700 px-2 py-1 rounded hover:bg-primary-200 font-medium">
+                            הזמן למערכת
+                        </button>
+                    ) : (
+                        <>
+                            <label className="relative inline-flex items-center cursor-pointer" title={contact.hasSystemAccess ? 'חסום גישה' : 'אפשר גישה'}>
+                                <input type="checkbox" checked={contact.hasSystemAccess} onChange={(e) => handleSystemAccessToggle(e, contact.id)} className="sr-only peer" />
+                                <div className="w-9 h-5 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-primary-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-green-500"></div>
+                            </label>
+                            <button onClick={(e) => handleResetPassword(e, contact.id)} className="text-xs text-text-subtle hover:text-primary-600 underline" title="איפוס סיסמה">
+                                איפוס סיסמה
+                            </button>
+                        </>
+                    )}
+                </div>
+            );
             case 'actions': return (
                 <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
                     <a href={`tel:${contact.mobilePhone || contact.phone}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>

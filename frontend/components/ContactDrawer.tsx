@@ -4,18 +4,20 @@ import Drawer from './Drawer';
 import { 
     UserIcon, PhoneIcon, EnvelopeIcon, BriefcaseIcon, 
     CalendarDaysIcon, ChatBubbleBottomCenterTextIcon, 
-    CheckCircleIcon, ClockIcon, PlusIcon, ArrowRightIcon
+    CheckCircleIcon, ClockIcon, PlusIcon, ArrowRightIcon, WhatsappIcon
 } from './Icons';
 import { Contact, Client } from './ClientsListView';
+import { MessageModalConfig } from '../hooks/useUIState';
 
 interface ContactDrawerProps {
     isOpen: boolean;
     onClose: () => void;
     contact: Contact | null;
     onStartProcess: (type: 'sales' | 'retention') => void;
+    openMessageModal: (config: MessageModalConfig) => void;
 }
 
-const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact, onStartProcess }) => {
+const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact, onStartProcess, openMessageModal }) => {
     const [activeTab, setActiveTab] = useState<'overview' | 'processes' | 'history'>('overview');
 
     if (!contact) return null;
@@ -60,8 +62,15 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact,
             <div className="flex flex-col h-full">
                 {/* Header Profile */}
                 <div className="flex items-center gap-4 mb-6 p-4 bg-bg-subtle rounded-2xl border border-border-default">
-                    <div className="w-16 h-16 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center text-2xl font-bold border-2 border-white shadow-sm">
+                    <div className="w-16 h-16 rounded-full bg-primary-100 text-primary-600 flex items-center justify-center text-2xl font-bold border-2 border-white shadow-sm relative">
                         {contact.avatar || contact.name.charAt(0)}
+                        <div className="absolute -bottom-1 -right-1 w-6 h-6 rounded-full bg-white border-2 border-white shadow-sm flex items-center justify-center text-[8px] font-bold text-text-muted overflow-hidden">
+                            {contact.clientLogo ? (
+                                <img src={contact.clientLogo} alt={contact.clientName} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                            ) : (
+                                contact.clientName.substring(0, 2)
+                            )}
+                        </div>
                     </div>
                     <div>
                         <h3 className="text-xl font-black text-text-default">{contact.name}</h3>
@@ -75,11 +84,23 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact,
                     <a href={`tel:${contact.phone}`} className="flex-1 py-2 bg-green-50 text-green-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-green-100 transition-colors border border-green-200">
                         <PhoneIcon className="w-4 h-4"/> חייג
                     </a>
-                    <a href={`mailto:${contact.email}`} className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-200">
+                    <button 
+                        onClick={() => openMessageModal({ mode: 'email', candidateName: contact.name, candidatePhone: contact.phone })}
+                        className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-200"
+                    >
                         <EnvelopeIcon className="w-4 h-4"/> מייל
-                    </a>
-                    <button className="flex-1 py-2 bg-purple-50 text-purple-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-purple-100 transition-colors border border-purple-200">
+                    </button>
+                    <button 
+                        onClick={() => openMessageModal({ mode: 'sms', candidateName: contact.name, candidatePhone: contact.phone })}
+                        className="flex-1 py-2 bg-purple-50 text-purple-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-purple-100 transition-colors border border-purple-200"
+                    >
                         <ChatBubbleBottomCenterTextIcon className="w-4 h-4"/> SMS
+                    </button>
+                    <button 
+                        onClick={() => openMessageModal({ mode: 'whatsapp', candidateName: contact.name, candidatePhone: contact.phone })}
+                        className="flex-1 py-2 bg-emerald-50 text-emerald-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-emerald-100 transition-colors border border-emerald-200"
+                    >
+                        <WhatsappIcon className="w-4 h-4"/> וואטסאפ
                     </button>
                 </div>
 

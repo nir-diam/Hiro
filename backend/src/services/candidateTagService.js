@@ -41,6 +41,10 @@ const normalizeEntry = (entry) => {
       typeof entry?.calculated_weight === 'number' ? entry.calculated_weight : null,
     final_score:
       typeof entry?.final_score === 'number' ? entry.final_score : null,
+    raw_type_reason:
+      typeof entry?.raw_type_reason === 'string' ? entry.raw_type_reason.trim() : null,
+    tag_reason:
+      typeof entry?.tag_reason === 'string' ? entry.tag_reason.trim() : null,
   };
 };
 
@@ -254,8 +258,9 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     'certification',
     'language',
     'seniority',
-    'domain',
-  ];
+    'degree',
+    'soft_skill'
+];
   const tagType = allowedTypes.includes(typeValue) ? typeValue : 'role';
 
   const tag = await Tag.create({
@@ -317,6 +322,8 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
         tag_id: tag.id,
         raw_type: payload.raw_type,
         context: payload.context,
+        raw_type_reason: payload.raw_type_reason,
+        tag_reason: payload.tag_reason,
         is_current: payload.is_current,
         is_in_summary: payload.is_in_summary,
         confidence_score: payload.confidence_score,
@@ -357,12 +364,113 @@ const removeAbsentTags = async (candidateId, tags = []) => {
   return existing;
 };
 
+/** Tag columns for admin lists — avoid embedding/synonyms/aliases JSONB (OOM on large datasets). */
+const TAG_ADMIN_LIST_ATTRIBUTES = [
+  'id',
+  'tagKey',
+  'displayNameHe',
+  'displayNameEn',
+  'type',
+  'category',
+  'status',
+  'qualityState',
+  'source',
+  'matchable',
+  'usageCount',
+];
+
+/**
+ * Paginated admin listing with optional search (DB) and is_active filter.
+ * @param {{
+ *   candidateId?: string,
+ *   limit?: number,
+ *   offset?: number,
+ *   search?: string,
+ *   isActive?: 'all' | boolean
+ * }} opts
+ */
+const listCandidateTagsPaginatedForAdmin = async ({
+  candidateId,
+  limit = 500,
+  offset = 0,
+  search,
+  isActive = 'all',
+} = {}) => {
+  const base = {};
+  if (candidateId) {
+    base.candidate_id = String(candidateId).trim();
+  }
+  if (isActive === true) {
+    base.is_active = true;
+  }
+  if (isActive === false) {
+    base.is_active = false;
+  }
+
+  const searchTrim = typeof search === 'string' ? search.trim() : '';
+  let whereClause = base;
+  if (searchTrim) {
+    const like = `%${searchTrim}%`;
+    // Do not use $assoc.field$ — Sequelize can emit wrong column names (e.g. "tag"."tagKey" vs tag_key).
+    // Tag model uses underscored DB columns; Candidate uses camelCase attribute names as columns.
+    whereClause = {
+      [Op.and]: [
+        base,
+        {
+          [Op.or]: [
+            { raw_type: { [Op.iLike]: like } },
+            { context: { [Op.iLike]: like } },
+            sequelize.where(sequelize.col('tag.tag_key'), { [Op.iLike]: like }),
+            sequelize.where(sequelize.col('tag.display_name_he'), { [Op.iLike]: like }),
+            sequelize.where(sequelize.col('tag.display_name_en'), { [Op.iLike]: like }),
+            sequelize.where(sequelize.col('candidate.fullName'), { [Op.iLike]: like }),
+            sequelize.where(sequelize.col('candidate.email'), { [Op.iLike]: like }),
+            sequelize.where(sequelize.col('candidate.phone'), { [Op.iLike]: like }),
+            sequelize.literal(
+              `("CandidateTag"."candidate_id")::text ILIKE ${sequelize.escape(like)}`,
+            ),
+          ],
+        },
+      ],
+    };
+  }
+
+  const safeLimit = Math.min(2000, Math.max(1, Number(limit) || 500));
+  const safeOffset = Math.max(0, Number(offset) || 0);
+
+  const include = [
+    { model: Tag, as: 'tag', attributes: TAG_ADMIN_LIST_ATTRIBUTES, required: false },
+    { model: Candidate, as: 'candidate', attributes: ['id', 'fullName', 'email', 'phone'], required: false },
+  ];
+
+  const { rows, count } = await CandidateTag.findAndCountAll({
+    where: whereClause,
+    limit: safeLimit,
+    offset: safeOffset,
+    order: [['created_at', 'DESC']],
+    subQuery: false,
+    distinct: true,
+    col: 'id',
+    include,
+  });
+
+  return {
+    rows,
+    count,
+    limit: safeLimit,
+    offset: safeOffset,
+    hasMore: safeOffset + rows.length < count,
+  };
+};
+
+/** @deprecated Prefer listCandidateTagsPaginatedForAdmin — loads full table (risk of OOM). */
 const listAllCandidateTags = () =>
   CandidateTag.findAll({
     include: [
-      { model: Tag, as: 'tag' },
+      { model: Tag, as: 'tag', attributes: TAG_ADMIN_LIST_ATTRIBUTES },
       { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
     ],
+    limit: 5000,
   });
 
 // Find a tag by human name/alias/synonym and return all CandidateTag records for it
@@ -413,6 +521,8 @@ module.exports = {
       tag_id: tag.id,
       raw_type: payload.raw_type,
       context: payload.context,
+      raw_type_reason: payload.raw_type_reason ?? null,
+      tag_reason: payload.tag_reason ?? null,
       is_current: payload.is_current,
       is_in_summary: payload.is_in_summary,
       confidence_score: payload.confidence_score,
@@ -476,15 +586,16 @@ module.exports = {
         { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
       ],
     }),
-  listCandidateTagsByTag: async (tagId) =>
+  listCandidateTagsByTag: async (tagId, { activeOnly = true } = {}) =>
     CandidateTag.findAll({
-      where: { tag_id: tagId, is_active: true },
+      where: { tag_id: tagId, ...(activeOnly ? { is_active: true } : {}) },
       include: [
-        { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
+        { model: Candidate, as: 'candidate', attributes: ['id', 'fullName', 'email', 'phone'] },
       ],
     }),
   listCandidateTagsByTagName,
   listAllCandidateTags,
+  listCandidateTagsPaginatedForAdmin,
   countTagUsage,
 };
 

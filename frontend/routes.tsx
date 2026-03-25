@@ -70,6 +70,7 @@ import AdminCandidateTagsView from './components/AdminCandidateTagsView';
 import AdminJobFieldsView from './components/AdminJobFieldsView';
 import AdminCompaniesView from './components/AdminCompaniesView';
 import AdminPromptsView from './components/AdminPromptsView';
+import AdminMatchingEngineView from './components/AdminMatchingEngineView';
 import AdminPicklistsView from './components/AdminPicklistsView';
 import AdminTagCorrectionsView from './components/AdminTagCorrectionsView';
 import AdminEventsView from './components/AdminEventsView';
@@ -865,6 +866,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                         { path: 'tags', element: <AdminTagsView /> },
                         { path: 'job-fields', element: <AdminJobFieldsView /> },
                         { path: 'prompts', element: <AdminPromptsView /> },
+                        { path: 'matching-engine', element: <AdminMatchingEngineView /> },
                     ],
                 },
             ] 

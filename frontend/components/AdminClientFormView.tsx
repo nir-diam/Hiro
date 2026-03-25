@@ -11,7 +11,7 @@ import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
 interface ClientUser {
-    id: string;
+    id: number;
     name: string;
     email: string;
     role: 'Admin' | 'Recruiter' | 'Viewer';
@@ -19,7 +19,7 @@ interface ClientUser {
 }
 
 interface ClientData {
-    id: string;
+    id: number;
     clientName: string;
     displayName: string;
     status: 'active' | 'inactive' | 'trial' | 'suspended';
@@ -33,6 +33,7 @@ interface ClientData {
     authorizedIps: string;
     primaryColor: string;
     logoUrl: string;
+    matchingEnginePreset: 'balanced' | 'skills' | 'experience';
     
     // Quotas
     cvQuota: { used: number; total: number };
@@ -70,6 +71,7 @@ const mockClientData: ClientData = {
     authorizedIps: '192.168.1.1, 10.0.0.5',
     primaryColor: '#8B5CF6', 
     logoUrl: '',
+    matchingEnginePreset: 'balanced',
     cvQuota: { used: 1250, total: 2000 },
     smsQuota: { used: 450, total: 1000 },
     usersQuota: { used: 8, total: 10 },
@@ -291,16 +293,13 @@ const AdminClientFormView: React.FC = () => {
     const navigate = useNavigate();
     const { t } = useLanguage();
     const isEditing = !!clientId;
-    const apiBase = import.meta.env.VITE_API_BASE || '';
 
     const [activeTab, setActiveTab] = useState<'details' | 'modules' | 'quotas' | 'branding' | 'users'>('details');
     const [isUserModalOpen, setIsUserModalOpen] = useState(false);
     const [editingUser, setEditingUser] = useState<ClientUser | null>(null);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
     
     const [formData, setFormData] = useState<ClientData>({
-        id: '',
+        id: 0,
         clientName: '',
         displayName: '',
         status: 'active',
@@ -314,6 +313,7 @@ const AdminClientFormView: React.FC = () => {
         authorizedIps: '',
         primaryColor: '#8B5CF6',
         logoUrl: '',
+        matchingEnginePreset: 'balanced',
         cvQuota: { used: 0, total: 500 },
         smsQuota: { used: 0, total: 100 },
         usersQuota: { used: 1, total: 3 },
@@ -327,50 +327,10 @@ const AdminClientFormView: React.FC = () => {
     });
 
     useEffect(() => {
-        const load = async () => {
-            if (!isEditing || !clientId || !apiBase) return;
-            setLoading(true);
-            setError(null);
-            try {
-                const res = await fetch(`${apiBase}/api/clients/${clientId}`);
-                if (!res.ok) throw new Error('Failed to load client');
-                const data = await res.json();
-                setFormData((prev) => ({
-                    ...prev,
-                    ...data.metadata,
-                    id: data.id || clientId,
-                    clientName: data.name || data.displayName || '',
-                    displayName: data.displayName || data.name || '',
-                    status: data.status === 'לא פעיל' ? 'inactive' : (data.status as any) || 'active',
-                    packageType: data.packageType || 'starter',
-                    creationDate: data.creationDate ? data.creationDate.slice(0, 10) : prev.creationDate,
-                    renewalDate: data.renewalDate ? data.renewalDate.slice(0, 10) : prev.renewalDate,
-                    mainContactName: data.mainContactName || '',
-                    mainContactEmail: data.mainContactEmail || '',
-                    mainContactPhone: data.mainContactPhone || '',
-                    smsSource: data.smsSource || '',
-                    authorizedIps: data.authorizedIps || '',
-                    primaryColor: data.primaryColor || '#8B5CF6',
-                    logoUrl: data.logoUrl || '',
-                    cvQuota: { used: data.cvQuotaUsed || 0, total: data.cvQuotaTotal || 500 },
-                    smsQuota: { used: data.smsUsed || 0, total: data.smsTotal || 1000 },
-                    usersQuota: { used: data.usersUsed || 0, total: data.usersTotal || 3 },
-                    jobsQuota: { used: data.jobsUsed || 0, total: data.jobsTotal || 5 },
-                    emailsQuota: { used: data.emailsQuotaUsed || 0, total: data.emailsQuotaTotal || 500 },
-                    tagsQuota: { used: data.tagsQuotaUsed || 0, total: data.tagsQuotaTotal || 20 },
-                    storageQuota: { used: data.storageQuotaUsed || 0, total: data.storageQuotaTotal || 5 },
-                    aiCreditsQuota: { used: data.aiCreditsQuotaUsed || 0, total: data.aiCreditsQuotaTotal || 100 },
-                    modules: data.modules || { ats: true },
-                    users: data.users || [],
-                }));
-            } catch (err: any) {
-                setError(err.message || 'Load failed');
-            } finally {
-                setLoading(false);
-            }
-        };
-        load();
-    }, [isEditing, clientId, apiBase]);
+        if (isEditing) {
+            setFormData(mockClientData);
+        }
+    }, [isEditing, clientId]);
 
     const handlePackageChange = (newPackage: 'starter' | 'pro' | 'enterprise') => {
         const defaults = packageDefaults[newPackage];
@@ -389,71 +349,9 @@ const AdminClientFormView: React.FC = () => {
         }));
     };
 
-    const mapStatusToDb = (status: string) => {
-        switch (status) {
-            case 'active': return 'פעיל';
-            case 'inactive': return 'לא פעיל';
-            case 'suspended': return 'בהקפאה';
-            case 'trial': return 'פעיל'; // no enum value; treat as active
-            default: return 'פעיל';
-        }
-    };
-
-    const handleSave = async () => {
-        if (!apiBase) return;
-        setLoading(true);
-        setError(null);
-        try {
-            const statusDb = mapStatusToDb(formData.status);
-            const payload = {
-                name: formData.clientName || formData.displayName,
-                displayName: formData.displayName || formData.clientName,
-                status: statusDb,
-                packageType: formData.packageType,
-                creationDate: formData.creationDate,
-                renewalDate: formData.renewalDate,
-                mainContactName: formData.mainContactName,
-                mainContactEmail: formData.mainContactEmail,
-                mainContactPhone: formData.mainContactPhone,
-                smsSource: formData.smsSource,
-                authorizedIps: formData.authorizedIps,
-                primaryColor: formData.primaryColor,
-                logoUrl: formData.logoUrl,
-                jobsUsed: formData.jobsQuota.used,
-                jobsTotal: formData.jobsQuota.total,
-                coordinatorsUsed: formData.usersQuota.used,
-                coordinatorsTotal: formData.usersQuota.total,
-                usersUsed: formData.usersQuota.used,
-                usersTotal: formData.usersQuota.total,
-                smsUsed: formData.smsQuota.used,
-                smsTotal: formData.smsQuota.total,
-                emailsQuotaUsed: formData.emailsQuota.used,
-                emailsQuotaTotal: formData.emailsQuota.total,
-                tagsQuotaUsed: formData.tagsQuota.used,
-                tagsQuotaTotal: formData.tagsQuota.total,
-                storageQuotaUsed: formData.storageQuota.used,
-                storageQuotaTotal: formData.storageQuota.total,
-                aiCreditsQuotaUsed: formData.aiCreditsQuota.used,
-                aiCreditsQuotaTotal: formData.aiCreditsQuota.total,
-                modules: formData.modules,
-                users: formData.users,
-                metadata: formData,
-                isActive: statusDb === 'פעיל',
-            };
-            const method = isEditing ? 'PUT' : 'POST';
-            const url = isEditing ? `${apiBase}/api/clients/${clientId}` : `${apiBase}/api/clients`;
-            const res = await fetch(url, {
-                method,
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
-            if (!res.ok) throw new Error('Save failed');
-            navigate('/admin/clients');
-        } catch (err: any) {
-            setError(err.message || 'Save failed');
-        } finally {
-            setLoading(false);
-        }
+    const handleSave = () => {
+        console.log("Saving client:", formData);
+        navigate('/admin/clients');
     };
 
     const toggleModule = (key: string) => {

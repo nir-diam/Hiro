@@ -1,7 +1,6 @@
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
-import { clientsData } from './ClientsListView';
 import { 
     BuildingOffice2Icon, 
     UserGroupIcon, 
@@ -50,36 +49,36 @@ const InfoItem: React.FC<{ label: string, children: React.ReactNode }> = ({ labe
 const ClientInsightsDashboard: React.FC = () => {
     const { t } = useLanguage();
     const insights = {
-        openJobs: 12,
-        frozenJobs: 3,
-        closedJobs: 28,
-        avgJobLifespan: "42 ימים",
-        submissions: { week: 15, month: 62, year: 740 },
-        hiredCount: 21,
-        daysSinceStart: 452,
+        openJobs: null,
+        frozenJobs: null,
+        closedJobs: null,
+        avgJobLifespan: null,
+        submissions: { week: null, month: null, year: null },
+        hiredCount: null,
+        daysSinceStart: null,
     };
 
     return (
         <div className="space-y-6">
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                <StatCard title={t('client_profile.stat_open_jobs')} value={insights.openJobs.toString()} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
-                <StatCard title={t('client_profile.stat_frozen_jobs')} value={insights.frozenJobs.toString()} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
-                <StatCard title={t('client_profile.stat_closed_jobs')} value={insights.closedJobs.toString()} icon={<CheckBadgeIcon />} colorClass={{ bg: 'bg-green-100', text: 'text-green-600' }} />
-                <StatCard title={t('client_profile.stat_lifespan')} value={insights.avgJobLifespan} icon={<ClockIcon />} colorClass={{ bg: 'bg-secondary-100', text: 'text-secondary-600' }} />
+                <StatCard title={t('client_profile.stat_open_jobs')} value={insights.openJobs == null ? '—' : String(insights.openJobs)} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
+                <StatCard title={t('client_profile.stat_frozen_jobs')} value={insights.frozenJobs == null ? '—' : String(insights.frozenJobs)} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
+                <StatCard title={t('client_profile.stat_closed_jobs')} value={insights.closedJobs == null ? '—' : String(insights.closedJobs)} icon={<CheckBadgeIcon />} colorClass={{ bg: 'bg-green-100', text: 'text-green-600' }} />
+                <StatCard title={t('client_profile.stat_lifespan')} value={insights.avgJobLifespan == null ? '—' : String(insights.avgJobLifespan)} icon={<ClockIcon />} colorClass={{ bg: 'bg-secondary-100', text: 'text-secondary-600' }} />
             </div>
 
             <AccordionSection title={t('client_profile.section_insights')} icon={<UserGroupIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
-                    <InfoItem label={t('client_profile.insight_submissions_week')}>{insights.submissions.week}</InfoItem>
-                    <InfoItem label={t('client_profile.insight_submissions_month')}>{insights.submissions.month}</InfoItem>
-                    <InfoItem label={t('client_profile.insight_submissions_year')}>{insights.submissions.year}</InfoItem>
-                    <InfoItem label={t('client_profile.insight_hired')}>{insights.hiredCount}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_week')}>{insights.submissions.week ?? '—'}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_month')}>{insights.submissions.month ?? '—'}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_year')}>{insights.submissions.year ?? '—'}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_hired')}>{insights.hiredCount ?? '—'}</InfoItem>
                 </dl>
             </AccordionSection>
 
             <AccordionSection title={t('client_profile.section_relationship')} icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
-                    <InfoItem label={t('client_profile.insight_days_start')}>{insights.daysSinceStart}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_days_start')}>{insights.daysSinceStart ?? '—'}</InfoItem>
                 </dl>
             </AccordionSection>
         </div>
@@ -95,7 +94,35 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
     const { clientId } = useParams<{ clientId: string }>();
     const [activeTab, setActiveTab] = useState<Tab>('details');
 
-    const client = clientsData.find(c => c.id === Number(clientId));
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [client, setClient] = useState<any | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!apiBase || !clientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients/${clientId}`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Client not found');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                setClient(data);
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Client not found');
+                setClient(null);
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase, clientId]);
 
     const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
         { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
@@ -107,8 +134,11 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
         { id: 'finance', label: 'כספים', icon: <BanknotesIcon className="w-5 h-5" /> },
     ];
 
-    if (!client) {
-        return <div className="text-center p-8">לקוח לא נמצא.</div>;
+    if (isLoading) {
+        return <div className="text-center p-8">טוען...</div>;
+    }
+    if (error || !client) {
+        return <div className="text-center p-8">{error || 'לקוח לא נמצא.'}</div>;
     }
 
     const renderContent = () => {
@@ -120,16 +150,16 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                             <ClientInsightsDashboard />
                         </div>
                         <div className="lg:col-span-1 space-y-6">
-                            <ClientDetailsTab />
+                            <ClientDetailsTab client={client} onClientUpdated={setClient} />
                         </div>
                     </div>
                 );
-            case 'tasks': return <ClientTasksTab />; 
+            case 'tasks': return <ClientTasksTab clientId={clientId!} />; 
             case 'contacts': return <ClientContactsTab clientId={clientId!} onOpenMessageModal={openMessageModal} />;
             case 'jobs': return <ClientJobsTab />;
-            case 'events': return <ClientEventsTab />;
-            case 'documents': return <ClientDocumentsTab />;
-            case 'finance': return <ClientFinanceTab clientName={client.name} />;
+            case 'events': return <ClientEventsTab clientId={clientId!} clientName={client.displayName || client.name} />;
+            case 'documents': return <ClientDocumentsTab clientId={clientId!} clientName={client.displayName || client.name} />;
+            case 'finance': return <ClientFinanceTab clientId={clientId!} clientName={client.displayName || client.name} />;
             default: return null;
         }
     };
@@ -137,7 +167,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
     return (
         <div className="space-y-6">
             <header>
-                <h1 className="text-2xl font-bold text-text-default">{client.name}</h1>
+                <h1 className="text-2xl font-bold text-text-default">{client.displayName || client.name}</h1>
                 <p className="text-sm text-text-muted">ניהול כל המידע והפעילויות הקשורות ללקוח.</p>
             </header>
             

@@ -12,7 +12,7 @@ type NotificationType = 'task' | 'message' | 'system';
 type NotificationStatus = 'New' | 'In Progress' | 'Done';
 
 interface Notification {
-  id: number;
+  id: string;
   type: NotificationType;
   title: string;
   content: string;
@@ -26,90 +26,8 @@ interface Notification {
   urgency?: 'נמוכה' | 'בינונית' | 'גבוהה';
   linkedCandidateId?: number;
   linkedClient?: string;
+  backendStatus: 'unread' | 'tasks' | 'archived' | 'deleted';
 }
-
-// --- MOCK DATA ---
-export const notificationsData: Notification[] = [
-  { 
-      id: 1, 
-      type: 'task', 
-      title: 'משימה בחריגה: ליצור קשר עם UPS', 
-      content: 'עברו יומיים מאז שהלקוח ביקש עדכון על משרת המחסנאי.', 
-      timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(), 
-      dueDate: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), // Overdue by 1 day
-      isRead: false, 
-      sender: 'מערכת', 
-      recipient: 'גילעד', 
-      status: 'New', 
-      category: 'גיוס', 
-      urgency: 'גבוהה', 
-      linkedClient: 'UPS' 
-  },
-  { 
-      id: 2, 
-      type: 'task', 
-      title: 'משימה להיום: ראיון טלפוני', 
-      content: 'ביצוע סינון טלפוני למועמדת מאיה כהן.', 
-      timestamp: new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString(), 
-      dueDate: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(), // Due today in 2 hours
-      isRead: false, 
-      sender: 'מערכת', 
-      recipient: 'עצמי', 
-      status: 'New', 
-      category: 'גיוס' 
-  },
-  { 
-      id: 3, 
-      type: 'message', 
-      title: 'תזכורת: פגישה עם דנה', 
-      content: 'פגישת סיכום שבוע עם צוות הגיוס היום ב-16:30.', 
-      timestamp: new Date(Date.now() - 60 * 60 * 1000).toISOString(), 
-      isRead: false, 
-      sender: 'דנה כהן', 
-      recipient: 'עצמי', 
-      status: 'New', 
-      category: 'כללי' 
-  },
-  { 
-      id: 4, 
-      type: 'system', 
-      title: 'עדכון מערכת', 
-      content: '3 קורות חיים חדשים התקבלו מ-AllJobs למשרת "אנליסט נתונים".', 
-      timestamp: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(), 
-      isRead: true, 
-      sender: 'מערכת', 
-      recipient: 'כולם', 
-      status: 'Done', 
-      category: 'גיוס' 
-  },
-  { 
-      id: 5, 
-      type: 'task', 
-      title: 'משימה עתידית: הכנת דוחות', 
-      content: 'להכין דוח גיוס חודשי לישיבת הנהלה.', 
-      timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(), 
-      dueDate: new Date(Date.now() + 4 * 24 * 60 * 60 * 1000).toISOString(), // Due in 4 days
-      isRead: true, 
-      sender: 'אביב לוי', 
-      recipient: 'אביב לוי', 
-      status: 'New', 
-      category: 'גיוס', 
-      urgency: 'בינונית' 
-  },
-  { 
-      id: 6, 
-      type: 'message', 
-      title: 'הודעה מדנה כהן', 
-      content: 'המועמד גדעון שפירא אישר הגעה לראיון מחר.', 
-      timestamp: new Date(Date.now() - 26 * 60 * 60 * 1000).toISOString(), 
-      isRead: true, 
-      sender: 'דנה כהן', 
-      recipient: 'עצמי', 
-      status: 'Done', 
-      category: 'גיוס', 
-      linkedCandidateId: 1 
-  },
-];
 
 const notificationStyles: { [key in NotificationType]: { icon: React.ReactNode; bg: string; text: string; } } = {
     task: { icon: <ClipboardDocumentListIcon className="w-5 h-5" />, bg: 'bg-primary-100', text: 'text-primary-600' },
@@ -173,16 +91,20 @@ interface NotificationCenterProps {
 
 const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidateSummary }) => {
     const navigate = useNavigate();
-    const [notifications, setNotifications] = useState<Notification[]>(notificationsData);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [notifications, setNotifications] = useState<Notification[]>([]);
     const [archivedNotifications, setArchivedNotifications] = useState<Notification[]>([]);
     const [activeTab, setActiveTab] = useState<'all' | 'tasks' | 'unread' | 'archived'>('all');
     const [searchTerm, setSearchTerm] = useState('');
-    const [expandedId, setExpandedId] = useState<number | null>(null);
+    const [expandedId, setExpandedId] = useState<string | null>(null);
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
-    const [selectedNotifications, setSelectedNotifications] = useState<number[]>([]);
+    const [selectedNotifications, setSelectedNotifications] = useState<string[]>([]);
     const [isAssignMenuOpen, setIsAssignMenuOpen] = useState(false);
     const [tempSelectedAgents, setTempSelectedAgents] = useState<string[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [loadError, setLoadError] = useState('');
     const assignMenuRef = useRef<HTMLDivElement>(null);
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
     
     const initialAdvancedFilters = {
         sender: '', recipient: '', status: '', category: '', fromDate: '', toDate: '', linkedClient: ''
@@ -201,30 +123,146 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         };
     }, []);
 
-    const unreadCount = useMemo(() => notifications.filter(n => !n.isRead).length, [notifications]);
-    const openTasksCount = useMemo(() => notifications.filter(n => n.type === 'task' && n.status !== 'Done').length, [notifications]);
+    useEffect(() => {
+        if (!apiBase) return;
+        let active = true;
+
+        const mapCategory = (value: unknown): Notification['category'] => {
+            if (value === 'גיוס' || value === 'מכירות') return value;
+            return 'כללי';
+        };
+
+        const mapUrgency = (value: unknown): Notification['urgency'] => {
+            if (value === 'נמוכה' || value === 'בינונית' || value === 'גבוהה') return value;
+            return undefined;
+        };
+
+        const loadNotifications = async () => {
+            setIsLoading(true);
+            setLoadError('');
+            try {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+                const response = await fetch(`${apiBase}/api/email-uploads/messages`, {
+                    method: 'GET',
+                    credentials: 'include',
+                    headers: {
+                        Accept: 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                });
+
+                if (!response.ok) {
+                    const text = await response.text().catch(() => '');
+                    throw new Error(text || `HTTP ${response.status}`);
+                }
+
+                const rows: any[] = await response.json();
+                if (!active) return;
+
+                const mapped: Notification[] = (Array.isArray(rows) ? rows : []).flatMap((row) => {
+                    const backendId = String(row?.id || row?.notificationMessageId || '').trim();
+                    if (!uuidRegex.test(backendId)) {
+                        return [];
+                    }
+                    const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
+                    const deliveryStatus = metadata?.deliveryStatus;
+                    const isTask = Boolean(row?.isTask) || row?.messageType === 'task';
+                    const status: NotificationStatus = isTask
+                        ? 'New'
+                        : deliveryStatus === 'sent'
+                            ? 'Done'
+                            : 'New';
+
+                    return [{
+                        id: backendId,
+                        type: isTask ? 'task' : 'message',
+                        title: String(row?.subject || 'הודעה חדשה'),
+                        content: String(row?.text || row?.html || ''),
+                        timestamp: String(row?.createdAt || new Date().toISOString()),
+                        dueDate: row?.dueDate ? String(row.dueDate) : undefined,
+                        isRead: deliveryStatus === 'sent',
+                        sender: String(row?.senderUserId || 'מערכת'),
+                        recipient: String(row?.assignee || row?.toEmail || ''),
+                        status,
+                        category: mapCategory(row?.category),
+                        urgency: mapUrgency(row?.sla),
+                        linkedClient: undefined,
+                        linkedCandidateId: undefined,
+                        backendStatus: row?.status === 'tasks' || row?.status === 'archived' || row?.status === 'deleted' ? row.status : 'unread',
+                    }];
+                });
+
+                setNotifications(mapped.filter((n) => n.backendStatus !== 'archived' && n.backendStatus !== 'deleted'));
+                setArchivedNotifications(mapped.filter((n) => n.backendStatus === 'archived'));
+            } catch (error: any) {
+                if (!active) return;
+                setLoadError(error?.message || 'טעינת הודעות נכשלה');
+            } finally {
+                if (!active) return;
+                setIsLoading(false);
+            }
+        };
+
+        void loadNotifications();
+        return () => {
+            active = false;
+        };
+    }, [apiBase]);
+
+    const unreadCount = useMemo(() => notifications.filter(n => n.backendStatus === 'unread').length, [notifications]);
+    const openTasksCount = useMemo(() => notifications.filter(n => n.backendStatus === 'tasks').length, [notifications]);
+
+    const persistStatusUpdate = async (id: string, status: 'unread' | 'tasks' | 'archived' | 'deleted') => {
+        if (!apiBase) return;
+        if (!uuidRegex.test(id)) {
+            throw new Error(`Invalid notification id: ${id}`);
+        }
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${apiBase}/api/email-uploads/messages/${id}/status`, {
+            method: 'PATCH',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ status }),
+        });
+        if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+    };
 
     const handleAdvancedFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
         setAdvancedFilters(prev => ({ ...prev, [name]: value }));
     };
     
-    const filterOptions = useMemo(() => ({
-        senders: [...new Set(notificationsData.map(n => n.sender))],
-        recipients: [...new Set(notificationsData.map(n => n.recipient))],
-        statuses: [...new Set(notificationsData.map(n => n.status))],
-        categories: [...new Set(notificationsData.map(n => n.category))],
-        linkedClients: [...new Set(notificationsData.map(n => n.linkedClient).filter(Boolean))] as string[],
-    }), []);
+    const filterOptions = useMemo(() => {
+        const notificationsForFilters = [...notifications, ...archivedNotifications];
+        return {
+            senders: [...new Set(notificationsForFilters.map(n => n.sender))],
+            recipients: [...new Set(notificationsForFilters.map(n => n.recipient))],
+            statuses: [...new Set(notificationsForFilters.map(n => n.status))],
+            categories: [...new Set(notificationsForFilters.map(n => n.category))],
+            linkedClients: [...new Set(notificationsForFilters.map(n => n.linkedClient).filter(Boolean))] as string[],
+        };
+    }, [notifications, archivedNotifications]);
 
     const filteredNotifications = useMemo(() => {
-        let listToFilter = activeTab === 'archived' ? archivedNotifications : notifications;
+        let listToFilter =
+            activeTab === 'archived'
+                ? archivedNotifications
+                : activeTab === 'all'
+                    ? [...notifications, ...archivedNotifications]
+                    : notifications;
         
         if (activeTab === 'unread') {
-            listToFilter = listToFilter.filter(n => !n.isRead);
+            listToFilter = listToFilter.filter(n => n.backendStatus === 'unread');
         }
         if (activeTab === 'tasks') {
-            listToFilter = listToFilter.filter(n => n.type === 'task' && n.status !== 'Done');
+            listToFilter = listToFilter.filter(n => n.backendStatus === 'tasks');
         }
 
         const search = searchTerm.toLowerCase();
@@ -251,7 +289,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
             });
     }, [activeTab, searchTerm, notifications, archivedNotifications, advancedFilters, filterOptions]);
 
-    const handleToggleSelect = (id: number) => {
+    const handleToggleSelect = (id: string) => {
         setSelectedNotifications(prev => 
             prev.includes(id) 
                 ? prev.filter(selectedId => selectedId !== id)
@@ -275,21 +313,22 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         }
     };
 
-    const handleToggleExpand = (id: number) => {
+    const handleToggleExpand = (id: string) => {
         setExpandedId(prevId => (prevId === id ? null : id));
     };
 
-    const handleMarkAsRead = (id: number) => {
+    const handleMarkAsRead = async (id: string) => {
         setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
     };
     
-    const handleTaskComplete = (e: React.MouseEvent, id: number) => {
+    const handleTaskComplete = async (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
+        await persistStatusUpdate(id, 'tasks');
         // Mark as read and Done
         setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true, status: 'Done' } : n));
     };
 
-    const handleRescheduleTask = (e: React.MouseEvent, id: number) => {
+    const handleRescheduleTask = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
         setNotifications(prev => prev.map(n => {
             if (n.id === id) {
@@ -301,19 +340,21 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         }));
     };
 
-    const handleArchive = (id: number) => {
+    const handleArchive = async (id: string) => {
+        await persistStatusUpdate(id, 'archived');
         const notificationToArchive = notifications.find(n => n.id === id);
         if (notificationToArchive) {
             setNotifications(prev => prev.filter(n => n.id !== id));
-            setArchivedNotifications(prev => [{ ...notificationToArchive, isRead: true }, ...prev]);
+            setArchivedNotifications(prev => [{ ...notificationToArchive, isRead: true, backendStatus: 'archived' }, ...prev]);
         }
     };
 
-    const handleRestore = (id: number) => {
+    const handleRestore = async (id: string) => {
         const notificationToRestore = archivedNotifications.find(n => n.id === id);
         if (notificationToRestore) {
+            await persistStatusUpdate(id, notificationToRestore.type === 'task' ? 'tasks' : 'unread');
             setArchivedNotifications(prev => prev.filter(n => n.id !== id));
-            setNotifications(prev => [{ ...notificationToRestore, isRead: false }, ...prev]);
+            setNotifications(prev => [{ ...notificationToRestore, isRead: false, backendStatus: notificationToRestore.type === 'task' ? 'tasks' : 'unread' }, ...prev]);
         }
     };
 
@@ -332,10 +373,11 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         setSelectedNotifications([]);
     };
 
-    const handleBulkArchive = () => {
+    const handleBulkArchive = async () => {
+        await Promise.all(selectedNotifications.map((id) => persistStatusUpdate(id, 'archived')));
         const toArchive = notifications.filter(n => selectedNotifications.includes(n.id));
         setNotifications(prev => prev.filter(n => !selectedNotifications.includes(n.id)));
-        setArchivedNotifications(prev => [...toArchive.map(n => ({...n, isRead: true})), ...prev]);
+        setArchivedNotifications(prev => [...toArchive.map(n => ({...n, isRead: true, backendStatus: 'archived' as const})), ...prev]);
         setSelectedNotifications([]);
     };
 
@@ -462,6 +504,12 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
             </div>
 
             <main className="flex-1 overflow-y-auto space-y-2 pb-20">
+                {isLoading && (
+                    <div className="text-center py-6 text-text-muted text-sm">טוען הודעות...</div>
+                )}
+                {loadError && (
+                    <div className="text-center py-6 text-red-600 text-sm">{loadError}</div>
+                )}
                 {filteredNotifications.length > 0 ? (
                     filteredNotifications.map(notification => {
                         const { icon, bg, text } = notificationStyles[notification.type];

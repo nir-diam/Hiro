@@ -10,6 +10,7 @@ const Job = sequelize.define(
       defaultValue: DataTypes.UUIDV4,
     },
     title: { type: DataTypes.STRING, allowNull: false },
+    publicJobTitle: DataTypes.STRING,
     client: { type: DataTypes.STRING, allowNull: false },
     field: DataTypes.STRING,
     role: DataTypes.STRING,

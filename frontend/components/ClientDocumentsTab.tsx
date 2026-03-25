@@ -2,12 +2,24 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ArrowDownTrayIcon, FolderIcon, DocumentIcon, PhotoIcon, ArchiveBoxIcon } from './Icons';
 import DocumentFormModal, { Document, DocumentType } from './DocumentFormModal';
 
-// Mock Data for Client Documents
-const initialDocumentsData: Document[] = [
-  { id: 1, name: 'Service_Agreement_2024.pdf', type: 'הסכם', uploadDate: '2024-01-15T10:00:00', uploadedBy: 'אביב לוי', notes: 'הסכם התקשרות שנתי.', fileSize: 512 },
-  { id: 2, name: 'Invoice_Q2_2024.pdf', type: 'חשבונית', uploadDate: '2024-07-01T11:30:00', uploadedBy: 'רו"ח', notes: 'חשבונית על שירותי גיוס.', fileSize: 128 },
-  { id: 3, name: 'Company_Profile.docx', type: 'אחר', uploadDate: '2024-01-15T10:05:00', uploadedBy: 'אביב לוי', notes: 'פרופיל חברה שהתקבל מהלקוח.', fileSize: 2048 },
-];
+interface ClientDocumentsTabProps {
+  clientId: string;
+  clientName: string;
+}
+
+type BackendDoc = Omit<Document, 'id'> & { id: string; key?: string; url?: string };
+
+const normalizeDoc = (row: any): BackendDoc => ({
+  id: String(row.id),
+  name: row.name || '',
+  type: row.type as DocumentType,
+  uploadDate: row.uploadDate || new Date().toISOString(),
+  uploadedBy: row.uploadedBy || 'מערכת',
+  notes: row.notes || '',
+  fileSize: Number(row.fileSize ?? 0),
+  key: row.key,
+  url: row.url,
+});
 
 const documentTypeStyles: { [key in DocumentType]: { bg: string; text: string; } } = {
   'קורות חיים': { bg: 'bg-secondary-100', text: 'text-secondary-800' },
@@ -42,14 +54,17 @@ const formatFileSize = (kilobytes: number) => {
     }
 }
 
-const ClientDocumentsTab: React.FC = () => {
-    const [documents, setDocuments] = useState<Document[]>(initialDocumentsData);
+const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clientName }) => {
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [documents, setDocuments] = useState<BackendDoc[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [filterType, setFilterType] = useState('הכול');
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [editingDoc, setEditingDoc] = useState<Document | null>(null);
-    const [openMenuId, setOpenMenuId] = useState<number | null>(null);
+    const [editingDoc, setEditingDoc] = useState<BackendDoc | null>(null);
+    const [openMenuId, setOpenMenuId] = useState<string | null>(null);
     const menuRef = useRef<HTMLDivElement>(null);
 
     const handleCreateDoc = () => {
@@ -57,20 +72,92 @@ const ClientDocumentsTab: React.FC = () => {
         setIsModalOpen(true);
     };
 
-    const handleEditDoc = (doc: Document) => {
+    const handleEditDoc = (doc: BackendDoc) => {
         setEditingDoc(doc);
         setIsModalOpen(true);
         setOpenMenuId(null);
     };
 
-    const handleDeleteDoc = (docId: number) => {
+    const handleDeleteDoc = async (docId: string) => {
         if (window.confirm('האם אתה בטוח שברצונך למחוק את המסמך?')) {
             setDocuments(documents.filter(d => d.id !== docId));
+            if (apiBase && clientId) {
+                await fetch(`${apiBase}/api/clients/${clientId}/documents/${docId}`, { method: 'DELETE' }).catch(() => null);
+            }
         }
         setOpenMenuId(null);
     };
 
-    const handleSaveDoc = (docData: Omit<Document, 'id' | 'uploadDate' | 'fileSize'> & { id?: number }) => {
+    const handleSaveDoc = async (docData: any) => {
+        if (!apiBase || !clientId) return;
+
+        // Edit metadata only
+        if (docData?.id && !docData?.file) {
+            const res = await fetch(`${apiBase}/api/clients/${clientId}/documents/${docData.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: docData.name,
+                    type: docData.type,
+                    notes: docData.notes,
+                    uploadedBy: docData.uploadedBy,
+                }),
+            }).catch(() => null);
+            if (res && (res as any).ok) {
+                const updated = normalizeDoc(await (res as any).json());
+                setDocuments(prev => prev.map(d => d.id === updated.id ? updated : d));
+            }
+            setIsModalOpen(false);
+            return;
+        }
+
+        // New upload
+        const file: File | null = docData?.file || null;
+        if (!file) {
+            setIsModalOpen(false);
+            return;
+        }
+
+        // 1) get upload URL
+        const uploadRes = await fetch(`${apiBase}/api/clients/${clientId}/documents/upload-url`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fileName: file.name, contentType: file.type || 'application/octet-stream' }),
+        });
+        if (!uploadRes.ok) {
+            setIsModalOpen(false);
+            return;
+        }
+        const { uploadUrl, key, publicUrl } = await uploadRes.json();
+
+        // 2) upload to S3
+        const putRes = await fetch(uploadUrl, { method: 'PUT', body: file });
+        if (!putRes.ok) {
+            setIsModalOpen(false);
+            return;
+        }
+
+        // 3) attach metadata to client
+        const fileSizeKb = Math.max(1, Math.round(file.size / 1024));
+        const attachRes = await fetch(`${apiBase}/api/clients/${clientId}/documents/attach`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: docData.name,
+                type: docData.type,
+                notes: docData.notes,
+                uploadedBy: docData.uploadedBy,
+                fileSize: fileSizeKb,
+                key,
+                url: publicUrl,
+                uploadDate: new Date().toISOString(),
+            }),
+        });
+        if (attachRes.ok) {
+            const created = normalizeDoc(await attachRes.json());
+            setDocuments(prev => [created, ...prev]);
+        }
+
         setIsModalOpen(false);
     };
     
@@ -83,6 +170,32 @@ const ClientDocumentsTab: React.FC = () => {
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    useEffect(() => {
+        if (!apiBase || !clientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients/${clientId}/documents`)
+            .then((r) => {
+                if (!r.ok) throw new Error('Failed to load documents');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : (data?.data ?? []);
+                setDocuments(list.map(normalizeDoc));
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'Failed to load documents');
+                setDocuments([]);
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase, clientId]);
 
     const filteredDocuments = useMemo(() => {
         return documents
@@ -150,7 +263,13 @@ const ClientDocumentsTab: React.FC = () => {
                         <tbody className="divide-y divide-border-subtle">
                         {filteredDocuments.map(doc => (
                             <tr key={doc.id} className="hover:bg-bg-hover">
-                                <td className="px-4 py-3"><a href="#" className="font-semibold text-primary-700 hover:underline">{doc.name}</a></td>
+                                <td className="px-4 py-3">
+                                    {doc.url ? (
+                                        <a href={doc.url} target="_blank" rel="noreferrer" className="font-semibold text-primary-700 hover:underline">{doc.name}</a>
+                                    ) : (
+                                        <span className="font-semibold text-text-default">{doc.name}</span>
+                                    )}
+                                </td>
                                 <td className="px-4 py-3"><span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${documentTypeStyles[doc.type as DocumentType]?.bg || 'bg-gray-100'} ${documentTypeStyles[doc.type as DocumentType]?.text || 'text-gray-800'}`}>{doc.type}</span></td>
                                 <td className="px-4 py-3 text-text-muted">{new Date(doc.uploadDate).toLocaleDateString('he-IL')}</td>
                                 <td className="px-4 py-3 text-text-muted">{doc.uploadedBy}</td>
@@ -162,7 +281,11 @@ const ClientDocumentsTab: React.FC = () => {
                                         {openMenuId === doc.id && (
                                             <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10">
                                                 <button onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> ערוך</button>
-                                                <a href="#" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</a>
+                                                {doc.url ? (
+                                                    <a href={doc.url} target="_blank" rel="noreferrer" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</a>
+                                                ) : (
+                                                    <span className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-subtle opacity-60 cursor-not-allowed"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</span>
+                                                )}
                                                 <button onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> מחק</button>
                                             </div>
                                         )}
@@ -182,14 +305,22 @@ const ClientDocumentsTab: React.FC = () => {
                                 {openMenuId === doc.id && (
                                     <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10">
                                         <button onClick={() => handleEditDoc(doc)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> ערוך</button>
-                                        <a href="#" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</a>
+                                        {doc.url ? (
+                                            <a href={doc.url} target="_blank" rel="noreferrer" className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-default hover:bg-bg-hover"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</a>
+                                        ) : (
+                                            <span className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-text-subtle opacity-60 cursor-not-allowed"><ArrowDownTrayIcon className="w-4 h-4"/> הורד</span>
+                                        )}
                                         <button onClick={() => handleDeleteDoc(doc.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> מחק</button>
                                     </div>
                                 )}
                             </div>
                             <div className="flex-grow flex flex-col items-center justify-center py-4">
                                {getFileIcon(doc.name)}
-                                <a href="#" className="font-semibold text-text-default mt-3 text-sm hover:text-primary-700 break-words w-full">{doc.name}</a>
+                                {doc.url ? (
+                                    <a href={doc.url} target="_blank" rel="noreferrer" className="font-semibold text-text-default mt-3 text-sm hover:text-primary-700 break-words w-full">{doc.name}</a>
+                                ) : (
+                                    <span className="font-semibold text-text-default mt-3 text-sm break-words w-full">{doc.name}</span>
+                                )}
                             </div>
                             <div className="text-xs text-text-muted border-t border-border-default pt-2">
                                 <p>{doc.type}</p>
@@ -218,7 +349,7 @@ const ClientDocumentsTab: React.FC = () => {
                 onSave={handleSaveDoc}
                 document={editingDoc}
                 context="client"
-                contextName="גטר גרופ"
+                contextName={clientName}
             />
         </div>
     );

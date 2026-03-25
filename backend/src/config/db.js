@@ -21,6 +21,9 @@ const connectDb = async () => {
   require('../models/MessageLog');
   require('../models/Organization');
   require('../models/Client');
+  require('../models/ClientContact');
+  require('../models/ClientContactGroup');
+  require('../models/ClientTask');
   require('../models/JobPublication');
   require('../models/Tag');
   require('../models/TagHistory');
@@ -36,6 +39,7 @@ const connectDb = async () => {
   require('../models/OrganizationHistory');
   require('../models/BusinessLogicRule');
   require('../models/EmailUpload');
+  require('../models/NotificationMessage');
   require('../models/City');
   require('../models/CandidateOrganization');
 

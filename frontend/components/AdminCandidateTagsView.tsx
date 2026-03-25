@@ -2,9 +2,11 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { SparklesIcon } from './Icons';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 const AdminCandidateTagsView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [candidateId, setCandidateId] = useState('');
+    const [candidateId] = useState('');
     const [tags, setTags] = useState<any[]>([]);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -25,10 +27,23 @@ const AdminCandidateTagsView: React.FC = () => {
     });
     const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearch, setDebouncedSearch] = useState('');
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(50);
+    const [total, setTotal] = useState(0);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
     const [summaryCandidate, setSummaryCandidate] = useState<any | null>(null);
 
     const [tagOptions, setTagOptions] = useState<any[]>([]);
+
+    useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 300);
+        return () => clearTimeout(t);
+    }, [searchTerm]);
+
+    useEffect(() => {
+        setPage(1);
+    }, [debouncedSearch, statusFilter, pageSize]);
 
     useEffect(() => {
         const loadTags = async () => {
@@ -56,50 +71,50 @@ const AdminCandidateTagsView: React.FC = () => {
         setLoading(true);
         setError(null);
         try {
-            const query = candidateId ? `?candidateId=${encodeURIComponent(candidateId)}` : '';
-            const res = await fetch(`${apiBase}/api/admin/candidate-tags${query}`);
+            const params = new URLSearchParams();
+            params.set('limit', String(pageSize));
+            params.set('offset', String((page - 1) * pageSize));
+            if (candidateId.trim()) {
+                params.set('candidateId', candidateId.trim());
+            }
+            if (debouncedSearch) {
+                params.set('search', debouncedSearch);
+            }
+            if (statusFilter === 'active') {
+                params.set('isActive', 'true');
+            }
+            if (statusFilter === 'inactive') {
+                params.set('isActive', 'false');
+            }
+
+            const res = await fetch(`${apiBase}/api/admin/candidate-tags?${params.toString()}`);
             if (!res.ok) throw new Error('Failed to load candidate tags');
-            const data = await res.json();
-            setTags(data);
+            const body = await res.json();
+
+            if (Array.isArray(body)) {
+                setTags(body);
+                setTotal(body.length);
+            } else {
+                setTags(Array.isArray(body.data) ? body.data : []);
+                setTotal(typeof body.total === 'number' ? body.total : 0);
+            }
             setLastUpdated(new Date().toISOString());
         } catch (err: any) {
             setError(err.message || 'Load failed');
             setTags([]);
+            setTotal(0);
         } finally {
             setLoading(false);
         }
-    }, [apiBase, candidateId]);
+    }, [apiBase, candidateId, page, pageSize, debouncedSearch, statusFilter]);
 
     useEffect(() => {
-        fetchTags();
+        void fetchTags();
     }, [fetchTags]);
 
     const formRef = useRef<HTMLDivElement | null>(null);
 
-    const filteredTags = useMemo(() => {
-        const term = searchTerm.trim().toLowerCase();
-        return tags.filter((tag) => {
-            if (statusFilter !== 'all') {
-                const active = statusFilter === 'active';
-                if (Boolean(tag.is_active) !== active) return false;
-            }
-            if (term) {
-                const candidateName = tag.candidate?.fullName || '';
-                const haystack = [
-                    tag.tag?.tagKey || tag.tagKey || '',
-                    tag.tag?.displayNameHe || tag.displayNameHe || '',
-                    tag.raw_type || '',
-                    tag.context || '',
-                    candidateName,
-                    tag.candidate_id || '',
-                ]
-                    .join(' ')
-                    .toLowerCase();
-                if (!haystack.includes(term)) return false;
-            }
-            return true;
-        });
-    }, [tags, statusFilter, searchTerm]);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
 
     const handleRefresh = () => {
         void fetchTags();
@@ -111,6 +126,11 @@ const AdminCandidateTagsView: React.FC = () => {
 
     const handleSearchTermChange = (value: string) => {
         setSearchTerm(value);
+    };
+
+    const goToPage = (p: number) => {
+        if (p < 1 || p > totalPages) return;
+        setPage(p);
     };
 
     const openSummary = (tag: any) => {
@@ -182,7 +202,7 @@ const AdminCandidateTagsView: React.FC = () => {
         try {
             const res = await fetch(`${apiBase}/api/admin/candidate-tags/${entry.id}`, { method: 'DELETE' });
             if (!res.ok) throw new Error('Delete failed');
-            setTags((prev) => prev.filter((item) => item.id !== entry.id));
+            void fetchTags();
         } catch (err: any) {
             alert(err?.message || 'Unable to delete tag');
         }
@@ -216,17 +236,16 @@ const AdminCandidateTagsView: React.FC = () => {
                     <SparklesIcon className="w-6 h-6 text-primary-600" />
                     <div>
                         <h1 className="text-2xl font-black text-text-default">תגיות מועמדים</h1>
-                        <p className="text-sm text-text-muted">מעקב אחר התגיות שנוצרו עבור מועמדים וסטטוס ההפעלה שלהן.</p>
+                        <p className="text-sm text-text-muted">מעקב אחר התגיות שנוצרו עבור מועמדים וסטטוס ההפעלה שלהן. חיפוש וסינון בשרת (עמודים).</p>
                     </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-3">
-                   
-                    <div className="flex gap-2 flex-wrap">
-                    <input
+                    <div className="flex gap-2 flex-wrap items-center">
+                        <input
                             value={searchTerm}
                             onChange={(e) => handleSearchTermChange(e.target.value)}
-                            placeholder="חיפוש חופשי"
-                            className="bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm text-text-default focus:ring-1 focus:ring-primary-500 outline-none min-w-[200px]"
+                            placeholder="חיפוש (שרת) — נקה לאיפוס לעמוד ראשון"
+                            className="bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm text-text-default focus:ring-1 focus:ring-primary-500 outline-none min-w-[220px]"
                         />
                         <select
                             value={statusFilter}
@@ -237,7 +256,24 @@ const AdminCandidateTagsView: React.FC = () => {
                             <option value="active">פעיל</option>
                             <option value="inactive">לא פעיל</option>
                         </select>
-                       
+                        <select
+                            value={pageSize}
+                            onChange={(e) => setPageSize(Number(e.target.value))}
+                            className="bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
+                        >
+                            {PAGE_SIZE_OPTIONS.map((n) => (
+                                <option key={n} value={n}>
+                                    {n} לעמוד
+                                </option>
+                            ))}
+                        </select>
+                        <button
+                            type="button"
+                            onClick={handleRefresh}
+                            className="text-sm font-semibold text-primary-600 border border-primary-200 rounded-lg px-3 py-2 hover:bg-primary-50"
+                        >
+                            רענן
+                        </button>
                     </div>
                 </div>
             </header>
@@ -371,10 +407,10 @@ const AdminCandidateTagsView: React.FC = () => {
             )}
 
                     {loading ? (
-                        <div className="text-sm text-text-muted">טוען...</div>
+                        <div className="text-sm text-text-muted">טוען עמוד…</div>
                     ) : (
                         <>
-                            {filteredTags.length ? (
+                            {tags.length ? (
                                 <div className="overflow-x-auto bg-bg-card border border-border-default rounded-2xl shadow-sm">
                                     <table className="w-full text-sm text-right">
                                         <thead className="bg-bg-subtle text-text-muted uppercase text-xs font-semibold">
@@ -394,7 +430,7 @@ const AdminCandidateTagsView: React.FC = () => {
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-border-default">
-                                            {filteredTags.map((tag) => {
+                                            {tags.map((tag) => {
                                                 const candidateName = tag.candidate?.fullName || 'מועמד';
                                                 return (
                                                     <tr key={tag.id} className="hover:bg-bg-hover">
@@ -450,9 +486,34 @@ const AdminCandidateTagsView: React.FC = () => {
                                 </div>
                             ) : (
                                 <div className="rounded-xl border border-border-default bg-white/80 p-6 text-sm text-text-muted text-center">
-                                    {!candidateId ? 'הכנס מזהה מועמד כדי להציג תגיות' : 'לא נמצאו תגיות עבור מועמד זה.'}
+                                    לא נמצאו רשומות בעמוד זה.
                                 </div>
                             )}
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 text-sm text-text-muted">
+                                <span>
+                                    סה״כ {total.toLocaleString()} רשומות · עמוד {page} מתוך {totalPages}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                    <button
+                                        type="button"
+                                        disabled={page <= 1}
+                                        onClick={() => goToPage(page - 1)}
+                                        className="px-3 py-1.5 rounded-lg border border-border-default disabled:opacity-40 hover:bg-bg-hover"
+                                    >
+                                        הקודם
+                                    </button>
+                                    <button
+                                        type="button"
+                                        disabled={page >= totalPages}
+                                        onClick={() => goToPage(page + 1)}
+                                        className="px-3 py-1.5 rounded-lg border border-border-default disabled:opacity-40 hover:bg-bg-hover"
+                                    >
+                                        הבא
+                                    </button>
+                                </div>
+                            </div>
+
                             {lastUpdated && (
                                 <p className="text-xs text-text-muted mt-2">עודכן לאחרונה: {new Date(lastUpdated).toLocaleString()}</p>
                             )}
@@ -471,4 +532,3 @@ const AdminCandidateTagsView: React.FC = () => {
 };
 
 export default AdminCandidateTagsView;
-

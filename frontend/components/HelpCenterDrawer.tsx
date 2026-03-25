@@ -5,7 +5,7 @@ import {
     VideoCameraIcon, DocumentTextIcon, FolderIcon, ArrowRightIcon,
     ArrowsPointingOutIcon, ArrowsPointingInIcon // Assuming these exist in Icons.tsx, if not I will use simple arrows
 } from './Icons';
-import { initialHelpData, HelpArticle } from '../data/helpCenterData';
+import { HelpArticle } from '../data/helpCenterData';
 
 interface HelpCenterDrawerProps {
     isOpen: boolean;
@@ -25,32 +25,47 @@ const flattenArticles = (items: HelpArticle[]) => {
     return flat;
 };
 
-const getRootIds = (items: HelpArticle[]) => items.filter((item) => !item.parentId).map((item) => item.id);
+const getRootIds = (items: HelpArticle[]) =>
+    items.filter((item) => item.parentId == null || item.parentId === '').map((item) => item.id);
+
+const normParentId = (p: string | null | undefined) => (p == null || p === '' ? null : p);
 
 const HelpCenterDrawer: React.FC<HelpCenterDrawerProps> = ({ isOpen, onClose }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [searchTerm, setSearchTerm] = useState('');
     const [currentArticle, setCurrentArticle] = useState<HelpArticle | null>(null);
-    const initialFlat = flattenArticles(initialHelpData as HelpArticle[]);
-    const [articles, setArticles] = useState<HelpArticle[]>(initialFlat);
-    const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set(getRootIds(initialFlat)));
+    const [articles, setArticles] = useState<HelpArticle[]>([]);
+    const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
     const [isExpandedMode, setIsExpandedMode] = useState(false); // New state for width
     const [isLoading, setIsLoading] = useState(false);
 
     useEffect(() => {
         const loadArticles = async () => {
+            if (!apiBase) return;
             setIsLoading(true);
             try {
-                const response = await fetch(`${apiBase}/api/help-center/articles`, { credentials: 'include' });
+                const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+                const headers: Record<string, string> = {
+                    Accept: 'application/json',
+                    'Cache-Control': 'no-cache',
+                };
+                if (token) headers.Authorization = `Bearer ${token}`;
+                const response = await fetch(`${apiBase}/api/help-center/articles`, {
+                    credentials: 'include',
+                    cache: 'no-store',
+                    headers,
+                });
                 if (!response.ok) {
                     throw new Error(`Help center load failed (${response.status})`);
                 }
                 const data: HelpArticle[] = await response.json();
-                const flat = flattenArticles(data);
-        setArticles(flat);
+                const list = Array.isArray(data) ? data : [];
+                const flat = flattenArticles(list);
+                setArticles(flat);
                 setExpandedFolders(new Set(getRootIds(flat)));
             } catch (err) {
                 console.error('[HelpCenterDrawer] failed to load articles', err);
+                setArticles([]);
             } finally {
                 setIsLoading(false);
             }
@@ -103,11 +118,13 @@ const HelpCenterDrawer: React.FC<HelpCenterDrawerProps> = ({ isOpen, onClose }) 
             ));
         }
 
-        const nodes = articles.filter(a => a.parentId === parentId).sort((a, b) => a.order - b.order);
-        
+        const nodes = articles
+            .filter((a) => normParentId(a.parentId) === parentId)
+            .sort((a, b) => a.order - b.order);
+
         return nodes.map(node => {
             const isExpanded = expandedFolders.has(node.id);
-            const hasChildren = articles.some(a => a.parentId === node.id);
+            const hasChildren = articles.some((a) => normParentId(a.parentId) === node.id);
 
             return (
                 <React.Fragment key={node.id}>
@@ -237,12 +254,15 @@ const HelpCenterDrawer: React.FC<HelpCenterDrawerProps> = ({ isOpen, onClose }) 
                             </div>
                         ) : (
                             <div className="py-2">
+                                {isLoading && articles.length === 0 && (
+                                    <div className="text-center py-10 text-text-muted text-sm">טוען מרכז עזרה...</div>
+                                )}
                                 {searchTerm && filteredItems.length === 0 && (
                                     <div className="text-center py-10 text-text-muted">
                                         <p>לא נמצאו תוצאות עבור "{searchTerm}"</p>
                                     </div>
                                 )}
-                                {renderTree()}
+                                {!isLoading || articles.length > 0 ? renderTree() : null}
                             </div>
                         )}
                     </div>

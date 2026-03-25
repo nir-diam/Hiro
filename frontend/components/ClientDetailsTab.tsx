@@ -1,6 +1,6 @@
 
-import React, { useState, useRef, useEffect } from 'react';
-import { ChevronDownIcon, LinkIcon, PencilIcon } from './Icons';
+import React, { useState, useEffect } from 'react';
+import { LinkIcon, PencilIcon } from './Icons';
 import AccordionSection from './AccordionSection'; 
 import { useLanguage } from '../context/LanguageContext';
 
@@ -34,44 +34,80 @@ const InfoTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </span>
 );
 
+interface ClientDetailsTabProps {
+    client: any;
+    onClientUpdated?: (next: any) => void;
+}
 
-const allRecruiters = ['דנה כהן', 'אביב לוי', 'יעל שחר', 'מיכל אלקבץ'];
-
-const ClientDetailsTab: React.FC = () => {
+const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpdated }) => {
     const { t } = useLanguage();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const [formData, setFormData] = useState({
-        clientName: 'גטר גרופ',
-        clientType: 'לקוח פעיל',
-        clientId: '',
+        clientName: '',
+        clientStatus: 'פעיל',
         accountManager: '',
-        recruiters: ['דנה כהן'],
+        recruiters: '',
         internalNotes: '',
     });
-    const [isRecruiterDropdownOpen, setIsRecruiterDropdownOpen] = useState(false);
-    const recruiterRef = useRef<HTMLDivElement>(null);
+    const [isSaving, setIsSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
 
-     useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (recruiterRef.current && !recruiterRef.current.contains(event.target as Node)) {
-                setIsRecruiterDropdownOpen(false);
-            }
-        };
-        document.addEventListener('mousedown', handleClickOutside);
-        return () => document.removeEventListener('mousedown', handleClickOutside);
-    }, []);
+    useEffect(() => {
+        if (!client) return;
+        const meta = (client.metadata && typeof client.metadata === 'object') ? client.metadata : {};
+        setFormData({
+            clientName: client.displayName || client.name || '',
+            clientStatus: client.status || 'פעיל',
+            accountManager: client.accountManager || '',
+            recruiters: Array.isArray(meta.recruiters) ? meta.recruiters.join(', ') : (meta.recruiters || ''),
+            internalNotes: meta.internalNotes || '',
+        });
+    }, [client]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
         setFormData(prev => ({ ...prev, [name]: value }));
     };
     
-    const handleRecruiterChange = (recruiter: string) => {
-        setFormData(prev => ({
-            ...prev,
-            recruiters: prev.recruiters.includes(recruiter)
-                ? prev.recruiters.filter(r => r !== recruiter)
-                : [...prev.recruiters, recruiter]
-        }));
+    const handleSave = async () => {
+        if (!client?.id || !apiBase) return;
+        setIsSaving(true);
+        setError(null);
+        try {
+            const prevMeta = (client.metadata && typeof client.metadata === 'object') ? client.metadata : {};
+            const recruitersArr = String(formData.recruiters || '')
+                .split(',')
+                .map(s => s.trim())
+                .filter(Boolean);
+
+            const payload: any = {
+                name: formData.clientName || client.name,
+                displayName: formData.clientName || client.displayName,
+                status: formData.clientStatus,
+                accountManager: formData.accountManager,
+                metadata: {
+                    ...prevMeta,
+                    recruiters: recruitersArr,
+                    internalNotes: formData.internalNotes || '',
+                },
+            };
+
+            const res = await fetch(`${apiBase}/api/clients/${client.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'Update failed');
+            }
+            const updated = await res.json();
+            onClientUpdated?.(updated);
+        } catch (e: any) {
+            setError(e?.message || 'Update failed');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     return (
@@ -79,24 +115,39 @@ const ClientDetailsTab: React.FC = () => {
             <AccordionSection title={t('client_details.section_info')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                  <div className="space-y-4 text-sm">
                     <p className="text-text-muted leading-relaxed">
-                        קבוצה ותיקה המתמחה בייבוא והפצת ציוד טכנולוגי, כולל מחשוב, תקשורת, דפוס וציוד רפואי.
+                        {(client?.metadata?.description || client?.metadata?.notes || '').toString() || '—'}
                     </p>
                     <div>
                         <h4 className="font-semibold text-text-default mb-2">{t('client_details.products_services')}</h4>
                         <div className="flex flex-wrap gap-2">
-                            <InfoTag>ציוד מחשוב</InfoTag>
-                            <InfoTag>תקשורת</InfoTag>
-                            <InfoTag>דפוס</InfoTag>
-                            <InfoTag>ציוד רפואה</InfoTag>
-                            <InfoTag>הפצה טכנולוגית</InfoTag>
+                            {(Array.isArray(client?.metadata?.products) ? client.metadata.products : [])
+                                .slice(0, 8)
+                                .map((p: any) => (
+                                    <InfoTag key={String(p)}>{String(p)}</InfoTag>
+                                ))}
+                            {(!Array.isArray(client?.metadata?.products) || client.metadata.products.length === 0) && (
+                                <InfoTag>—</InfoTag>
+                            )}
                         </div>
                     </div>
                     <dl className="space-y-2 pt-2 border-t border-border-default">
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.industry')}</dt><dd className="font-semibold text-right">מסחר וקמעונאות &gt; יבוא וסחר סיטונאי</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">501-1000</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">פרטית</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">פתח תקווה</dd></div>
-                        <div className="flex justify-between items-center"><dt className="text-text-muted">{t('client_details.website')}</dt><dd><a href="https://www.getter.co.il/" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1"><span>getter.co.il</span> <LinkIcon className="w-4 h-4" /></a></dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.industry')}</dt><dd className="font-semibold text-right">{client?.industry || client?.field || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">{client?.metadata?.employeeCount || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">{client?.metadata?.ownership || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">{client?.city || client?.metadata?.address || '—'}</dd></div>
+                        <div className="flex justify-between items-center">
+                            <dt className="text-text-muted">{t('client_details.website')}</dt>
+                            <dd>
+                                {client?.metadata?.website ? (
+                                    <a href={client.metadata.website} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1">
+                                        <span>{String(client.metadata.website).replace('https://www.', '').replace('http://www.', '').replace('https://', '').replace('http://', '')}</span>
+                                        <LinkIcon className="w-4 h-4" />
+                                    </a>
+                                ) : (
+                                    <span className="font-semibold">—</span>
+                                )}
+                            </dd>
+                        </div>
                     </dl>
                  </div>
             </AccordionSection>
@@ -104,38 +155,29 @@ const ClientDetailsTab: React.FC = () => {
             <AccordionSection title={t('client_details.section_management')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                 <div className="space-y-4">
                      <div className="grid grid-cols-2 gap-4 text-sm">
-                        <div><strong className="text-text-muted">{t('client_details.client_id')}</strong> <span className="font-semibold">383</span></div>
-                        <div><strong className="text-text-muted">{t('client_details.created_at')}</strong> <span className="font-semibold">11/11/2025</span></div>
+                        <div><strong className="text-text-muted">{t('client_details.client_id')}</strong> <span className="font-semibold">{String(client?.id || '—')}</span></div>
+                        <div><strong className="text-text-muted">{t('client_details.created_at')}</strong> <span className="font-semibold">{client?.creationDate ? new Date(client.creationDate).toLocaleDateString('he-IL') : (client?.createdAt ? new Date(client.createdAt).toLocaleDateString('he-IL') : '—')}</span></div>
                     </div>
                     <FormInput label={t('client_details.field_client_name')} name="clientName" value={formData.clientName} onChange={handleChange} />
-                    <FormSelect label={t('client_details.field_client_type')} name="clientType" value={formData.clientType} onChange={handleChange}>
-                        <option>לקוח פעיל</option>
-                        <option>לקוח כללי</option>
-                        <option>מתעניין</option>
-                        <option>לא פעיל</option>
+                    <FormSelect label={t('client_details.field_client_type')} name="clientStatus" value={formData.clientStatus} onChange={handleChange}>
+                        <option value="פעיל">פעיל</option>
+                        <option value="בהקפאה">בהקפאה</option>
+                        <option value="לא פעיל">לא פעיל</option>
                     </FormSelect>
                      <FormInput label={t('client_details.field_account_manager')} name="accountManager" value={formData.accountManager} onChange={handleChange} />
-                    <div className="relative" ref={recruiterRef}>
-                        <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('client_details.field_recruiter')}</label>
-                        <button type="button" onClick={() => setIsRecruiterDropdownOpen(!isRecruiterDropdownOpen)} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-right flex justify-between items-center">
-                            <span className="truncate">{formData.recruiters.length > 0 ? formData.recruiters.join(', ') : t('client_details.select_recruiters')}</span>
-                            <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform ${isRecruiterDropdownOpen ? 'rotate-180' : ''}`} />
-                        </button>
-                        {isRecruiterDropdownOpen && (
-                            <div className="absolute z-10 w-full mt-1 bg-bg-card border border-border-default rounded-lg shadow-lg">
-                                {allRecruiters.map(recruiter => (
-                                    <label key={recruiter} className="flex items-center gap-2 p-2 text-sm text-text-default hover:bg-bg-hover cursor-pointer">
-                                        <input type="checkbox" checked={formData.recruiters.includes(recruiter)} onChange={() => handleRecruiterChange(recruiter)} className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500 bg-bg-card" />
-                                        {recruiter}
-                                    </label>
-                                ))}
-                            </div>
-                        )}
-                    </div>
+                    <FormInput label={t('client_details.field_recruiter')} name="recruiters" value={formData.recruiters} onChange={handleChange} />
                      <FormTextArea label={t('client_details.field_internal_notes')} name="internalNotes" value={formData.internalNotes} onChange={handleChange} />
                      <div className="flex justify-end pt-2">
-                        <button className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition">{t('client_details.save_changes')}</button>
+                        <button
+                            type="button"
+                            disabled={isSaving}
+                            onClick={handleSave}
+                            className="bg-primary-600 text-white font-bold py-2 px-6 rounded-lg hover:bg-primary-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+                        >
+                            {isSaving ? 'שומר...' : t('client_details.save_changes')}
+                        </button>
                     </div>
+                    {error && <div className="text-sm font-semibold text-red-600">{error}</div>}
                 </div>
             </AccordionSection>
         </div>

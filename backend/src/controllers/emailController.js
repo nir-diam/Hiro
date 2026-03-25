@@ -10,6 +10,9 @@ const { uploadResumeForCandidate, fetchResumeText, buildParsedUpdates } = requir
 const candidateTagService = require('../services/candidateTagService');
 const promptService = require('../services/promptService');
 const { sendChat } = require('../services/geminiService');
+const User = require('../models/User');
+const NotificationMessage = require('../models/NotificationMessage');
+const { Op } = require('sequelize');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
@@ -176,6 +179,52 @@ const getByCandidate = async (req, res) => {
   }
 };
 
+const getNotificationMessages = async (req, res) => {
+  try {
+    const records = await NotificationMessage.findAll({
+      where: {
+        status: {
+          [Op.ne]: 'deleted',
+        },
+      },
+      order: [['createdAt', 'DESC']],
+      limit: 500,
+    });
+    return res.json(records);
+  } catch (error) {
+    console.error('[email][getNotificationMessages]', error);
+    return res.status(500).json({ message: 'Failed to load notification messages' });
+  }
+};
+
+const updateNotificationMessageStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+    const isUuid =
+      typeof id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+    if (!isUuid) {
+      return res.status(400).json({ message: 'id must be a valid UUID' });
+    }
+    const allowedStatuses = new Set(['unread', 'tasks', 'archived', 'deleted']);
+    if (!allowedStatuses.has(status)) {
+      return res.status(400).json({ message: 'status must be one of unread/tasks/archived/deleted' });
+    }
+
+    const record = await NotificationMessage.findByPk(id);
+    if (!record) {
+      return res.status(404).json({ message: 'Notification message not found' });
+    }
+
+    await record.update({ status });
+    return res.json(record);
+  } catch (error) {
+    console.error('[email][updateNotificationMessageStatus]', error);
+    return res.status(500).json({ message: 'Failed to update notification status' });
+  }
+};
+
 const upload = async (req, res) => {
   const { jobId, fileKey, bucket } = req.body;
   if (!jobId || !fileKey || !bucket) {
@@ -192,7 +241,144 @@ const upload = async (req, res) => {
   }
 };
 
-module.exports = { upload, getByCandidate };
+const send = async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const {
+      to,
+      toEmail,
+      subject,
+      text,
+      html,
+      isTask,
+      messageType,
+      assignee,
+      category,
+      dueDate,
+      dueTime,
+      submissionPopup,
+      submissionEmail,
+      sla,
+      allocatedDays,
+      taskPayload,
+    } = payload;
+
+    console.log('[email][send] request received', {
+      to: typeof to === 'string' ? to : undefined,
+      toEmail: typeof toEmail === 'string' ? toEmail : undefined,
+      subject: typeof subject === 'string' ? subject : undefined,
+      hasText: typeof text === 'string' && text.trim().length > 0,
+      hasHtml: typeof html === 'string' && html.trim().length > 0,
+    });
+
+    if (!subject) return res.status(400).json({ message: 'subject is required' });
+    const bodyText = typeof text === 'string' ? text : undefined;
+
+    const emailCandidate = String(toEmail || to || '').trim();
+    if (!emailCandidate) return res.status(400).json({ message: 'recipient (to/toEmail) is required' });
+
+    const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailCandidate);
+    let resolvedToEmail = emailCandidate;
+
+    if (!isEmail) {
+      console.log('[email][send] resolving recipient name -> user.email', {
+        assigneeOrName: emailCandidate,
+      });
+      const user = await User.findOne({
+        where: { name: { [Op.iLike]: `%${emailCandidate}%` } },
+        attributes: ['email'],
+      });
+      if (!user?.email) {
+        return res.status(404).json({ message: `No user.email found for assignee/name: ${emailCandidate}` });
+      }
+      resolvedToEmail = user.email;
+    }
+
+    console.log('[email][send] resolved recipient', {
+      isEmail,
+      resolvedToEmail,
+    });
+
+    const normalizedIsTask = Boolean(isTask);
+    const normalizedMessageType = messageType === 'task' || normalizedIsTask ? 'task' : 'message';
+
+    const savedMessage = await NotificationMessage.create({
+      toEmail: resolvedToEmail,
+      subject: String(subject || ''),
+      text: typeof text === 'string' ? text : null,
+      html: typeof html === 'string' ? html : null,
+      messageType: normalizedMessageType,
+      status: normalizedMessageType === 'task' ? 'tasks' : 'unread',
+      isTask: normalizedIsTask,
+      assignee: typeof assignee === 'string' ? assignee : null,
+      category: typeof category === 'string' ? category : null,
+      dueDate: typeof dueDate === 'string' ? dueDate : null,
+      dueTime: typeof dueTime === 'string' ? dueTime : null,
+      submissionPopup: Boolean(submissionPopup),
+      submissionEmail: submissionEmail === undefined ? true : Boolean(submissionEmail),
+      sla: typeof sla === 'string' ? sla : null,
+      allocatedDays: Number.isFinite(Number(allocatedDays)) ? Number(allocatedDays) : null,
+      senderUserId: req?.user?.id || null,
+      metadata: {
+        deliveryStatus: 'pending',
+        taskPayload:
+          taskPayload && typeof taskPayload === 'object' && !Array.isArray(taskPayload)
+            ? taskPayload
+            : {},
+      },
+    });
+
+    let result;
+    try {
+      result = await emailService.sendEmail({
+        toEmail: resolvedToEmail,
+        subject,
+        text: bodyText || (typeof html === 'string' ? undefined : ''),
+        html: typeof html === 'string' ? html : undefined,
+      });
+
+      await savedMessage.update({
+        metadata: {
+          ...(savedMessage.metadata || {}),
+          deliveryStatus: 'sent',
+          providerMessageId: result?.messageId || null,
+        },
+      });
+    } catch (sendErr) {
+      await savedMessage.update({
+        metadata: {
+          ...(savedMessage.metadata || {}),
+          deliveryStatus: 'failed',
+          deliveryError: sendErr?.message || String(sendErr),
+        },
+      });
+      throw sendErr;
+    }
+
+    console.log('[email][send] sendEmail succeeded', {
+      messageId: result?.messageId || null,
+      accepted: result?.accepted?.length || null,
+      rejected: result?.rejected?.length || null,
+      notificationMessageId: savedMessage?.id || null,
+    });
+
+    return res.json({
+      ok: true,
+      messageId: result?.messageId || null,
+      notificationMessageId: savedMessage?.id || null,
+    });
+  } catch (err) {
+    console.error('[email][send] send failed', {
+      message: err?.message || err,
+      name: err?.name,
+      // Avoid dumping entire transporter/config to prevent leaking anything sensitive.
+      stack: err?.stack,
+    });
+    return res.status(400).json({ message: err?.message || 'Failed to send email' });
+  }
+};
+
+module.exports = { upload, getByCandidate, send, getNotificationMessages, updateNotificationMessageStatus };
 
 const normalizeStringArray = (val) => {
   if (!val) return [];

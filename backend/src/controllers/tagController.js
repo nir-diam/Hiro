@@ -193,16 +193,14 @@ const remove = async (req, res) => {
 };
 
 const listTagCandidatesHelper = async (tagId) => {
-  const entries = await candidateTagService.listAllCandidateTags();
-  return entries
-    .filter((entry) => entry.tag_id === tagId)
-    .map((entry) => ({
-      candidate_tag_id: entry.id,
-      candidate_id: entry.candidate_id,
-      full_name: entry.candidate?.fullName || entry.candidate?.full_name,
-      email: entry.candidate?.email,
-      phone: entry.candidate?.phone,
-    }));
+  const entries = await candidateTagService.listCandidateTagsByTag(tagId, { activeOnly: false });
+  return entries.map((entry) => ({
+    candidate_tag_id: entry.id,
+    candidate_id: entry.candidate_id,
+    full_name: entry.candidate?.fullName || entry.candidate?.full_name,
+    email: entry.candidate?.email,
+    phone: entry.candidate?.phone,
+  }));
 };
 
 const listTagJobsHelper = async (tagId) => {
@@ -290,45 +288,94 @@ const getHistory = async (req, res) => {
   }
 };
 
-const listPending = async (_req, res) => {
+const listPending = async (req, res) => {
   try {
-    const entries = await Tag.findAll({
-      where: { status: 'pending' },
+    const page = Math.max(1, Number(req.query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+    const offset = (page - 1) * limit;
+    const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+    const type = typeof req.query.type === 'string' ? req.query.type.trim() : '';
+    const rawMinUsage = Number(req.query.minUsage);
+    const minUsage = Number.isFinite(rawMinUsage) ? Math.max(1, rawMinUsage) : 1;
+
+    const parts = [{ status: 'pending' }];
+    if (type && type !== 'all') {
+      parts.push({ type });
+    }
+    if (minUsage > 1) {
+      parts.push({ usageCount: { [Op.gte]: minUsage } });
+    }
+    if (search) {
+      const like = `%${search}%`;
+      parts.push({
+        [Op.or]: [
+          { tagKey: { [Op.iLike]: like } },
+          { displayNameHe: { [Op.iLike]: like } },
+          { displayNameEn: { [Op.iLike]: like } },
+          { descriptionHe: { [Op.iLike]: like } },
+          { category: { [Op.iLike]: like } },
+        ],
+      });
+    }
+    const where = parts.length === 1 ? parts[0] : { [Op.and]: parts };
+
+    const { rows: entries, count: total } = await Tag.findAndCountAll({
+      where,
       order: [['createdAt', 'DESC']],
+      limit,
+      offset,
     });
+
     const tagIds = entries.map((t) => t.id);
-    if (tagIds.length === 0) {
-      return res.json(entries);
+    let tagToCandidates = new Map();
+    if (tagIds.length) {
+      const candidateTags = await CandidateTag.findAll({
+        where: { tag_id: { [Op.in]: tagIds } },
+        attributes: ['tag_id', 'candidate_id'],
+      });
+      const candidateIds = [...new Set(candidateTags.map((ct) => ct.candidate_id))];
+      const candidates =
+        candidateIds.length === 0
+          ? []
+          : await Candidate.findAll({
+              where: { id: { [Op.in]: candidateIds } },
+              attributes: ['id', 'fullName', 'email'],
+            });
+      const candidateMap = new Map(candidates.map((c) => [c.id, c.get({ plain: true })]));
+      for (const tid of tagIds) {
+        tagToCandidates.set(tid, []);
+      }
+      for (const ct of candidateTags) {
+        const c = candidateMap.get(ct.candidate_id);
+        if (!c) continue;
+        const list = tagToCandidates.get(ct.tag_id);
+        if (list && !list.some((x) => x.id === c.id)) list.push(c);
+      }
     }
-    const candidateTags = await CandidateTag.findAll({
-      where: { tag_id: { [Op.in]: tagIds } },
-      attributes: ['tag_id', 'candidate_id'],
-    });
-    const candidateIds = [...new Set(candidateTags.map((ct) => ct.candidate_id))];
-    const candidates =
-      candidateIds.length === 0
-        ? []
-        : await Candidate.findAll({
-            where: { id: { [Op.in]: candidateIds } },
-            attributes: ['id', 'fullName', 'email'],
-          });
-    const candidateMap = new Map(candidates.map((c) => [c.id, c.get({ plain: true })]));
-    const tagToCandidates = new Map();
-    for (const tagId of tagIds) {
-      tagToCandidates.set(tagId, []);
-    }
-    for (const ct of candidateTags) {
-      const c = candidateMap.get(ct.candidate_id);
-      if (!c) continue;
-      const list = tagToCandidates.get(ct.tag_id);
-      if (!list.some((x) => x.id === c.id)) list.push(c);
-    }
+
     const payload = entries.map((tag) => {
       const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
+      delete plain.embedding;
       plain.candidates = tagToCandidates.get(tag.id) || [];
       return plain;
     });
-    res.json(payload);
+
+    const [totalPending, pendingUsageSum] = await Promise.all([
+      Tag.count({ where: { status: 'pending' } }),
+      Tag.sum('usageCount', { where: { status: 'pending' } }).then((v) => Number(v) || 0),
+    ]);
+
+    res.json({
+      data: payload,
+      total,
+      page,
+      limit,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+      stats: {
+        totalPending,
+        pendingUsageSum,
+      },
+    });
   } catch (err) {
     console.error('[tagController] listPending error', err);
     res.status(500).json({ message: 'Failed to load pending tags' });

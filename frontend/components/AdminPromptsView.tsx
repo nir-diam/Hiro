@@ -654,7 +654,7 @@ const AdminPromptsView: React.FC = () => {
                                                             <p className="text-[11px] text-text-muted flex items-center gap-2">
                                                                 <span className="capitalize">{entry.action}</span>
                                                                 <span>•</span>
-                                                                {new Date(entry.createdAt).toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' })}
+                                                                {new Date(entry.createdAt).toLocaleString('he-IL')}
                                                             </p>
                                                         </div>
                                                         <span className="text-[10px] text-text-muted font-mono">{entry.promptId}</span>
@@ -695,20 +695,20 @@ const AdminPromptsView: React.FC = () => {
 
 const HistoryModal: React.FC<{ entry: PromptHistoryEntry; onClose: () => void }> = ({ entry, onClose }) => (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
-        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl border border-border-default overflow-hidden flex flex-col animate-fade-in">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] border border-border-default overflow-hidden flex flex-col animate-fade-in">
             <div className="flex justify-between items-center px-5 py-4 border-b border-border-default">
                 <div>
                     <p className="text-lg font-bold text-text-default">{entry.name}</p>
                     <p className="text-xs text-text-muted flex items-center gap-2">
                         <span className="capitalize bg-bg-subtle px-1.5 rounded">{entry.action}</span>
-                        <span>{new Date(entry.createdAt).toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' })}</span>
+                        <span>{new Date(entry.createdAt).toLocaleString('he-IL')}</span>
                     </p>
                 </div>
                 <button onClick={onClose} className="p-2 text-text-muted hover:text-text-default">
                     סגור
                 </button>
             </div>
-                <div className="p-5 space-y-4 overflow-y-auto">
+            <div className="p-5 space-y-4 overflow-y-auto">
                 <div>
                     <p className="text-xs text-text-muted uppercase mb-1">תיאור</p>
                     <p className="text-sm text-text-default whitespace-pre-line">{entry.description || 'ללא תיאור'}</p>

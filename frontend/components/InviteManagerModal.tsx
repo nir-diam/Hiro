@@ -8,6 +8,7 @@ interface InviteManagerModalProps {
   onClose: () => void;
   onInvite: (data: any) => void;
   jobTitle: string;
+  contacts?: Array<{ id: string | number; name: string; email?: string; role?: string }>;
 }
 
 const allStatuses = [
@@ -16,16 +17,14 @@ const allStatuses = [
     'נדחה', 'הסיר מועמדות'
 ];
 
-const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose, onInvite, jobTitle }) => {
+const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose, onInvite, jobTitle, contacts = [] }) => {
     const { t } = useLanguage();
-    const [email, setEmail] = useState('');
-    const [name, setName] = useState('');
+    const [selectedContactId, setSelectedContactId] = useState<string>('');
     const [selectedStatuses, setSelectedStatuses] = useState<string[]>(allStatuses);
 
     useEffect(() => {
         if (isOpen) {
-            setEmail('');
-            setName('');
+            setSelectedContactId('');
             setSelectedStatuses(allStatuses); // Default: all selected
         }
     }, [isOpen]);
@@ -50,7 +49,10 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        onInvite({ name, email, allowedStatuses: selectedStatuses });
+        const contact = contacts.find(c => String(c.id) === selectedContactId);
+        if (contact) {
+            onInvite({ name: contact.name, email: contact.email || '', allowedStatuses: selectedStatuses, contactId: contact.id });
+        }
         onClose();
     };
 
@@ -69,29 +71,21 @@ const InviteManagerModal: React.FC<InviteManagerModalProps> = ({ isOpen, onClose
 
                 <form onSubmit={handleSubmit} className="flex flex-col flex-1 overflow-hidden">
                     <main className="p-6 overflow-y-auto space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('invite.manager_name')}</label>
-                                <input 
-                                    type="text" 
-                                    required 
-                                    value={name} 
-                                    onChange={e => setName(e.target.value)} 
-                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500" 
-                                    placeholder="ישראל ישראלי"
-                                />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('invite.email')}</label>
-                                <input 
-                                    type="email" 
-                                    required 
-                                    value={email} 
-                                    onChange={e => setEmail(e.target.value)} 
-                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500" 
-                                    placeholder="manager@company.com"
-                                />
-                            </div>
+                        <div>
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">בחר מנהל מרשימת אנשי הקשר</label>
+                            <select 
+                                required 
+                                value={selectedContactId} 
+                                onChange={e => setSelectedContactId(e.target.value)} 
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500" 
+                            >
+                                <option value="" disabled>בחר איש קשר...</option>
+                                {contacts.map((contact) => (
+                                    <option key={contact.id} value={contact.id}>
+                                        {contact.name}{contact.email ? ` (${contact.email})` : contact.role ? ` (${contact.role})` : ''}
+                                    </option>
+                                ))}
+                            </select>
                         </div>
 
                         <div className="bg-primary-50/50 p-4 rounded-xl border border-primary-100">
