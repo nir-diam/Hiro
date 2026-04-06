@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { EnvelopeIcon, LockClosedIcon, HiroLogotype, UserIcon, CheckCircleIcon } from './Icons';
 
 // Google Icon SVG Component (Reused)
@@ -15,6 +16,7 @@ const GoogleIcon: React.FC = () => (
 
 const CandidateSignup: React.FC = () => {
     const navigate = useNavigate();
+    const { refreshUser } = useAuth();
     const [fullName, setFullName] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
@@ -39,7 +41,11 @@ const CandidateSignup: React.FC = () => {
             const data = await res.json();
             if (!data.token) throw new Error('Missing token from server');
             localStorage.setItem('token', data.token);
-            // After successful signup, navigate to the Profile Wizard (Resume Upload)
+            if (data.user) {
+                localStorage.setItem('herouser', JSON.stringify(data.user));
+                localStorage.setItem('user', JSON.stringify(data.user));
+            }
+            await refreshUser();
             navigate('/candidate-portal/register');
         } catch (err: any) {
             setError(err.message || 'Signup failed');

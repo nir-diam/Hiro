@@ -1,3 +1,4 @@
+const { Op } = require('sequelize');
 const Client = require('../models/Client');
 
 const coerceString = (v) => {
@@ -42,7 +43,14 @@ const buildClientUpdatePayload = (client, payload = {}) => {
   return out;
 };
 
-const list = async () => Client.findAll();
+const list = async (options = {}) => {
+  const activeOnly = Boolean(options.activeOnly);
+  const q = { order: [['name', 'ASC']] };
+  if (activeOnly) {
+    q.where = { isActive: true };
+  }
+  return Client.findAll(q);
+};
 
 const getById = async (id) => {
   const client = await Client.findByPk(id);
@@ -72,5 +80,23 @@ const remove = async (id) => {
   await client.destroy();
 };
 
-module.exports = { list, getById, create, update, remove };
+/** Map Job.client (free-text company label) to Client.id for templates / tenancy. */
+const findIdByJobClientLabel = async (label) => {
+  const t = String(label || '').trim();
+  if (!t) return null;
+  const row = await Client.findOne({
+    where: {
+      [Op.or]: [
+        { name: t },
+        { displayName: t },
+        { name: { [Op.iLike]: t } },
+        { displayName: { [Op.iLike]: t } },
+      ],
+    },
+    attributes: ['id'],
+  });
+  return row ? row.id : null;
+};
+
+module.exports = { list, getById, create, update, remove, findIdByJobClientLabel };
 

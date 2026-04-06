@@ -339,7 +339,12 @@ interface CandidateProfileProps {
     candidateData: any;
     onMatchJobsClick: () => void;
     onScreenCandidateClick: () => void;
-    onOpenMessageModal: (config: { mode: MessageMode, candidateName: string, candidatePhone: string }) => void;
+    onOpenMessageModal: (config: {
+        mode: MessageMode;
+        candidateName: string;
+        candidatePhone: string;
+        candidateEmail?: string | null;
+    }) => void;
     onTagsChange: (tags: string[]) => void;
     onFormChange: (data: any) => void;
     isFavorite: boolean;
@@ -1028,6 +1033,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         mode,
         candidateName: candidateData.fullName,
         candidatePhone: candidateData.phone,
+        candidateEmail: candidateData.email || candidateData.contactEmail || undefined,
     });
   };
 

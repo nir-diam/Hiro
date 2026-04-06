@@ -1,13 +1,12 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { 
-    UserIcon, BriefcaseIcon, LinkIcon, UserGroupIcon, ArrowLeftIcon, 
-    LockClosedIcon, ShieldCheckIcon, PencilIcon, EnvelopeIcon, CheckCircleIcon,
-    BanknotesIcon // Added icon
+import {
+    UserIcon, BriefcaseIcon, LinkIcon, UserGroupIcon, ArrowLeftIcon,
+    LockClosedIcon, ShieldCheckIcon, PencilIcon, CheckCircleIcon,
 } from './Icons';
-import { coordinatorsData } from './CoordinatorsSettingsView';
 import { useLanguage } from '../context/LanguageContext';
+import { fetchStaffUser, updateStaffUser, type StaffUserDto } from '../services/usersApi';
 
 // --- SHARED FORM COMPONENTS ---
 
@@ -22,20 +21,6 @@ const FormInput: React.FC<{ label: string; name: string; value: string; onChange
             disabled={disabled}
             className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500 focus:border-primary-500 disabled:opacity-50 disabled:cursor-not-allowed" 
         />
-    </div>
-);
-
-const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode }> = ({ label, name, value, onChange, children }) => (
-    <div>
-        <label className="block text-sm font-semibold text-text-muted mb-1.5">{label}</label>
-        <select 
-            name={name} 
-            value={value} 
-            onChange={onChange}
-            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-primary-500 focus:border-primary-500"
-        >
-            {children}
-        </select>
     </div>
 );
 
@@ -54,114 +39,78 @@ const ToggleSwitch: React.FC<{ label: string; checked: boolean; onChange: (check
 
 // --- TABS COMPONENTS ---
 
-const DetailsTab: React.FC<{ coordinator: any; formData: any; setFormData: any; }> = ({ coordinator, formData, setFormData }) => {
-     const { t } = useLanguage();
-     
-     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
+const DetailsTab: React.FC<{
+    formData: Record<string, unknown>;
+    setFormData: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
+    onSave: () => Promise<void>;
+    saving: boolean;
+    saveMessage: string | null;
+}> = ({ formData, setFormData, onSave, saving, saveMessage }) => {
+    const { t } = useLanguage();
+
+    const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value, type } = e.target;
-        // @ts-ignore
-        const checked = type === 'checkbox' ? e.target.checked : undefined;
-        setFormData((prev: any) => ({ ...prev, [name]: checked !== undefined ? checked : value }));
-     };
+        const checked = type === 'checkbox' ? (e.target as HTMLInputElement).checked : undefined;
+        setFormData((prev) => ({ ...prev, [name]: checked !== undefined ? checked : value }));
+    };
 
-     return (
-         <div className="space-y-6 animate-fade-in">
-             <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
-                 <div className="flex items-center gap-2 mb-4">
-                     <UserIcon className="w-5 h-5 text-primary-500"/>
-                     <h3 className="text-lg font-bold text-text-default">{t('coordinator_profile.tab_details')}</h3>
-                 </div>
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                     <FormInput label={t('coordinators.col_username')} name="username" value={formData.username || ''} onChange={handleChange} />
-                     <FormInput label={t('coordinators.col_email')} name="email" value={formData.email || ''} onChange={handleChange} />
-                     <FormInput label={t('coordinators.col_phone')} name="phone" value={formData.phone || ''} onChange={handleChange} />
-                     <FormInput label={t('coordinators.col_extension')} name="extension" value={formData.extension || ''} onChange={handleChange} />
-                     <FormInput label={t('coordinators.col_sender')} name="senderName" value={formData.senderName || ''} onChange={handleChange} />
-                     
-                     <div className="md:col-span-2 border-t border-border-default pt-4 mt-2">
-                        <h4 className="text-sm font-bold text-text-muted mb-3">הגדרות העסקה</h4>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                             <FormSelect label="סוג התקשרות" name="roleType" value={formData.roleType || 'employee'} onChange={handleChange}>
-                                 <option value="employee">שכירה (Employee)</option>
-                                 <option value="freelance">פרילנס (Freelance)</option>
-                                 <option value="owner">בעלים (Owner)</option>
-                             </FormSelect>
-                             
-                             {formData.roleType === 'freelance' && (
-                                <div className="space-y-3">
-                                    {/* VAT Status */}
-                                    <div className="bg-bg-subtle p-3 rounded-lg border border-border-default mt-1">
-                                        <label className="flex items-start gap-3 cursor-pointer">
-                                            <input 
-                                                type="checkbox" 
-                                                name="vatStatus"
-                                                checked={formData.vatStatus === 'liable'} 
-                                                onChange={(e) => setFormData((prev: any) => ({ ...prev, vatStatus: e.target.checked ? 'liable' : 'exempt' }))}
-                                                className="mt-1 w-4 h-4 text-primary-600 rounded border-gray-300 focus:ring-primary-500" 
-                                            />
-                                            <div>
-                                                <span className="text-sm font-bold text-text-default block">עוסק מורשה (דורש תוספת מע"מ)</span>
-                                                <span className="text-xs text-text-muted">סמן רק אם הרכזת חשבונית מס וזכאית לתוספת מע"מ על התשלום.</span>
-                                            </div>
-                                        </label>
-                                    </div>
-
-                                    {/* Default Commission Settings */}
-                                    <div className="bg-bg-subtle p-3 rounded-lg border border-border-default">
-                                        <div className="flex items-center gap-2 mb-2 text-primary-700">
-                                            <BanknotesIcon className="w-4 h-4"/>
-                                            <span className="text-sm font-bold">הגדרת עמלת בסיס (דיפולט)</span>
-                                        </div>
-                                        <div className="grid grid-cols-2 gap-2">
-                                            <div>
-                                                <select 
-                                                    name="defaultCommissionType" 
-                                                    value={formData.defaultCommissionType || 'percent'} 
-                                                    onChange={handleChange}
-                                                    className="w-full bg-white border border-border-default rounded-md p-2 text-xs focus:ring-primary-500 font-medium"
-                                                >
-                                                    <option value="percent">אחוז מהשכר (%)</option>
-                                                    <option value="fixed">סכום קבוע (₪)</option>
-                                                </select>
-                                            </div>
-                                            <div className="relative">
-                                                <input 
-                                                    type="number" 
-                                                    name="defaultCommissionValue"
-                                                    value={formData.defaultCommissionValue || ''}
-                                                    onChange={handleChange}
-                                                    placeholder={formData.defaultCommissionType === 'fixed' ? '2000' : '30'}
-                                                    className="w-full bg-white border border-border-default rounded-md p-2 pl-6 text-xs font-bold focus:ring-primary-500"
-                                                />
-                                                <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-text-muted font-bold">
-                                                    {formData.defaultCommissionType === 'fixed' ? '₪' : '%'}
-                                                </span>
-                                            </div>
-                                        </div>
-                                        <p className="text-[10px] text-text-muted mt-1.5 leading-tight">
-                                            ערך זה יוזן אוטומטית בעת יצירת השמה חדשה עבור הרכזת, אך ניתן לשינוי פרטני בכל עסקה.
-                                        </p>
-                                    </div>
-                                </div>
-                             )}
-                        </div>
-                     </div>
-
-                     <div className="md:col-span-2 pt-2 border-t border-border-default mt-2">
-                        <ToggleSwitch 
-                            label={t('coordinators.col_active')} 
-                            checked={formData.isActive || false} 
-                            onChange={(checked) => setFormData((prev: any) => ({ ...prev, isActive: checked }))} 
+    return (
+        <div className="space-y-6 animate-fade-in">
+            <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
+                <div className="flex items-center gap-2 mb-4">
+                    <UserIcon className="w-5 h-5 text-primary-500" />
+                    <h3 className="text-lg font-bold text-text-default">{t('coordinator_profile.tab_details')}</h3>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <FormInput
+                        label={t('coordinators.col_username')}
+                        name="name"
+                        value={String(formData.name ?? '')}
+                        onChange={handleChange}
+                    />
+                    <FormInput
+                        label={t('coordinators.col_email')}
+                        name="email"
+                        type="email"
+                        value={String(formData.email ?? '')}
+                        onChange={handleChange}
+                    />
+                    <FormInput
+                        label={t('coordinators.col_phone')}
+                        name="phone"
+                        value={String(formData.phone ?? '')}
+                        onChange={handleChange}
+                    />
+                    <FormInput
+                        label={t('coordinators.col_extension')}
+                        name="extension"
+                        value={String(formData.extension ?? '')}
+                        onChange={handleChange}
+                    />
+                    <div className="md:col-span-2 pt-2 border-t border-border-default mt-2">
+                        <ToggleSwitch
+                            label={t('coordinators.col_active')}
+                            checked={!!formData.isActive}
+                            onChange={(checked) => setFormData((prev) => ({ ...prev, isActive: checked }))}
                         />
-                     </div>
-                 </div>
-             </div>
-             
-             <div className="flex justify-end">
-                  <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 shadow-sm transition-all">{t('client_form.save')}</button>
-             </div>
-         </div>
-     );
+                    </div>
+                </div>
+            </div>
+            {saveMessage && (
+                <p className={`text-sm ${saveMessage.includes('נכשל') ? 'text-red-600' : 'text-green-600'}`}>{saveMessage}</p>
+            )}
+            <div className="flex justify-end">
+                <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void onSave()}
+                    className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-60"
+                >
+                    {saving ? 'שומר...' : t('client_form.save')}
+                </button>
+            </div>
+        </div>
+    );
 };
 
 const UsageTab: React.FC = () => {
@@ -263,50 +212,111 @@ const SignatureTab: React.FC = () => {
     );
 };
 
-const PermissionsTab: React.FC = () => {
-    const { t } = useLanguage();
-    const [role, setRole] = useState('recruiter');
-    const [candidateScope, setCandidateScope] = useState('all');
-    const [jobScope, setJobScope] = useState('department');
+type PermFlags = {
+    canDeleteCandidates: boolean;
+    canEditJobs: boolean;
+    canManageClients: boolean;
+    canViewReports: boolean;
+    canManageTags: boolean;
+};
 
-    // Granular Permissions
-    const [permissions, setPermissions] = useState({
+const PermissionsTab: React.FC<{
+    userId: string;
+    user: StaffUserDto | null;
+    onUserUpdated: (u: StaffUserDto) => void;
+}> = ({ userId, user, onUserUpdated }) => {
+    const { t } = useLanguage();
+    const [role, setRole] = useState<'manager' | 'recruiter'>('recruiter');
+    const [candidateScope, setCandidateScope] = useState('own');
+    const [jobScope, setJobScope] = useState('own');
+    const [permissions, setPermissions] = useState<PermFlags>({
         canDeleteCandidates: false,
         canEditJobs: true,
         canManageClients: false,
         canViewReports: false,
-        canManageTags: true
+        canManageTags: true,
     });
+    const [saving, setSaving] = useState(false);
+    const [msg, setMsg] = useState<string | null>(null);
 
-    const togglePermission = (key: keyof typeof permissions) => {
-        setPermissions(prev => ({ ...prev, [key]: !prev[key] }));
+    useEffect(() => {
+        if (!user) return;
+        setRole(user.role === 'manager' ? 'manager' : 'recruiter');
+        const ds = user.dataScope || {};
+        setCandidateScope(typeof ds.candidates === 'string' ? ds.candidates : 'own');
+        setJobScope(typeof ds.jobs === 'string' ? ds.jobs : 'own');
+        const p = user.permissions || {};
+        setPermissions({
+            canDeleteCandidates: !!p.canDeleteCandidates,
+            canEditJobs: p.canEditJobs !== false,
+            canManageClients: !!p.canManageClients,
+            canViewReports: !!p.canViewReports,
+            canManageTags: p.canManageTags !== false,
+        });
+    }, [user]);
+
+    const togglePermission = (key: keyof PermFlags) => {
+        setPermissions((prev) => ({ ...prev, [key]: !prev[key] }));
     };
+
+    const save = async () => {
+        setMsg(null);
+        setSaving(true);
+        try {
+            const updated = await updateStaffUser(userId, {
+                role,
+                dataScope: { candidates: candidateScope, jobs: jobScope },
+                permissions: { ...permissions },
+            });
+            onUserUpdated(updated);
+            setMsg('נשמר בהצלחה');
+        } catch (e: any) {
+            setMsg(e?.message || 'שמירה נכשלה');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (!user) return null;
 
     return (
         <div className="space-y-6 animate-fade-in">
-             <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
+            <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
                 <div className="flex items-center gap-2 mb-4">
-                     <ShieldCheckIcon className="w-5 h-5 text-primary-500"/>
-                     <h3 className="text-lg font-bold text-text-default">פרופיל הרשאה (Role)</h3>
-                 </div>
-                 
-                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-                     <label className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${role === 'admin' ? 'border-primary-500 bg-primary-50' : 'border-border-default hover:bg-bg-subtle'}`}>
-                         <input type="radio" name="role" value="admin" checked={role === 'admin'} onChange={(e) => setRole(e.target.value)} className="sr-only" />
-                         <span className="block font-bold text-text-default mb-1">{t('coordinator_profile.role_admin')}</span>
-                         <span className="text-xs text-text-muted">גישה מלאה לכלל ההגדרות, המשתמשים והנתונים במערכת.</span>
-                     </label>
-                     <label className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${role === 'manager' ? 'border-primary-500 bg-primary-50' : 'border-border-default hover:bg-bg-subtle'}`}>
-                         <input type="radio" name="role" value="manager" checked={role === 'manager'} onChange={(e) => setRole(e.target.value)} className="sr-only" />
-                         <span className="block font-bold text-text-default mb-1">{t('coordinator_profile.role_manager')}</span>
-                         <span className="text-xs text-text-muted">ניהול צוות, צפייה בדוחות מתקדמים וניהול משרות.</span>
-                     </label>
-                     <label className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${role === 'recruiter' ? 'border-primary-500 bg-primary-50' : 'border-border-default hover:bg-bg-subtle'}`}>
-                         <input type="radio" name="role" value="recruiter" checked={role === 'recruiter'} onChange={(e) => setRole(e.target.value)} className="sr-only" />
-                         <span className="block font-bold text-text-default mb-1">{t('coordinator_profile.role_recruiter')}</span>
-                         <span className="text-xs text-text-muted">טיפול במועמדים, משרות ולקוחות שוטף.</span>
-                     </label>
-                 </div>
+                    <ShieldCheckIcon className="w-5 h-5 text-primary-500" />
+                    <h3 className="text-lg font-bold text-text-default">פרופיל הרשאה (Role)</h3>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                    <label
+                        className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${role === 'manager' ? 'border-primary-500 bg-primary-50' : 'border-border-default hover:bg-bg-subtle'}`}
+                    >
+                        <input
+                            type="radio"
+                            name="permRole"
+                            value="manager"
+                            checked={role === 'manager'}
+                            onChange={() => setRole('manager')}
+                            className="sr-only"
+                        />
+                        <span className="block font-bold text-text-default mb-1">{t('coordinator_profile.role_manager')}</span>
+                        <span className="text-xs text-text-muted">ניהול צוות, צפייה בדוחות מתקדמים וניהול משרות.</span>
+                    </label>
+                    <label
+                        className={`cursor-pointer p-4 rounded-xl border-2 transition-all ${role === 'recruiter' ? 'border-primary-500 bg-primary-50' : 'border-border-default hover:bg-bg-subtle'}`}
+                    >
+                        <input
+                            type="radio"
+                            name="permRole"
+                            value="recruiter"
+                            checked={role === 'recruiter'}
+                            onChange={() => setRole('recruiter')}
+                            className="sr-only"
+                        />
+                        <span className="block font-bold text-text-default mb-1">{t('coordinator_profile.role_recruiter')}</span>
+                        <span className="text-xs text-text-muted">טיפול במועמדים, משרות ולקוחות שוטף.</span>
+                    </label>
+                </div>
             </div>
 
             <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
@@ -316,7 +326,11 @@ const PermissionsTab: React.FC = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
                     <div>
                         <label className="block text-sm font-semibold text-text-default mb-2">{t('coordinator_profile.scope_candidates')}</label>
-                        <select value={candidateScope} onChange={(e) => setCandidateScope(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm">
+                        <select
+                            value={candidateScope}
+                            onChange={(e) => setCandidateScope(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                        >
                             <option value="all">{t('coordinator_profile.scope_all')}</option>
                             <option value="department">{t('coordinator_profile.scope_department')}</option>
                             <option value="own">{t('coordinator_profile.scope_own')}</option>
@@ -324,37 +338,68 @@ const PermissionsTab: React.FC = () => {
                     </div>
                     <div>
                         <label className="block text-sm font-semibold text-text-default mb-2">{t('coordinator_profile.scope_jobs')}</label>
-                        <select value={jobScope} onChange={(e) => setJobScope(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm">
+                        <select
+                            value={jobScope}
+                            onChange={(e) => setJobScope(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm"
+                        >
                             <option value="all">{t('coordinator_profile.scope_jobs_all')}</option>
                             <option value="department">{t('coordinator_profile.scope_jobs_department')}</option>
                             <option value="own">{t('coordinator_profile.scope_jobs_own')}</option>
                         </select>
                     </div>
                 </div>
-                
-                 {/* Specific Toggles */}
-                 <div className="mt-6 space-y-3 pt-6 border-t border-border-default">
+
+                <div className="mt-6 space-y-3 pt-6 border-t border-border-default">
                     <h4 className="text-sm font-bold text-text-default mb-2">הגדרות תצוגה מתקדמות</h4>
                     <ToggleSwitch label={t('coordinator_profile.show_own_jobs_only')} checked={true} onChange={() => {}} />
                     <ToggleSwitch label={t('coordinator_profile.show_other_messages')} checked={false} onChange={() => {}} />
                     <ToggleSwitch label={t('coordinator_profile.show_external_docs')} checked={true} onChange={() => {}} />
-                 </div>
+                </div>
             </div>
 
             <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
                 <h3 className="text-lg font-bold text-text-default mb-4">{t('coordinator_profile.permissions_actions')}</h3>
                 <div className="space-y-3">
-                    <ToggleSwitch label="מחיקת מועמדים (לצמיתות)" checked={permissions.canDeleteCandidates} onChange={() => togglePermission('canDeleteCandidates')} />
-                    <ToggleSwitch label="עריכת פרטי משרה (כולל סגירה)" checked={permissions.canEditJobs} onChange={() => togglePermission('canEditJobs')} />
-                    <ToggleSwitch label="ניהול ועיבוד נתוני לקוחות" checked={permissions.canManageClients} onChange={() => togglePermission('canManageClients')} />
-                    <ToggleSwitch label="צפייה בדוחות ניהוליים" checked={permissions.canViewReports} onChange={() => togglePermission('canViewReports')} />
-                    <ToggleSwitch label="ניהול תגיות מערכת" checked={permissions.canManageTags} onChange={() => togglePermission('canManageTags')} />
+                    <ToggleSwitch
+                        label="מחיקת מועמדים (לצמיתות)"
+                        checked={permissions.canDeleteCandidates}
+                        onChange={() => togglePermission('canDeleteCandidates')}
+                    />
+                    <ToggleSwitch
+                        label="עריכת פרטי משרה (כולל סגירה)"
+                        checked={permissions.canEditJobs}
+                        onChange={() => togglePermission('canEditJobs')}
+                    />
+                    <ToggleSwitch
+                        label="ניהול ועיבוד נתוני לקוחות"
+                        checked={permissions.canManageClients}
+                        onChange={() => togglePermission('canManageClients')}
+                    />
+                    <ToggleSwitch
+                        label="צפייה בדוחות ניהוליים"
+                        checked={permissions.canViewReports}
+                        onChange={() => togglePermission('canViewReports')}
+                    />
+                    <ToggleSwitch
+                        label="ניהול תגיות מערכת"
+                        checked={permissions.canManageTags}
+                        onChange={() => togglePermission('canManageTags')}
+                    />
                 </div>
             </div>
 
+            {msg && <p className={`text-sm ${msg.includes('נכשל') ? 'text-red-600' : 'text-green-600'}`}>{msg}</p>}
             <div className="flex justify-end">
-                  <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 shadow-sm transition-all">{t('client_form.save')}</button>
-             </div>
+                <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => void save()}
+                    className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 shadow-sm transition-all disabled:opacity-60"
+                >
+                    {saving ? 'שומר...' : t('client_form.save')}
+                </button>
+            </div>
         </div>
     );
 };
@@ -363,33 +408,89 @@ const CoordinatorProfileView: React.FC = () => {
     const { t } = useLanguage();
     const { coordinatorId } = useParams<{ coordinatorId: string }>();
     const navigate = useNavigate();
-    
-    // Find coordinator (Mock)
-    const coordinator = coordinatorsData.find(c => c.id === Number(coordinatorId));
-    
+
+    const [staffUser, setStaffUser] = useState<StaffUserDto | null>(null);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState('details');
-    const [formData, setFormData] = useState(coordinator || {});
+    const [formData, setFormData] = useState<Record<string, unknown>>({});
+    const [detailsSaving, setDetailsSaving] = useState(false);
+    const [detailsMsg, setDetailsMsg] = useState<string | null>(null);
+
+    const loadUser = useCallback(async () => {
+        if (!coordinatorId) return;
+        setLoading(true);
+        setLoadError(null);
+        try {
+            const u = await fetchStaffUser(coordinatorId);
+            setStaffUser(u);
+            setFormData({
+                name: u.name || '',
+                email: u.email,
+                phone: u.phone || '',
+                extension: u.extension || '',
+                isActive: u.isActive,
+            });
+        } catch (e: any) {
+            setLoadError(e?.message || 'טעינה נכשלה');
+            setStaffUser(null);
+        } finally {
+            setLoading(false);
+        }
+    }, [coordinatorId]);
 
     useEffect(() => {
-        if (coordinator) {
-            setFormData(coordinator);
-        }
-    }, [coordinator]);
+        void loadUser();
+    }, [loadUser]);
 
-    if (!coordinator) {
+    const saveDetails = async () => {
+        if (!coordinatorId) return;
+        setDetailsMsg(null);
+        setDetailsSaving(true);
+        try {
+            const updated = await updateStaffUser(coordinatorId, {
+                name: String(formData.name ?? ''),
+                email: String(formData.email ?? ''),
+                phone: String(formData.phone ?? ''),
+                extension: String(formData.extension ?? ''),
+                isActive: !!formData.isActive,
+            });
+            setStaffUser(updated);
+            setDetailsMsg('נשמר בהצלחה');
+        } catch (e: any) {
+            setDetailsMsg(e?.message || 'שמירה נכשלה');
+        } finally {
+            setDetailsSaving(false);
+        }
+    };
+
+    if (loading) {
         return (
-            <div className="flex flex-col items-center justify-center h-full p-6 text-center text-text-muted">
-                <p className="text-lg font-semibold">רכז לא נמצא</p>
-                <button onClick={() => navigate('/settings/coordinators')} className="mt-4 text-primary-600 hover:underline">חזרה לרשימה</button>
+            <div className="flex flex-col items-center justify-center h-full p-6 text-text-muted">
+                <p>טוען...</p>
             </div>
         );
     }
 
+    if (loadError || !staffUser) {
+        return (
+            <div className="flex flex-col items-center justify-center h-full p-6 text-center text-text-muted">
+                <p className="text-lg font-semibold">{loadError || 'משתמש לא נמצא'}</p>
+                <button type="button" onClick={() => navigate('/settings/coordinators')} className="mt-4 text-primary-600 hover:underline">
+                    חזרה לרשימה
+                </button>
+            </div>
+        );
+    }
+
+    const displayName = (staffUser.name || staffUser.email || '—').trim();
+    const initial = displayName.charAt(0) || '?';
+
     const tabs = [
-        { id: 'details', label: t('coordinator_profile.tab_details'), icon: <UserIcon className="w-5 h-5"/> },
-        { id: 'usage', label: t('coordinator_profile.tab_usage'), icon: <BriefcaseIcon className="w-5 h-5"/> },
-        { id: 'signature', label: t('coordinator_profile.tab_signature'), icon: <LinkIcon className="w-5 h-5"/> },
-        { id: 'permissions', label: t('coordinator_profile.tab_permissions'), icon: <UserGroupIcon className="w-5 h-5"/> },
+        { id: 'details', label: t('coordinator_profile.tab_details'), icon: <UserIcon className="w-5 h-5" /> },
+        { id: 'usage', label: t('coordinator_profile.tab_usage'), icon: <BriefcaseIcon className="w-5 h-5" /> },
+        { id: 'signature', label: t('coordinator_profile.tab_signature'), icon: <LinkIcon className="w-5 h-5" /> },
+        { id: 'permissions', label: t('coordinator_profile.tab_permissions'), icon: <UserGroupIcon className="w-5 h-5" /> },
     ];
 
     return (
@@ -397,22 +498,29 @@ const CoordinatorProfileView: React.FC = () => {
             <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } } .animate-fade-in { animation: fadeIn 0.3s ease-out; }`}</style>
             <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 <div className="flex items-center gap-4">
-                     <div className="w-14 h-14 bg-gradient-to-br from-primary-100 to-primary-200 rounded-full flex items-center justify-center text-primary-700 font-bold text-2xl border-4 border-white shadow-sm">
-                         {coordinator.username.charAt(0)}
-                     </div>
-                     <div>
+                    <div className="w-14 h-14 bg-gradient-to-br from-primary-100 to-primary-200 rounded-full flex items-center justify-center text-primary-700 font-bold text-2xl border-4 border-white shadow-sm">
+                        {initial}
+                    </div>
+                    <div>
                         <h1 className="text-2xl font-bold text-text-default flex items-center gap-2">
-                            {coordinator.username}
-                            {coordinator.isActive && (
+                            {displayName}
+                            {staffUser.isActive && (
                                 <span title="פעיל">
                                     <CheckCircleIcon className="w-5 h-5 text-green-500" />
                                 </span>
                             )}
                         </h1>
-                        <p className="text-sm text-text-muted">{coordinator.email}</p>
-                     </div>
+                        <p className="text-sm text-text-muted">{staffUser.email}</p>
+                        <p className="text-xs text-text-subtle mt-1">
+                            {staffUser.role === 'manager' ? 'מנהל/ת' : 'מגייס/ת'}
+                        </p>
+                    </div>
                 </div>
-                 <button onClick={() => navigate('/settings/coordinators')} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition flex items-center gap-2 self-start sm:self-center">
+                <button
+                    type="button"
+                    onClick={() => navigate('/settings/coordinators')}
+                    className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover transition flex items-center gap-2 self-start sm:self-center"
+                >
                     <ArrowLeftIcon className="w-5 h-5" />
                     <span>חזרה לרשימה</span>
                 </button>
@@ -420,14 +528,15 @@ const CoordinatorProfileView: React.FC = () => {
 
             <div className="border-b border-border-default overflow-x-auto">
                 <nav className="flex items-center -mb-px gap-6 min-w-max">
-                    {tabs.map(tab => (
-                         <button 
+                    {tabs.map((tab) => (
+                        <button
                             key={tab.id}
+                            type="button"
                             onClick={() => setActiveTab(tab.id)}
                             className={`flex items-center gap-2 pb-3 text-sm font-bold transition-all border-b-2 ${
-                                activeTab === tab.id 
-                                ? 'border-primary-500 text-primary-600' 
-                                : 'border-transparent text-text-muted hover:text-text-default hover:border-border-default'
+                                activeTab === tab.id
+                                    ? 'border-primary-500 text-primary-600'
+                                    : 'border-transparent text-text-muted hover:text-text-default hover:border-border-default'
                             }`}
                         >
                             {tab.icon}
@@ -438,10 +547,20 @@ const CoordinatorProfileView: React.FC = () => {
             </div>
 
             <main className="flex-1 overflow-y-auto">
-                {activeTab === 'details' && <DetailsTab coordinator={coordinator} formData={formData} setFormData={setFormData} />}
+                {activeTab === 'details' && (
+                    <DetailsTab
+                        formData={formData}
+                        setFormData={setFormData}
+                        onSave={saveDetails}
+                        saving={detailsSaving}
+                        saveMessage={detailsMsg}
+                    />
+                )}
                 {activeTab === 'usage' && <UsageTab />}
                 {activeTab === 'signature' && <SignatureTab />}
-                {activeTab === 'permissions' && <PermissionsTab />}
+                {activeTab === 'permissions' && (
+                    <PermissionsTab userId={staffUser.id} user={staffUser} onUserUpdated={setStaffUser} />
+                )}
             </main>
         </div>
     );

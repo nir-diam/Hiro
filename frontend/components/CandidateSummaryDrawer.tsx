@@ -441,6 +441,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
             mode,
             candidateName: resumeData.name || candidate.name,
             candidatePhone: displayPhone || candidate.phone,
+            candidateEmail: displayEmail || undefined,
         });
     }
   };

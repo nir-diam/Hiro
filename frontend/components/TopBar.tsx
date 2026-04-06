@@ -9,6 +9,7 @@ import {
 import { specs } from '../data/specs';
 import SpecDrawer from './SpecDrawer';
 import HelpCenterDrawer from './HelpCenterDrawer';
+import { useAuth } from '../context/AuthContext';
 
 
 const ActionButton: React.FC<{ children: React.ReactNode; tooltip: string; hasNotification?: boolean; notificationCount?: number; onClick?: () => void; 'aria-expanded'?: boolean; className?: string }> = ({ children, tooltip, hasNotification, notificationCount, onClick, className = '', ...props }) => (
@@ -73,6 +74,7 @@ interface TopBarProps {
 const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenNewTask, onToggleSidebar }) => {
     const navigate = useNavigate();
     const location = useLocation();
+    const { canPage } = useAuth();
     
     const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
     const [isSettingsMenuOpen, setIsSettingsMenuOpen] = useState(false);
@@ -125,18 +127,22 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                                 <div className="p-2">
                                     <span className="px-2 py-1 text-xs font-semibold text-text-subtle">החלפת תפקיד</span>
                                 </div>
+                                {canPage('page:admin') && (
                                 <MenuItem 
                                     icon={<WrenchScrewdriverIcon className="w-5 h-5" />}
                                     label="פאנל ניהול"
                                     to="/admin"
                                     onClick={() => setIsUserMenuOpen(false)}
                                 />
+                                )}
+                                {canPage('page:manager_portal') && (
                                 <MenuItem 
                                     icon={<BriefcaseIcon className="w-5 h-5" />}
                                     label="תצוגת מנהל מגייס"
                                     to="/portal/manager"
                                     onClick={() => setIsUserMenuOpen(false)}
                                 />
+                                )}
                                 <MenuItem 
                                     icon={<UserCircleIcon className="w-5 h-5" />}
                                     label="תצוגת מחפש עבודה"
@@ -164,6 +170,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                         <QuestionMarkCircleIcon className="w-6 h-6" />
                     </ActionButton>
                     
+                    {canPage('page:settings') && (
                     <div className="relative" ref={settingsMenuRef}>
                         <ActionButton tooltip="הגדרות" onClick={() => setIsSettingsMenuOpen(!isSettingsMenuOpen)} aria-expanded={isSettingsMenuOpen}>
                             <Cog6ToothIcon className="w-6 h-6" />
@@ -180,10 +187,12 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                             </div>
                         )}
                     </div>
+                    )}
 
                     <ActionButton tooltip="יצירת משימה חדשה" onClick={onOpenNewTask}>
                         <PaperAirplaneIcon className="w-6 h-6" />
                     </ActionButton>
+                    {canPage('page:notifications') && (
                     <ActionButton 
                         tooltip="מרכז עדכונים ומשימות" 
                         hasNotification={unreadCount > 0} 
@@ -192,6 +201,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                     >
                         <BellIcon className="w-6 h-6" />
                     </ActionButton>
+                    )}
                     <style>{`
                         @keyframes fade-in-down {
                             from { opacity: 0; transform: translateY(-10px); }

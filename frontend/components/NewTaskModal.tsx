@@ -1,12 +1,177 @@
 
-import React, { useState, useEffect, useRef, useId } from 'react';
+import React, { useState, useEffect, useRef, useId, useCallback } from 'react';
 import { XMarkIcon, CalendarDaysIcon, ClockIcon, Microsoft365Icon, OutlookTaskIcon, GoogleCalendarIcon, ClipboardDocumentCheckIcon } from './Icons';
+import type { Candidate } from './CandidatesListView';
+import { deriveLocalCandidateId } from '../utils/candidateId';
 
 interface NewTaskModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSave: (taskData: any) => void;
-  onOpenCandidateSummary: (candidateId: number) => void;
+  onOpenCandidateSummary: (candidate: Candidate | number) => void;
+  pathname: string;
+}
+
+type TaskLinkedRoute =
+  | { kind: 'none' }
+  | { kind: 'candidate'; id: string }
+  | { kind: 'job'; id: string }
+  | { kind: 'client'; id: string }
+  | { kind: 'contact'; clientId: string; contactId: string };
+
+function parseTaskLinkedRoute(pathname: string): TaskLinkedRoute {
+  const parts = pathname.split('/').filter(Boolean);
+
+  if (parts[0] === 'candidates' && parts[1] && parts[1] !== 'new') {
+    return { kind: 'candidate', id: parts[1] };
+  }
+  if (parts[0] === 'admin' && parts[1] === 'candidates' && parts[2]) {
+    return { kind: 'candidate', id: parts[2] };
+  }
+  if (parts[0] === 'jobs') {
+    if (parts[1] === 'edit' && parts[2]) return { kind: 'job', id: parts[2] };
+    if (parts[1] && (parts[2] === 'publish' || parts[2] === 'screen')) {
+      return { kind: 'job', id: parts[1] };
+    }
+  }
+  if (parts[0] === 'portal' && parts[1] === 'manager' && parts[2] === 'jobs' && parts[3]) {
+    return { kind: 'job', id: parts[3] };
+  }
+  if (parts[0] === 'clients' && parts[1] && parts[1] !== 'new') {
+    if (parts[2] === 'contacts' && parts[3]) {
+      return { kind: 'contact', clientId: parts[1], contactId: parts[3] };
+    }
+    return { kind: 'client', id: parts[1] };
+  }
+  return { kind: 'none' };
+}
+
+function candidateFromApiRow(row: Record<string, unknown>): Candidate {
+  const backendId = String(row.id ?? '');
+  const fullName = String(row.fullName ?? '');
+  return {
+    id: deriveLocalCandidateId(backendId),
+    backendId: backendId || undefined,
+    name: fullName,
+    avatar: String(row.profilePicture ?? ''),
+    title: String(row.title ?? ''),
+    status: String(row.status ?? ''),
+    lastActivity: String(row.lastActivity ?? row.lastActive ?? ''),
+    source: String(row.source ?? ''),
+    tags: [],
+    internalTags: Array.isArray(row.internalTags) ? (row.internalTags as string[]) : [],
+    matchScore: typeof row.matchScore === 'number' ? row.matchScore : 0,
+    phone: String(row.phone ?? ''),
+  };
+}
+
+function jsonHeaders(): HeadersInit {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const h: Record<string, string> = {
+    Accept: 'application/json',
+    'Cache-Control': 'no-cache',
+  };
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+}
+
+const CAL_EVENT_DURATION_MS = 60 * 60 * 1000;
+
+type CalendarFormSlice = {
+  messageText: string;
+  assignee: string;
+  category: string;
+  dueDate: string;
+  dueTime: string;
+  sla: string;
+  allocatedDays: number;
+};
+
+function parseDueAsLocalRange(dueDate: string, dueTime: string): { start: Date; end: Date } | null {
+  if (!dueDate?.trim()) return null;
+  const timePart = dueTime?.trim() && /^\d{1,2}:\d{2}/.test(dueTime) ? dueTime.trim() : '09:00';
+  const [th, tm] = timePart.split(':').map((x) => Number(x));
+  const [y, m, d] = dueDate.split('-').map((x) => Number(x));
+  if (!y || !m || !d) return null;
+  const start = new Date(y, m - 1, d, Number.isFinite(th) ? th : 0, Number.isFinite(tm) ? tm : 0, 0, 0);
+  if (Number.isNaN(start.getTime())) return null;
+  return { start, end: new Date(start.getTime() + CAL_EVENT_DURATION_MS) };
+}
+
+function buildCalendarEventMeta(form: CalendarFormSlice, isTaskMode: boolean) {
+  const subjectBase = isTaskMode ? 'משימה חדשה' : 'תזכורת';
+  const title = `${subjectBase}: ${form.category || 'כללי'}${
+    form.dueDate && form.dueTime ? ` (${form.dueDate} ${form.dueTime})` : ''
+  }`;
+
+  const lines: string[] = [];
+  if (form.messageText.trim()) lines.push(form.messageText.trim());
+  if (form.assignee.trim()) lines.push(`למען: ${form.assignee.trim()}`);
+  lines.push(`קטגוריה: ${form.category || 'כללי'}`);
+  if (isTaskMode) {
+    lines.push(`דחיפות: ${form.sla}`);
+    lines.push(`ימים מוקצים: ${form.allocatedDays}`);
+  }
+  const body = lines.join('\n\n');
+
+  const parsed = parseDueAsLocalRange(form.dueDate, form.dueTime);
+  const now = new Date();
+  const start = parsed?.start ?? now;
+  const end = parsed?.end ?? new Date(now.getTime() + CAL_EVENT_DURATION_MS);
+
+  return { title, body, start, end };
+}
+
+function formatGoogleDates(start: Date, end: Date): string {
+  const p = (d: Date) => {
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    const h = String(d.getHours()).padStart(2, '0');
+    const min = String(d.getMinutes()).padStart(2, '0');
+    const s = String(d.getSeconds()).padStart(2, '0');
+    return `${y}${m}${day}T${h}${min}${s}`;
+  };
+  return `${p(start)}/${p(end)}`;
+}
+
+/** Local datetime string for Outlook / Microsoft 365 compose (no timezone suffix). */
+function formatOutlookLocalIso(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const h = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  const s = String(d.getSeconds()).padStart(2, '0');
+  return `${y}-${m}-${day}T${h}:${min}:${s}`;
+}
+
+function openGoogleCalendarFromMeta(meta: ReturnType<typeof buildCalendarEventMeta>, guestEmail?: string) {
+  const dates = formatGoogleDates(meta.start, meta.end);
+  let url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(meta.title)}&details=${encodeURIComponent(
+    meta.body,
+  )}&dates=${dates}`;
+  const guest = guestEmail?.trim();
+  if (guest && guest.includes('@')) {
+    url += `&add=${encodeURIComponent(guest)}`;
+  }
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function openOutlookCalendarFromMeta(meta: ReturnType<typeof buildCalendarEventMeta>, workAccount: boolean) {
+  const startdt = formatOutlookLocalIso(meta.start);
+  const enddt = formatOutlookLocalIso(meta.end);
+  const base = workAccount
+    ? 'https://outlook.office.com/calendar/0/deeplink/compose'
+    : 'https://outlook.live.com/calendar/0/deeplink/compose';
+  const q = new URLSearchParams({
+    subject: meta.title,
+    body: meta.body,
+    startdt,
+    enddt,
+    allday: 'false',
+  });
+  window.open(`${base}?${q.toString()}`, '_blank', 'noopener,noreferrer');
 }
 
 type ClientContactOption = {
@@ -52,9 +217,18 @@ const SingleRangeSlider: React.FC<{
 };
 
 
-const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, onOpenCandidateSummary }) => {
+type LinkedPanel =
+    | { phase: 'none' }
+    | { phase: 'loading' }
+    | { phase: 'error'; message: string }
+    | { phase: 'ok'; rows: { label: string; node: React.ReactNode }[] };
+
+const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, onOpenCandidateSummary, pathname }) => {
     const [isTaskMode, setIsTaskMode] = useState(false);
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [linkedPanel, setLinkedPanel] = useState<LinkedPanel>({ phase: 'none' });
+    const openSummaryRef = useRef(onOpenCandidateSummary);
+    openSummaryRef.current = onOpenCandidateSummary;
     const [contactsLoading, setContactsLoading] = useState(false);
     const [clientContactOptions, setClientContactOptions] = useState<ClientContactOption[]>([]);
     const [formData, setFormData] = useState({
@@ -200,6 +374,206 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
             active = false;
         };
     }, [isOpen, apiBase]);
+
+    useEffect(() => {
+        if (!isOpen || !apiBase) return;
+
+        const route = parseTaskLinkedRoute(pathname);
+        if (route.kind === 'none') {
+            setLinkedPanel({ phase: 'none' });
+            return;
+        }
+
+        let cancelled = false;
+        setLinkedPanel({ phase: 'loading' });
+
+        const fail = (message: string) => {
+            if (!cancelled) setLinkedPanel({ phase: 'error', message });
+        };
+
+        const run = async () => {
+            try {
+                if (route.kind === 'candidate') {
+                    const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(route.id)}`, {
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: jsonHeaders(),
+                    });
+                    if (!res.ok) {
+                        const t = await res.text().catch(() => '');
+                        fail(t || `HTTP ${res.status}`);
+                        return;
+                    }
+                    const row = (await res.json()) as Record<string, unknown>;
+                    if (cancelled) return;
+                    const cand = candidateFromApiRow(row);
+                    const name = cand.name || 'מועמד';
+                    setLinkedPanel({
+                        phase: 'ok',
+                        rows: [
+                            {
+                                label: 'מועמד:',
+                                node: (
+                                    <button
+                                        type="button"
+                                        onClick={() => openSummaryRef.current(cand)}
+                                        className="text-primary-600 font-bold hover:underline text-right hover:text-primary-700 transition-colors"
+                                    >
+                                        {name}
+                                    </button>
+                                ),
+                            },
+                            ...(cand.title
+                                ? [{ label: 'כותרת:', node: <span className="text-text-default font-bold">{cand.title}</span> }]
+                                : []),
+                            ...(String(row.email || '').trim()
+                                ? [
+                                      {
+                                          label: 'אימייל:',
+                                          node: (
+                                              <span className="text-text-default font-bold">{String(row.email)}</span>
+                                          ),
+                                      },
+                                  ]
+                                : []),
+                        ],
+                    });
+                    return;
+                }
+
+                if (route.kind === 'job') {
+                    const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(route.id)}`, {
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: jsonHeaders(),
+                    });
+                    if (!res.ok) {
+                        const t = await res.text().catch(() => '');
+                        fail(t || `HTTP ${res.status}`);
+                        return;
+                    }
+                    const row = (await res.json()) as Record<string, unknown>;
+                    if (cancelled) return;
+                    const title =
+                        String(row.publicJobTitle || row.title || '').trim() || 'משרה';
+                    const client = String(row.client || '').trim();
+                    const city = String(row.city || '').trim();
+                    const status = String(row.status || '').trim();
+                    setLinkedPanel({
+                        phase: 'ok',
+                        rows: [
+                            { label: 'משרה:', node: <span className="text-text-default font-bold">{title}</span> },
+                            ...(client ? [{ label: 'לקוח:', node: <span className="text-text-default font-bold">{client}</span> }] : []),
+                            ...(city ? [{ label: 'אזור:', node: <span className="text-text-default font-bold">{city}</span> }] : []),
+                            ...(status ? [{ label: 'סטטוס:', node: <span className="text-text-default font-bold">{status}</span> }] : []),
+                        ],
+                    });
+                    return;
+                }
+
+                if (route.kind === 'client') {
+                    const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(route.id)}`, {
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: jsonHeaders(),
+                    });
+                    if (!res.ok) {
+                        const t = await res.text().catch(() => '');
+                        fail(t || `HTTP ${res.status}`);
+                        return;
+                    }
+                    const row = (await res.json()) as Record<string, unknown>;
+                    if (cancelled) return;
+                    const name =
+                        String(row.displayName || row.name || '').trim() || 'לקוח';
+                    const contactPerson = String(row.contactPerson || '').trim();
+                    const phone = String(row.phone || '').trim();
+                    setLinkedPanel({
+                        phase: 'ok',
+                        rows: [
+                            { label: 'לקוח:', node: <span className="text-text-default font-bold">{name}</span> },
+                            ...(contactPerson
+                                ? [{ label: 'איש קשר:', node: <span className="text-text-default font-bold">{contactPerson}</span> }]
+                                : []),
+                            ...(phone ? [{ label: 'טלפון:', node: <span className="text-text-default font-bold">{phone}</span> }] : []),
+                        ],
+                    });
+                    return;
+                }
+
+                if (route.kind === 'contact') {
+                    const [cRes, listRes] = await Promise.all([
+                        fetch(`${apiBase}/api/clients/${encodeURIComponent(route.clientId)}`, {
+                            credentials: 'include',
+                            cache: 'no-store',
+                            headers: jsonHeaders(),
+                        }),
+                        fetch(`${apiBase}/api/clients/${encodeURIComponent(route.clientId)}/contacts`, {
+                            credentials: 'include',
+                            cache: 'no-store',
+                            headers: jsonHeaders(),
+                        }),
+                    ]);
+                    if (!cRes.ok) {
+                        const t = await cRes.text().catch(() => '');
+                        fail(t || `HTTP ${cRes.status}`);
+                        return;
+                    }
+                    if (!listRes.ok) {
+                        const t = await listRes.text().catch(() => '');
+                        fail(t || `HTTP ${listRes.status}`);
+                        return;
+                    }
+                    const clientRow = (await cRes.json()) as Record<string, unknown>;
+                    const contacts = (await listRes.json()) as Record<string, unknown>[];
+                    if (cancelled) return;
+                    const clientName =
+                        String(clientRow.displayName || clientRow.name || '').trim() || 'לקוח';
+                    const contact = Array.isArray(contacts)
+                        ? contacts.find((x) => String(x?.id) === route.contactId)
+                        : undefined;
+                    const cName = contact ? String(contact.name || '').trim() : '';
+                    const cEmail = contact ? String(contact.email || '').trim() : '';
+                    const cRole = contact ? String(contact.role || '').trim() : '';
+                    setLinkedPanel({
+                        phase: 'ok',
+                        rows: [
+                            { label: 'לקוח:', node: <span className="text-text-default font-bold">{clientName}</span> },
+                            ...(cName
+                                ? [{ label: 'איש קשר:', node: <span className="text-text-default font-bold">{cName}</span> }]
+                                : []),
+                            ...(cRole
+                                ? [{ label: 'תפקיד:', node: <span className="text-text-default font-bold">{cRole}</span> }]
+                                : []),
+                            ...(cEmail
+                                ? [{ label: 'אימייל:', node: <span className="text-text-default font-bold">{cEmail}</span> }]
+                                : []),
+                        ],
+                    });
+                }
+            } catch (e: unknown) {
+                fail(e instanceof Error ? e.message : 'שגיאת רשת');
+            }
+        };
+
+        void run();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, apiBase, pathname]);
+
+    const openExternalCalendar = useCallback(
+        (target: 'google' | 'outlook365' | 'outlook') => {
+            const meta = buildCalendarEventMeta(formData, isTaskMode);
+            const guest = formData.assignee.trim();
+            if (target === 'google') {
+                openGoogleCalendarFromMeta(meta, guest.includes('@') ? guest : undefined);
+                return;
+            }
+            openOutlookCalendarFromMeta(meta, target === 'outlook365');
+        },
+        [formData, isTaskMode],
+    );
 
     if (!isOpen) return null;
 
@@ -404,27 +778,59 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                                             </label>
                                         </div>
                                         <div className="flex items-center gap-3 pt-2">
-                                            <button type="button" title="Microsoft 365" className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"><Microsoft365Icon className="w-6 h-6"/></button>
-                                            <button type="button" title="Outlook" className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"><OutlookTaskIcon className="w-6 h-6"/></button>
-                                            <button type="button" title="Google Calendar" className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"><GoogleCalendarIcon className="w-6 h-6"/></button>
+                                            <button
+                                                type="button"
+                                                title="Microsoft 365 — פתיחת אירוע בלוח השנה של הארגון"
+                                                aria-label="פתח בלוח שנה Microsoft 365"
+                                                onClick={() => openExternalCalendar('outlook365')}
+                                                className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"
+                                            >
+                                                <Microsoft365Icon className="w-6 h-6" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                title="Outlook — פתיחת אירוע בלוח השנה האישי (Outlook.com)"
+                                                aria-label="פתח בלוח שנה Outlook אישי"
+                                                onClick={() => openExternalCalendar('outlook')}
+                                                className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"
+                                            >
+                                                <OutlookTaskIcon className="w-6 h-6" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                title="Google Calendar — פתיחת אירוע בלוח השנה של החשבון המחובר בדפדפן"
+                                                aria-label="פתח ב-Google Calendar"
+                                                onClick={() => openExternalCalendar('google')}
+                                                className="p-2.5 rounded-xl border bg-bg-card border-border-default text-text-muted hover:border-primary-400 hover:text-primary-600 hover:shadow-sm transition-all"
+                                            >
+                                                <GoogleCalendarIcon className="w-6 h-6" />
+                                            </button>
                                         </div>
                                     </div>
                                     <div className="p-5 rounded-2xl border border-border-default/80 bg-bg-subtle/30 flex flex-col">
                                       <h3 className="text-sm font-bold text-text-default mb-3">מידע מקושר</h3>
-                                      <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 text-sm items-center flex-grow">
-                                          <span className="font-medium text-text-muted justify-self-end">מועמד:</span>
-                                          <button
-                                            type="button"
-                                            onClick={() => onOpenCandidateSummary(1)}
-                                            className="text-primary-600 font-bold hover:underline text-right hover:text-primary-700 transition-colors"
-                                          >
-                                            שפירא גדעון
-                                          </button>
-                                          <span className="font-medium text-text-muted justify-self-end">משרה:</span>
-                                          <span className="text-text-default font-bold">מחסנאי.ת בוקר למודיעין*</span>
-                                          <span className="font-medium text-text-muted justify-self-end">לקוח:</span>
-                                          <span className="text-text-default font-bold">UPS</span>
-                                      </div>
+                                      {linkedPanel.phase === 'none' && (
+                                          <p className="text-sm text-text-muted flex-grow">אין הקשר מהמסך הנוכחי (מועמד, משרה או לקוח).</p>
+                                      )}
+                                      {linkedPanel.phase === 'loading' && (
+                                          <p className="text-sm text-text-muted flex-grow">טוען נתונים...</p>
+                                      )}
+                                      {linkedPanel.phase === 'error' && (
+                                          <p className="text-sm text-red-600 flex-grow">{linkedPanel.message}</p>
+                                      )}
+                                      {linkedPanel.phase === 'ok' && linkedPanel.rows.length > 0 && (
+                                          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-3 text-sm items-center flex-grow">
+                                              {linkedPanel.rows.map((r, i) => (
+                                                  <React.Fragment key={`${r.label}-${i}`}>
+                                                      <span className="font-medium text-text-muted justify-self-end">{r.label}</span>
+                                                      <div className="text-right min-w-0">{r.node}</div>
+                                                  </React.Fragment>
+                                              ))}
+                                          </div>
+                                      )}
+                                      {linkedPanel.phase === 'ok' && linkedPanel.rows.length === 0 && (
+                                          <p className="text-sm text-text-muted flex-grow">לא נמצאו שדות להצגה.</p>
+                                      )}
                                     </div>
                                 </div>
                             </div>

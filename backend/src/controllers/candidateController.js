@@ -1,4 +1,5 @@
 const path = require('path');
+const jwt = require('jsonwebtoken');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const candidateService = require('../services/candidateService');
@@ -9,6 +10,7 @@ const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const Candidate = require('../models/Candidate');
+const User = require('../models/User');
 const { sequelize } = require('../config/db');
 
 /** Until DB migration runs (add_job_candidate_screening_rejection.sql), skip rejection columns */
@@ -38,6 +40,39 @@ const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
+const messageTemplateService = require('../services/messageTemplateService');
+
+const getBearerTokenFromRequest = (req) => {
+  const raw =
+    (typeof req.get === 'function' && req.get('Authorization')) ||
+    req.headers?.authorization ||
+    req.headers?.Authorization ||
+    '';
+  const s = String(raw).trim();
+  if (!s) return null;
+  const lower = s.toLowerCase();
+  if (lower.startsWith('bearer ')) return s.slice(7).trim();
+  return s;
+};
+
+/**
+ * Tenant UUID for client-scoped welcome templates when staff is authenticated.
+ * Returns null if no/invalid JWT, user missing, or user has no clientId — in those cases
+ * `queueCandidateWelcomeEmail` uses the admin template catalog (see messageTemplateService).
+ */
+const getStaffClientIdFromRequest = async (req) => {
+  const token = getBearerTokenFromRequest(req);
+  if (!token) return null;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'change_me');
+    const userId = decoded.sub;
+    if (!userId) return null;
+    const user = await User.findByPk(userId, { attributes: ['clientId'] });
+    return user?.clientId || null;
+  } catch (err) {
+    return null;
+  }
+};
 
 const extractTextFromImageBuffer = async (buffer) => {
   const worker = await createWorker('eng+heb');
@@ -570,6 +605,7 @@ const get = async (req, res) => {
 
 const create = async (req, res) => {
   try {
+    const sendWelcome = req.body?.sendWelcomeEmail !== false;
     const candidate = await candidateService.create(req.body);
     if (Array.isArray(req.body.tags) && req.body.tags.length) {
       await candidateTagService.syncTagsForCandidate(candidate.id, req.body.tags);
@@ -588,6 +624,10 @@ const create = async (req, res) => {
       void tryEmbedCandidate(candidate.id, embedText);
     }
     await ensureOrganizationsFromExperience(enrichedCandidate.workExperience, enrichedCandidate.id);
+    const welcomeClientId = await getStaffClientIdFromRequest(req);
+    if (sendWelcome) {
+      messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, { clientId: welcomeClientId });
+    }
     res.status(201).json(enrichedCandidate);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Create failed' });
@@ -596,6 +636,7 @@ const create = async (req, res) => {
 
 const createFromAi = async (req, res) => {
   try {
+    const sendWelcome = req.body?.sendWelcomeEmail !== false;
     const { resumeText, fileBase64, mimeType, fileName } = req.body || {};
     let text = typeof resumeText === 'string' ? resumeText : '';
     if (fileBase64 && !text) {
@@ -686,6 +727,10 @@ const createFromAi = async (req, res) => {
       await candidateTagService.syncTagsForCandidate(createdCandidate.id, aiTagsForSync);
     }
     const enrichedCandidate = await candidateService.getById(createdCandidate.id);
+    const welcomeClientId = await getStaffClientIdFromRequest(req);
+    if (sendWelcome) {
+      messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, { clientId: welcomeClientId });
+    }
     res.status(201).json({ candidate: enrichedCandidate, parsed: aiResult });
   } catch (err) {
     console.error('[createFromAi-error]', err);
@@ -724,7 +769,8 @@ const remove = async (req, res) => {
 };
 
 const createUploadUrl = async (req, res) => {
-  const { fileName, contentType, folder = 'profiles' } = req.body;
+  const { fileName, contentType, folder = 'profiles', sendWelcomeEmail } = req.body;
+  const sendWelcome = sendWelcomeEmail !== false;
 
   if (!fileName || !contentType) {
     return res.status(400).json({ message: 'fileName and contentType are required' });
@@ -742,6 +788,18 @@ const createUploadUrl = async (req, res) => {
     });
 
     const uploadUrl = await getSignedUrl(client, command, { expiresIn: 60 * 5 });
+    try {
+      if (sendWelcome) {
+        const candidateRow = await candidateService.getById(req.params.id);
+        const welcomeClientId = await getStaffClientIdFromRequest(req);
+        messageTemplateService.queueCandidateWelcomeEmail(candidateRow, {
+          onlyIfNoResume: true,
+          clientId: welcomeClientId,
+        });
+      }
+    } catch (welcomeErr) {
+      console.warn('[createUploadUrl] welcome email skipped', welcomeErr?.message || welcomeErr);
+    }
     res.json({ uploadUrl, key, publicUrl: buildPublicUrl(key) });
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to generate upload URL' });

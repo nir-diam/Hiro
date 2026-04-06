@@ -347,6 +347,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
             mode,
             candidateName: contact.name,
             candidatePhone: contact.mobilePhone || contact.phone,
+            candidateEmail: contact.email || undefined,
         });
     };
     

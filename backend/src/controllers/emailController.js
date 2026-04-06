@@ -1,9 +1,12 @@
 const { GetObjectCommand } = require('@aws-sdk/client-s3');
 const { simpleParser } = require('mailparser');
 const emailService = require('../services/emailService');
+const messageTemplateService = require('../services/messageTemplateService');
+const Client = require('../models/Client');
 const candidateService = require('../services/candidateService');
 const jobCandidateService = require('../services/jobCandidateService');
 const jobService = require('../services/jobService');
+const clientService = require('../services/clientService');
 const EmailUpload = require('../models/EmailUpload');
 const { createS3Client } = require('../services/s3Service');
 const { uploadResumeForCandidate, fetchResumeText, buildParsedUpdates } = require('./candidateController');
@@ -12,14 +15,50 @@ const promptService = require('../services/promptService');
 const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
 const NotificationMessage = require('../models/NotificationMessage');
-const { Op } = require('sequelize');
+const { Op, Sequelize } = require('sequelize');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
 
+/**
+ * SMTP profile: admin → HIRO_* / Resend; tenant «מימד אנושי» → HUMAND_*; else legacy SMTP_*.
+ * Expects `authMiddleware` on `/send` so `req.user.sub` is set (no manual Authorization parsing).
+ */
+async function resolveEmailSenderSmtpContext(req) {
+  return { userRole: null, clientName: null };
+
+  
+  const userId = req.user?.sub || req.user?.id;
+  if (!userId) return { userRole: null, clientName: null };
+  try {
+    const user = await User.findByPk(userId, {
+      attributes: ['role', 'clientId'],
+      include: [{ model: Client, as: 'client', attributes: ['name', 'displayName'], required: false }],
+    });
+    if (!user) return { userRole: null, clientName: null };
+    const c = user.client;
+    const label = c ? String(c.displayName || c.name || '').trim() : '';
+    return { userRole: user.role || null, clientName: label || null };
+  } catch {
+    return { userRole: null, clientName: null };
+  }
+}
+
+/**
+ * Job application inboxes use plus addressing: {prefix}+{postingCode}@{domain}
+ * e.g. hiro+123@…, humand+5848@…, nir+5222@… — prefix is not always "hiro".
+ */
+const postingCodeFromPlusAddressText = (text = '') => {
+  const m = String(text || '').match(/[a-zA-Z0-9][a-zA-Z0-9._-]*\+([a-zA-Z0-9_-]+)@/i);
+  return m ? m[1] : null;
+};
+
 const extractPostingCodeFromEmailAddress = (email = '') => {
-  const match = (email || '').trim().toLowerCase().match(/hiro\+([0-9a-zA-Z_-]+)@/i);
-  return match ? match[1] : null;
+  const raw = String(email || '').trim();
+  if (!raw) return null;
+  const angle = raw.match(/<([^>]+@[^>]+)>/i);
+  const addr = angle ? angle[1].trim() : raw;
+  return postingCodeFromPlusAddressText(addr);
 };
 
 const streamToBuffer = async (stream) => {
@@ -101,9 +140,7 @@ const processEmailUpload = async (record) => {
       }
     }
     if (!postingCode) {
-      const toText = parsed.to?.text || '';
-      const match = toText.match(/hiro\+([0-9a-zA-Z_-]+)@/i);
-      postingCode = match ? match[1] : null;
+      postingCode = postingCodeFromPlusAddressText(parsed.to?.text || '');
     }
     let resolvedJob = null;
     if (postingCode) {
@@ -117,6 +154,7 @@ const processEmailUpload = async (record) => {
     }
 
     let candidate = await candidateService.findByEmail(fromEmail);
+    let candidateCreatedViaEmailIngest = false;
     if (!candidate) {
       const inferredName =
         fromAddress?.name?.trim() || fromEmail.split('@')[0] || 'מועמד חדש';
@@ -125,6 +163,7 @@ const processEmailUpload = async (record) => {
         fullName: inferredName,
         source: 'email',
       });
+      candidateCreatedViaEmailIngest = true;
       console.log('[email] created new candidate', candidate.id);
     }
 
@@ -138,11 +177,18 @@ const processEmailUpload = async (record) => {
     }
     const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(extraText);
     if (aiFields && Object.keys(aiFields).length) {
-      await candidateService.update(candidate.id, aiFields);
+      const safeAi = { ...aiFields };
+      const envelopeEmail = candidate.email && String(candidate.email).includes('@');
+      if (envelopeEmail && (!safeAi.email || !String(safeAi.email).includes('@'))) {
+        delete safeAi.email;
+      }
+      await candidateService.update(candidate.id, safeAi);
     }
     if (aiTags.length) {
       await candidateTagService.syncTagsForCandidate(candidate.id, aiTags);
     }
+    await candidateService.update(candidate.id, { source: 'email' });
+
     const association = await jobCandidateService.associateCandidateWithJob({
       jobId: resolvedJob?.id || null,
       candidateId: candidate.id,
@@ -150,6 +196,28 @@ const processEmailUpload = async (record) => {
     });
     console.log('[email] associated candidate with job', association?.id);
     await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
+
+      try {
+        const fresh = await candidateService.getById(candidate.id);
+        let welcomeClientId = null;
+        if (resolvedJob?.client) {
+          welcomeClientId = await clientService.findIdByJobClientLabel(resolvedJob.client);
+        }
+        console.log('[email] ingest template email queue (every successful CV-by-mail)', {
+          candidateId: fresh?.id,
+          newCandidateThisIngest: candidateCreatedViaEmailIngest,
+          email: fresh?.email || null,
+          source: fresh?.source,
+          resolvedJobId: resolvedJob?.id || null,
+          welcomeClientId,
+          postingCode: postingCode || null,
+        });
+        messageTemplateService.queueCandidateWelcomeEmail(fresh, {
+          clientId: welcomeClientId,
+        });
+      } catch (welcomeErr) {
+        console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
+      }
     }
     console.log('[email] resume attached for candidate', candidate.id, record.fileKey);
   } catch (error) {
@@ -179,17 +247,54 @@ const getByCandidate = async (req, res) => {
   }
 };
 
+/** DB-backed viewer: JWT email can be missing or stale; rows may match assignee/name or sender. */
+async function resolveNotificationViewerContext(req) {
+  const userId = req.user?.sub || req.user?.id;
+  if (!userId) return null;
+  const user = await User.findByPk(userId, { attributes: ['id', 'email', 'name'] });
+  if (!user) return null;
+  const emailNorm = (user.email || '').trim().toLowerCase();
+  const nameNorm = (user.name || '').trim().toLowerCase();
+  return { userId: user.id, emailNorm, nameNorm };
+}
+
+function notificationVisibleToViewer(record, ctx) {
+  if (!ctx) return false;
+  const toEmail = String(record.toEmail || '').trim().toLowerCase();
+  const assignee = String(record.assignee || '').trim().toLowerCase();
+  if (ctx.emailNorm && toEmail === ctx.emailNorm) return true;
+  if (ctx.emailNorm && assignee === ctx.emailNorm) return true;
+  if (ctx.nameNorm && assignee === ctx.nameNorm) return true;
+  return false;
+}
+
 const getNotificationMessages = async (req, res) => {
   try {
+    const ctx = await resolveNotificationViewerContext(req);
+    if (!ctx || !ctx.emailNorm) {
+      res.set('Cache-Control', 'private, no-store');
+      return res.json([]);
+    }
+
+    const trimmedLower = (col) =>
+      Sequelize.fn('lower', Sequelize.fn('trim', Sequelize.col(col)));
+
+    const orConditions = [
+      Sequelize.where(trimmedLower('toEmail'), ctx.emailNorm),
+      Sequelize.where(trimmedLower('assignee'), ctx.emailNorm),
+    ];
+    if (ctx.nameNorm) {
+      orConditions.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
+    }
+
     const records = await NotificationMessage.findAll({
       where: {
-        status: {
-          [Op.ne]: 'deleted',
-        },
+        [Op.and]: [{ status: { [Op.ne]: 'deleted' } }, { [Op.or]: orConditions }],
       },
       order: [['createdAt', 'DESC']],
       limit: 500,
     });
+    res.set('Cache-Control', 'private, no-store');
     return res.json(records);
   } catch (error) {
     console.error('[email][getNotificationMessages]', error);
@@ -215,6 +320,11 @@ const updateNotificationMessageStatus = async (req, res) => {
     const record = await NotificationMessage.findByPk(id);
     if (!record) {
       return res.status(404).json({ message: 'Notification message not found' });
+    }
+
+    const ctx = await resolveNotificationViewerContext(req);
+    if (!ctx || !notificationVisibleToViewer(record, ctx)) {
+      return res.status(403).json({ message: 'Forbidden' });
     }
 
     await record.update({ status });
@@ -318,7 +428,7 @@ const send = async (req, res) => {
       submissionEmail: submissionEmail === undefined ? true : Boolean(submissionEmail),
       sla: typeof sla === 'string' ? sla : null,
       allocatedDays: Number.isFinite(Number(allocatedDays)) ? Number(allocatedDays) : null,
-      senderUserId: req?.user?.id || null,
+      senderUserId: req?.user?.sub || req?.user?.id || null,
       metadata: {
         deliveryStatus: 'pending',
         taskPayload:
@@ -328,6 +438,8 @@ const send = async (req, res) => {
       },
     });
 
+    const { userRole: smtpUserRole, clientName: smtpClientName } = await resolveEmailSenderSmtpContext(req);
+
     let result;
     try {
       result = await emailService.sendEmail({
@@ -335,6 +447,8 @@ const send = async (req, res) => {
         subject,
         text: bodyText || (typeof html === 'string' ? undefined : ''),
         html: typeof html === 'string' ? html : undefined,
+        userRole: smtpUserRole,
+        clientName: smtpClientName,
       });
 
       await savedMessage.update({

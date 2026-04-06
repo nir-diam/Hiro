@@ -8,6 +8,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { SavedSearchesProvider } from './context/SavedSearchesContext';
 import { DevModeProvider } from './context/DevModeContext';
 import { LanguageProvider } from './context/LanguageContext';
+import { AuthProvider } from './context/AuthContext';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -23,7 +24,9 @@ root.render(
           <ErrorBoundary>
             <SavedSearchesProvider>
               <HashRouter>
-                <App />
+                <AuthProvider>
+                  <App />
+                </AuthProvider>
               </HashRouter>
             </SavedSearchesProvider>
           </ErrorBoundary>

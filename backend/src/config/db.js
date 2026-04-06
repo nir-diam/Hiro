@@ -1,5 +1,6 @@
 const { Sequelize } = require('sequelize');
 
+// Set POSTGRES_URI or DATABASE_URL in backend/.env. Do not rely on repo defaults for production.
 const sequelize = new Sequelize(
   process.env.POSTGRES_URI
     || process.env.DATABASE_URL
@@ -42,6 +43,20 @@ const connectDb = async () => {
   require('../models/NotificationMessage');
   require('../models/City');
   require('../models/CandidateOrganization');
+  require('../models/MessageTemplate');
+  require('../models/ClientUsageSetting');
+  require('../models/LoginEmailCode');
+
+  const User = require('../models/User');
+  const Client = require('../models/Client');
+  const MessageTemplate = require('../models/MessageTemplate');
+  const ClientUsageSetting = require('../models/ClientUsageSetting');
+  User.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  Client.hasMany(User, { foreignKey: 'clientId', as: 'members' });
+  MessageTemplate.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  Client.hasMany(MessageTemplate, { foreignKey: 'clientId', as: 'messageTemplates' });
+  Client.hasOne(ClientUsageSetting, { foreignKey: 'clientId', as: 'usageSettings' });
+  ClientUsageSetting.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
   await sequelize.sync();
   console.log('PostgreSQL connected & models synced');

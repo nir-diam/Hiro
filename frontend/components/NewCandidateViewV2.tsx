@@ -104,6 +104,8 @@ const NewCandidateViewV2: React.FC = () => {
     const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
     const [generateSummaryError, setGenerateSummaryError] = useState<string | null>(null);
     const [candidateId, setCandidateId] = useState<string | null>(null);
+    /** When false, backend skips queueing welcome_email after create / AI create / presigned upload. */
+    const [sendWelcomeEmail, setSendWelcomeEmail] = useState(true);
     useEffect(() => {
         setResumeData((prev: any) => ({
             ...prev,
@@ -179,7 +181,12 @@ const NewCandidateViewV2: React.FC = () => {
             const presignRes = await fetch(`${apiBase}/api/candidates/${id}/upload-url`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-                body: JSON.stringify({ fileName: file.name, contentType: file.type, folder }),
+                body: JSON.stringify({
+                    fileName: file.name,
+                    contentType: file.type,
+                    folder,
+                    sendWelcomeEmail,
+                }),
             });
             if (!presignRes.ok) throw new Error('Failed to get upload URL');
             const { uploadUrl, key } = await presignRes.json();
@@ -240,8 +247,8 @@ const NewCandidateViewV2: React.FC = () => {
                 const base = apiBase || '';
                 const res = await fetch(`${base}/api/candidates`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload),
+                    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                    body: JSON.stringify({ ...payload, sendWelcomeEmail }),
                 });
                 if (!res.ok) throw new Error('שגיאה ביצירת מועמד ראשוני.');
                 const created = await res.json();
@@ -297,6 +304,7 @@ const NewCandidateViewV2: React.FC = () => {
         setResumeData(initialResumeState);
         setParseError(null);
         setPastedResumeText('');
+        setSendWelcomeEmail(true);
     };
 
     const goToChoice = () => {
@@ -429,8 +437,8 @@ const NewCandidateViewV2: React.FC = () => {
 
             const response = await fetch(`${apiBase}/api/candidates/ai`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
+                headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+                body: JSON.stringify({ ...payload, sendWelcomeEmail }),
             });
             const json = await response.json();
 
@@ -455,7 +463,7 @@ const NewCandidateViewV2: React.FC = () => {
             clearInterval(interval);
             setLoadingMessage('');
         }
-    }, [apiBase, applyParsedData]);
+    }, [apiBase, applyParsedData, sendWelcomeEmail]);
 
     const processFileUpload = useCallback(async (file: File) => {
         await handleParse('file', file);
@@ -493,10 +501,12 @@ const NewCandidateViewV2: React.FC = () => {
             const url = aiCandidateId
                 ? `${apiBase}/api/candidates/${aiCandidateId}`
                 : `${apiBase}/api/candidates`;
+            const saveBody =
+                method === 'POST' ? { ...payload, sendWelcomeEmail } : payload;
             const res = await fetch(url, {
                 method,
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(payload),
+                body: JSON.stringify(saveBody),
             });
             if (!res.ok) {
                 let msg = 'שמירה נכשלה, בדוק את הפרטים ונסה שוב.';
@@ -585,6 +595,17 @@ const NewCandidateViewV2: React.FC = () => {
 
                 <div className="mb-10">
                     <h3 className="text-2xl font-black text-text-default mb-4">{t('new_candidate.ai_parsing_title')}</h3>
+                    <label className="flex items-start gap-3 mb-4 cursor-pointer group">
+                        <input
+                            type="checkbox"
+                            checked={sendWelcomeEmail}
+                            onChange={(e) => setSendWelcomeEmail(e.target.checked)}
+                            className="mt-1 w-4 h-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                        />
+                        <span className="text-sm text-text-default leading-snug group-hover:text-text-default/90">
+                            {t('new_candidate.send_welcome_email')}
+                        </span>
+                    </label>
                     <textarea
                         value={pastedResumeText}
                         onChange={(e) => setPastedResumeText(e.target.value)}

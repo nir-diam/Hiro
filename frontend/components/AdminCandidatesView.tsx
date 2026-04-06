@@ -18,6 +18,138 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import CustomizeViewsPopover, { ViewConfig } from './CustomizeViewsPopover';
+import SearchableSelect from './SearchableSelect';
+import {
+    fetchMessageTemplatesForCompose,
+    fetchMessageTemplateCatalog,
+    type MessageTemplateDto,
+    type MessageTemplateCatalogDto,
+} from '../services/messageTemplatesApi';
+import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
+import { sendNotificationEmail } from '../services/emailSendApi';
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function escapeHtmlCampaign(s: string) {
+    return String(s || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+}
+
+function isSilentComposeFetchErrorCampaign(message: string): boolean {
+    return /invalid\s+token|unauthorized|jwt\s+(expired|invalid|malformed)|token\s+expired|^401(\s|$)|\b401\b|forbidden|^403(\s|$)/i.test(
+        message.trim(),
+    );
+}
+
+function personalizeBulkPlaceholders(body: string, name: string) {
+    const n = name || '';
+    return String(body)
+        .replace(/\{name\}/gi, n)
+        .replace(/\{שם\}/g, n)
+        .replace(/\{candidate_first_name\}/gi, n.split(/\s+/)[0] || n);
+}
+
+function resolveBulkTemplateScopeSubline(
+    selectedTpl: MessageTemplateDto | undefined,
+    composeScope: 'client' | 'admin' | null,
+): string {
+    if (!selectedTpl) return '';
+    const cat = selectedTpl as MessageTemplateCatalogDto;
+    if (cat.scope === 'client' && cat.clientName) {
+        return String(cat.clientName).trim();
+    }
+    if (cat.scope === 'admin') {
+        return 'תבניות מערכת (Hiro)';
+    }
+    if (composeScope === 'admin') return 'תבניות מערכת (Hiro)';
+    if (composeScope === 'client') return 'תבניות הארגון';
+    return '';
+}
+
+function buildBulkEmailBodies(
+    content: string,
+    selectedTpl: MessageTemplateDto | undefined,
+    selectedJob: JobComposeRow | undefined,
+    composeScope: 'client' | 'admin' | null,
+) {
+    const trimmedContent = content.trim();
+    const templateValuePlain = selectedTpl
+        ? `${selectedTpl.name}${selectedTpl.templateKey ? ` (${selectedTpl.templateKey})` : ''}`
+        : '';
+    const jobValuePlain = selectedJob
+        ? `${selectedJob.title} (${selectedJob.client})${selectedJob.postingCode ? ` · ${selectedJob.postingCode}` : ''}`
+        : '';
+    const composeScopeSubline = resolveBulkTemplateScopeSubline(selectedTpl, composeScope);
+
+    const templateFooterLine = selectedTpl ? `תבנית שמורה: ${templateValuePlain}` : '';
+    const jobFooterLine = selectedJob ? `משרה מקושרת: ${jobValuePlain}` : '';
+
+    const footerPlainParts: string[] = [];
+    if (selectedTpl) {
+        let block = `תבנית שמורה:\n${templateValuePlain}`;
+        if (composeScopeSubline) block += `\n${composeScopeSubline}`;
+        footerPlainParts.push(block);
+    }
+    if (selectedJob) {
+        footerPlainParts.push(`משרה מקושרת:\n${jobValuePlain}`);
+    }
+    const footerPlain = footerPlainParts.length ? `\n\n—\n${footerPlainParts.join('\n\n')}` : '';
+    const textCore = `${trimmedContent}${footerPlain}`;
+
+    const mainHtml = `<div dir="rtl" style="white-space:pre-wrap;font-family:sans-serif;">${escapeHtmlCampaign(trimmedContent).replace(/\n/g, '<br/>')}</div>`;
+
+    const footerBlocks: string[] = [];
+    if (selectedTpl) {
+        const scopeHtml = composeScopeSubline
+            ? `<div style="font-size:11px;color:#888;margin-top:0.35em;">${escapeHtmlCampaign(composeScopeSubline)}</div>`
+            : '';
+        footerBlocks.push(
+            `<div style="margin-bottom:0.9em;">` +
+                `<div style="font-weight:700;color:#333;font-size:13px;">תבנית שמורה:</div>` +
+                `<div style="color:#555;margin-top:0.25em;">${escapeHtmlCampaign(templateValuePlain)}</div>` +
+                scopeHtml +
+            `</div>`,
+        );
+    }
+    if (selectedJob) {
+        footerBlocks.push(
+            `<div>` +
+                `<div style="font-weight:700;color:#333;font-size:13px;">משרה מקושרת:</div>` +
+                `<div style="color:#555;margin-top:0.25em;">${escapeHtmlCampaign(jobValuePlain)}</div>` +
+            `</div>`,
+        );
+    }
+    const footerHtml =
+        footerBlocks.length > 0
+            ? `<div dir="rtl" style="margin-top:1.25em;padding-top:1em;border-top:1px solid #ccc;color:#444;font-size:13px;line-height:1.55;font-family:sans-serif;">${footerBlocks.join('')}</div>`
+            : '';
+    const htmlCore = `${mainHtml}${footerHtml}`;
+
+    return {
+        textCore,
+        htmlCore,
+        templateFooterLine,
+        jobFooterLine,
+    };
+}
+
+function buildCampaignTemplateDisplayLabel(
+    t: MessageTemplateDto,
+    templateListKind: 'catalog' | 'compose' | null,
+): string {
+    const cat = t as MessageTemplateCatalogDto;
+    const orgSuffix =
+        templateListKind === 'catalog'
+            ? cat.scope === 'admin'
+                ? ' · Hiro'
+                : cat.clientName
+                  ? ` · ${cat.clientName}`
+                  : ''
+            : '';
+    return `${t.name}${t.templateKey ? ` (${t.templateKey})` : ''}${orgSuffix}`;
+}
 
 // --- TYPES ---
 type SourceType = 'job_application' | 'portal_signup' | 'campaign' | 'import';
@@ -50,21 +182,6 @@ interface AdminCandidate {
     salaryExpectation?: number;
     age?: number;
 }
-
-interface MessageTemplate {
-    id: number;
-    name: string;
-    type: 'email' | 'sms';
-    subject?: string;
-    content: string;
-}
-
-// --- MOCK DATA ---
-const mockTemplates: MessageTemplate[] = [
-    { id: 1, name: 'הזמנה לראיון (מייל)', type: 'email', subject: 'זימון לראיון עבודה ב-Hiro', content: 'היי {name},\n\nראינו את קורות החיים שלך והתרשמנו מאוד. נשמח לתאם ראיון היכרות.\n\nבברכה,\nצוות הגיוס' },
-    { id: 2, name: 'עדכון סטטוס (SMS)', type: 'sms', content: 'היי {name}, רצינו לעדכן שקורות החיים שלך התקבלו ונמצאים בבדיקה. נחזור אליך בהקדם. צוות Hiro' },
-    { id: 3, name: 'דחייה מנומסת (מייל)', type: 'email', subject: 'עדכון לגבי מועמדותך', content: 'שלום {name},\n\nתודה על התעניינותך במשרה. לצערנו החלטנו להתקדם עם מועמדים אחרים.\nנשמור את פרטיך למשרות עתידיות.\n\nבהצלחה!' },
-];
 
 const jobScopeOptions = ['משרה מלאה', 'משרה חלקית', 'משמרות', 'פרילנס', 'היברידי'];
 
@@ -191,127 +308,399 @@ const DoubleRangeSlider: React.FC<{
     );
 };
 
+type CampaignRecipient = { id: string; email: string; name: string };
+
 // Campaign Modal
-const CampaignModal: React.FC<{ 
-    isOpen: boolean; 
-    onClose: () => void; 
-    recipientCount: number; 
-    onSubmit: (data: any) => void; 
-}> = ({ isOpen, onClose, recipientCount, onSubmit }) => {
+const CampaignModal: React.FC<{
+    isOpen: boolean;
+    onClose: () => void;
+    recipients: CampaignRecipient[];
+}> = ({ isOpen, onClose, recipients }) => {
     const [channel, setChannel] = useState<'email' | 'sms'>('email');
-    const [selectedTemplate, setSelectedTemplate] = useState<string>('');
+    const [selectedTemplateId, setSelectedTemplateId] = useState('');
+    const [selectedJobId, setSelectedJobId] = useState('');
     const [subject, setSubject] = useState('');
     const [content, setContent] = useState('');
+    const [templates, setTemplates] = useState<MessageTemplateDto[]>([]);
+    /** `catalog` = GET admin catalog (Hiro + all clients); `compose` = tenant/for-compose only */
+    const [templateListKind, setTemplateListKind] = useState<'catalog' | 'compose' | null>(null);
+    const [composeScope, setComposeScope] = useState<'client' | 'admin' | null>(null);
+    const [templatesLoading, setTemplatesLoading] = useState(false);
+    const [templatesListError, setTemplatesListError] = useState<string | null>(null);
+    const [jobs, setJobs] = useState<JobComposeRow[]>([]);
+    const [jobsLoading, setJobsLoading] = useState(false);
+    const [jobsListError, setJobsListError] = useState<string | null>(null);
+    const [isSending, setIsSending] = useState(false);
+    const [sendError, setSendError] = useState<string | null>(null);
+
+    const channelTemplates = useMemo(() => {
+        const ch = channel === 'email' ? 'email' : 'sms';
+        return templates.filter((t) => (t.channels || []).includes(ch));
+    }, [templates, channel]);
+
+    const templateSelectOptions = useMemo(() => {
+        const rows = channelTemplates.map((t) => ({
+            id: t.id,
+            label: buildCampaignTemplateDisplayLabel(t, templateListKind),
+        }));
+        rows.sort((a, b) => a.label.localeCompare(b.label, 'he', { sensitivity: 'base', numeric: true }));
+        return rows;
+    }, [channelTemplates, templateListKind]);
+
+    const jobSelectOptions = useMemo(() => {
+        const rows = jobs.map((j) => ({
+            id: j.id,
+            label: `${j.title} (${j.client})${j.postingCode ? ` · ${j.postingCode}` : ''}`,
+        }));
+        rows.sort((a, b) => a.label.localeCompare(b.label, 'he', { sensitivity: 'base', numeric: true }));
+        return rows;
+    }, [jobs]);
+
+    const scopeHint =
+        templateListKind === 'catalog'
+            ? 'קטלוג מנהל: תבניות Hiro ותבניות לכל הארגונים'
+            : composeScope === 'admin'
+              ? 'תבניות מערכת (Hiro)'
+              : composeScope === 'client'
+                ? 'תבניות הארגון'
+                : '';
+    const templatesErrBlocksHints = !!(templatesListError && !isSilentComposeFetchErrorCampaign(templatesListError));
+    const jobsErrBlocksHints = !!(jobsListError && !isSilentComposeFetchErrorCampaign(jobsListError));
+
+    const withValidEmail = useMemo(
+        () => recipients.filter((r) => EMAIL_RE.test(String(r.email || '').trim())),
+        [recipients],
+    );
 
     useEffect(() => {
-        if (isOpen) {
-            setChannel('email');
-            setSelectedTemplate('');
-            setSubject('');
-            setContent('');
-        }
+        if (!isOpen) return;
+        setChannel('email');
+        setSelectedTemplateId('');
+        setSelectedJobId('');
+        setSubject('');
+        setContent('');
+        setSendError(null);
+        setTemplatesListError(null);
+        setJobsListError(null);
+        setIsSending(false);
+        setTemplateListKind(null);
+
+        let cancelled = false;
+        (async () => {
+            setTemplatesLoading(true);
+            setJobsLoading(true);
+            try {
+                const [templateBlock, jobRows] = await Promise.all([
+                    (async (): Promise<{ rows: MessageTemplateDto[]; kind: 'catalog' | 'compose'; scope: 'client' | 'admin' | null }> => {
+                        try {
+                            const catalog = await fetchMessageTemplateCatalog();
+                            return {
+                                rows: Array.isArray(catalog) ? catalog : [],
+                                kind: 'catalog' as const,
+                                scope: null,
+                            };
+                        } catch {
+                            const tRes = await fetchMessageTemplatesForCompose();
+                            return {
+                                rows: Array.isArray(tRes.templates) ? tRes.templates : [],
+                                kind: 'compose' as const,
+                                scope: tRes.scope,
+                            };
+                        }
+                    })(),
+                    fetchJobsForCompose(),
+                ]);
+                if (cancelled) return;
+                setTemplateListKind(templateBlock.kind);
+                setComposeScope(templateBlock.scope);
+                setTemplates(templateBlock.rows);
+                setJobs(Array.isArray(jobRows) ? jobRows : []);
+            } catch (e: unknown) {
+                if (cancelled) return;
+                const msg = e instanceof Error ? e.message : 'טעינה נכשלה';
+                setTemplates([]);
+                setJobs([]);
+                setComposeScope(null);
+                setTemplateListKind(null);
+                if (isSilentComposeFetchErrorCampaign(msg)) {
+                    setTemplatesListError(null);
+                    setJobsListError(null);
+                } else {
+                    setTemplatesListError(msg);
+                    setJobsListError(msg);
+                }
+            } finally {
+                if (!cancelled) {
+                    setTemplatesLoading(false);
+                    setJobsLoading(false);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
     }, [isOpen]);
 
-    const handleTemplateChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const templateId = Number(e.target.value);
-        setSelectedTemplate(e.target.value);
-        const template = mockTemplates.find(t => t.id === templateId);
-        if (template) {
-            setChannel(template.type); 
-            setSubject(template.subject || '');
-            setContent(template.content);
-        } else {
-            setSubject('');
-            setContent('');
+    const applyTemplate = useCallback(
+        (templateId: string) => {
+            setSelectedTemplateId(templateId);
+            if (!templateId) {
+                setSubject('');
+                setContent('');
+                return;
+            }
+            const t = channelTemplates.find((x) => x.id === templateId);
+            if (!t) return;
+            setContent(t.content || '');
+            if (channel === 'email') {
+                setSubject(t.subject || '');
+            } else {
+                setSubject('');
+            }
+        },
+        [channelTemplates, channel],
+    );
+
+    const handleChannelChange = (next: 'email' | 'sms') => {
+        setChannel(next);
+        setSelectedTemplateId('');
+        setSelectedJobId('');
+        setSubject('');
+        setContent('');
+    };
+
+    const handleSend = async () => {
+        setSendError(null);
+        if (channel === 'sms') {
+            setSendError('שליחת SMS מרוכז דרך השרת אינה זמינה כרגע. נא לבחור אימייל.');
+            return;
+        }
+        if (!content.trim()) {
+            setSendError('תוכן ההודעה חובה');
+            return;
+        }
+        if (!subject.trim()) {
+            setSendError('נושא המייל חובה');
+            return;
+        }
+        if (withValidEmail.length === 0) {
+            setSendError('אין כתובות מייל תקינות ברשימת הנמענים.');
+            return;
+        }
+
+        const selectedTpl = selectedTemplateId ? templates.find((t) => t.id === selectedTemplateId) : undefined;
+        const selectedJob = selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined;
+
+        setIsSending(true);
+        let sent = 0;
+        const failed: string[] = [];
+        try {
+            for (const r of withValidEmail) {
+                const name = r.name || '';
+                const personalizedMain = personalizeBulkPlaceholders(content.trim(), name);
+                const { textCore, htmlCore, templateFooterLine, jobFooterLine } = buildBulkEmailBodies(
+                    personalizedMain,
+                    selectedTpl,
+                    selectedJob,
+                    composeScope,
+                );
+                const subj = personalizeBulkPlaceholders(subject.trim(), name);
+                try {
+                    await sendNotificationEmail({
+                        toEmail: String(r.email).trim().toLowerCase(),
+                        subject: subj,
+                        text: textCore,
+                        html: htmlCore,
+                        isTask: false,
+                        messageType: 'message',
+                        taskPayload: {
+                            source: 'AdminCandidatesView.bulk',
+                            candidateId: r.id,
+                            templateId: selectedTemplateId || null,
+                            jobId: selectedJobId || null,
+                            composeScope:
+                                (selectedTpl as MessageTemplateCatalogDto | undefined)?.scope ?? composeScope,
+                            templateListKind,
+                            templateLabel: templateFooterLine || null,
+                            jobLabel: jobFooterLine || null,
+                        },
+                    });
+                    sent += 1;
+                } catch {
+                    failed.push(r.email);
+                }
+            }
+            if (failed.length === 0) {
+                alert(`נשלחו ${sent} מיילים בהצלחה.`);
+                onClose();
+            } else {
+                setSendError(
+                    `נשלחו ${sent} מתוך ${withValidEmail.length}. נכשלו: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}`,
+                );
+            }
+        } finally {
+            setIsSending(false);
         }
     };
 
     if (!isOpen) return null;
 
+    const recipientLabel =
+        recipients.length === 0
+            ? '0'
+            : `${recipients.length}${withValidEmail.length !== recipients.length ? ` (${withValidEmail.length} עם מייל תקין)` : ''}`;
+
     return (
         <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm" onClick={onClose}>
-             <div className="bg-bg-card rounded-2xl p-0 max-w-lg w-full shadow-2xl flex flex-col overflow-hidden animate-fade-in" onClick={e => e.stopPropagation()}>
-                 <div className="p-5 border-b border-border-default flex justify-between items-center bg-bg-subtle/30">
-                     <h3 className="text-xl font-bold text-text-default">שליחת דיוור מרוכז</h3>
-                     <button onClick={onClose}><XMarkIcon className="w-5 h-5 text-text-muted hover:text-text-default"/></button>
-                 </div>
-                 
-                 <div className="p-6 space-y-5">
-                     {/* Channel Selection */}
-                     <div>
-                         <label className="block text-sm font-bold text-text-muted mb-2">ערוץ שליחה</label>
-                         <div className="flex gap-4">
-                             <label className={`flex-1 p-3 rounded-xl border-2 cursor-pointer flex items-center justify-center gap-2 transition-all ${channel === 'email' ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-border-default hover:bg-bg-subtle'}`}>
-                                 <input type="radio" name="channel" value="email" checked={channel === 'email'} onChange={() => setChannel('email')} className="hidden" />
-                                 <EnvelopeIcon className="w-5 h-5" />
-                                 <span>אימייל</span>
-                             </label>
-                             <label className={`flex-1 p-3 rounded-xl border-2 cursor-pointer flex items-center justify-center gap-2 transition-all ${channel === 'sms' ? 'border-green-500 bg-green-50 text-green-700' : 'border-border-default hover:bg-bg-subtle'}`}>
-                                 <input type="radio" name="channel" value="sms" checked={channel === 'sms'} onChange={() => setChannel('sms')} className="hidden" />
-                                 <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
-                                 <span>SMS</span>
-                             </label>
-                         </div>
-                     </div>
+            <div
+                className="bg-bg-card rounded-2xl p-0 max-w-lg w-full shadow-2xl flex flex-col overflow-hidden animate-fade-in max-h-[90vh] min-h-0"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="p-5 border-b border-border-default flex justify-between items-center bg-bg-subtle/30 flex-shrink-0">
+                    <h3 className="text-xl font-bold text-text-default">שליחת דיוור מרוכז</h3>
+                    <button type="button" onClick={onClose}>
+                        <XMarkIcon className="w-5 h-5 text-text-muted hover:text-text-default" />
+                    </button>
+                </div>
 
-                     {/* Template Selection */}
-                     <div>
-                         <label className="block text-sm font-bold text-text-muted mb-1.5">בחר תבנית (אופציונלי)</label>
-                         <select 
-                            value={selectedTemplate} 
-                            onChange={handleTemplateChange} 
-                            className="w-full bg-bg-input border border-border-default rounded-xl p-2.5 text-sm focus:ring-primary-500 focus:border-primary-500"
-                        >
-                             <option value="">כתוב הודעה חדשה...</option>
-                             {mockTemplates.map(t => (
-                                 <option key={t.id} value={t.id}>{t.name} ({t.type === 'email' ? 'מייל' : 'SMS'})</option>
-                             ))}
-                         </select>
-                     </div>
+                <div className="flex flex-col flex-1 min-h-0">
+                    {/* Searchable dropdowns stay outside overflow-y so lists are not clipped */}
+                    <div className="px-6 pt-6 space-y-5 flex-shrink-0">
+                    <div>
+                        <label className="block text-sm font-bold text-text-muted mb-2">ערוץ שליחה</label>
+                        <div className="flex gap-4">
+                            <label
+                                className={`flex-1 p-3 rounded-xl border-2 cursor-pointer flex items-center justify-center gap-2 transition-all ${channel === 'email' ? 'border-primary-500 bg-primary-50 text-primary-700' : 'border-border-default hover:bg-bg-subtle'}`}
+                            >
+                                <input
+                                    type="radio"
+                                    name="channel"
+                                    value="email"
+                                    checked={channel === 'email'}
+                                    onChange={() => handleChannelChange('email')}
+                                    className="hidden"
+                                />
+                                <EnvelopeIcon className="w-5 h-5" />
+                                <span>אימייל</span>
+                            </label>
+                            <label
+                                className={`flex-1 p-3 rounded-xl border-2 cursor-pointer flex items-center justify-center gap-2 transition-all ${channel === 'sms' ? 'border-green-500 bg-green-50 text-green-700' : 'border-border-default hover:bg-bg-subtle'}`}
+                            >
+                                <input
+                                    type="radio"
+                                    name="channel"
+                                    value="sms"
+                                    checked={channel === 'sms'}
+                                    onChange={() => handleChannelChange('sms')}
+                                    className="hidden"
+                                />
+                                <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
+                                <span>SMS</span>
+                            </label>
+                        </div>
+                        {channel === 'sms' && (
+                            <p className="text-xs text-amber-700 mt-2">שליחה בפועל דרך השרת זמינה כרגע רק לאימייל.</p>
+                        )}
+                    </div>
 
-                     {/* Subject (Email Only) */}
-                     {channel === 'email' && (
-                         <div className="animate-fade-in">
-                             <label className="block text-sm font-bold text-text-muted mb-1.5">נושא ההודעה</label>
-                             <input 
-                                type="text" 
-                                value={subject} 
-                                onChange={e => setSubject(e.target.value)} 
-                                className="w-full bg-bg-input border border-border-default rounded-xl p-2.5 text-sm focus:ring-primary-500"
-                                placeholder="לדוגמה: הזדמנות למשרה חדשה ב-Hiro"
+                    <div>
+                        <label className="block text-sm font-bold text-text-muted mb-1.5">בחר תבנית</label>
+                        <SearchableSelect
+                            options={templateSelectOptions}
+                            value={selectedTemplateId || null}
+                            onChange={(v) => applyTemplate(v == null ? '' : String(v))}
+                            placeholder="כתוב הודעה חדשה…"
+                            disabled={templatesLoading}
+                            className="w-full"
+                        />
+                        {templatesLoading && <p className="text-xs text-text-subtle mt-1">טוען תבניות…</p>}
+                        {templatesListError && !isSilentComposeFetchErrorCampaign(templatesListError) && (
+                            <p className="text-xs text-red-600 mt-1">{templatesListError}</p>
+                        )}
+                        {!templatesLoading && !templatesErrBlocksHints && scopeHint && (
+                            <p className="text-xs text-text-subtle mt-1">{scopeHint}</p>
+                        )}
+                        {!templatesLoading && !templatesErrBlocksHints && channelTemplates.length === 0 && (
+                            <p className="text-xs text-text-subtle mt-1">אין תבניות לערוץ זה — אפשר למלא ידנית</p>
+                        )}
+                    </div>
+
+                    {channel === 'email' && (
+                        <div>
+                            <label className="block text-sm font-bold text-text-muted mb-1.5">משרה מקושרת</label>
+                            <SearchableSelect
+                                options={jobSelectOptions}
+                                value={selectedJobId || null}
+                                onChange={(v) => setSelectedJobId(v == null ? '' : String(v))}
+                                placeholder="ללא משרה"
+                                disabled={jobsLoading}
+                                className="w-full"
                             />
-                         </div>
-                     )}
+                            {jobsLoading && <p className="text-xs text-text-subtle mt-1">טוען משרות…</p>}
+                            {jobsListError && !isSilentComposeFetchErrorCampaign(jobsListError) && (
+                                <p className="text-xs text-red-600 mt-1">{jobsListError}</p>
+                            )}
+                            {!jobsLoading && !jobsErrBlocksHints && jobs.length === 0 && (
+                                <p className="text-xs text-text-subtle mt-1">אין משרות להצגה</p>
+                            )}
+                        </div>
+                    )}
+                    </div>
 
-                     {/* Body */}
-                     <div>
-                         <label className="block text-sm font-bold text-text-muted mb-1.5">תוכן ההודעה</label>
-                         <textarea 
-                            value={content} 
-                            onChange={e => setContent(e.target.value)} 
-                            rows={5} 
+                    <div className="px-6 pb-6 flex-1 min-h-0 overflow-y-auto space-y-5 pt-2">
+                    {channel === 'email' && (
+                        <div className="animate-fade-in">
+                            <label className="block text-sm font-bold text-text-muted mb-1.5">נושא ההודעה</label>
+                            <input
+                                type="text"
+                                value={subject}
+                                onChange={(e) => setSubject(e.target.value)}
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-2.5 text-sm focus:ring-primary-500"
+                                placeholder="לדוגמה: הזדמנות למשרה חדשה"
+                            />
+                            <p className="text-xs text-text-subtle mt-1">מציינים {'{name}'} או {'{candidate_first_name}'} להתאמה אישית לכל נמען.</p>
+                        </div>
+                    )}
+
+                    <div>
+                        <label className="block text-sm font-bold text-text-muted mb-1.5">תוכן ההודעה</label>
+                        <textarea
+                            value={content}
+                            onChange={(e) => setContent(e.target.value)}
+                            rows={5}
                             className="w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm focus:ring-primary-500 resize-none"
-                            placeholder={channel === 'email' ? "כתוב את תוכן המייל כאן..." : "כתוב הודעת SMS קצרה..."}
-                        ></textarea>
+                            placeholder={channel === 'email' ? 'כתוב את תוכן המייל כאן…' : 'כתוב הודעת SMS (שליחה בפועל — רק מייל)…'}
+                        />
                         <div className="text-xs text-text-subtle mt-1 text-left">{content.length} תווים</div>
-                     </div>
-                 </div>
+                    </div>
 
-                 <div className="p-5 border-t border-border-default bg-bg-subtle/30 flex justify-end gap-3">
-                     <button onClick={onClose} className="px-5 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">ביטול</button>
-                     <button 
-                        onClick={() => onSubmit({ channel, subject, content })} 
-                        className="px-6 py-2.5 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 shadow-lg shadow-primary-500/20 flex items-center gap-2"
-                        disabled={!content || (channel === 'email' && !subject)}
+                    {sendError && <p className="text-sm text-red-600">{sendError}</p>}
+                    </div>
+                </div>
+
+                <div className="p-5 border-t border-border-default bg-bg-subtle/30 flex justify-end gap-3 flex-shrink-0">
+                    <button type="button" onClick={onClose} className="px-5 py-2.5 rounded-xl font-bold text-text-muted hover:bg-bg-hover transition">
+                        ביטול
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => void handleSend()}
+                        className="px-6 py-2.5 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 shadow-lg shadow-primary-500/20 flex items-center gap-2 disabled:opacity-60 disabled:pointer-events-none"
+                        disabled={
+                            isSending ||
+                            !content.trim() ||
+                            (channel === 'email' && !subject.trim()) ||
+                            channel === 'sms'
+                        }
                     >
                         <PaperAirplaneIcon className="w-4 h-4 transform rotate-180" />
-                        <span>שלח ל-{recipientCount} מועמדים</span>
-                     </button>
-                 </div>
-             </div>
+                        <span>{isSending ? 'שולח…' : `שלח מייל ל-${recipientLabel} מועמדים`}</span>
+                    </button>
+                </div>
+            </div>
         </div>
-    )
-}
+    );
+};
 
 // Save Search Modal
 const SaveSearchModal: React.FC<{
@@ -880,11 +1269,10 @@ const AdminCandidatesView: React.FC = () => {
     };
 
 
-    const handleSendCampaign = (data: any) => {
-        setIsCampaignModalOpen(false);
-        console.log("Sending campaign:", data, "To IDs:", Array.from(selectedIds));
-        alert('הקמפיין נשלח בהצלחה!');
-    };
+    const campaignRecipients = useMemo(() => {
+        const pool = filteredCandidates.filter((c) => (selectedIds.size > 0 ? selectedIds.has(c.id) : true));
+        return pool.map((c) => ({ id: c.id, email: c.email || '', name: c.name }));
+    }, [filteredCandidates, selectedIds]);
 
     const handleSaveSearch = (name: string) => {
         if (!name) return;
@@ -1556,11 +1944,10 @@ const AdminCandidatesView: React.FC = () => {
                 )}
             </div>
 
-            <CampaignModal 
+            <CampaignModal
                 isOpen={isCampaignModalOpen}
                 onClose={() => setIsCampaignModalOpen(false)}
-                recipientCount={selectedIds.size > 0 ? selectedIds.size : filteredCandidates.length}
-                onSubmit={handleSendCampaign}
+                recipients={campaignRecipients}
             />
             
             <SaveSearchModal 

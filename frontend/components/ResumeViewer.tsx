@@ -309,11 +309,14 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
             // Attempt to extract a phone number from contact string, or pass empty
             const phoneMatch = finalResumeData.contact.match(/[\d-]{9,}/);
             const phone = phoneMatch ? phoneMatch[0] : '';
-            
+            const emailMatch = finalResumeData.contact.match(/[^\s<>]+@[^\s<>]+\.[^\s<>]+/);
+            const emailAddr = emailMatch ? emailMatch[0].replace(/[<>]/g, '') : '';
+
             onOpenMessageModal({
                 mode: 'email',
                 candidateName: finalResumeData.name || 'מועמד',
-                candidatePhone: phone, 
+                candidatePhone: phone,
+                candidateEmail: emailAddr || undefined,
             });
         }
     }

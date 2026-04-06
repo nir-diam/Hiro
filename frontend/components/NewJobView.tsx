@@ -6,9 +6,9 @@ import {
     PencilIcon, SparklesIcon, GenderMaleIcon, GenderFemaleIcon, MapPinIcon, TrashIcon, XMarkIcon,
     BellIcon, ShareIcon, CheckCircleIcon, UserIcon, NoSymbolIcon, TagIcon, InformationCircleIcon,
     MagnifyingGlassIcon, BuildingOffice2Icon, GlobeAmericasIcon, ChevronUpIcon, ExclamationTriangleIcon, CheckIcon,
-    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon, BoldIcon, ItalicIcon, ListBulletIcon,
-    UnderlineIcon, LinkIcon, ListNumberIcon, AcademicCapIcon, WrenchScrewdriverIcon
+    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon, AcademicCapIcon, WrenchScrewdriverIcon
 } from './Icons';
+import { RichTextArea, normalizeValueForEditor } from './RichTextArea';
 import { SmartTagType } from './SmartTagTypes';
 import TagSelectorModal, { TagOption as GlobalTagOption } from './TagSelectorModal';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -30,6 +30,10 @@ interface JobSkill {
     mode: TagMode;
     source: TagSource;
     tagType?: SmartTagType; // for same categories/colors as CandidateProfile
+    tag_reason?: string;
+    relevance_score?: number;
+    /** Original LLM mode e.g. advantage */
+    aiMode?: string;
 }
 
 interface QuestionOption {
@@ -105,179 +109,6 @@ const stripHtml = (html: string): string => {
         return (div.textContent || div.innerText || '').trim();
     }
     return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-};
-
-// Plain text with \n → HTML with <br> / <p> so it displays with proper line breaks (not one block)
-const normalizeValueForEditor = (value: string): string => {
-    if (!value || typeof value !== 'string') return '';
-    const trimmed = value.trim();
-    if (!trimmed) return '';
-    // If it looks like plain text (no HTML tags), convert newlines to blocks for pretty display
-    if (!/<\s*[a-zA-Z][^>]*>/.test(trimmed)) {
-        const paragraphs = trimmed.split(/\n\s*\n/); // double newline = new paragraph
-        return paragraphs
-            .map((p) => {
-                const line = p.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
-                if (!line) return '';
-                const withBr = line.replace(/\n/g, '<br>');
-                return `<p>${withBr}</p>`;
-            })
-            .filter(Boolean)
-            .join('') || trimmed.replace(/\n/g, '<br>');
-    }
-    return value;
-};
-
-const richTextSyncEffect = (editorRef: React.RefObject<HTMLDivElement | null>, value: string, isUserInput: React.MutableRefObject<boolean>, onChange: (html: string) => void) => {
-    if (!editorRef.current) return;
-    if (isUserInput.current) { isUserInput.current = false; return; }
-    const next = normalizeValueForEditor(value ?? '');
-    if (editorRef.current.innerHTML !== next) editorRef.current.innerHTML = next;
-};
-
-const RICH_TEXT_BUTTON = 'p-2 rounded-lg hover:bg-black/8 hover:text-text-default text-text-muted transition-colors';
-const RICH_TEXT_TOOLBAR_BASE = 'flex items-center gap-1 p-2 border-b border-border-default flex-wrap';
-
-const FONT_FAMILIES = [
-    { label: 'ברירת מחדל', value: '' },
-    { label: 'Heebo', value: 'Heebo' },
-    { label: 'Assistant', value: 'Assistant' },
-    { label: 'Rubik', value: 'Rubik' },
-    { label: 'Arial', value: 'Arial' },
-    { label: 'David', value: 'David' },
-];
-const FONT_SIZES = [
-    { label: 'קטן', value: '1' },
-    { label: 'רגיל', value: '3' },
-    { label: 'בינוני', value: '4' },
-    { label: 'גדול', value: '5' },
-    { label: 'כותרת', value: '6' },
-];
-const TEXT_COLORS = [
-    { label: 'שחור', color: '#111827' },
-    { label: 'אפור כהה', color: '#4b5563' },
-    { label: 'כחול', color: '#1d4ed8' },
-    { label: 'ירוק', color: '#15803d' },
-    { label: 'אדום', color: '#b91c1c' },
-    { label: 'סגול', color: '#6b21a8' },
-];
-
-const RichTextArea: React.FC<{
-    value: string;
-    onChange: (html: string) => void;
-    placeholder?: string;
-    rows?: number;
-    className?: string;
-    toolbarClassName?: string;
-    editorClassName?: string;
-    minHeight?: string;
-    fullToolbar?: boolean;
-}> = ({ value, onChange, placeholder, minHeight = '120px', className = '', toolbarClassName = '', editorClassName = '', fullToolbar = false }) => {
-    const editorRef = React.useRef<HTMLDivElement>(null);
-    const isUserInput = React.useRef(false);
-    React.useEffect(() => { richTextSyncEffect(editorRef, value, isUserInput, onChange); }, [value]);
-    const execCmd = (cmd: string, arg?: string) => {
-        try {
-            if (cmd === 'fontName' && arg) document.execCommand('fontName', false, arg);
-            else if (cmd === 'fontSize' && arg) document.execCommand('fontSize', false, arg);
-            else if (cmd === 'foreColor' && arg) document.execCommand('foreColor', false, arg);
-            else document.execCommand(cmd, false, arg);
-        } catch (_) {}
-        if (editorRef.current) onChange(editorRef.current.innerHTML);
-        editorRef.current?.focus();
-    };
-    const toolbar = (
-        <div className={`${RICH_TEXT_TOOLBAR_BASE} ${toolbarClassName}`}>
-            <select
-                title="גופן"
-                onChange={(e) => { const v = e.target.value; if (v) { editorRef.current?.focus(); execCmd('fontName', v); } }}
-                className="text-xs border border-border-default rounded-lg px-2 py-1.5 bg-white text-text-default min-w-0 max-w-[110px] cursor-pointer"
-            >
-                {FONT_FAMILIES.map((f) => (
-                    <option key={f.value || 'default'} value={f.value || undefined}>{f.label}</option>
-                ))}
-            </select>
-            <select
-                title="גודל גופן"
-                onChange={(e) => { const v = e.target.value; editorRef.current?.focus(); execCmd('fontSize', v); }}
-                defaultValue="3"
-                className="text-xs border border-border-default rounded-lg px-2 py-1.5 bg-white text-text-default min-w-0 max-w-[90px] cursor-pointer"
-            >
-                {FONT_SIZES.map((s) => (
-                    <option key={s.value} value={s.value}>{s.label}</option>
-                ))}
-            </select>
-            <div className="flex items-center gap-0.5" title="צבע טקסט">
-                {TEXT_COLORS.map((c) => (
-                    <button
-                        key={c.color}
-                        type="button"
-                        onMouseDown={(e) => { e.preventDefault(); execCmd('foreColor', c.color); }}
-                        className="w-6 h-6 rounded border border-border-default hover:ring-2 hover:ring-offset-1 ring-primary-400 transition-all"
-                        style={{ backgroundColor: c.color }}
-                        title={c.label}
-                    />
-                ))}
-            </div>
-            <span className="w-px h-5 bg-border-default mx-0.5" />
-            <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('bold'); }} className={RICH_TEXT_BUTTON} title="מודגש"><BoldIcon className="w-4 h-4" /></button>
-            <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('italic'); }} className={RICH_TEXT_BUTTON} title="נטוי"><ItalicIcon className="w-4 h-4" /></button>
-            {fullToolbar && (
-                <>
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('underline'); }} className={RICH_TEXT_BUTTON} title="קו תחתון"><UnderlineIcon className="w-4 h-4" /></button>
-                    <span className="w-px h-5 bg-border-default mx-0.5" />
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('formatBlock', 'h2'); }} className={`${RICH_TEXT_BUTTON} text-xs font-bold`} title="כותרת 2">H2</button>
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('formatBlock', 'h3'); }} className={`${RICH_TEXT_BUTTON} text-xs font-bold`} title="כותרת 3">H3</button>
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('formatBlock', 'p'); }} className={`${RICH_TEXT_BUTTON} text-xs`} title="פסקה">P</button>
-                    <span className="w-px h-5 bg-border-default mx-0.5" />
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('insertUnorderedList'); }} className={RICH_TEXT_BUTTON} title="רשימת תבליטים"><ListBulletIcon className="w-4 h-4" /></button>
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('insertOrderedList'); }} className={RICH_TEXT_BUTTON} title="רשימה ממוספרת"><ListNumberIcon className="w-4 h-4" /></button>
-                    <button type="button" onMouseDown={(e) => { e.preventDefault(); const url = window.prompt('הזן קישור URL:'); if (url) execCmd('createLink', url); }} className={RICH_TEXT_BUTTON} title="קישור"><LinkIcon className="w-4 h-4" /></button>
-                </>
-            )}
-            {!fullToolbar && (
-                <button type="button" onMouseDown={(e) => { e.preventDefault(); execCmd('insertUnorderedList'); }} className={RICH_TEXT_BUTTON} title="רשימה"><ListBulletIcon className="w-4 h-4" /></button>
-            )}
-        </div>
-    );
-    return (
-        <div className={`border-2 rounded-2xl overflow-hidden shadow-sm transition-shadow focus-within:shadow-md ${className}`}>
-            {toolbar}
-            <div
-                ref={editorRef}
-                contentEditable
-                onInput={() => {
-                    if (editorRef.current) {
-                        isUserInput.current = true;
-                        onChange(editorRef.current.innerHTML);
-                    }
-                }}
-                data-placeholder={placeholder}
-                className={`rich-text-editor-content outline-none p-4 overflow-y-auto text-right w-full resize-y rich-text-area-empty ${editorClassName}`}
-                style={{
-                    minHeight,
-                    direction: 'rtl',
-                    fontFamily: 'Heebo, Assistant, Rubik, Arial, sans-serif',
-                    fontSize: '15px',
-                    lineHeight: 1.65,
-                    color: 'var(--color-text-default, #111827)',
-                }}
-            />
-            <style>{`
-                .rich-text-area-empty:empty::before { content: attr(data-placeholder); color: var(--color-text-muted, #6b7280); font-size: 0.9375rem; }
-                .rich-text-editor-content p { margin-bottom: 1em; line-height: 1.7; display: block; }
-                .rich-text-editor-content p:last-child { margin-bottom: 0; }
-                .rich-text-editor-content p + p { margin-top: 0.25em; }
-                .rich-text-editor-content br { display: block; content: ''; margin-bottom: 0.35em; line-height: 1.7; }
-                .rich-text-editor-content h2 { font-size: 1.25rem; font-weight: 700; margin-top: 1em; margin-bottom: 0.4em; line-height: 1.35; display: block; }
-                .rich-text-editor-content h3 { font-size: 1.1rem; font-weight: 700; margin-top: 0.85em; margin-bottom: 0.35em; line-height: 1.4; display: block; }
-                .rich-text-editor-content ul, .rich-text-editor-content ol { margin: 0.5em 0 0.75em 1.25em; padding-right: 0.5em; }
-                .rich-text-editor-content li { margin-bottom: 0.35em; line-height: 1.6; }
-                .rich-text-editor-content div { margin-bottom: 0.5em; line-height: 1.65; }
-                .rich-text-editor-content br + br { display: block; content: ''; margin-top: 0.5em; }
-            `}</style>
-        </div>
-    );
 };
 
 const LOCATION_SEP = ', ';
@@ -864,6 +695,13 @@ const JOB_TAG_ROW_CONFIG: Array<{ id: string; label: string; icon: React.Compone
     { id: 'soft', label: 'כישורים רכים', icon: SparklesIcon, iconColor: 'text-amber-500', types: ['soft'] },
 ];
 
+const mapLlmModeToTagMode = (m: unknown): TagMode => {
+    const s = String(m || '').toLowerCase();
+    if (s === 'mandatory' || s === 'required') return 'mandatory';
+    if (s === 'negative' || s === 'exclusion') return 'negative';
+    return 'normal';
+};
+
 const SmartTag: React.FC<{ 
     tag: JobSkill; 
     onToggle: (id: string) => void; 
@@ -880,19 +718,43 @@ const SmartTag: React.FC<{
                 ? 'border-red-500'
                 : '';
 
+    const tooltipLines = [
+        titleText,
+        tag.aiMode ? `מצב מקור: ${tag.aiMode}` : null,
+        tag.relevance_score != null && tag.relevance_score !== undefined ? `ציון רלוונטיות: ${tag.relevance_score}/10` : null,
+        tag.tag_reason ? `נימוק: ${tag.tag_reason}` : null,
+        tag.source ? `מקור: ${tag.source}` : null,
+    ].filter(Boolean) as string[];
+
     return (
-        <div
-            className={`inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-pointer select-none border whitespace-nowrap hover:shadow-md ${styleByType} ${modeBorderClass}`}
-            onClick={() => onToggle(tag.id)}
-            title={`${titleText} - לחץ לשינוי מצב`}
-        >
-            <span>{tag.name}</span>
-            <button
-                onClick={(e) => { e.stopPropagation(); onRemove(tag.id); }}
-                className="ml-1 p-0.5 rounded-full hover:bg-black/10 focus:outline-none"
+        <div className="relative inline-flex group">
+            <div
+                className={`inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-pointer select-none border whitespace-nowrap hover:shadow-md ${styleByType} ${modeBorderClass}`}
+                onClick={() => onToggle(tag.id)}
+                title={tooltipLines.length ? undefined : `${titleText} - לחץ לשינוי מצב`}
+                aria-label={tooltipLines.length ? tooltipLines.join('. ') : undefined}
             >
-                <XMarkIcon className="w-3 h-3" />
-            </button>
+                <span>{tag.name}</span>
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onRemove(tag.id); }}
+                    className="ml-1 p-0.5 rounded-full hover:bg-black/10 focus:outline-none"
+                >
+                    <XMarkIcon className="w-3 h-3" />
+                </button>
+            </div>
+            {tooltipLines.length > 0 && (
+                <div
+                    className="pointer-events-none absolute bottom-full left-1/2 z-[60] mb-2 w-max max-w-xs -translate-x-1/2 rounded-lg border border-border-default bg-bg-card px-3 py-2 text-[11px] text-text-default shadow-lg opacity-0 transition-opacity group-hover:opacity-100"
+                    dir="rtl"
+                >
+                    {tooltipLines.map((line, i) => (
+                        <p key={i} className={i === 0 ? 'font-bold text-text-muted' : 'mt-1 leading-snug'}>
+                            {line}
+                        </p>
+                    ))}
+                </div>
+            )}
         </div>
     );
 };
@@ -1338,7 +1200,17 @@ const defaultJobId = defaultPostingCode;
 const defaultUniqueEmail = `humand+${defaultPostingCode}@app.hiro.co.il`;
 
 const initialJobState = {
-    clientName: '', 
+    clientName: '',
+    /** AI / free-text תחום (when job field selector empty) */
+    aiField: '',
+    /** AI / free-text תפקיד (when job field selector empty) */
+    aiRole: '',
+    publicJobTitle: '',
+    publicDescription: '',
+    regionLabel: '',
+    clientTypeLabel: 'כללי',
+    openPositions: 1,
+    rating: 0,
     jobId: defaultJobId, 
     postingCode: defaultPostingCode, 
     uniqueEmail: defaultUniqueEmail,
@@ -1388,6 +1260,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [formData, setFormData] = useState(initialJobState);
     const [activeSection, setActiveSection] = useState('general-info');
     const [isClientConfirmed, setIsClientConfirmed] = useState(false);
+    const [activeClients, setActiveClients] = useState<Array<{ id: string; label: string }>>([]);
+    const [activeClientsLoading, setActiveClientsLoading] = useState(false);
     
     const [aiFilledFields, setAiFilledFields] = useState<Set<string>>(new Set());
     const [showParseSummary, setShowParseSummary] = useState(false);
@@ -1420,11 +1294,47 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     useEffect(() => {
         if (isEditing && jobData) {
              const candidateLocations = deriveLocationsFromJob(jobData);
+            const hydratedSkills: JobSkill[] = Array.isArray(jobData.skills)
+                ? jobData.skills.map((s: any, i: number) => ({
+                      id: String(s.id ?? `loaded-${i}`),
+                      name: String(s.name ?? ''),
+                      key: s.key,
+                      mode: ['mandatory', 'negative', 'normal'].includes(s.mode)
+                          ? (s.mode as TagMode)
+                          : mapLlmModeToTagMode(s.mode),
+                      source: (s.source as TagSource) || 'manual',
+                      tagType: (s.tagType === 'soft_skill' ? 'soft' : s.tagType) as SmartTagType | undefined,
+                      tag_reason: typeof s.tag_reason === 'string' ? s.tag_reason : undefined,
+                      relevance_score:
+                          typeof s.relevance_score === 'number'
+                              ? s.relevance_score
+                              : s.relevance_score != null
+                                ? Number(s.relevance_score)
+                                : undefined,
+                      aiMode: s.aiMode != null ? String(s.aiMode) : s.mode != null ? String(s.mode) : undefined,
+                  }))
+                : [];
+
             setFormData(prev => ({
                 ...prev,
                 clientName: jobData.client || prev.clientName,
+                aiField: jobData.field || prev.aiField,
+                aiRole: jobData.role || prev.aiRole,
+                publicJobTitle: jobData.publicJobTitle || prev.publicJobTitle,
+                publicDescription: jobData.PublicDescription
+                    ? normalizeValueForEditor(String(jobData.PublicDescription))
+                    : jobData.publicDescription
+                      ? normalizeValueForEditor(String(jobData.publicDescription))
+                      : prev.publicDescription,
+                regionLabel: jobData.region || prev.regionLabel,
+                clientTypeLabel: jobData.clientType || prev.clientTypeLabel,
+                openPositions: typeof jobData.openPositions === 'number' ? jobData.openPositions : prev.openPositions,
+                rating: typeof jobData.rating === 'number' ? jobData.rating : prev.rating,
                 jobTitle: jobData.title || prev.jobTitle,
                 jobDescription: jobData.description || prev.jobDescription,
+                requirements: Array.isArray(jobData.requirements)
+                    ? jobData.requirements.map((r: string) => String(r).trim()).join('\n')
+                    : jobData.requirements ?? prev.requirements,
                 internalNotes: jobData.internalNotes || '',
                 salaryMin: jobData.salaryMin || prev.salaryMin,
                 salaryMax: jobData.salaryMax || prev.salaryMax,
@@ -1447,7 +1357,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 enableManualScreening: jobData.enableManualScreening ?? true,
                 
                 languages: jobData.languages || [],
-                skills: jobData.skills || [], 
+                skills: hydratedSkills.length ? hydratedSkills : prev.skills,
                 locations: candidateLocations.length ? candidateLocations : prev.locations,
                 gender: mapJobGenderSelection(jobData.gender),
                 mobility: jobData.mobility ? 'חובה' : 'לא חשוב',
@@ -1463,6 +1373,53 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
              if (jobData.client) setIsClientConfirmed(true);
         }
     }, [isEditing, jobData]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!apiBase) {
+            setActiveClients([]);
+            setActiveClientsLoading(false);
+            return;
+        }
+        setActiveClientsLoading(true);
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            credentials: 'include',
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+        })
+            .then((res) => (res.ok ? res.json() : Promise.reject(new Error('load clients'))))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : [];
+                const opts = list
+                    .map((c: Record<string, unknown>) => {
+                        const label = String(c.displayName || c.name || '').trim();
+                        return { id: String(c.id ?? label), label };
+                    })
+                    .filter((o) => o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setActiveClients(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setActiveClients([]);
+            })
+            .finally(() => {
+                if (!cancelled) setActiveClientsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    const clientSelectOptions = useMemo(() => {
+        const current = formData.clientName.trim();
+        if (!current) return activeClients;
+        if (activeClients.some((c) => c.label === current)) return activeClients;
+        return [{ id: `legacy:${current}`, label: current }, ...activeClients];
+    }, [activeClients, formData.clientName]);
 
     useEffect(() => {
         const scrollContainer = document.getElementById('main-scroll-container');
@@ -1544,6 +1501,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 jobTitle: raw.title ?? raw.jobTitle,
                 jobDescription: raw.description ?? raw.jobDescription,
                 drivingLicense: raw.licenseType ?? raw.drivingLicense,
+                publicJobTitle: raw.publicJobTitle ?? raw.public_job_title,
+                publicDescription: raw.PublicDescription ?? raw.publicDescription ?? raw.public_description,
             };
 
             const filled = new Set<string>();
@@ -1603,14 +1562,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 disqualificationReason: q.disqualificationReason,
             }));
 
-            const apiRequirements = Array.isArray(extractedData.requirements)
-                ? extractedData.requirements
-                : (extractedData.requirements ? [extractedData.requirements] : []);
-            const desc = extractedData.jobDescription || '';
-            const reqText = apiRequirements.length
-                ? '\n\nדרישות:\n' + apiRequirements.map((r: string) => '• ' + String(r).trim()).join('\n')
-                : '';
-            const jobDescriptionWithReqs = (desc + reqText).trim() || undefined;
+            // Keep description, PublicDescription, and requirements separate — never merge requirements into description text.
+            const rawDesc = String(extractedData.jobDescription || '').trim();
+            const jobDescriptionFromAi = rawDesc ? normalizeValueForEditor(rawDesc) : undefined;
 
             const rawTypeToSmartTagType = (raw: string): SmartTagType => {
                 const r = (raw || '').toLowerCase();
@@ -1633,9 +1587,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     const baseName = String(t.raw_value ?? t.name ?? '').trim();
                     if (!baseName) return null;
 
+                    const namePrefix = String(t.name || '').split(':')[0]?.trim() ?? '';
                     const baseTagType = t.tagType
                         ? (String(t.tagType) as SmartTagType)
-                        : rawTypeToSmartTagType(t.raw_type ?? t.rawType ?? '');
+                        : rawTypeToSmartTagType(t.raw_type ?? t.rawType ?? namePrefix);
 
                     // Prefer explicit key from AI, otherwise derive from name
                     const explicitKey = typeof t.key === 'string' && t.key.trim() ? t.key.trim() : undefined;
@@ -1645,10 +1600,15 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         .toLowerCase()
                         .replace(/\s+/g, '_');
 
-                    // Always start AI-imported tags in 'normal' visual mode,
-                    // so the first click clearly turns them green (mandatory),
-                    // second click red (negative), third back to normal.
-                    const mode: TagMode = 'normal';
+                    const mode: TagMode = mapLlmModeToTagMode(t.mode);
+                    const relevanceScore =
+                        typeof t.relevance_score === 'number'
+                            ? t.relevance_score
+                            : t.relevance_score != null
+                              ? Number(t.relevance_score)
+                              : undefined;
+                    const tagReason = typeof t.tag_reason === 'string' ? t.tag_reason : undefined;
+                    const aiModeStr = t.mode != null && t.mode !== '' ? String(t.mode) : undefined;
 
                     return {
                         id: t.id ?? `ai-${Date.now()}-${i}`,
@@ -1657,17 +1617,57 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         mode,
                         source: (t.source as TagSource) || 'manual',
                         tagType: baseTagType,
+                        tag_reason: tagReason,
+                        relevance_score: Number.isFinite(relevanceScore as number) ? (relevanceScore as number) : undefined,
+                        aiMode: aiModeStr,
                     } as JobSkill;
                 })
                 .filter((t): t is JobSkill => Boolean(t));
 
             const genderSelection = mapJobGenderSelection(extractedData.gender);
 
+            const requirementsForForm = Array.isArray(extractedData.requirements)
+                ? (extractedData.requirements as string[]).map((r) => String(r).trim()).join('\n')
+                : extractedData.requirements != null
+                  ? String(extractedData.requirements)
+                  : undefined;
+
+            const mobilityFromAi =
+                typeof extractedData.mobility === 'boolean'
+                    ? extractedData.mobility
+                        ? 'חובה'
+                        : 'לא חשוב'
+                    : null;
+
             setFormData(prev => ({
                 ...prev,
+                clientName: (extractedData.client || prev.clientName || '').trim() || prev.clientName,
+                aiField: (extractedData.field != null && String(extractedData.field).trim())
+                    ? String(extractedData.field).trim()
+                    : prev.aiField,
+                aiRole: (extractedData.role != null && String(extractedData.role).trim())
+                    ? String(extractedData.role).trim()
+                    : prev.aiRole,
+                regionLabel: (extractedData.region != null && String(extractedData.region).trim())
+                    ? String(extractedData.region).trim()
+                    : prev.regionLabel,
+                clientTypeLabel: (extractedData.clientType != null && String(extractedData.clientType).trim())
+                    ? String(extractedData.clientType).trim()
+                    : prev.clientTypeLabel,
+                publicJobTitle: (extractedData.publicJobTitle != null && String(extractedData.publicJobTitle).trim())
+                    ? String(extractedData.publicJobTitle).trim()
+                    : prev.publicJobTitle,
+                publicDescription: extractedData.publicDescription
+                    ? normalizeValueForEditor(String(extractedData.publicDescription))
+                    : prev.publicDescription,
+                openPositions:
+                    typeof extractedData.openPositions === 'number' && extractedData.openPositions > 0
+                        ? extractedData.openPositions
+                        : prev.openPositions,
+                rating: typeof extractedData.rating === 'number' ? extractedData.rating : prev.rating,
                 jobTitle: extractedData.jobTitle || prev.jobTitle,
-                jobDescription: jobDescriptionWithReqs || prev.jobDescription,
-                requirements: extractedData.requirements || prev.requirements,
+                jobDescription: jobDescriptionFromAi ?? prev.jobDescription,
+                requirements: requirementsForForm !== undefined ? requirementsForForm : prev.requirements,
                 internalNotes: extractedData.internalNotes || prev.internalNotes,
                 salaryMin: typeof extractedData.salaryMin === 'number' ? extractedData.salaryMin : prev.salaryMin,
                 salaryMax: typeof extractedData.salaryMax === 'number' ? extractedData.salaryMax : prev.salaryMax,
@@ -1676,9 +1676,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     : prev.locations,
                 languages: aiLanguages.length ? aiLanguages : prev.languages,
                 drivingLicense: extractedData.drivingLicense || prev.drivingLicense,
-                mobility: extractedData.mobility || prev.mobility,
+                mobility: mobilityFromAi ?? prev.mobility,
                 gender: genderSelection.length ? genderSelection : prev.gender,
-                skills: apiTags.length ? [...(prev.skills || []), ...apiTags] : prev.skills,
+                skills: apiTags.length ? apiTags : prev.skills,
                 digitalQuestions: newQuestions,
                 enableDigitalScreening: true,
                 telephoneQuestions: newTelephoneQuestions.length > 0 ? newTelephoneQuestions : prev.telephoneQuestions,
@@ -1847,7 +1847,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         return JOB_TAG_ROW_CONFIG.map((row) => ({
             ...row,
             tags: skills.filter((tag) => {
-                const t = tag.tagType ?? 'skill';
+                const raw = tag.tagType ?? 'skill';
+                const t = raw === 'soft_skill' ? 'soft' : raw;
                 return row.types.includes(t);
             }),
         }));
@@ -2026,15 +2027,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         const recruiterName = mockInternalRecruiters.find(r => data.assignedRecruiters.includes(r.id))?.name || 'מערכת';
         const accountManagerName = mockAccountManagers.find(m => data.assignedAccountManagers.includes(m.id))?.name || 'מערכת';
 
+        const publicDescRaw = data.publicDescription;
+        const publicDescStr = typeof publicDescRaw === 'string' ? publicDescRaw.trim() : '';
+
         return {
             title: data.jobTitle || 'משרה חדשה',
+            publicJobTitle: data.publicJobTitle?.trim() || undefined,
             client: data.clientName || 'לקוח כללי',
-            field: field?.category || '',
-            role: field?.role || '',
+            field: field?.category || data.aiField || '',
+            role: field?.role || data.aiRole || '',
             priority: data.priority,
-            clientType: 'כללי',
+            clientType: data.clientTypeLabel || 'כללי',
             city: firstCity,
-            region: '',
+            region: (data.regionLabel || '').trim(),
             gender: genderValue,
             mobility: data.mobility === 'חובה',
             licenseType: data.drivingLicense === 'לא חשוב' ? '' : data.drivingLicense,
@@ -2046,7 +2051,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             salaryMax: data.salaryMax,
             ageMin: data.ageMin,
             ageMax: data.ageMax,
-            openPositions: 1,
+            openPositions: typeof data.openPositions === 'number' ? data.openPositions : 1,
             status: data.status === 'פעילה' ? 'פתוחה' : data.status,
             associatedCandidates: 0,
             waitingForScreening: 0,
@@ -2056,8 +2061,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             location: locationString,
             jobType: Array.isArray(data.jobType) ? data.jobType : [data.jobType],
             description: data.jobDescription,
+            PublicDescription: publicDescStr || undefined,
             requirements,
-            rating: 0,
+            rating: typeof data.rating === 'number' ? data.rating : 0,
             healthProfile: data.healthProfile,
             internalNotes: data.internalNotes,
             aiRawDescription: pastedJobText || undefined,
@@ -2072,7 +2078,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             telephoneQuestions: data.telephoneQuestions,
             digitalQuestions: data.digitalQuestions,
             languages: data.languages,
-            skills: Array.isArray(data.skills) ? data.skills : [],
+            skills: Array.isArray(data.skills)
+                ? data.skills.map((s) => ({
+                      ...s,
+                      key: s.key || (typeof s.name === 'string' ? s.name.trim() : ''),
+                  }))
+                : [],
         };
     };
 
@@ -2282,10 +2293,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                             name="clientName" 
                                             value={formData.clientName} 
                                             onChange={handleChange}
-                                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
+                                            disabled={activeClientsLoading}
+                                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm disabled:opacity-60"
                                         >
-                                            <option value="">{t('new_job.choose_client')}</option>
-                                            <option>בזק</option><option>Wix</option><option>אל-על</option>
+                                            <option value="">
+                                                {activeClientsLoading ? `${t('new_job.choose_client')}…` : t('new_job.choose_client')}
+                                            </option>
+                                            {clientSelectOptions.map((c) => (
+                                                <option key={c.id} value={c.label}>
+                                                    {c.label}
+                                                </option>
+                                            ))}
                                         </select>
                                     </div>
                                     <button type="button" onClick={() => setIsClientConfirmed(true)} disabled={!formData.clientName} className="bg-primary-600 text-white font-bold p-2.5 rounded-lg hover:bg-primary-700 disabled:opacity-50">
@@ -2392,6 +2410,18 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             />
                              <AIIndicator name="jobTitle" />
                         </div>
+
+                        <div className="relative">
+                            <label className="block text-sm font-semibold text-text-muted mb-1.5">כותרת פרסום (חיצונית)</label>
+                            <input
+                                type="text"
+                                name="publicJobTitle"
+                                value={formData.publicJobTitle}
+                                onChange={handleChange}
+                                placeholder="כותרת מושכת למועמדים..."
+                                className="w-full bg-bg-input border border-border-default text-text-default rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-3 text-sm"
+                            />
+                        </div>
                         
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="relative">
@@ -2407,17 +2437,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                 />
                                 <AIIndicator name="jobDescription" />
                             </div>
-                            <div>
-                                <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.internal_notes')}</label>
-                                <RichTextArea
-                                    value={formData.internalNotes}
-                                    onChange={(html) => setFormData(prev => ({ ...prev, internalNotes: html }))}
-                                    placeholder="דגשים לצוות הגיוס..."
-                                    minHeight="220px"
-                                    toolbarClassName="bg-primary-50/70 border-primary-200"
-                                    editorClassName="bg-white"
-                                    className="border-primary-200 focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-200 bg-bg-input"
-                                />
+                            <div className="space-y-4">
+                             
+                                <div>
+                                    <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.internal_notes')}</label>
+                                    <RichTextArea
+                                        value={formData.internalNotes}
+                                        onChange={(html) => setFormData(prev => ({ ...prev, internalNotes: html }))}
+                                        placeholder="דגשים לצוות הגיוס..."
+                                        minHeight="160px"
+                                        toolbarClassName="bg-primary-50/70 border-primary-200"
+                                        editorClassName="bg-white"
+                                        className="border-primary-200 focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-200 bg-bg-input"
+                                    />
+                                </div>
                             </div>
                         </div>
                     </div>

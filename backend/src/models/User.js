@@ -14,7 +14,15 @@ const User = sequelize.define(
     password: { type: DataTypes.STRING, allowNull: false },
     name: DataTypes.STRING,
     role: {
-      type: DataTypes.ENUM('admin', 'recruiter', 'coordinator', 'manager', 'guest', 'candidate'),
+      type: DataTypes.ENUM(
+        'super_admin',
+        'admin',
+        'recruiter',
+        'coordinator',
+        'manager',
+        'guest',
+        'candidate',
+      ),
       defaultValue: 'recruiter',
     },
     isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
@@ -28,6 +36,14 @@ const User = sequelize.define(
       // Map of permission key -> boolean
       type: DataTypes.JSONB,
       defaultValue: {},
+    },
+    /** Tenant: staff users (manager/recruiter) belong to one client */
+    clientId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      references: { model: 'clients', key: 'id' },
+      onDelete: 'SET NULL',
+      onUpdate: 'CASCADE',
     },
   },
   {

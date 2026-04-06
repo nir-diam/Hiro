@@ -1,4 +1,5 @@
-const { Op } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
+const { sequelize } = require('../config/db');
 const Candidate = require('../models/Candidate');
 const CandidateTag = require('../models/CandidateTag');
 const Tag = require('../models/Tag');
@@ -74,6 +75,39 @@ const includeCandidateTags = [
   },
 ];
 
+/** List view: avoid wide tag join on candidates; second query + slim tag rows (no embeddings / synonyms JSON). */
+const TAG_ATTRIBUTES_EXCLUDE_FOR_LIST = [
+  'synonyms',
+  'aliases',
+  'domains',
+  'embedding',
+  'internalNote',
+  'qualityState',
+  'usageCount',
+  'createdBy',
+  'updatedBy',
+  'lastUsedAt',
+];
+
+const includeCandidateTagsForList = [
+  {
+    model: CandidateTag,
+    as: 'candidateTags',
+    required: false,
+    separate: true,
+    where: {
+      is_active: true,
+    },
+    include: [
+      {
+        model: Tag,
+        as: 'tag',
+        attributes: { exclude: TAG_ATTRIBUTES_EXCLUDE_FOR_LIST },
+      },
+    ],
+  },
+];
+
 // When CandidateTag.raw_type is null, derive from Tag.type so frontend gets correct labels (e.g. Skill, Tool).
 const TAG_TYPE_TO_RAW_TYPE = {
   role: 'Role',
@@ -134,30 +168,84 @@ const mapCandidateWithTags = (candidate) => {
 const list = async () =>
   (await Candidate.findAll({ include: includeCandidateTags })).map(mapCandidateWithTags);
 
+/**
+ * Heavy JSON / text not used by GET /api/candidates grid (full profile loads on detail).
+ * Dropping these columns is the largest win on wide rows.
+ */
+const LIST_EXCLUDE_ATTRIBUTES = [
+  'embedding',
+  'searchText',
+  'workExperience',
+  'experience',
+  'education',
+  'skills',
+  'languages',
+  'internalNotes',
+  'candidateNotes',
+  'highlights',
+  'jobScopes',
+  'industryAnalysis',
+];
+
 const listPaginated = async ({ page = 1, limit = 100, search = '' } = {}) => {
   const safeLimit = Number.isFinite(limit) ? limit : 100;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
   const offset = (safePage - 1) * safeLimit;
-  const where = {};
   const trimmedSearch = String(search || '').trim();
-  if (trimmedSearch) {
-    const likeValue = { [Op.iLike]: `%${trimmedSearch}%` };
-    where[Op.or] = [
-      { fullName: likeValue },
-      { email: likeValue },
-      { professionalSummary: likeValue },
-    ];
+
+  // Parameterized raw SQL: narrow index-friendly scans (no ORM overhead on COUNT/LIMIT page).
+  let count;
+  let idRows;
+  if (!trimmedSearch) {
+    const [countRows, idQueryRows] = await Promise.all([
+      sequelize.query('SELECT COUNT(*)::int AS c FROM candidates WHERE "isDeleted" = false', {
+        type: QueryTypes.SELECT,
+      }),
+      sequelize.query(
+        'SELECT id FROM candidates WHERE "isDeleted" = false ORDER BY "updatedAt" DESC NULLS LAST LIMIT $1 OFFSET $2',
+        { bind: [safeLimit, offset], type: QueryTypes.SELECT },
+      ),
+    ]);
+    count = countRows[0].c;
+    idRows = idQueryRows;
+  } else {
+    const term = `%${trimmedSearch}%`;
+    const [countRows, idQueryRows] = await Promise.all([
+      sequelize.query(
+        `SELECT COUNT(*)::int AS c FROM candidates WHERE "isDeleted" = false
+         AND ("fullName" ILIKE $1 OR "email" ILIKE $1 OR "professionalSummary" ILIKE $1)`,
+        { bind: [term], type: QueryTypes.SELECT },
+      ),
+      sequelize.query(
+        `SELECT id FROM candidates WHERE "isDeleted" = false
+         AND ("fullName" ILIKE $1 OR "email" ILIKE $1 OR "professionalSummary" ILIKE $1)
+         ORDER BY "updatedAt" DESC NULLS LAST LIMIT $2 OFFSET $3`,
+        { bind: [term, safeLimit, offset], type: QueryTypes.SELECT },
+      ),
+    ]);
+    count = countRows[0].c;
+    idRows = idQueryRows;
   }
 
-  const { rows, count } = await Candidate.findAndCountAll({
-    include: includeCandidateTags,
-    where,
-    distinct: true,
-    col: 'id',
-    limit: safeLimit,
-    offset,
-    order: [['updatedAt', 'DESC']],
+  const ids = idRows.map((r) => r.id).filter(Boolean);
+  if (!ids.length) {
+    return {
+      rows: [],
+      count,
+      page: safePage,
+      limit: safeLimit,
+    };
+  }
+
+  const rows = await Candidate.findAll({
+    where: { id: ids },
+    include: includeCandidateTagsForList,
+    attributes: { exclude: LIST_EXCLUDE_ATTRIBUTES },
   });
+
+  const orderIndex = new Map(ids.map((id, i) => [String(id), i]));
+  rows.sort((a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0));
+
   return {
     rows: rows.map(mapCandidateWithTags),
     count,
@@ -268,6 +356,7 @@ const create = async (payload) => {
     cleanPayload.embedding = null;
   }
   delete cleanPayload.tags;
+  delete cleanPayload.sendWelcomeEmail;
   return Candidate.create(cleanPayload);
 };
 
@@ -308,6 +397,7 @@ const update = async (id, payload) => {
     else delete cleanPayload.embedding; // avoid invalid/empty vector writes
   }
   delete cleanPayload.tags;
+  delete cleanPayload.sendWelcomeEmail;
   await candidate.update(cleanPayload);
   return mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),

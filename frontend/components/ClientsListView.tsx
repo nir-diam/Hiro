@@ -1335,7 +1335,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
          openMessageModal({
             mode: action,
             candidateName: contact.name, // Reusing candidate modal for contacts for simplicity
-            candidatePhone: contact.phone
+            candidatePhone: contact.phone,
+            candidateEmail: contact.email,
         });
     };
 

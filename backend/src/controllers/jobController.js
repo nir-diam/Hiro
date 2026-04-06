@@ -1,5 +1,6 @@
 const jobService = require('../services/jobService');
 const jobCandidateService = require('../services/jobCandidateService');
+const clientUsageSettingService = require('../services/clientUsageSettingService');
 const Job = require('../models/Job');
 const Tag = require('../models/Tag');
 
@@ -36,6 +37,37 @@ const analyzeDescription = async (req, res) => {
 const list = async (_req, res) => {
   const jobs = await jobService.list();
   res.json(jobs);
+};
+
+/**
+ * Jobs for messaging UI: when user has a client, only jobs whose Job.client string matches
+ * that Client's name/displayName; otherwise all jobs (admin / no-tenant).
+ */
+const listForCompose = async (req, res) => {
+  try {
+    const user = req.dbUser;
+    const allJobs = await jobService.list();
+    if (!user?.clientId || !user.client) {
+      return res.json(allJobs);
+    }
+    const c = user.client;
+    const labels = new Set(
+      [c.name, c.displayName]
+        .filter(Boolean)
+        .map((s) => String(s).trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (!labels.size) {
+      return res.json(allJobs);
+    }
+    const filtered = allJobs.filter((j) => {
+      const jc = String(j.client || '').trim().toLowerCase();
+      return labels.has(jc);
+    });
+    return res.json(filtered);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
+  }
 };
 
 const get = async (req, res) => {
@@ -237,11 +269,15 @@ const getCandidates = async (req, res) => {
   try {
     const job = await jobService.getById(req.params.id);
     const candidates = await jobCandidateService.listForJob(req.params.id);
-    res.json({ job, candidates });
+    const returnMonths = await clientUsageSettingService.resolveReturnMonthsForJobRequest(
+      job,
+      req,
+    );
+    res.json({ job, candidates, returnMonths });
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
   }
 };
 
-module.exports = { list, get, create, update, remove, getCandidates, analyzeDescription };
+module.exports = { list, listForCompose, get, create, update, remove, getCandidates, analyzeDescription };
 

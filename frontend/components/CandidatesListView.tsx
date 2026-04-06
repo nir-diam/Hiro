@@ -539,11 +539,48 @@ const SmartSearchPanel: React.FC<{
 
 const VIEW_STATE_KEY = 'hiro.candidates.listViewState';
 
+/** When returning to the list with semantic search results saved, hydrate immediately so no loading overlay runs. */
+function loadSemanticListSessionRestore(): {
+    candidates: Candidate[];
+    searchTerm: string;
+    page: number;
+    pageSize: number;
+    showNeedsAttention: boolean;
+    showFavoritesOnly: boolean;
+} | null {
+    if (typeof sessionStorage === 'undefined') return null;
+    try {
+        const raw = sessionStorage.getItem(VIEW_STATE_KEY);
+        if (!raw) return null;
+        const saved = JSON.parse(raw);
+        if (!saved.semanticListActive || !Array.isArray(saved.candidates) || !saved.candidates.length) {
+            return null;
+        }
+        return {
+            candidates: saved.candidates,
+            searchTerm: saved.searchTerm || '',
+            page: saved.page || 1,
+            pageSize: saved.pageSize || 100,
+            showNeedsAttention: !!saved.showNeedsAttention,
+            showFavoritesOnly: !!saved.showFavoritesOnly,
+        };
+    } catch {
+        return null;
+    }
+}
+
 const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [candidates, setCandidates] = useState<Candidate[]>([]);
-    const [isRemoteLoading, setIsRemoteLoading] = useState(true);
-    const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(false);
+    const semanticListSessionRef = useRef<ReturnType<typeof loadSemanticListSessionRestore> | undefined>(undefined);
+    if (semanticListSessionRef.current === undefined) {
+        semanticListSessionRef.current = loadSemanticListSessionRestore();
+    }
+    const [candidates, setCandidates] = useState<Candidate[]>(
+        () => semanticListSessionRef.current?.candidates ?? [],
+    );
+    const [isRemoteLoading, setIsRemoteLoading] = useState(() => semanticListSessionRef.current === null);
+    const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(() => semanticListSessionRef.current !== null);
+    const [suspendListPolling, setSuspendListPolling] = useState(() => semanticListSessionRef.current !== null);
     const [jobs, setJobs] = useState<{ id: string; title: string }[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
     const [jobsError, setJobsError] = useState<string | null>(null);
@@ -554,7 +591,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const { t } = useLanguage();
 
-    const [searchTerm, setSearchTerm] = useState('');
+    const [searchTerm, setSearchTerm] = useState(() => semanticListSessionRef.current?.searchTerm ?? '');
     useEffect(() => {
         const handler = setTimeout(() => {
             const trimmed = searchTerm.trim();
@@ -567,9 +604,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const settingsRef = useRef<HTMLDivElement>(null);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [page, setPage] = useState(1);
-    const [pageSize, setPageSize] = useState(100);
-    const [totalCandidates, setTotalCandidates] = useState(0);
+    const [page, setPage] = useState(() => semanticListSessionRef.current?.page ?? 1);
+    const [pageSize, setPageSize] = useState(() => semanticListSessionRef.current?.pageSize ?? 100);
+    const [totalCandidates, setTotalCandidates] = useState(() =>
+        semanticListSessionRef.current ? semanticListSessionRef.current.candidates.length : 0,
+    );
     const totalPages = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
     const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
     const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
@@ -637,8 +676,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>(null);
     
-    const [showNeedsAttention, setShowNeedsAttention] = useState(false);
-    const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+    const [showNeedsAttention, setShowNeedsAttention] = useState(
+        () => semanticListSessionRef.current?.showNeedsAttention ?? false,
+    );
+    const [showFavoritesOnly, setShowFavoritesOnly] = useState(
+        () => semanticListSessionRef.current?.showFavoritesOnly ?? false,
+    );
 
     // Initialize basic search/filter state from URL on first mount
     useEffect(() => {
@@ -719,6 +762,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const fetchCandidates = useCallback(async () => {
         if (!apiBase) return;
+        setSuspendListPolling(false);
         setIsRemoteLoading(true);
         try {
             const params = new URLSearchParams({
@@ -747,7 +791,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     // Poll backend for updates every 10s on current page
     useEffect(() => {
-        if (!apiBase || !hasInitiallyLoaded) return;
+        if (!apiBase || !hasInitiallyLoaded || suspendListPolling) return;
         let cancelled = false;
         let inFlight = false;
 
@@ -776,15 +820,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             }
         };
 
-        // run once shortly after mount, then every 10 seconds
-        const t0 = window.setTimeout(poll, 1000);
+        // First poll only after 20s so initial load isn’t stacked; then every 10s.
+        const t0 = window.setTimeout(poll, 20_000);
         const id = window.setInterval(poll, 10_000);
         return () => {
             cancelled = true;
             window.clearTimeout(t0);
             window.clearInterval(id);
         };
-    }, [apiBase, hasInitiallyLoaded, mapCandidate, page, pageSize]);
+    }, [apiBase, hasInitiallyLoaded, mapCandidate, page, pageSize, suspendListPolling]);
 
     const goToPage = useCallback((target: number) => {
         const normalized = Math.max(1, Math.min(totalPages, target));
@@ -799,7 +843,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     // On first mount, try to restore full view state from sessionStorage.
     // If found, skip backend fetch; otherwise load from backend once.
     useEffect(() => {
-        let restored = false;
+        // First paint already restored from session (no loading spinner); do not fetch or duplicate setState.
+        if (semanticListSessionRef.current !== null) {
+            return;
+        }
+        let skipFetchAfterRestore = false;
         try {
             const raw = sessionStorage.getItem(VIEW_STATE_KEY);
             if (raw) {
@@ -812,21 +860,27 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     setShowNeedsAttention(!!saved.showNeedsAttention);
                     setShowFavoritesOnly(!!saved.showFavoritesOnly);
                     setHasInitiallyLoaded(true);
-                    restored = true;
+                    if (saved.semanticListActive) {
+                        setSuspendListPolling(true);
+                        skipFetchAfterRestore = true;
+                    }
                 }
             }
         } catch {
             // ignore restore errors
         }
-        // Always refresh from backend on mount so data stays fresh.
-        // If we restored state, this shows the lightweight loader while updating.
-        fetchCandidates();
+        // Skip refresh when returning from profile with an active semantic-search list (same results).
+        if (!skipFetchAfterRestore) {
+            fetchCandidates();
+        }
     }, []);
 
+    // Refetch when paging changes only. Do not depend on `hasInitiallyLoaded`; when it flips after the
+    // initial mount fetch, deps here stay the same so we avoid a duplicate GET.
     useEffect(() => {
-        if (!hasInitiallyLoaded) return;
+        if (!hasInitiallyLoaded || suspendListPolling) return;
         fetchCandidates();
-    }, [page, pageSize]);
+    }, [page, pageSize, fetchCandidates]);
 
     // Persist current view state (candidates + filters + paging) into sessionStorage
     // so that navigation to profile and back restores the exact same view.
@@ -839,13 +893,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             pageSize,
             showNeedsAttention,
             showFavoritesOnly,
+            semanticListActive: suspendListPolling,
         };
         try {
             sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify(stateToSave));
         } catch {
             // ignore storage errors
         }
-    }, [candidates, searchTerm, page, pageSize, showNeedsAttention, showFavoritesOnly, hasInitiallyLoaded]);
+    }, [candidates, searchTerm, page, pageSize, showNeedsAttention, showFavoritesOnly, hasInitiallyLoaded, suspendListPolling]);
 
 
 
@@ -1005,7 +1060,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             const jobList = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
             setJobs(jobList.map(job => ({ id: job.id, title: job.title || job.name || 'ללא שם' })));
         } catch (err: any) {
-            setJobsError(err.message || 'הتحميل فشل');
+            setJobsError(err.message);
         } finally {
             setJobsLoading(false);
         }
@@ -1050,6 +1105,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 Array.isArray(data?.data) ? data.data :
                 [];
             setCandidates(list.map(mapCandidate));
+            setSuspendListPolling(true);
             const label = job ? job.title : smartSearchQuery.trim();
             setFeedbackMessage(`מציג ${list.length} מועמדים דומים ל-${label}`);
         } catch (err: any) {

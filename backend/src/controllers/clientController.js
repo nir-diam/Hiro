@@ -1,7 +1,9 @@
 const clientService = require('../services/clientService');
 
-const list = async (_req, res) => {
-  const clients = await clientService.list();
+const list = async (req, res) => {
+  const raw = req.query?.activeOnly;
+  const activeOnly = raw === true || raw === 'true' || raw === '1';
+  const clients = await clientService.list({ activeOnly });
   res.json(clients);
 };
 

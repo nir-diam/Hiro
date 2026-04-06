@@ -27,6 +27,7 @@ import AdminCandidatesView from './components/AdminCandidatesView';
 import AdminCandidateProfileView from './components/AdminCandidateProfileView';
 import AdminClientFormView from './components/AdminClientFormView';
 import MessageTemplatesView from './components/MessageTemplatesView';
+import AdminMessageTemplatesView from './components/AdminMessageTemplatesView';
 import EventTypesSettingsView from './components/EventTypesSettingsView';
 import RecruitmentSourcesSettingsView from './components/RecruitmentSourcesSettingsView';
 import QuestionnaireBuilderView from './components/QuestionnaireBuilderView'; 
@@ -867,6 +868,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                         { path: 'job-fields', element: <AdminJobFieldsView /> },
                         { path: 'prompts', element: <AdminPromptsView /> },
                         { path: 'matching-engine', element: <AdminMatchingEngineView /> },
+                        { path: 'message-templates', element: <AdminMessageTemplatesView /> },
                     ],
                 },
             ] 

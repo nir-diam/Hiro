@@ -1,6 +1,7 @@
 
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../context/AuthContext';
 import { EnvelopeIcon, LockClosedIcon, HiroLogotype } from './Icons';
 
 const CandidateLoginView: React.FC = () => {
@@ -10,6 +11,7 @@ const CandidateLoginView: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const navigate = useNavigate();
+    const { refreshUser } = useAuth();
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -19,7 +21,7 @@ const CandidateLoginView: React.FC = () => {
             const res = await fetch(`${apiBase}/api/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password, role: 'candidate' }),
+                body: JSON.stringify({ email, password }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -32,7 +34,13 @@ const CandidateLoginView: React.FC = () => {
                 localStorage.setItem('herouser', JSON.stringify(data.user));
                 localStorage.setItem('user', JSON.stringify(data.user)); // for existing consumers
             }
-            navigate('/candidate-portal/profile');
+            await refreshUser();
+            const role = (data.user?.role || '').toLowerCase();
+            if (role === 'candidate') {
+                navigate('/candidate-portal/profile');
+            } else {
+                navigate('/dashboard');
+            }
         } catch (err: any) {
             setError(err.message || 'Login failed');
         } finally {

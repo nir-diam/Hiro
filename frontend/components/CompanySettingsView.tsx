@@ -7,6 +7,7 @@ import CustomFieldsSettingsView from './CustomFieldsSettingsView';
 import JobHealthSettingsView from './JobHealthSettingsView';
 import ClientHealthSettingsView from './ClientHealthSettingsView'; // New Import
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 
 // Reusable components for this view
@@ -368,6 +369,8 @@ const FinanceDefaultsTab: React.FC = () => {
 
 const CompanySettingsView: React.FC = () => {
     const { t } = useLanguage();
+    const { user } = useAuth();
+    const usageClientId = user?.clientId ?? null;
     const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults'>('details');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
     const [matchingEnginePreset, setMatchingEnginePreset] = useState<'balanced' | 'skills' | 'experience'>('balanced');
@@ -483,7 +486,7 @@ const CompanySettingsView: React.FC = () => {
             case 'parameters':
                  return <ParametersTab />;
             case 'usage':
-                return <UsageSettingsTab />;
+                return <UsageSettingsTab clientId={usageClientId} />;
             case 'tags':
                 return <CompanyTagsSettingsView />;
             case 'custom_fields':

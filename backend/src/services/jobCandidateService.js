@@ -18,6 +18,9 @@ const candidateAttributes = [
 
 const buildCandidateView = (record) => {
   const candidate = record.candidate?.toJSON?.() || {};
+  const plain = record.get ? record.get({ plain: true }) : record;
+  const createdRaw = plain.createdAt ?? record.createdAt;
+  const createdDate = createdRaw ? new Date(createdRaw).toISOString() : null;
   const name = candidate.fullName || 'מועמד';
   const address = candidate.address || candidate.location || '';
   const status = record.status || candidate.status || 'חדש';
@@ -34,6 +37,7 @@ const buildCandidateView = (record) => {
     source,
     lastActivity,
     avatar: name.trim().charAt(0) || '#',
+    createdDate,
   };
 };
 

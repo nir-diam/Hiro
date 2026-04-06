@@ -18,7 +18,7 @@ const getById = async (id) => {
 const create = async (payload) => Job.create(payload);
 
 const update = async (id, payload) => {
-  const job = await getById(id);
+const job = await getById(id);
   await job.update(payload);
   return job;
 };

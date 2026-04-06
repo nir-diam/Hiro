@@ -1,5 +1,8 @@
 const express = require('express');
+const authMiddleware = require('../middleware/authMiddleware');
+const { attachDbUser } = require('../middleware/permissionMiddleware');
 const clientController = require('../controllers/clientController');
+const clientUsageSettingController = require('../controllers/clientUsageSettingController');
 const clientContactController = require('../controllers/clientContactController');
 const clientTaskController = require('../controllers/clientTaskController');
 const clientEventController = require('../controllers/clientEventController');
@@ -38,6 +41,20 @@ router.delete('/:id/documents/:docId', clientDocumentController.remove);
 
 router.get('/:id/finance', clientFinanceController.get);
 router.put('/:id/finance', clientFinanceController.update);
+
+router.get(
+  '/:id/usage-settings',
+  authMiddleware,
+  attachDbUser,
+  clientUsageSettingController.get,
+);
+router.put(
+  '/:id/usage-settings',
+  authMiddleware,
+  attachDbUser,
+  clientUsageSettingController.update,
+);
+
 router.get('/:id', clientController.get);
 router.post('/', clientController.create);
 router.put('/:id', clientController.update);

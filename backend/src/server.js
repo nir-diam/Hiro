@@ -2,6 +2,7 @@ const path = require('path');
 const dotenv = require('dotenv');
 // Load env before any other imports that rely on it
 dotenv.config({ path: path.resolve(__dirname, '../.env') });
+dotenv.config({ path: path.resolve(__dirname, '.env') }); // e.g. backend/src/.env
 dotenv.config(); // fallback to default .env resolution
 
 const express = require('express');
@@ -23,11 +24,13 @@ const candidateTagRoutes = require('./routes/candidateTagRoutes');
 const businessLogicRoutes = require('./routes/businessLogicRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const cityRoutes = require('./routes/cityRoutes');
+const userRoutes = require('./routes/userRoutes');
+const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateAdminRoutes } = require('./routes/messageTemplateRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
-// Increase limit for /api/candidates/ai (base64 resume + payload). If 413 persists, raise proxy limit (e.g. nginx client_max_body_size).
-const bodyParserLimit = process.env.BODY_PARSER_LIMIT || '10mb';
+// Base64 resume in JSON expands ~4/3; 50mb avoids 413 for typical PDFs. Override with BODY_PARSER_LIMIT. Nginx/proxy may need client_max_body_size too.
+const bodyParserLimit = process.env.BODY_PARSER_LIMIT || '50mb';
 
 app.use(express.json({ limit: bodyParserLimit }));
 app.use(express.urlencoded({ limit: bodyParserLimit, extended: true }));
@@ -39,6 +42,7 @@ app.get('/health', (_req, res) => {
 });
 
 app.use('/api/auth', authRoutes);
+app.use('/api/users', userRoutes);
 app.use('/api/clients', clientRoutes);
 app.use('/api/organizations', organizationRoutes);
 app.use('/api/jobs', jobRoutes);
@@ -54,6 +58,8 @@ app.use('/api/admin/candidate-tags', candidateTagRoutes);
 app.use('/api/admin/business-logic', businessLogicRoutes);
 app.use('/api/email-uploads', emailRoutes);
 app.use('/api/cities', cityRoutes);
+app.use('/api/message-templates', messageTemplateClientRoutes);
+app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
 
 const start = async () => {
   try {

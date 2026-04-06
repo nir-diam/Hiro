@@ -1,7 +1,11 @@
-
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { InformationCircleIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import {
+    fetchClientUsageSettings,
+    saveClientUsageSettings,
+    type ClientUsageSettingsDto,
+} from '../services/usageSettingsApi';
 
 // Reusable local components
 const FormSelect: React.FC<{ value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; name: string; children: React.ReactNode; }> = ({ value, onChange, name, children }) => (
@@ -72,9 +76,84 @@ const initialSettings = {
     billingStatusAccepted: false,
 };
 
-const UsageSettingsTab: React.FC = () => {
+function mergeUsageFromApi(
+    prev: typeof initialSettings,
+    data: ClientUsageSettingsDto,
+): typeof initialSettings {
+    return {
+        ...prev,
+        doubleAuth: data.doubleAuth,
+        googleLogin: data.googleLogin,
+        initialScreeningLevel: data.initialScreeningLevel,
+        returnMonths: data.returnMonths,
+        questionnaireSource: data.questionnaireSource,
+        autoDisconnect: data.autoDisconnect,
+        logoOnCv: data.logoOnCv,
+        candidateNoLocationToFix: data.candidateNoLocationToFix,
+        candidateNoTagToFix: data.candidateNoTagToFix,
+        showCvPreview: data.showCvPreview,
+        jobAlerts: data.jobAlerts,
+        autoThanksEmail: data.autoThanksEmail,
+        oneCandidatePerEmail: data.oneCandidatePerEmail,
+        billingStatusParent: data.billingStatusParent,
+        billingStatusAccepted: data.billingStatusAccepted,
+    };
+}
+
+function toSavePayload(s: typeof initialSettings): ClientUsageSettingsDto {
+    return {
+        doubleAuth: s.doubleAuth,
+        googleLogin: s.googleLogin,
+        initialScreeningLevel: s.initialScreeningLevel,
+        returnMonths: Number(s.returnMonths) || 0,
+        questionnaireSource: s.questionnaireSource,
+        autoDisconnect: s.autoDisconnect,
+        logoOnCv: s.logoOnCv,
+        candidateNoLocationToFix: s.candidateNoLocationToFix,
+        candidateNoTagToFix: s.candidateNoTagToFix,
+        showCvPreview: s.showCvPreview,
+        jobAlerts: s.jobAlerts,
+        autoThanksEmail: s.autoThanksEmail,
+        oneCandidatePerEmail: s.oneCandidatePerEmail,
+        billingStatusParent: s.billingStatusParent,
+        billingStatusAccepted: s.billingStatusAccepted,
+    };
+}
+
+const UsageSettingsTab: React.FC<{ clientId: string | null }> = ({ clientId }) => {
     const { t } = useLanguage();
     const [settings, setSettings] = useState(initialSettings);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [saveError, setSaveError] = useState<string | null>(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+
+    useEffect(() => {
+        if (!clientId) {
+            setLoadError(null);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            setIsLoading(true);
+            setLoadError(null);
+            try {
+                const data = await fetchClientUsageSettings(clientId);
+                if (!cancelled) {
+                    setSettings((prev) => mergeUsageFromApi(prev, data));
+                }
+            } catch (e: unknown) {
+                if (!cancelled) {
+                    setLoadError(e instanceof Error ? e.message : t('company_settings.usage_load_error'));
+                }
+            } finally {
+                if (!cancelled) setIsLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [clientId, t]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value, type } = e.target;
@@ -85,30 +164,46 @@ const UsageSettingsTab: React.FC = () => {
         }));
     };
 
+    const handleSave = useCallback(async () => {
+        if (!clientId) return;
+        setSaveError(null);
+        setIsSaving(true);
+        try {
+            const saved = await saveClientUsageSettings(clientId, toSavePayload(settings));
+            setSettings((prev) => mergeUsageFromApi(prev, saved));
+            alert(t('company_settings.usage_saved'));
+        } catch (e: unknown) {
+            setSaveError(e instanceof Error ? e.message : t('company_settings.usage_save_error'));
+        } finally {
+            setIsSaving(false);
+        }
+    }, [clientId, settings, t]);
+
     return (
         <div className="animate-fade-in">
             <h2 className="text-xl font-bold text-text-default mb-6">{t('company_settings.tab_usage')}</h2>
+            {!clientId && (
+                <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-3 mb-4">
+                    {t('company_settings.usage_no_client')}
+                </p>
+            )}
+            {loadError && (
+                <p className="text-sm text-red-600 mb-4">{loadError}</p>
+            )}
+            {isLoading && clientId && (
+                <p className="text-sm text-text-subtle mb-4">{t('company_settings.usage_loading')}</p>
+            )}
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-12 gap-y-8">
                 {/* Left Column from image */}
                 <div className="bg-bg-card p-4 rounded-lg border border-border-default">
                     <h3 className="text-base font-bold mb-2">{t('company_settings.interface_settings')}</h3>
                     <div>
-                        <SettingRow label={t('company_settings.interface_lang')}><FormSelect name="interfaceLanguage" value={settings.interfaceLanguage} onChange={handleChange}><option>עברית</option><option>English</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.double_auth')}><FormSelect name="doubleAuth" value={settings.doubleAuth} onChange={handleChange}><option>לא פעיל</option><option>פעיל</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.google_login')}><FormSelect name="googleLogin" value={settings.googleLogin} onChange={handleChange}><option>פעיל</option><option>לא פעיל</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.foreign_phones')}><FormSelect name="foreignPhones" value={settings.foreignPhones} onChange={handleChange}><option>לא נתמך</option><option>נתמך</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.initial_screening')}><FormSelect name="initialScreeningLevel" value={settings.initialScreeningLevel} onChange={handleChange}><option>טלפוני</option><option>פרונטלי</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.send_method')}><FormSelect name="sendMethod" value={settings.sendMethod} onChange={handleChange}><option>{'דוא"ל'}</option><option>SMS</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.send_from_fix')}><FormSelect name="sendFromFix" value={settings.sendFromFix} onChange={handleChange}><option>כן</option><option>לא</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.hide_details')}><FormSelect name="hideDetails" value={settings.hideDetails} onChange={handleChange}><option>לא</option><option>כן</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.cv_hebrew')}><FormSelect name="cvInHebrew" value={settings.cvInHebrew} onChange={handleChange}><option>לא</option><option>כן</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.job_cities')}><FormSelect name="jobCities" value={settings.jobCities} onChange={handleChange}><option>כלום לא מסומן</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.job_validity')}><FormInput name="jobValidityDays" value={settings.jobValidityDays} onChange={handleChange} type="number" /></SettingRow>
-                        <SettingRow label={t('company_settings.job_type_validity')}><FormInput name="jobTypeValidityDays" value={settings.jobTypeValidityDays} onChange={handleChange} type="number" /></SettingRow>
                         <SettingRow label={t('company_settings.return_months')}><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>
                         <SettingRow label={t('company_settings.questionnaire_source')}><FormSelect name="questionnaireSource" value={settings.questionnaireSource} onChange={handleChange}><option>חברה</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.system_referral')}><FormSelect name="systemReferral" value={settings.systemReferral} onChange={handleChange}><option>מערכת</option></FormSelect></SettingRow>
                     </div>
                 </div>
 
@@ -118,14 +213,11 @@ const UsageSettingsTab: React.FC = () => {
                     <div>
                         <CheckboxRow label={t('company_settings.auto_disconnect')} name="autoDisconnect" checked={settings.autoDisconnect} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.logo_on_cv')} name="logoOnCv" checked={settings.logoOnCv} onChange={handleChange} />
-                        <CheckboxRow label={t('company_settings.original_cv_only')} name="sendOnlyOriginalCv" checked={settings.sendOnlyOriginalCv} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.no_location_fix')} name="candidateNoLocationToFix" checked={settings.candidateNoLocationToFix} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.no_tag_fix')} name="candidateNoTagToFix" checked={settings.candidateNoTagToFix} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.cv_preview')} name="showCvPreview" checked={settings.showCvPreview} onChange={handleChange} />
-                        <CheckboxRow label={t('company_settings.import_hunter')} name="importHunterCandidates" checked={settings.importHunterCandidates} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.job_alerts')} name="jobAlerts" checked={settings.jobAlerts} onChange={handleChange} />
-                        <CheckboxRow label={t('company_settings.download_cv_dashboard')} name="downloadCvInDashboard" checked={settings.downloadCvInDashboard} onChange={handleChange} />
-                        <CheckboxRow label={t('company_settings.auto_thanks')} name="autoThanksEmail" checked={settings.autoThanksEmail} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.welcome_email')} name="autoThanksEmail" checked={settings.autoThanksEmail} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.one_candidate_email')} name="oneCandidatePerEmail" checked={settings.oneCandidatePerEmail} onChange={handleChange} />
                          <div>
                              <CheckboxRow label={t('company_settings.billing_statuses')} name="billingStatusParent" checked={settings.billingStatusParent} onChange={handleChange} />
@@ -135,8 +227,16 @@ const UsageSettingsTab: React.FC = () => {
                 </div>
             </div>
 
-            <div className="flex justify-end pt-6 mt-6 border-t border-border-default">
-                <button className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md">{t('company_settings.save_changes')}</button>
+            <div className="flex flex-col items-end gap-2 pt-6 mt-6 border-t border-border-default">
+                {saveError && <p className="text-sm text-red-600">{saveError}</p>}
+                <button
+                    type="button"
+                    onClick={() => void handleSave()}
+                    disabled={!clientId || isSaving || isLoading}
+                    className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md disabled:opacity-50 disabled:pointer-events-none"
+                >
+                    {isSaving ? t('company_settings.usage_saving') : t('company_settings.save_changes')}
+                </button>
             </div>
         </div>
     );

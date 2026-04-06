@@ -12,6 +12,14 @@ import AccordionSection from './AccordionSection';
 import { AvatarIcon } from './Icons';
 import HiroAIChat from './HiroAIChat';
 import { useLanguage } from '../context/LanguageContext';
+import { RichTextArea, normalizeValueForEditor } from './RichTextArea';
+
+/** Same public-description sources as NewJobView (`formData.publicDescription`). */
+function publicDescriptionFromJob(job: any): string {
+    const raw = job?.PublicDescription ?? job?.publicDescription ?? job?.public_description;
+    if (raw == null || raw === '') return '';
+    return normalizeValueForEditor(String(raw));
+}
 
 interface Message {
     role: 'user' | 'model';
@@ -151,7 +159,9 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const publishingCode = (job as any).postingCode || fallbackPostingCode;
     const [copySuccess, setCopySuccess] = useState(false);
     const [publicJobTitle, setPublicJobTitle] = useState((job as any).publicJobTitle || '');
-    const [publicJobDescription, setPublicJobDescription] = useState(job.description);
+    const [publicJobDescription, setPublicJobDescription] = useState(() =>
+        publicDescriptionFromJob(jobFromParent || mockJob),
+    );
     const [publicJobRequirements, setPublicJobRequirements] = useState(job.requirements.join('\n'));
     
     const [landingPageFields, setLandingPageFields] = useState<LandingPageField[]>(initialFields);
@@ -234,7 +244,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     useEffect(() => {
         const anyJob: any = job;
         setPublicJobTitle(anyJob.publicJobTitle || '');
-        setPublicJobDescription(anyJob.description || '');
+        setPublicJobDescription(publicDescriptionFromJob(anyJob));
         const requirements = Array.isArray(anyJob.requirements) ? anyJob.requirements : (anyJob.requirements ? [anyJob.requirements] : []);
         setPublicJobRequirements(requirements.join('\n'));
         setScreeningQuestions(Array.isArray(job.screeningQuestions) ? job.screeningQuestions : []);
@@ -440,7 +450,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
 
             const payload = {
                 publicJobTitle: publicJobTitle.trim() || null,
-                description: publicJobDescription,
+                PublicDescription: publicJobDescription,
                 requirements: requirementsArray,
                 screeningQuestions,
             };
@@ -541,11 +551,14 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                     
                      <div>
                         <label className="block text-base font-bold text-text-default mb-2">תיאור משרה (לפרסום)</label>
-                        <textarea 
+                        <RichTextArea
                             value={publicJobDescription}
-                            onChange={(e) => setPublicJobDescription(e.target.value)}
-                            rows={6}
-                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
+                            onChange={(html) => setPublicJobDescription(html)}
+                            placeholder="טקסט קצר ומושך למועמדים..."
+                            minHeight="160px"
+                            toolbarClassName="bg-emerald-50/70 border-emerald-200"
+                            editorClassName="bg-white"
+                            className="border-emerald-200 focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-200 bg-bg-input"
                         />
                     </div>
 

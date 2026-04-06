@@ -18,6 +18,7 @@ import CreateJobAlertModal from './components/CreateJobAlertModal';
 import { useLanguage } from './context/LanguageContext';
 import { FinanceProvider } from './context/FinanceContext';
 import { PromptProvider } from './context/PromptContext';
+import StaffPageGate from './components/StaffPageGate';
 
 
 export type PageType = 'list' | 'profile' | 'new' | 'login' | 'jobs' | 'new-job' | 'clients' | 'new-client' | 'notifications' | 'company-settings' | 'coordinators-settings' | 'coordinator-profile' | 'admin-dashboard' | 'admin-client-form' | 'message-templates' | 'event-types-settings' | 'candidate-pool' | 'job-board' | 'finance';
@@ -236,6 +237,7 @@ const AppContent: React.FC = () => {
                         mode={messageModalConfig.mode}
                         candidateName={messageModalConfig.candidateName}
                         candidatePhone={messageModalConfig.candidatePhone}
+                        candidateEmail={messageModalConfig.candidateEmail}
                     />
                 )}
             </div>
@@ -244,6 +246,7 @@ const AppContent: React.FC = () => {
 
     return (
         <FinanceProvider>
+            <StaffPageGate>
             <div className="flex h-screen bg-bg-default text-text-default" dir="rtl">
                 <Sidebar 
                     isSidebarOpen={isSidebarOpen}
@@ -296,6 +299,7 @@ const AppContent: React.FC = () => {
                     onClose={closeNewTask} 
                     onSave={handleSaveTask}
                     onOpenCandidateSummary={openSummaryDrawer}
+                    pathname={location.pathname}
                 />
                 <CandidateSummaryDrawer
                     isOpen={isSummaryDrawerOpen}
@@ -313,6 +317,7 @@ const AppContent: React.FC = () => {
                         mode={messageModalConfig.mode}
                         candidateName={messageModalConfig.candidateName}
                         candidatePhone={messageModalConfig.candidatePhone}
+                        candidateEmail={messageModalConfig.candidateEmail}
                     />
                 )}
                 <CreateJobAlertModal 
@@ -322,6 +327,7 @@ const AppContent: React.FC = () => {
                     config={jobAlertModalConfig}
                 />
             </div>
+            </StaffPageGate>
         </FinanceProvider>
     );
 };

@@ -4,6 +4,7 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { UserGroupIcon, BriefcaseIcon, ChartPieIcon,BanknotesIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 // ... (Keep existing interfaces and NavItem/SubMenuLink components) ...
 interface NavItemProps {
@@ -57,6 +58,7 @@ type ConnectedUser = {
     name?: string;
     role?: string;
     phone?: string;
+    effectivePermissions?: Record<string, boolean>;
 };
 
 const readStoredUser = (): ConnectedUser | null => {
@@ -77,6 +79,7 @@ const getInitial = (u: ConnectedUser | null): string => {
 
 const roleLabelHe = (role?: string): string => {
     switch ((role || '').toLowerCase()) {
+        case 'super_admin': return 'מנהל על';
         case 'admin': return 'אדמין';
         case 'recruiter': return 'מגייס/ת';
         case 'coordinator': return 'רכז/ת';
@@ -92,6 +95,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const location = useLocation();
     const { savedSearches, deleteSearch } = useSavedSearches();
     const { t, dir } = useLanguage();
+    const { canPage } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
     const [connectedUser, setConnectedUser] = useState<ConnectedUser | null>(() => readStoredUser());
@@ -147,7 +151,11 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         if (!token) return;
 
         const hasName = !!(connectedUser?.name && connectedUser.name.trim());
-        if (hasName) return;
+        const hasPerms =
+            connectedUser?.effectivePermissions &&
+            typeof connectedUser.effectivePermissions === 'object' &&
+            Object.keys(connectedUser.effectivePermissions).length > 0;
+        if (hasName && hasPerms) return;
 
         let cancelled = false;
         (async () => {
@@ -170,7 +178,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
         })();
 
         return () => { cancelled = true; };
-    }, [apiBase, connectedUser?.name]);
+    }, [apiBase, connectedUser?.name, connectedUser?.effectivePermissions]);
 
     const handleNavigation = (path: string) => {
         navigate(path);
@@ -272,7 +280,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                 <div className="flex-1 flex flex-col justify-between overflow-y-auto overflow-x-hidden custom-scrollbar py-4 space-y-1">
                     <nav className="flex flex-col space-y-1">
                         
-                        {/* ... (Existing Candidates Group) ... */}
+                        {canPage('page:candidates') && (
                         <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isCandidatesOpen, setIsCandidatesOpen, '/candidates')}
@@ -345,7 +353,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 </div>
                             </div>
                         </div>
+                        )}
                         
+                        {canPage('page:communications') && (
                         <NavItem 
                             to="/communications"
                             label={t('nav.communications')} 
@@ -354,7 +364,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             onClick={() => handleNavigation('/communications')}
                             isOpen={isOpen} 
                         />
+                        )}
                          
+                        {canPage('page:candidate_pool') && (
                          <NavItem 
                             to="/candidate-pool"
                             label={t('nav.candidate_pool')}
@@ -363,7 +375,9 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             onClick={() => handleNavigation('/candidate-pool')}
                             isOpen={isOpen} 
                         />
+                        )}
 
+                        {canPage('page:job_board') && (
                         <NavItem 
                             to="/job-board"
                             label={t('nav.job_board')}
@@ -372,8 +386,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             onClick={() => handleNavigation('/job-board')}
                             isOpen={isOpen} 
                         />
+                        )}
 
                         {/* Jobs Group */}
+                        {canPage('page:jobs') && (
                         <div className="w-full">
                              <button
                                 onClick={() => handleParentClick(isJobsOpen, setIsJobsOpen, '/jobs')}
@@ -422,8 +438,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 </div>
                             </div>
                         </div>
+                        )}
 
                         {/* Clients Group */}
+                        {canPage('page:clients') && (
                         <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isClientsOpen, setIsClientsOpen, '/clients')}
@@ -460,8 +478,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 </div>
                             </div>
                         </div>
+                        )}
 
                         {/* --- FINANCE GROUP (NEW) --- */}
+                        {canPage('page:finance') && (
                         <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isFinanceOpen, setIsFinanceOpen, '/finance')}
@@ -504,8 +524,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 </div>
                             </div>
                         </div>
+                        )}
 
                          {/* Reports Group */}
+                         {canPage('page:reports') && (
                          <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isReportsOpen, setIsReportsOpen, '/reports')}
@@ -555,9 +577,10 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 </div>
                             </div>
                         </div>
+                        )}
 
                          {/* Settings Group */}
-                         {/* ... (Existing) ... */}
+                         {(canPage('page:settings') || canPage('page:admin')) && (
                          <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isSettingsOpen, setIsSettingsOpen, '/settings')}
@@ -579,6 +602,8 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             </button>
                             <div className={`overflow-hidden transition-all duration-300 ${isOpen && isSettingsOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'}`}>
                                 <div className="mt-1 space-y-0.5">
+                                    {canPage('page:settings') && (
+                                    <>
                                     <SubMenuLink 
                                         to="/settings/company"
                                         label={t('nav.company_settings')}
@@ -591,7 +616,6 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                         onClick={() => handleNavigation('/settings/coordinators')} 
                                         isActive={pathname.startsWith('/settings/coordinators')}
                                     />
-                                    {/* ... rest of settings ... */}
                                     <SubMenuLink 
                                         to="/settings/message-templates"
                                         label={t('nav.message_templates')}
@@ -616,18 +640,23 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                         onClick={() => handleNavigation('/settings/questionnaires')} 
                                         isActive={pathname === '/settings/questionnaires'}
                                     />
+                                    </>
+                                    )}
+                                    {canPage('page:admin') && (
                                     <SubMenuLink 
                                         to="/admin"
                                         label={t('nav.admin_panel')}
                                         onClick={() => handleNavigation('/admin')} 
                                         isActive={pathname.startsWith('/admin')}
                                     />
+                                    )}
                                 </div>
                             </div>
                         </div>
+                        )}
 
                          {/* Misc Group */}
-                         {/* ... (Existing) ... */}
+                         {canPage('page:dashboard') && (
                          <div className="w-full">
                             <button
                                 onClick={() => handleParentClick(isMiscOpen, setIsMiscOpen, '')}
@@ -673,6 +702,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                 </div>
                             </div>
                         </div>
+                        )}
 
                     </nav>
                 </div>

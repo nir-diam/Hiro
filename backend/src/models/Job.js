@@ -48,6 +48,7 @@ const Job = sequelize.define(
     location: DataTypes.TEXT,
     jobType: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     description: DataTypes.TEXT,
+    PublicDescription: DataTypes.TEXT,
     requirements: { type: DataTypes.ARRAY(DataTypes.TEXT), defaultValue: [] },
     rating: DataTypes.INTEGER,
     healthProfile: {
@@ -64,7 +65,7 @@ const Job = sequelize.define(
     skills: {
       type: DataTypes.JSONB,
       defaultValue: [],
-      comment: 'Array of { id, name, mode, source } for כישורים ותגיות חכמות',
+      comment: 'Array of skill/tag objects (id, name, key, mode, tag_reason, relevance_score, etc.)',
     },
     aiRawDescription: DataTypes.TEXT,
   },

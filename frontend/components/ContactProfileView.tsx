@@ -86,6 +86,7 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
             mode,
             candidateName: contact.name,
             candidatePhone: contact.mobilePhone || contact.phone,
+            candidateEmail: contact.email || contact.mainContactEmail || undefined,
         });
     };
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { BuildingOffice2Icon, TagIcon, BriefcaseIcon, SparklesIcon } from './Icons';
+import { BuildingOffice2Icon, TagIcon, BriefcaseIcon, SparklesIcon, ChatBubbleBottomCenterTextIcon } from './Icons';
 
 const AdminSettingsLayout: React.FC = () => {
     const navItems = [
@@ -8,6 +8,7 @@ const AdminSettingsLayout: React.FC = () => {
         { to: '/admin/settings/tags', label: 'ניהול תגיות', icon: <TagIcon className="w-5 h-5" /> },
         { to: '/admin/settings/job-fields', label: 'ניהול תחומי משרה', icon: <BriefcaseIcon className="w-5 h-5" /> },
         { to: '/admin/settings/prompts', label: 'AI Prompts', icon: <SparklesIcon className="w-5 h-5" /> },
+        { to: '/admin/settings/message-templates', label: 'תבניות הודעה (Hiro)', icon: <ChatBubbleBottomCenterTextIcon className="w-5 h-5" /> },
     ];
 
     return (

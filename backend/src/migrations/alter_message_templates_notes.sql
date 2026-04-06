@@ -1,0 +1,5 @@
+-- No ALTER TABLE required for admin vs client templates.
+-- Admin / Hiro templates: scope = 'admin', client_id IS NULL (CHECK constraint already enforces this).
+-- Tenant templates: scope = 'client', client_id = FK to clients.id.
+-- Optional: inspect
+--   SELECT scope, client_id, template_key, name FROM message_templates ORDER BY scope, client_id;

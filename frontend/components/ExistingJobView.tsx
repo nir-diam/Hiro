@@ -234,45 +234,123 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
             `}</style>
 
-            {/* Header Area - Compact Version */}
-            <div className="flex flex-col lg:flex-row justify-between items-center gap-4 bg-gradient-to-l from-primary-600 to-primary-700 p-5 rounded-2xl text-white shadow-lg relative overflow-hidden">
-                <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-10 -mt-10 blur-2xl"></div>
-                <div className="relative z-10 flex flex-col md:flex-row items-center gap-4 text-center md:text-right">
-                    <div className="flex-shrink-0">
-                        <div className="bg-white/20 text-white text-[10px] font-black px-2.5 py-1 rounded-lg backdrop-blur-md uppercase tracking-widest border border-white/20 mb-1 inline-block">
-                             {t('job.id_prefix')} {jobDataState.id}
+            {/* Header: skill tags in one horizontal row (full width scroll), never stacked under each other */}
+            <div className="flex flex-col gap-2.5 bg-gradient-to-l from-primary-600 to-primary-700 p-3 sm:gap-3 sm:p-4 md:p-5 rounded-2xl text-white shadow-lg relative overflow-hidden lg:flex-row lg:items-start lg:justify-between lg:gap-4">
+                <div className="absolute top-0 right-0 w-24 h-24 bg-white/5 rounded-full -mr-8 -mt-8 blur-2xl pointer-events-none sm:w-32 sm:h-32 sm:-mr-10 sm:-mt-10" aria-hidden />
+                <div className="relative z-10 flex min-w-0 flex-1 flex-col gap-2 text-right">
+                    <div className="flex min-w-0 flex-col gap-2 md:flex-row md:items-start md:gap-3 lg:gap-4">
+                        <div className="min-w-0 shrink-0 md:max-w-[min(100%,28rem)]">
+                        <div
+                            className="mb-1 flex max-w-full items-center gap-1 rounded-lg border border-white/20 bg-white/20 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-white backdrop-blur-md sm:px-2 sm:py-1 sm:text-[9px] sm:tracking-wider md:text-[10px]"
+                            dir="ltr"
+                            title={`${t('job.id_prefix')} ${jobDataState.id}`}
+                        >
+                            <span className="shrink-0">{t('job.id_prefix')}</span>
+                            <span className="min-w-0 truncate font-mono text-[7px] sm:text-[8px] md:text-[9px]">
+                                {jobDataState.id}
+                            </span>
                         </div>
-                        <h1 className="text-2xl font-black tracking-tight leading-none">{jobDataState.title}</h1>
-                    </div>
-                    <div className="h-8 w-px bg-white/20 hidden md:block mx-2"></div>
-                    <div className="flex flex-col items-center md:items-start">
-                        <p className="text-primary-100 text-sm font-bold opacity-90">{jobDataState.client}</p>
-                        <div className="flex items-center gap-2 mt-0.5">
-                            <span className="text-[11px] text-primary-200">{jobDataState.location.split(',')[0]}</span>
-                            <div className="flex items-center gap-1 bg-amber-400 text-amber-900 text-[9px] font-black px-1.5 py-0.5 rounded shadow-sm">
-                                <FireIcon className="w-2.5 h-2.5" /> {t(`priority.${jobDataState.priority}`)}
+                        <h1 className="text-base font-black leading-snug tracking-tight break-words sm:text-lg md:text-xl lg:text-2xl">
+                            {jobDataState.title}
+                        </h1>
+                        {(jobDataState as any).publicJobTitle ? (
+                            <p className="mt-1 max-w-xl text-xs font-semibold leading-snug text-primary-100/95 line-clamp-2 sm:mt-1.5 sm:text-sm sm:line-clamp-none">
+                                פרסום: {(jobDataState as any).publicJobTitle}
+                            </p>
+                        ) : null}
+                        </div>
+                        <div className="hidden w-px shrink-0 bg-white/20 md:block md:self-stretch md:min-h-0" />
+                        <div className="flex min-w-0 flex-1 flex-col items-stretch text-right md:min-h-0">
+                        <p className="text-xs font-bold text-primary-100 opacity-90 sm:text-sm">{jobDataState.client}</p>
+                        {(jobDataState as any).field || (jobDataState as any).role ? (
+                            <p
+                                className="mt-0.5 min-w-0 max-w-full truncate text-[11px] leading-snug text-primary-200/90 sm:mt-1 sm:text-xs"
+                                title={
+                                    [
+                                        (jobDataState as any).field ? `תחום: ${(jobDataState as any).field}` : '',
+                                        (jobDataState as any).role ? `תפקיד: ${(jobDataState as any).role}` : '',
+                                    ]
+                                        .filter(Boolean)
+                                        .join(' · ') || undefined
+                                }
+                            >
+                                {(jobDataState as any).field ? <>תחום: {(jobDataState as any).field}</> : null}
+                                {(jobDataState as any).field && (jobDataState as any).role ? ' · ' : null}
+                                {(jobDataState as any).role ? <>תפקיד: {(jobDataState as any).role}</> : null}
+                            </p>
+                        ) : null}
+                            <div className="mt-1 flex flex-nowrap items-center gap-1.5 sm:mt-1.5 sm:gap-2">
+                                <span className="text-[10px] text-primary-200 sm:text-[11px]">
+                                    {jobDataState.location.split(',')[0]}
+                                </span>
+                                <div className="flex items-center gap-0.5 rounded bg-amber-400 px-1 py-0.5 text-[8px] font-black text-amber-900 shadow-sm sm:gap-1 sm:px-1.5 sm:text-[9px]">
+                                    <FireIcon className="h-2 w-2 shrink-0 sm:h-2.5 sm:w-2.5" /> {t(`priority.${jobDataState.priority}`)}
+                                </div>
                             </div>
                         </div>
                     </div>
+                    {Array.isArray((jobDataState as any).skills) && (jobDataState as any).skills.length > 0 ? (
+                        <div className="-mx-0.5 flex w-full min-w-0 flex-row flex-nowrap items-center gap-1 overflow-x-auto overflow-y-hidden px-0.5 py-0.5 [-webkit-overflow-scrolling:touch] [scrollbar-width:thin] sm:gap-1.5">
+                            {(jobDataState as any).skills.map((s: any) => {
+                                const tip = [
+                                    s.tagType ? `סוג: ${s.tagType}` : null,
+                                    s.mode || s.aiMode ? `מצב: ${s.mode || s.aiMode}` : null,
+                                    s.relevance_score != null ? `ציון: ${s.relevance_score}` : null,
+                                    s.tag_reason ? `נימוק: ${s.tag_reason}` : null,
+                                ]
+                                    .filter(Boolean)
+                                    .join('\n');
+                                return (
+                                    <span
+                                        key={s.id || s.key || s.name}
+                                        title={tip || s.name}
+                                        className="max-w-[10rem] shrink-0 rounded-full border border-white/25 bg-white/10 px-2 py-0.5 text-[9px] font-semibold text-white sm:max-w-[11rem] sm:text-[10px]"
+                                    >
+                                        <span className="block truncate">{s.name}</span>
+                                    </span>
+                                );
+                            })}
+                        </div>
+                    ) : null}
                 </div>
 
-                <div className="flex gap-2 relative z-10 w-full md:w-auto">
-                    <button 
+                <div className="relative z-10 flex w-full shrink-0 flex-row items-stretch gap-1.5 lg:w-auto lg:gap-2">
+                    <button
+                        type="button"
                         onClick={() => setIsInviteModalOpen(true)}
-                        className="flex-1 md:flex-none bg-white/10 hover:bg-white/20 text-white border border-white/20 font-bold py-2 px-5 rounded-xl transition-all flex items-center justify-center gap-2 backdrop-blur-md text-sm"
+                        className="flex min-h-0 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg border border-white/20 bg-white/10 px-2 py-2 text-[11px] font-bold leading-tight text-white backdrop-blur-md transition-all hover:bg-white/20 active:bg-white/25 sm:gap-2 sm:rounded-xl sm:px-3 sm:py-2.5 sm:text-sm lg:flex-none lg:px-5"
                     >
-                        <UserPlusIcon className="w-4 h-4" />
-                        {t('job.invite_manager')}
+                        <UserPlusIcon className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
+                        <span className="text-center">{t('job.invite_manager')}</span>
                     </button>
-                    <button 
+                    <button
+                        type="button"
                         onClick={handleOpenChat}
-                        className="flex-1 md:flex-none bg-white text-primary-700 font-bold py-2 px-6 rounded-xl hover:shadow-xl hover:scale-105 transition-all flex items-center justify-center gap-2 text-sm"
+                        className="flex min-h-0 min-w-0 flex-1 items-center justify-center gap-1 rounded-lg bg-white px-2 py-2 text-[11px] font-bold leading-tight text-primary-700 shadow-sm transition-all hover:shadow-lg active:scale-[0.99] sm:gap-2 sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-sm sm:hover:scale-[1.02] lg:flex-none lg:px-6"
                     >
-                        <SparklesIcon className="w-4 h-4" />
-                        {t('job.consult_hiro')}
+                        <SparklesIcon className="h-3.5 w-3.5 shrink-0 sm:h-4 sm:w-4" />
+                        <span className="text-center">{t('job.consult_hiro')}</span>
                     </button>
                 </div>
             </div>
+
+            {(() => {
+                const pubDesc = (jobDataState as any).PublicDescription || (jobDataState as any).publicDescription;
+                if (!pubDesc || !String(pubDesc).trim()) return null;
+                return (
+                    <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm p-5" dir="rtl">
+                        <h2 className="text-sm font-bold text-text-muted uppercase tracking-wide mb-2">תיאור פרסום (חיצוני)</h2>
+                        <div
+                            className="text-sm text-text-default prose prose-sm max-w-none"
+                            dangerouslySetInnerHTML={{
+                                __html: String(pubDesc).includes('<')
+                                    ? String(pubDesc)
+                                    : String(pubDesc).replace(/\n/g, '<br />'),
+                            }}
+                        />
+                    </div>
+                );
+            })()}
 
             {/* Main Content Grid */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

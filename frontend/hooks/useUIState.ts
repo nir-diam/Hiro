@@ -8,6 +8,8 @@ export interface MessageModalConfig {
     mode: MessageMode;
     candidateName: string;
     candidatePhone: string;
+    /** Used for email channel / `POST .../send` */
+    candidateEmail?: string | null;
 }
 
 export const useUIState = () => {

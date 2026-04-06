@@ -144,6 +144,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
                 const response = await fetch(`${apiBase}/api/email-uploads/messages`, {
                     method: 'GET',
+                    cache: 'no-store',
                     credentials: 'include',
                     headers: {
                         Accept: 'application/json',
@@ -220,6 +221,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
         const response = await fetch(`${apiBase}/api/email-uploads/messages/${id}/status`, {
             method: 'PATCH',
+            cache: 'no-store',
             credentials: 'include',
             headers: {
                 'Content-Type': 'application/json',

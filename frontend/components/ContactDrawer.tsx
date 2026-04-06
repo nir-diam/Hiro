@@ -85,7 +85,14 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact,
                         <PhoneIcon className="w-4 h-4"/> חייג
                     </a>
                     <button 
-                        onClick={() => openMessageModal({ mode: 'email', candidateName: contact.name, candidatePhone: contact.phone })}
+                        onClick={() =>
+                            openMessageModal({
+                                mode: 'email',
+                                candidateName: contact.name,
+                                candidatePhone: contact.phone,
+                                candidateEmail: contact.email,
+                            })
+                        }
                         className="flex-1 py-2 bg-blue-50 text-blue-700 rounded-lg flex items-center justify-center gap-2 text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-200"
                     >
                         <EnvelopeIcon className="w-4 h-4"/> מייל
