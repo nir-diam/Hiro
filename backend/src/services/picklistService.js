@@ -2,6 +2,23 @@ const { Op } = require('sequelize');
 const PicklistCategory = require('../models/PicklistCategory');
 const PicklistCategoryValue = require('../models/PicklistCategoryValue');
 
+/**
+ * Sort by numeric `order`, then natural alphanumeric on `label` (1,2,3…10… a,b,c).
+ */
+const sortPicklistValues = (rows) => {
+  const arr = Array.isArray(rows) ? [...rows] : [];
+  return arr.sort((a, b) => {
+    const oa = Number(a.order);
+    const ob = Number(b.order);
+    const orderA = Number.isFinite(oa) ? oa : 0;
+    const orderB = Number.isFinite(ob) ? ob : 0;
+    if (orderA !== orderB) return orderA - orderB;
+    const la = String(a.label ?? '').trim();
+    const lb = String(b.label ?? '').trim();
+    return la.localeCompare(lb, 'he', { numeric: true, sensitivity: 'base' });
+  });
+};
+
 const listCategories = async () => {
   return PicklistCategory.findAll({
     order: [
@@ -41,13 +58,20 @@ const listSubcategories = async (categoryId) => {
 const listCategoryValues = async (categoryId, parentValueId = null) => {
   const where = { categoryId };
   if (parentValueId && parentValueId !== 'all') where.parentValueId = parentValueId;
-  return PicklistCategoryValue.findAll({
-    where,
-    order: [
-      ['order', 'ASC'],
-      ['label', 'ASC'],
-    ],
+  const rows = await PicklistCategoryValue.findAll({ where });
+  return sortPicklistValues(rows);
+};
+
+/** Active values for a category identified by `PicklistCategory.key` (e.g. `driving_license`). */
+const listCategoryValuesByKey = async (key) => {
+  const k = String(key || '').trim();
+  if (!k) return [];
+  const category = await PicklistCategory.findOne({ where: { key: k } });
+  if (!category) return [];
+  const rows = await PicklistCategoryValue.findAll({
+    where: { categoryId: category.id, isActive: true },
   });
+  return sortPicklistValues(rows);
 };
 
 const createCategoryValue = async (categoryId, payload) => {
@@ -139,13 +163,8 @@ const listDomains = async ({ categoryId, subcategoryId, parentValueId }) => {
   if (parentValueId && parentValueId !== 'all') {
     where.parentValueId = parentValueId;
   }
-  return PicklistCategoryValue.findAll({
-    where,
-    order: [
-      ['order', 'ASC'],
-      ['label', 'ASC'],
-    ],
-  });
+  const rows = await PicklistCategoryValue.findAll({ where });
+  return sortPicklistValues(rows);
 };
 
 const createDomainValue = async ({ categoryId, subcategoryId, payload }) => {
@@ -171,6 +190,7 @@ module.exports = {
   deleteCategory,
   listSubcategories,
   listCategoryValues,
+  listCategoryValuesByKey,
   createCategoryValue,
   updateCategoryValue,
   deleteCategoryValue,

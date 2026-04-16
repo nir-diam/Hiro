@@ -1178,6 +1178,17 @@ const JobQuestionCard: React.FC<{
     );
 };
 
+/** When תחום/תפקיד come from AI or an existing job row, keep a SelectedJobField so the control is filled. */
+const jobFieldFromCategoryRole = (category: string, role: string): SelectedJobField | null => {
+    const c = String(category ?? '').trim();
+    const r = String(role ?? '').trim();
+    if (!c || !r) return null;
+    return { category: c, fieldType: '', role: r };
+};
+
+const isJobFieldComplete = (jobField: SelectedJobField | null | undefined): boolean =>
+    Boolean(jobField?.category?.trim() && jobField?.role?.trim());
+
 const sections = [
     { id: 'general-info', titleKey: 'new_job.section_general', icon: <BriefcaseIcon className="w-5 h-5"/> },
     { id: 'description-content', titleKey: 'new_job.section_description', icon: <PencilIcon className="w-5 h-5"/> },
@@ -1286,10 +1297,15 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [manualEditState, setManualEditState] = useState<{isOpen: boolean, question: Question | null}>({ isOpen: false, question: null });
     const [isSaving, setIsSaving] = useState(false);
     const [saveMessage, setSaveMessage] = useState<string | null>(null);
+    const [jobFieldError, setJobFieldError] = useState(false);
 
     const navRef = useRef<HTMLDivElement>(null);
     const formDataRef = useRef(formData);
     formDataRef.current = formData;
+
+    useEffect(() => {
+        if (isJobFieldComplete(formData.jobField)) setJobFieldError(false);
+    }, [formData.jobField]);
 
     useEffect(() => {
         if (isEditing && jobData) {
@@ -1315,11 +1331,16 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                   }))
                 : [];
 
+            const loadedField = jobData.field != null ? String(jobData.field).trim() : '';
+            const loadedRole = jobData.role != null ? String(jobData.role).trim() : '';
+            const loadedJobField = jobFieldFromCategoryRole(loadedField, loadedRole);
+
             setFormData(prev => ({
                 ...prev,
                 clientName: jobData.client || prev.clientName,
-                aiField: jobData.field || prev.aiField,
-                aiRole: jobData.role || prev.aiRole,
+                aiField: loadedField || prev.aiField,
+                aiRole: loadedRole || prev.aiRole,
+                jobField: loadedJobField ?? prev.jobField,
                 publicJobTitle: jobData.publicJobTitle || prev.publicJobTitle,
                 publicDescription: jobData.PublicDescription
                     ? normalizeValueForEditor(String(jobData.PublicDescription))
@@ -1639,15 +1660,23 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         : 'לא חשוב'
                     : null;
 
-            setFormData(prev => ({
+            setFormData(prev => {
+                const nextAiField =
+                    extractedData.field != null && String(extractedData.field).trim()
+                        ? String(extractedData.field).trim()
+                        : prev.aiField;
+                const nextAiRole =
+                    extractedData.role != null && String(extractedData.role).trim()
+                        ? String(extractedData.role).trim()
+                        : prev.aiRole;
+                const fromAiJobField = jobFieldFromCategoryRole(nextAiField, nextAiRole);
+
+                return {
                 ...prev,
                 clientName: (extractedData.client || prev.clientName || '').trim() || prev.clientName,
-                aiField: (extractedData.field != null && String(extractedData.field).trim())
-                    ? String(extractedData.field).trim()
-                    : prev.aiField,
-                aiRole: (extractedData.role != null && String(extractedData.role).trim())
-                    ? String(extractedData.role).trim()
-                    : prev.aiRole,
+                aiField: nextAiField,
+                aiRole: nextAiRole,
+                jobField: fromAiJobField ?? prev.jobField,
                 regionLabel: (extractedData.region != null && String(extractedData.region).trim())
                     ? String(extractedData.region).trim()
                     : prev.regionLabel,
@@ -1683,7 +1712,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 enableDigitalScreening: true,
                 telephoneQuestions: newTelephoneQuestions.length > 0 ? newTelephoneQuestions : prev.telephoneQuestions,
                 enableManualScreening: newTelephoneQuestions.length > 0 ? true : prev.enableManualScreening,
-            }));
+            };
+            });
 
             setAiFilledFields(filled);
             setParseSummaryData({ filled: filledList, missing: missingList });
@@ -2091,6 +2121,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         if (isEditing || !apiBase) {
             return null;
         }
+        if (!isJobFieldComplete(formDataRef.current.jobField)) {
+            setJobFieldError(true);
+            document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            alert(t('new_job.job_field_required'));
+            return null;
+        }
         setSaveMessage(null);
         setIsSaving(true);
         try {
@@ -2119,6 +2155,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const handleSaveAndContinue = async () => {
+        if (!isJobFieldComplete(formDataRef.current.jobField)) {
+            setJobFieldError(true);
+            document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            alert(t('new_job.job_field_required'));
+            return;
+        }
         if (isEditing) {
             onSave(buildJobPayload());
             navigate(`/jobs/${formData.jobId}/publish`);
@@ -2131,6 +2173,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
     const handleJustSave = async () => {
+        if (!isJobFieldComplete(formDataRef.current.jobField)) {
+            setJobFieldError(true);
+            document.getElementById('general-info')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            alert(t('new_job.job_field_required'));
+            return;
+        }
         if (isEditing) {
             onSave(buildJobPayload());
             alert('השינויים נשמרו בהצלחה');
@@ -2314,11 +2362,18 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                        </div>
 
                        <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('jobs.col_field')}</label>
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">
+                                {t('jobs.col_field')}
+                                <span className="text-red-500 mr-0.5" aria-hidden> *</span>
+                            </label>
                             <button
                                 type="button"
                                 onClick={() => setIsJobFieldSelectorOpen(true)}
-                                className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors focus:ring-1 focus:ring-primary-500"
+                                className={`w-full bg-bg-input border rounded-lg py-2.5 px-3 text-sm flex justify-between items-center text-right hover:border-primary-300 transition-colors focus:ring-1 focus:ring-primary-500 ${
+                                    jobFieldError && !isJobFieldComplete(formData.jobField)
+                                        ? 'border-red-400 ring-1 ring-red-200'
+                                        : 'border-border-default'
+                                }`}
                             >
                                 <span className={`truncate ${formData.jobField ? 'text-text-default' : 'text-text-muted'}`}>
                                     {formData.jobField ? `${formData.jobField.category} > ${formData.jobField.role}` : t('new_job.choose_field_placeholder') || 'בחר תחום...'}
@@ -2327,7 +2382,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                             </button>
                             <JobFieldSelector
                                 value={formData.jobField}
-                                onChange={(value) => setFormData(prev => ({ ...prev, jobField: value }))}
+                                onChange={(value) => {
+                                    setJobFieldError(false);
+                                    setFormData((prev) => ({ ...prev, jobField: value }));
+                                }}
                                 isModalOpen={isJobFieldSelectorOpen}
                                 setIsModalOpen={setIsJobFieldSelectorOpen}
                             />
@@ -2887,8 +2945,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             />
 
             <div className="sticky bottom-0 z-30 p-4 bg-bg-card border-t border-border-default flex justify-between items-center -mx-4 md:mx-0 rounded-b-2xl shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)]">
-                <div className="text-xs text-text-muted">
-                    * שינויים נשמרים בטיוטה
+                <div className="text-xs text-text-muted space-y-1">
+                    <p>* שינויים נשמרים בטיוטה</p>
+                    {!isJobFieldComplete(formData.jobField) && (
+                        <p className="text-amber-700 font-medium">{t('new_job.job_field_required_hint')}</p>
+                    )}
                 </div>
                 <div className="flex flex-col-reverse gap-2 md:flex-row md:items-center md:gap-3">
                     {saveMessage && (
@@ -2899,16 +2960,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     <button
                         type="button"
                         onClick={handleSaveAndContinue}
-                        disabled={isSaving}
-                        className={`bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
+                        disabled={isSaving || !isJobFieldComplete(formData.jobField)}
+                        className={`bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
+                            isSaving || !isJobFieldComplete(formData.jobField) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
                     >
                         {'פרסום משרה'}
                     </button>
                     <button
                         type="button"
                         onClick={handleJustSave}
-                        disabled={isSaving}
-                        className={`bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition ${isSaving ? 'opacity-50 cursor-wait' : ''}`}
+                        disabled={isSaving || !isJobFieldComplete(formData.jobField)}
+                        className={`bg-bg-subtle text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover border border-border-default transition ${
+                            isSaving || !isJobFieldComplete(formData.jobField) ? 'opacity-50 cursor-not-allowed' : ''
+                        }`}
                     >
                         {isSaving ? 'שומר...' : 'שמור'}
                     </button>

@@ -1,8 +1,20 @@
 
-import React, { useState, useEffect, useRef, useId, useCallback } from 'react';
-import { XMarkIcon, CalendarDaysIcon, ClockIcon, Microsoft365Icon, OutlookTaskIcon, GoogleCalendarIcon, ClipboardDocumentCheckIcon } from './Icons';
+import React, { useState, useEffect, useRef, useId, useCallback, useMemo } from 'react';
+import {
+    XMarkIcon,
+    CalendarDaysIcon,
+    ClockIcon,
+    Microsoft365Icon,
+    OutlookTaskIcon,
+    GoogleCalendarIcon,
+    ClipboardDocumentCheckIcon,
+    ChevronDownIcon,
+} from './Icons';
 import type { Candidate } from './CandidatesListView';
 import { deriveLocalCandidateId } from '../utils/candidateId';
+import { EMPTY_LINKED_LABEL } from '../utils/taskLinkedContext';
+import { useAuth } from '../context/AuthContext';
+import { requestNotificationInboxCountsRefresh } from '../services/notificationInboxCounts';
 
 interface NewTaskModalProps {
   isOpen: boolean;
@@ -65,6 +77,15 @@ function candidateFromApiRow(row: Record<string, unknown>): Candidate {
   };
 }
 
+function fixedLinkedPlainLines(candidate: string, job: string, client: string): { label: string; value: string }[] {
+    const v = (s: string) => (String(s ?? '').trim() || EMPTY_LINKED_LABEL);
+    return [
+        { label: 'מועמד:', value: v(candidate) },
+        { label: 'משרה:', value: v(job) },
+        { label: 'לקוח:', value: v(client) },
+    ];
+}
+
 function jsonHeaders(): HeadersInit {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
   const h: Record<string, string> = {
@@ -79,7 +100,7 @@ const CAL_EVENT_DURATION_MS = 60 * 60 * 1000;
 
 type CalendarFormSlice = {
   messageText: string;
-  assignee: string;
+  assigneeEmails: string[];
   category: string;
   dueDate: string;
   dueTime: string;
@@ -106,7 +127,7 @@ function buildCalendarEventMeta(form: CalendarFormSlice, isTaskMode: boolean) {
 
   const lines: string[] = [];
   if (form.messageText.trim()) lines.push(form.messageText.trim());
-  if (form.assignee.trim()) lines.push(`למען: ${form.assignee.trim()}`);
+  if (form.assigneeEmails.length) lines.push(`למען: ${form.assigneeEmails.join(', ')}`);
   lines.push(`קטגוריה: ${form.category || 'כללי'}`);
   if (isTaskMode) {
     lines.push(`דחיפות: ${form.sla}`);
@@ -146,14 +167,16 @@ function formatOutlookLocalIso(d: Date): string {
   return `${y}-${m}-${day}T${h}:${min}:${s}`;
 }
 
-function openGoogleCalendarFromMeta(meta: ReturnType<typeof buildCalendarEventMeta>, guestEmail?: string) {
+function openGoogleCalendarFromMeta(meta: ReturnType<typeof buildCalendarEventMeta>, guestEmails?: string[]) {
   const dates = formatGoogleDates(meta.start, meta.end);
   let url = `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(meta.title)}&details=${encodeURIComponent(
     meta.body,
   )}&dates=${dates}`;
-  const guest = guestEmail?.trim();
-  if (guest && guest.includes('@')) {
-    url += `&add=${encodeURIComponent(guest)}`;
+  for (const g of guestEmails || []) {
+    const guest = g?.trim();
+    if (guest && guest.includes('@')) {
+      url += `&add=${encodeURIComponent(guest)}`;
+    }
   }
   window.open(url, '_blank', 'noopener,noreferrer');
 }
@@ -221,9 +244,23 @@ type LinkedPanel =
     | { phase: 'none' }
     | { phase: 'loading' }
     | { phase: 'error'; message: string }
-    | { phase: 'ok'; rows: { label: string; node: React.ReactNode }[] };
+    | {
+          phase: 'ok';
+          rows: { label: string; node: React.ReactNode }[];
+          /** Same fields as UI, for appending to outgoing email body */
+          plainLines: { label: string; value: string }[];
+      };
+
+function buildEmailBodyWithLinkedContext(messageText: string, plainLines: { label: string; value: string }[]): string {
+    const main = (messageText || '').trim();
+    if (!plainLines.length) return main;
+    const block = plainLines.map((l) => `${l.label} ${l.value}`.trim()).join('\n');
+    const appendix = `---\nמידע מקושר מהמערכת:\n${block}`;
+    return main ? `${main}\n\n${appendix}` : appendix;
+}
 
 const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, onOpenCandidateSummary, pathname }) => {
+    const { user } = useAuth();
     const [isTaskMode, setIsTaskMode] = useState(false);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [linkedPanel, setLinkedPanel] = useState<LinkedPanel>({ phase: 'none' });
@@ -233,7 +270,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
     const [clientContactOptions, setClientContactOptions] = useState<ClientContactOption[]>([]);
     const [formData, setFormData] = useState({
         messageText: '',
-        assignee: '',
+        assigneeEmails: [] as string[],
         category: 'כללי',
         dueDate: '',
         dueTime: '',
@@ -243,7 +280,9 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
         allocatedDays: 3,
     });
     const modalRef = useRef<HTMLDivElement>(null);
+    const assigneePickerRef = useRef<HTMLDivElement>(null);
     const closeButtonRef = useRef<HTMLButtonElement>(null);
+    const [assigneeDropdownOpen, setAssigneeDropdownOpen] = useState(false);
     const previouslyFocusedElement = useRef<HTMLElement | null>(null);
     const titleId = useId();
     const contentId = useId();
@@ -262,7 +301,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
 
             setFormData({
                 messageText: '',
-                assignee: '',
+                assigneeEmails: [],
                 category: 'כללי',
                 dueDate: formattedDate,
                 dueTime: formattedTime,
@@ -356,8 +395,22 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
 
                 // If user didn't pick anything yet, default to the first available email.
                 setFormData((prev) => {
-                    if (prev.assignee) return prev;
-                    return { ...prev, assignee: options[0]?.email || '' };
+                    const me = user?.email?.trim();
+                    const first = options[0]?.email;
+                    if (me) {
+                        if (prev.assigneeEmails.length === 0) return { ...prev, assigneeEmails: [me] };
+                        if (
+                            prev.assigneeEmails.length === 1 &&
+                            first &&
+                            prev.assigneeEmails[0] === first &&
+                            me.toLowerCase() !== first.toLowerCase()
+                        ) {
+                            return { ...prev, assigneeEmails: [me] };
+                        }
+                        return prev;
+                    }
+                    if (prev.assigneeEmails.length > 0) return prev;
+                    return { ...prev, assigneeEmails: first ? [first] : [] };
                 });
             } catch (err) {
                 console.error('[NewTaskModal] Failed to load client contacts for assignee', err);
@@ -373,7 +426,79 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
         return () => {
             active = false;
         };
-    }, [isOpen, apiBase]);
+    }, [isOpen, apiBase, user?.email, user?.name]);
+
+    const orderedContactOptions = useMemo(() => {
+        const me = user?.email?.trim();
+        const meLower = me?.toLowerCase();
+        const myName = user?.name?.trim();
+        const list = clientContactOptions.map((o) => ({ ...o }));
+        if (!meLower) return list;
+        const idx = list.findIndex((o) => o.email.toLowerCase() === meLower);
+        if (idx >= 0) {
+            const [row] = list.splice(idx, 1);
+            const labelWithSelf = row.label.includes('(את/ה)') ? row.label : `${row.label} (את/ה)`;
+            list.unshift({ email: row.email, label: labelWithSelf });
+            return list;
+        }
+        const selfLabel = myName ? `${myName} (את/ה) (${me})` : `${me} (את/ה)`;
+        list.unshift({ email: me, label: selfLabel });
+        return list;
+    }, [clientContactOptions, user?.email, user?.name]);
+
+    const toggleAssigneeEmail = useCallback((email: string) => {
+        const e = email.trim();
+        if (!e) return;
+        setFormData((prev) => {
+            const next = new Set(prev.assigneeEmails.map((x) => x.trim()).filter(Boolean));
+            if (next.has(e)) {
+                if (next.size <= 1) return prev;
+                next.delete(e);
+            } else {
+                next.add(e);
+            }
+            return { ...prev, assigneeEmails: Array.from(next) };
+        });
+    }, []);
+
+    const assigneeSummary = useMemo(() => {
+        const emails = formData.assigneeEmails;
+        if (!emails.length) return 'בחרו נמענים…';
+        const labels = emails.map((addr) => {
+            const o = orderedContactOptions.find((x) => x.email.toLowerCase() === addr.toLowerCase());
+            return o?.label || addr;
+        });
+        const joined = labels.join(' · ');
+        if (joined.length > 72) return `${joined.slice(0, 69)}…`;
+        return joined;
+    }, [formData.assigneeEmails, orderedContactOptions]);
+
+    useEffect(() => {
+        if (!isOpen) setAssigneeDropdownOpen(false);
+    }, [isOpen]);
+
+    useEffect(() => {
+        if (!assigneeDropdownOpen) return;
+        const onDocMouseDown = (e: MouseEvent) => {
+            const el = assigneePickerRef.current;
+            if (el && !el.contains(e.target as Node)) setAssigneeDropdownOpen(false);
+        };
+        document.addEventListener('mousedown', onDocMouseDown);
+        return () => document.removeEventListener('mousedown', onDocMouseDown);
+    }, [assigneeDropdownOpen]);
+
+    useEffect(() => {
+        if (!assigneeDropdownOpen) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                setAssigneeDropdownOpen(false);
+            }
+        };
+        document.addEventListener('keydown', onKey, true);
+        return () => document.removeEventListener('keydown', onKey, true);
+    }, [assigneeDropdownOpen]);
 
     useEffect(() => {
         if (!isOpen || !apiBase) return;
@@ -408,35 +533,38 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     if (cancelled) return;
                     const cand = candidateFromApiRow(row);
                     const name = cand.name || 'מועמד';
+                    const plainLines = fixedLinkedPlainLines(name, cand.title || '', '');
+                    const candLabel = plainLines[0].value;
+                    const jobLabel = plainLines[1].value;
+                    const clientLabel = plainLines[2].value;
                     setLinkedPanel({
                         phase: 'ok',
                         rows: [
                             {
                                 label: 'מועמד:',
-                                node: (
-                                    <button
-                                        type="button"
-                                        onClick={() => openSummaryRef.current(cand)}
-                                        className="text-primary-600 font-bold hover:underline text-right hover:text-primary-700 transition-colors"
-                                    >
-                                        {name}
-                                    </button>
-                                ),
+                                node:
+                                    candLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={() => openSummaryRef.current(cand)}
+                                            className="text-primary-600 font-bold hover:underline text-right hover:text-primary-700 transition-colors"
+                                        >
+                                            {candLabel}
+                                        </button>
+                                    ),
                             },
-                            ...(cand.title
-                                ? [{ label: 'כותרת:', node: <span className="text-text-default font-bold">{cand.title}</span> }]
-                                : []),
-                            ...(String(row.email || '').trim()
-                                ? [
-                                      {
-                                          label: 'אימייל:',
-                                          node: (
-                                              <span className="text-text-default font-bold">{String(row.email)}</span>
-                                          ),
-                                      },
-                                  ]
-                                : []),
+                            {
+                                label: 'משרה:',
+                                node: <span className="text-text-default font-semibold">{jobLabel}</span>,
+                            },
+                            {
+                                label: 'לקוח:',
+                                node: <span className="text-text-default font-semibold">{clientLabel}</span>,
+                            },
                         ],
+                        plainLines,
                     });
                     return;
                 }
@@ -457,16 +585,38 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     const title =
                         String(row.publicJobTitle || row.title || '').trim() || 'משרה';
                     const client = String(row.client || '').trim();
-                    const city = String(row.city || '').trim();
-                    const status = String(row.status || '').trim();
+                    const plainLines = fixedLinkedPlainLines('', title, client);
+                    const candLabel = plainLines[0].value;
+                    const jobLabel = plainLines[1].value;
+                    const clientLabel = plainLines[2].value;
                     setLinkedPanel({
                         phase: 'ok',
                         rows: [
-                            { label: 'משרה:', node: <span className="text-text-default font-bold">{title}</span> },
-                            ...(client ? [{ label: 'לקוח:', node: <span className="text-text-default font-bold">{client}</span> }] : []),
-                            ...(city ? [{ label: 'אזור:', node: <span className="text-text-default font-bold">{city}</span> }] : []),
-                            ...(status ? [{ label: 'סטטוס:', node: <span className="text-text-default font-bold">{status}</span> }] : []),
+                            {
+                                label: 'מועמד:',
+                                node: <span className="text-text-default font-semibold">{candLabel}</span>,
+                            },
+                            {
+                                label: 'משרה:',
+                                node:
+                                    jobLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : (
+                                        <a
+                                            href={`/jobs/edit/${encodeURIComponent(route.id)}`}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {jobLabel}
+                                        </a>
+                                    ),
+                            },
+                            {
+                                label: 'לקוח:',
+                                node: <span className="text-text-default font-semibold">{clientLabel}</span>,
+                            },
                         ],
+                        plainLines,
                     });
                     return;
                 }
@@ -486,17 +636,38 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     if (cancelled) return;
                     const name =
                         String(row.displayName || row.name || '').trim() || 'לקוח';
-                    const contactPerson = String(row.contactPerson || '').trim();
-                    const phone = String(row.phone || '').trim();
+                    const plainLines = fixedLinkedPlainLines('', '', name);
+                    const candLabel = plainLines[0].value;
+                    const jobLabel = plainLines[1].value;
+                    const clientLabel = plainLines[2].value;
                     setLinkedPanel({
                         phase: 'ok',
                         rows: [
-                            { label: 'לקוח:', node: <span className="text-text-default font-bold">{name}</span> },
-                            ...(contactPerson
-                                ? [{ label: 'איש קשר:', node: <span className="text-text-default font-bold">{contactPerson}</span> }]
-                                : []),
-                            ...(phone ? [{ label: 'טלפון:', node: <span className="text-text-default font-bold">{phone}</span> }] : []),
+                            {
+                                label: 'מועמד:',
+                                node: <span className="text-text-default font-semibold">{candLabel}</span>,
+                            },
+                            {
+                                label: 'משרה:',
+                                node: <span className="text-text-default font-semibold">{jobLabel}</span>,
+                            },
+                            {
+                                label: 'לקוח:',
+                                node:
+                                    clientLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : (
+                                        <a
+                                            href={`/clients/${encodeURIComponent(route.id)}`}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {clientLabel}
+                                        </a>
+                                    ),
+                            },
                         ],
+                        plainLines,
                     });
                     return;
                 }
@@ -529,26 +700,38 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     if (cancelled) return;
                     const clientName =
                         String(clientRow.displayName || clientRow.name || '').trim() || 'לקוח';
-                    const contact = Array.isArray(contacts)
-                        ? contacts.find((x) => String(x?.id) === route.contactId)
-                        : undefined;
-                    const cName = contact ? String(contact.name || '').trim() : '';
-                    const cEmail = contact ? String(contact.email || '').trim() : '';
-                    const cRole = contact ? String(contact.role || '').trim() : '';
+                    const plainLines = fixedLinkedPlainLines('', '', clientName);
+                    const candLabel = plainLines[0].value;
+                    const jobLabel = plainLines[1].value;
+                    const clientLabel = plainLines[2].value;
                     setLinkedPanel({
                         phase: 'ok',
                         rows: [
-                            { label: 'לקוח:', node: <span className="text-text-default font-bold">{clientName}</span> },
-                            ...(cName
-                                ? [{ label: 'איש קשר:', node: <span className="text-text-default font-bold">{cName}</span> }]
-                                : []),
-                            ...(cRole
-                                ? [{ label: 'תפקיד:', node: <span className="text-text-default font-bold">{cRole}</span> }]
-                                : []),
-                            ...(cEmail
-                                ? [{ label: 'אימייל:', node: <span className="text-text-default font-bold">{cEmail}</span> }]
-                                : []),
+                            {
+                                label: 'מועמד:',
+                                node: <span className="text-text-default font-semibold">{candLabel}</span>,
+                            },
+                            {
+                                label: 'משרה:',
+                                node: <span className="text-text-default font-semibold">{jobLabel}</span>,
+                            },
+                            {
+                                label: 'לקוח:',
+                                node:
+                                    clientLabel === EMPTY_LINKED_LABEL ? (
+                                        <span className="text-text-default font-semibold">{EMPTY_LINKED_LABEL}</span>
+                                    ) : (
+                                        <a
+                                            href={`/clients/${encodeURIComponent(route.clientId)}`}
+                                            className="text-primary-600 font-bold hover:underline"
+                                            onClick={(e) => e.stopPropagation()}
+                                        >
+                                            {clientLabel}
+                                        </a>
+                                    ),
+                            },
                         ],
+                        plainLines,
                     });
                 }
             } catch (e: unknown) {
@@ -564,15 +747,22 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
 
     const openExternalCalendar = useCallback(
         (target: 'google' | 'outlook365' | 'outlook') => {
-            const meta = buildCalendarEventMeta(formData, isTaskMode);
-            const guest = formData.assignee.trim();
+            let meta = buildCalendarEventMeta(formData, isTaskMode);
+            if (linkedPanel.phase === 'ok' && linkedPanel.plainLines.length > 0) {
+                const block = linkedPanel.plainLines.map((l) => `${l.label} ${l.value}`.trim()).join('\n');
+                meta = {
+                    ...meta,
+                    body: `${meta.body}\n\n---\nמידע מקושר מהמערכת:\n${block}`,
+                };
+            }
+            const guests = formData.assigneeEmails.filter((x) => x.includes('@'));
             if (target === 'google') {
-                openGoogleCalendarFromMeta(meta, guest.includes('@') ? guest : undefined);
+                openGoogleCalendarFromMeta(meta, guests.length ? guests : undefined);
                 return;
             }
             openOutlookCalendarFromMeta(meta, target === 'outlook365');
         },
-        [formData, isTaskMode],
+        [formData, isTaskMode, linkedPanel],
     );
 
     if (!isOpen) return null;
@@ -592,12 +782,50 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
 
-        const taskPayload = { ...formData, isTask: isTaskMode };
+        const linkedPlain =
+            linkedPanel.phase === 'ok' && linkedPanel.plainLines.length > 0 ? linkedPanel.plainLines : [];
+        const fullMessageText = buildEmailBodyWithLinkedContext(formData.messageText, linkedPlain);
+        const route = parseTaskLinkedRoute(pathname);
+        const linkFields: Record<string, string | number> = {};
+        if (route.kind === 'candidate') {
+            linkFields.linkedCandidateBackendId = route.id;
+            linkFields.linkedCandidateLocalId = deriveLocalCandidateId(route.id);
+        } else if (route.kind === 'job') {
+            linkFields.linkedJobId = route.id;
+        } else if (route.kind === 'client') {
+            linkFields.linkedClientId = route.id;
+        } else if (route.kind === 'contact') {
+            linkFields.linkedClientId = route.clientId;
+            linkFields.linkedContactId = route.contactId;
+        }
+        const linkLabels =
+            linkedPlain.length >= 3
+                ? {
+                      linkedCandidateLabel: linkedPlain[0].value,
+                      linkedJobLabel: linkedPlain[1].value,
+                      linkedClientLabel: linkedPlain[2].value,
+                  }
+                : {};
+        const taskPayload = {
+            ...formData,
+            messageText: fullMessageText,
+            isTask: isTaskMode,
+            ...linkFields,
+            ...linkLabels,
+        };
 
-        if (formData.submissionEmail) {
+        let postedToServer = false;
+        if (apiBase) {
             try {
-                if (!apiBase) throw new Error('VITE_API_BASE is not set');
-                if (!formData.assignee) throw new Error('בחר כתובת אימייל ב"\"למען\""');
+                const me = user?.email?.trim();
+                const assignees = formData.assigneeEmails.map((x) => x.trim()).filter((x) => x.includes('@'));
+                const to = assignees.length ? assignees : me ? [me] : [];
+                if (!to.length) {
+                    throw new Error('בחרו נמען או ודאו שחשבון המשתמש כולל אימייל');
+                }
+                if (formData.submissionEmail && !assignees.length) {
+                    throw new Error('בחר לפחות נמען אחד ב"למען" לשליחת מייל');
+                }
                 const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
 
                 const subjectBase = isTaskMode ? 'משימה חדשה' : 'תזכורת';
@@ -613,13 +841,12 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                         ...(token ? { Authorization: `Bearer ${token}` } : {}),
                     },
                     body: JSON.stringify({
-                        // `to` is already an email address selected from client contacts.
-                        to: formData.assignee,
+                        to,
                         subject,
-                        text: formData.messageText || '',
+                        text: fullMessageText,
                         isTask: isTaskMode,
                         messageType: isTaskMode ? 'task' : 'message',
-                        assignee: formData.assignee,
+                        assignee: to[0] || '',
                         category: formData.category,
                         dueDate: formData.dueDate,
                         dueTime: formData.dueTime,
@@ -628,6 +855,7 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                         sla: isTaskMode ? formData.sla : null,
                         allocatedDays: isTaskMode ? formData.allocatedDays : null,
                         taskPayload,
+                        skipSmtp: !formData.submissionEmail,
                     }),
                 });
 
@@ -635,13 +863,18 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                     const t = await res.text().catch(() => '');
                     throw new Error(t || `HTTP ${res.status}`);
                 }
+                postedToServer = true;
             } catch (err: any) {
-                console.error('[NewTaskModal] email send failed', err);
-                alert(err?.message || 'שליחת מייל נכשלה');
+                console.error('[NewTaskModal] create / send failed', err);
+                alert(err?.message || 'שמירת הפעילות נכשלה');
+                return;
             }
         }
 
         onSave(taskPayload);
+        if (postedToServer) {
+            requestNotificationInboxCountsRefresh({ reloadNotificationList: true });
+        }
     };
 
     return (
@@ -681,28 +914,56 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                             {/* Left Column (in RTL): Controls */}
                             <div className="space-y-6 order-2 lg:order-1">
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-                                    <div>
-                                        <label className="block text-sm font-bold text-text-default mb-2">למען</label>
-                                        <select
-                                            name="assignee"
-                                            value={formData.assignee}
-                                            onChange={handleChange}
-                                            disabled={contactsLoading || clientContactOptions.length === 0}
-                                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3.5 transition-all shadow-sm disabled:opacity-50"
-                                        >
-                                            {contactsLoading ? (
-                                                <option value="">טוען אנשי קשר...</option>
-                                            ) : (
-                                                <>
-                                                    <option value="">בחר כתובת אימייל...</option>
-                                                    {clientContactOptions.map((opt) => (
-                                                        <option key={opt.email} value={opt.email}>
-                                                            {opt.label}
-                                                        </option>
-                                                    ))}
-                                                </>
-                                            )}
-                                        </select>
+                                    <div className="sm:col-span-2 relative" ref={assigneePickerRef}>
+                                        <label className="block text-sm font-bold text-text-default mb-2">
+                                            למען <span className="text-text-muted font-normal text-xs">(ניתן לבחור מספר נמענים)</span>
+                                        </label>
+                                        {contactsLoading ? (
+                                            <div className="w-full min-h-[44px] flex items-center px-3.5 rounded-xl border border-border-default bg-bg-input text-sm text-text-muted">
+                                                טוען אנשי קשר…
+                                            </div>
+                                        ) : orderedContactOptions.length === 0 ? (
+                                            <p className="text-sm text-amber-700 py-2">לא נמצאו אנשי קשר. ודאו שמחוברים למערכת.</p>
+                                        ) : (
+                                            <>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setAssigneeDropdownOpen((o) => !o)}
+                                                    aria-expanded={assigneeDropdownOpen}
+                                                    aria-haspopup="listbox"
+                                                    className="w-full min-h-[44px] flex items-center justify-between gap-2 px-3.5 py-2 rounded-xl border border-border-default bg-bg-input text-sm text-right text-text-default shadow-sm hover:border-primary-300 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500"
+                                                >
+                                                    <span className="truncate flex-1 min-w-0">{assigneeSummary}</span>
+                                                    <ChevronDownIcon
+                                                        className={`w-5 h-5 shrink-0 text-text-muted transition-transform ${assigneeDropdownOpen ? 'rotate-180' : ''}`}
+                                                    />
+                                                </button>
+                                                {assigneeDropdownOpen && (
+                                                    <div
+                                                        role="listbox"
+                                                        className="absolute top-full left-0 right-0 z-50 mt-1 max-h-48 overflow-y-auto rounded-xl border border-border-default bg-bg-card shadow-lg p-2 space-y-1"
+                                                    >
+                                                        {orderedContactOptions.map((opt) => {
+                                                            const checked = formData.assigneeEmails.includes(opt.email);
+                                                            return (
+                                                                <label
+                                                                    key={opt.email}
+                                                                    className="flex items-start gap-3 cursor-pointer text-sm text-text-default hover:bg-bg-subtle/80 rounded-lg px-2 py-1.5"
+                                                                >
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        className="mt-0.5 w-4 h-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                                                                        checked={checked}
+                                                                        onChange={() => toggleAssigneeEmail(opt.email)}
+                                                                    />
+                                                                    <span className="leading-snug break-all">{opt.label}</span>
+                                                                </label>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </>
+                                        )}
                                     </div>
                                     <div>
                                         <label className="block text-sm font-bold text-text-default mb-2">קטגוריה</label>

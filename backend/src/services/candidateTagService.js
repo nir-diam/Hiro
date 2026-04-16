@@ -249,7 +249,9 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
   const fuzzy = await findFuzzyTag(defaults.displayNameHe || defaults.displayNameEn || tagKey);
   if (fuzzy) return { tag: fuzzy, created: false };
 
-  const typeValue = typeof defaults.type === 'string' ? defaults.type.toLowerCase() : 'role';
+  let typeValue = typeof defaults.type === 'string' ? defaults.type.toLowerCase().trim() : 'role';
+  // LLM often sends "education"; catalog enum uses "degree".
+  if (typeValue === 'education') typeValue = 'degree';
   const allowedTypes = [
     'role',
     'skill',
@@ -259,8 +261,8 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     'language',
     'seniority',
     'degree',
-    'soft_skill'
-];
+    'soft_skill',
+  ];
   const tagType = allowedTypes.includes(typeValue) ? typeValue : 'role';
 
   const tag = await Tag.create({

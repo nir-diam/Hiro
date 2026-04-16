@@ -12,6 +12,7 @@ export function permissionForPath(pathname: string): string {
         { prefix: '/candidate-pool', perm: 'page:candidate_pool' },
         { prefix: '/job-board', perm: 'page:job_board' },
         { prefix: '/notifications', perm: 'page:notifications' },
+        { prefix: '/portal/manager', perm: 'page:manager_portal' },
         { prefix: '/dashboard', perm: 'page:dashboard' },
     ];
     const sorted = [...rules].sort((a, b) => b.prefix.length - a.prefix.length);

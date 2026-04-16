@@ -26,6 +26,8 @@ export interface Event {
   status: EventStatus;
   linkedTo: { type: string; name: string } | null;
   description: string;
+  /** ימים מוקצים — ממודל יצירת משימה (NewTaskModal) */
+  allocatedDays?: number;
   history?: HistoryEntry[];
 }
 
@@ -382,6 +384,9 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
                                 {expandedRowId === event.id && (
                                     <tr className="bg-primary-50/20"><td colSpan={visibleColumns.length + 2} className="px-8 py-4 text-sm text-text-muted">
                                         <p><span className="font-bold">תיאור מלא:</span> {event.description || "אין תיאור זמין."}</p>
+                                        {event.type === 'משימת מערכת' && event.allocatedDays != null && (
+                                            <p className="mt-2"><span className="font-bold">ימים מוקצים:</span> {event.allocatedDays}</p>
+                                        )}
                                         <div className="mt-4"><button onClick={(e) => { e.stopPropagation(); setHistoryVisibleEventId(prev => prev === event.id ? null : event.id); }} className="flex items-center gap-2 text-xs font-semibold hover:text-primary-600"><ClockIcon className="w-4 h-4" /><span>{t('job_events.history_title')}</span></button>
                                             {historyVisibleEventId === event.id && (<div className="mt-2 pt-2 border-t space-y-2 text-xs text-text-subtle">{event.history?.map((entry, index) => (<p key={index} className="flex items-start gap-2"><span className="font-semibold text-text-muted">{entry.user}:</span><span>{entry.summary}</span><span className="flex-shrink-0">&bull; {formatRelativeTime(entry.timestamp)}</span></p>)) || <p>אין היסטוריית שינויים.</p>}</div>)}
                                         </div>
@@ -403,6 +408,9 @@ const EventsView: React.FC<EventsViewProps> = ({ events, setEvents }) => {
                                 </div>
                                 <h3 className="font-bold text-text-default my-2">{event.title}</h3>
                                 <p className={`text-xs text-text-muted mb-2 transition-all duration-300 ${expandedRowId === event.id ? '' : 'line-clamp-2'}`}>{event.description}</p>
+                                {expandedRowId === event.id && event.type === 'משימת מערכת' && event.allocatedDays != null && (
+                                    <p className="text-xs text-text-muted mb-2"><span className="font-semibold">ימים מוקצים:</span> {event.allocatedDays}</p>
+                                )}
                                 <p className="text-xs text-text-muted flex items-center gap-1.5"><CalendarIcon className="w-4 h-4 text-text-subtle"/> {new Date(event.date).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}</p>
                             </div>
                             <div className="flex justify-between items-center mt-4 pt-3 border-t border-border-default">

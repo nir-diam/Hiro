@@ -55,14 +55,17 @@ export async function fetchStaffUser(id: string): Promise<StaffUserDto> {
 
 export async function createStaffUser(body: {
     email: string;
-    password: string;
+    /** Omit when invite is true — server sends activation email */
+    password?: string;
+    /** Default flow from Coordinators settings: email with activation link */
+    invite?: boolean;
     name: string;
     role: 'manager' | 'recruiter';
     phone?: string;
     extension?: string;
     /** Required when logged in as platform admin (super_admin / admin) */
     clientId?: string | null;
-}): Promise<StaffUserDto> {
+}): Promise<StaffUserDto & { inviteSent?: boolean; message?: string }> {
     const res = await fetch(`${apiBase()}/api/users`, {
         method: 'POST',
         headers: authHeaders(),

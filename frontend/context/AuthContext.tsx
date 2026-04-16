@@ -13,6 +13,8 @@ export type AuthUser = {
     dataScope?: unknown;
     permissions?: Record<string, boolean>;
     effectivePermissions?: Record<string, boolean>;
+    /** Per-tenant module toggles from `clients.modules` (admin). */
+    tenantModules?: Record<string, boolean>;
 };
 
 type AuthContextValue = {

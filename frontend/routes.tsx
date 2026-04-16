@@ -15,6 +15,7 @@ import ClientsListView from './components/ClientsListView';
 import NewClientView from './components/NewClientView';
 import ClientProfileView from './components/ClientProfileView';
 import LoginScreen from './components/LoginScreen';
+import ActivationPage from './components/ActivationPage';
 import LandingPage from './components/LandingPage';
 import NotificationCenter from './components/NotificationCenter';
 import CompanySettingsView from './components/CompanySettingsView';
@@ -90,7 +91,7 @@ import MainContent from './components/MainContent';
 import ResumeViewer from './components/ResumeViewer';
 import JobMatchingView from './components/JobMatchingView';
 import CandidateScreeningView from './components/CandidateScreeningView';
-import InterestedInJobs, { jobsData as interestedJobsData } from './components/InterestedInJobs';
+import InterestedInJobs from './components/InterestedInJobs';
 import ReferralsView from './components/ReferralsView';
 import EventsView, { type Event as EventsViewEvent } from './components/EventsView';
 import DocumentsView from './components/DocumentsView';
@@ -697,7 +698,12 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     </>
                 );
             case 'jobs':
-                return <InterestedInJobs onOpenNewTask={props.onOpenNewTask} />;
+                return (
+                    <InterestedInJobs
+                        onOpenNewTask={props.onOpenNewTask}
+                        candidateId={formData.backendId || formData.id}
+                    />
+                );
             case 'referrals':
                 return <ReferralsView onOpenNewTask={props.onOpenNewTask} />;
             case 'events':
@@ -821,6 +827,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         },
 
         { path: '/login', element: <LoginScreen /> },
+        { path: '/activation', element: <ActivationPage /> },
         { path: '/landing', element: <LandingPage /> }, 
         
         { path: '/reports/referrals', element: <ReferralsReportView onOpenNewTask={props.onOpenNewTask} onOpenCandidateSummary={props.openSummaryDrawer} /> },

@@ -1,5 +1,5 @@
 
-import React, { useId, useState } from 'react';
+import React, { useId, useState, useEffect, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import AccordionSection from './AccordionSection';
 import ContentNavBar from './ContentNavBar';
@@ -115,6 +115,39 @@ const getLevelText = (level: number): string => {
     return "חלש";
 };
 
+const DRIVING_LICENSE_PICKLIST_KEY = 'driving_license';
+const GENDER_PICKLIST_KEY = 'gender';
+const MARITAL_STATUS_PICKLIST_KEY = 'marital_status';
+const MOBILITY_PICKLIST_KEY = 'mobility';
+
+type PicklistRow = {
+    id: string;
+    label: string;
+    value: string;
+    displayName: string | null;
+};
+
+async function fetchPicklistValues(apiBase: string, categoryKey: string): Promise<PicklistRow[]> {
+    if (!apiBase || !categoryKey) return [];
+    try {
+        const res = await fetch(
+            `${apiBase}/api/picklists/categories/by-key/${encodeURIComponent(categoryKey)}/values`,
+            { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } },
+        );
+        if (!res.ok) return [];
+        const data: unknown = await res.json();
+        if (!Array.isArray(data)) return [];
+        return data.map((row: Record<string, unknown>) => ({
+            id: String(row.id ?? ''),
+            label: String(row.label ?? ''),
+            value: String(row.value ?? ''),
+            displayName: row.displayName != null ? String(row.displayName) : null,
+        }));
+    } catch {
+        return [];
+    }
+}
+
 const MainContent: React.FC<MainContentProps> = ({
     formData,
     onFormChange,
@@ -125,16 +158,61 @@ const MainContent: React.FC<MainContentProps> = ({
     isGeneratingSummary,
     generateSummaryError,
 }) => {
-    console.log('MainContent render', { 
-        viewMode, 
-        hasOnGenerate: !!onGenerateExperienceSummary, 
-        formDataId: formData?.id 
-    });
     const { t } = useLanguage();
     const summaryId = useId();
     const recruiterNotesId = useId();
     const candidateNotesId = useId();
-    
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [drivingLicenseOptions, setDrivingLicenseOptions] = useState<PicklistRow[]>([]);
+    const [genderOptions, setGenderOptions] = useState<PicklistRow[]>([]);
+    const [maritalStatusOptions, setMaritalStatusOptions] = useState<PicklistRow[]>([]);
+    const [mobilityOptions, setMobilityOptions] = useState<PicklistRow[]>([]);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        let cancelled = false;
+        void (async () => {
+            const [dl, g, ms, mob] = await Promise.all([
+                fetchPicklistValues(apiBase, DRIVING_LICENSE_PICKLIST_KEY),
+                fetchPicklistValues(apiBase, GENDER_PICKLIST_KEY),
+                fetchPicklistValues(apiBase, MARITAL_STATUS_PICKLIST_KEY),
+                fetchPicklistValues(apiBase, MOBILITY_PICKLIST_KEY),
+            ]);
+            if (cancelled) return;
+            setDrivingLicenseOptions(dl);
+            setGenderOptions(g);
+            setMaritalStatusOptions(ms);
+            setMobilityOptions(mob);
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    const drivingLicenseValueSet = useMemo(
+        () => new Set(drivingLicenseOptions.map((o) => o.value)),
+        [drivingLicenseOptions],
+    );
+    const drivingLicenseCurrent = formData.drivingLicense != null ? String(formData.drivingLicense) : '';
+    const drivingLicenseUnknown =
+        drivingLicenseCurrent !== '' && !drivingLicenseValueSet.has(drivingLicenseCurrent);
+
+    const genderValueSet = useMemo(() => new Set(genderOptions.map((o) => o.value)), [genderOptions]);
+    const genderCurrent = formData.gender != null ? String(formData.gender) : '';
+    const genderUnknown = genderCurrent !== '' && !genderValueSet.has(genderCurrent);
+
+    const maritalStatusValueSet = useMemo(
+        () => new Set(maritalStatusOptions.map((o) => o.value)),
+        [maritalStatusOptions],
+    );
+    const maritalStatusCurrent = formData.maritalStatus != null ? String(formData.maritalStatus) : '';
+    const maritalStatusUnknown =
+        maritalStatusCurrent !== '' && !maritalStatusValueSet.has(maritalStatusCurrent);
+
+    const mobilityValueSet = useMemo(() => new Set(mobilityOptions.map((o) => o.value)), [mobilityOptions]);
+    const mobilityCurrent = formData.mobility != null ? String(formData.mobility) : '';
+    const mobilityUnknown = mobilityCurrent !== '' && !mobilityValueSet.has(mobilityCurrent);
+
     // States for new item inputs
     const [newLanguageName, setNewLanguageName] = useState('');
     const [newEducation, setNewEducation] = useState('');
@@ -344,39 +422,68 @@ const MainContent: React.FC<MainContentProps> = ({
                         <FormInput label={t('form.address')} name="address" value={formData.address} onChange={handleInputChange} required icon={<MapPinIcon className="w-4 h-4" />} />
                         <FormInput label={t('form.id_number')} name="idNumber" value={formData.idNumber} onChange={handleInputChange} />
                         
-                        <FormSelect label={t('form.marital_status')} name="maritalStatus" value={formData.maritalStatus} onChange={handleInputChange}>
-                            <option value="-">-</option>
-                            <option value="רווק/ה">רווק/ה</option>
-                            <option value="נשוי/אה">נשוי/אה</option>
-                            <option value="גרוש/ה">גרוש/ה</option>
-                            <option value="אלמן/ה">אלמן/ה</option>
-                            <option value="ידוע/ה בציבור">ידוע/ה בציבור</option>
+                        <FormSelect
+                            label={t('form.marital_status')}
+                            name="maritalStatus"
+                            value={maritalStatusCurrent}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {maritalStatusUnknown && (
+                                <option value={maritalStatusCurrent}>{maritalStatusCurrent}</option>
+                            )}
+                            {maritalStatusOptions.map((v) => (
+                                <option key={v.id || v.value} value={v.value}>
+                                    {(v.displayName || v.label).trim() || v.value}
+                                </option>
+                            ))}
+                        </FormSelect>
+
+                        <FormSelect
+                            label={t('form.gender')}
+                            name="gender"
+                            value={genderCurrent}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {genderUnknown && <option value={genderCurrent}>{genderCurrent}</option>}
+                            {genderOptions.map((v) => (
+                                <option key={v.id || v.value} value={v.value}>
+                                    {(v.displayName || v.label).trim() || v.value}
+                                </option>
+                            ))}
                         </FormSelect>
                         
-                        <FormSelect label={t('form.gender')} name="gender" value={formData.gender} onChange={handleInputChange}>
-                            <option>זכר</option>
-                            <option>נקבה</option>
+                        <FormSelect
+                            label={t('form.driving_license')}
+                            name="drivingLicense"
+                            value={drivingLicenseCurrent}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {drivingLicenseUnknown && (
+                                <option value={drivingLicenseCurrent}>{drivingLicenseCurrent}</option>
+                            )}
+                            {drivingLicenseOptions.map((v) => (
+                                <option key={v.id || v.value} value={v.value}>
+                                    {(v.displayName || v.label).trim() || v.value}
+                                </option>
+                            ))}
                         </FormSelect>
                         
-                        <FormSelect label={t('form.driving_license')} name="drivingLicense" value={formData.drivingLicense} onChange={handleInputChange}>
-                            <option value="-">ללא</option>
-                            <option value="A">A (אופנוע)</option>
-                            <option value="A1">A1</option>
-                            <option value="A2">A2</option>
-                            <option value="B">B (רכב פרטי)</option>
-                            <option value="C">C (משאית)</option>
-                            <option value="C1">C1</option>
-                            <option value="D">D (אוטובוס)</option>
-                            <option value="D1">D1</option>
-                            <option value="E">E (גורר)</option>
-                            <option value="1">1 (טרקטור)</option>
-                        </FormSelect>
-                        
-                         <FormSelect label={t('form.mobility')} name="mobility" value={formData.mobility} onChange={handleInputChange}>
-                            <option value="-">-</option>
-                            <option value="כן">כן</option>
-                            <option value="לא">לא</option>
-                            <option value="בעל/ת רכב">בעל/ת רכב</option>
+                        <FormSelect
+                            label={t('form.mobility')}
+                            name="mobility"
+                            value={mobilityCurrent}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {mobilityUnknown && <option value={mobilityCurrent}>{mobilityCurrent}</option>}
+                            {mobilityOptions.map((v) => (
+                                <option key={v.id || v.value} value={v.value}>
+                                    {(v.displayName || v.label).trim() || v.value}
+                                </option>
+                            ))}
                         </FormSelect>
                     </div>
                 </AccordionSection>

@@ -4,6 +4,7 @@ const picklistController = require('../controllers/picklistController');
 const router = express.Router();
 
 router.get('/categories', picklistController.listCategories);
+router.get('/categories/by-key/:key/values', picklistController.listValuesByCategoryKey);
 router.post('/categories', picklistController.createCategory);
 router.put('/categories/:id', picklistController.updateCategory);
 router.delete('/categories/:id', picklistController.deleteCategory);

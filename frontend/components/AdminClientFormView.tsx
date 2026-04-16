@@ -1,13 +1,15 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { 
     BuildingOffice2Icon, ChartBarIcon, SparklesIcon, UserGroupIcon, 
     PaintBrushIcon, CheckCircleIcon, ArrowLeftIcon, 
     LockClosedIcon, BanknotesIcon, BriefcaseIcon, CloudArrowUpIcon,
-    PlusIcon, XMarkIcon
+    PlusIcon, XMarkIcon, ClipboardDocumentListIcon, ChatBubbleBottomCenterTextIcon,
+    Cog6ToothIcon, CircleStackIcon, ViewColumnsIcon, Squares2X2Icon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 // --- TYPES ---
 interface ClientUser {
@@ -19,7 +21,7 @@ interface ClientUser {
 }
 
 interface ClientData {
-    id: number;
+    id: string;
     clientName: string;
     displayName: string;
     status: 'active' | 'inactive' | 'trial' | 'suspended';
@@ -55,43 +57,157 @@ const packageDefaults = {
     enterprise: { cv: 10000, sms: 5000, users: 50, jobs: 100, emails: 50000, tags: 9999, storage: 500, ai: 10000 }
 };
 
-// --- MOCK DATA ---
-const mockClientData: ClientData = {
-    id: 1,
-    clientName: 'מימד אנושי',
-    displayName: 'מימד אנושי פתרונות',
-    status: 'active',
-    packageType: 'pro',
-    creationDate: '2022-05-12',
-    renewalDate: '2025-05-12',
-    mainContactName: 'ישראל ישראלי',
-    mainContactEmail: 'israel@memad.co.il',
-    mainContactPhone: '052-1234567',
-    smsSource: 'humand',
-    authorizedIps: '192.168.1.1, 10.0.0.5',
-    primaryColor: '#8B5CF6', 
-    logoUrl: '',
-    matchingEnginePreset: 'balanced',
-    cvQuota: { used: 1250, total: 2000 },
-    smsQuota: { used: 450, total: 1000 },
-    usersQuota: { used: 8, total: 10 },
-    jobsQuota: { used: 12, total: 20 },
-    emailsQuota: { used: 2100, total: 5000 },
-    tagsQuota: { used: 45, total: 100 },
-    storageQuota: { used: 12, total: 50 }, // GB
-    aiCreditsQuota: { used: 350, total: 1000 }, // Credits
-    modules: {
-        ats: true,
-        crm: true,
-        finance: false,
-        automation: true,
-        ai_parsing: true,
-        portal: true,
-    },
-    users: [
-        { id: 1, name: 'ישראל ישראלי', email: 'israel@memad.co.il', role: 'Admin', lastLogin: '2025-11-20' },
-        { id: 2, name: 'דנה כהן', email: 'dana@memad.co.il', role: 'Recruiter', lastLogin: '2025-11-19' },
-    ]
+const DEFAULT_MODULES: Record<string, boolean> = {
+    candidates: true,
+    candidate_pool: true,
+    jobs: true,
+    job_board: true,
+    misc: true,
+    clients: true,
+    finance: false,
+    reports: true,
+    communication: true,
+    settings: true,
+    ai_parsing: false,
+    hiro_ai: false,
+    portal: false,
+};
+
+const mergeModules = (raw: unknown): Record<string, boolean> => {
+    const base = { ...DEFAULT_MODULES };
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return base;
+    for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+        if (v === true || v === false) base[k] = v;
+    }
+    return base;
+};
+
+const dbStatusToForm = (s: string | undefined): ClientData['status'] => {
+    if (s === 'לא פעיל') return 'inactive';
+    if (s === 'בהקפאה') return 'suspended';
+    return 'active';
+};
+
+const formStatusToDb = (s: ClientData['status']): string => {
+    if (s === 'inactive') return 'לא פעיל';
+    if (s === 'suspended') return 'בהקפאה';
+    return 'פעיל';
+};
+
+const formatDateInput = (v: string | Date | null | undefined): string => {
+    if (!v) return '';
+    const d = typeof v === 'string' ? new Date(v) : v;
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 10);
+};
+
+const clientApiToFormData = (raw: Record<string, unknown>): ClientData => {
+    const usersRaw = raw.users;
+    const users: ClientUser[] = Array.isArray(usersRaw)
+        ? (usersRaw as Record<string, unknown>[]).map((u, i) => ({
+              id: Number(u.id) || i + 1,
+              name: String(u.name || ''),
+              email: String(u.email || ''),
+              role: (u.role as ClientUser['role']) || 'Recruiter',
+              lastLogin: String(u.lastLogin || '-'),
+          }))
+        : [];
+
+    return {
+        id: String(raw.id || ''),
+        clientName: String(raw.name || ''),
+        displayName: String(raw.displayName || raw.name || ''),
+        status: dbStatusToForm(raw.status as string),
+        packageType: (raw.packageType as ClientData['packageType']) || 'starter',
+        creationDate:
+            formatDateInput(raw.creationDate as string) || new Date().toISOString().split('T')[0],
+        renewalDate: formatDateInput(raw.renewalDate as string) || '',
+        mainContactName: String(raw.mainContactName || ''),
+        mainContactEmail: String(raw.mainContactEmail || ''),
+        mainContactPhone: String(raw.mainContactPhone || ''),
+        smsSource: String(raw.smsSource || ''),
+        authorizedIps: String(raw.authorizedIps || ''),
+        primaryColor: String(raw.primaryColor || '#8B5CF6'),
+        logoUrl: String(raw.logoUrl || ''),
+        matchingEnginePreset: 'balanced',
+        cvQuota: { used: Number(raw.cvQuotaUsed ?? 0), total: Number(raw.cvQuotaTotal ?? 0) },
+        smsQuota: { used: Number(raw.smsUsed ?? 0), total: Number(raw.smsTotal ?? 0) },
+        usersQuota: { used: Number(raw.usersUsed ?? 0), total: Number(raw.usersTotal ?? 0) },
+        jobsQuota: { used: Number(raw.jobsUsed ?? 0), total: Number(raw.jobsTotal ?? 0) },
+        emailsQuota: { used: Number(raw.emailsQuotaUsed ?? 0), total: Number(raw.emailsQuotaTotal ?? 0) },
+        tagsQuota: { used: Number(raw.tagsQuotaUsed ?? 0), total: Number(raw.tagsQuotaTotal ?? 0) },
+        storageQuota: { used: Number(raw.storageQuotaUsed ?? 0), total: Number(raw.storageQuotaTotal ?? 0) },
+        aiCreditsQuota: {
+            used: Number(raw.aiCreditsQuotaUsed ?? 0),
+            total: Number(raw.aiCreditsQuotaTotal ?? 0),
+        },
+        modules: mergeModules(raw.modules),
+        users,
+    };
+};
+
+/** New client: totals only — never send usage counters (server-owned). */
+const buildClientCreatePayload = (form: ClientData): Record<string, unknown> => ({
+    name: form.clientName,
+    displayName: form.displayName,
+    packageType: form.packageType,
+    status: formStatusToDb(form.status),
+    isActive: form.status === 'active' || form.status === 'trial',
+    mainContactName: form.mainContactName || null,
+    mainContactEmail: form.mainContactEmail || null,
+    mainContactPhone: form.mainContactPhone || null,
+    smsSource: form.smsSource || null,
+    authorizedIps: form.authorizedIps || null,
+    primaryColor: form.primaryColor || null,
+    logoUrl: form.logoUrl || null,
+    renewalDate: form.renewalDate || null,
+    modules: form.modules,
+    cvQuotaTotal: form.cvQuota.total,
+    tagsQuotaTotal: form.tagsQuota.total,
+    jobsTotal: form.jobsQuota.total,
+    usersTotal: form.usersQuota.total,
+    smsTotal: form.smsQuota.total,
+    emailsQuotaTotal: form.emailsQuota.total,
+    storageQuotaTotal: form.storageQuota.total,
+    aiCreditsQuotaTotal: form.aiCreditsQuota.total,
+});
+
+const modulesEqual = (a: Record<string, boolean>, b: Record<string, boolean>) =>
+    JSON.stringify(a) === JSON.stringify(b);
+
+/** Edit: only fields that changed vs snapshot — avoids overwriting usage & spamming unused keys. */
+const buildClientUpdatePatch = (form: ClientData, initial: ClientData): Record<string, unknown> => {
+    const p: Record<string, unknown> = {};
+    if (form.clientName !== initial.clientName) p.name = form.clientName;
+    if (form.displayName !== initial.displayName) p.displayName = form.displayName;
+    if (form.packageType !== initial.packageType) p.packageType = form.packageType;
+    const st = formStatusToDb(form.status);
+    const st0 = formStatusToDb(initial.status);
+    if (st !== st0) {
+        p.status = st;
+        p.isActive = form.status === 'active' || form.status === 'trial';
+    }
+    if (form.mainContactName !== initial.mainContactName) p.mainContactName = form.mainContactName || null;
+    if (form.mainContactEmail !== initial.mainContactEmail) p.mainContactEmail = form.mainContactEmail || null;
+    if (form.mainContactPhone !== initial.mainContactPhone) p.mainContactPhone = form.mainContactPhone || null;
+    if (form.smsSource !== initial.smsSource) p.smsSource = form.smsSource || null;
+    if (form.authorizedIps !== initial.authorizedIps) p.authorizedIps = form.authorizedIps || null;
+    if (form.primaryColor !== initial.primaryColor) p.primaryColor = form.primaryColor || null;
+    if (form.logoUrl !== initial.logoUrl) p.logoUrl = form.logoUrl || null;
+    if (form.renewalDate !== initial.renewalDate) p.renewalDate = form.renewalDate || null;
+    if (!modulesEqual(form.modules, initial.modules)) p.modules = form.modules;
+
+    if (form.cvQuota.total !== initial.cvQuota.total) p.cvQuotaTotal = form.cvQuota.total;
+    if (form.tagsQuota.total !== initial.tagsQuota.total) p.tagsQuotaTotal = form.tagsQuota.total;
+    if (form.jobsQuota.total !== initial.jobsQuota.total) p.jobsTotal = form.jobsQuota.total;
+    if (form.usersQuota.total !== initial.usersQuota.total) p.usersTotal = form.usersQuota.total;
+    if (form.smsQuota.total !== initial.smsQuota.total) p.smsTotal = form.smsQuota.total;
+    if (form.emailsQuota.total !== initial.emailsQuota.total) p.emailsQuotaTotal = form.emailsQuota.total;
+    if (form.storageQuota.total !== initial.storageQuota.total) p.storageQuotaTotal = form.storageQuota.total;
+    if (form.aiCreditsQuota.total !== initial.aiCreditsQuota.total) {
+        p.aiCreditsQuotaTotal = form.aiCreditsQuota.total;
+    }
+    return p;
 };
 
 // --- SUB-COMPONENTS ---
@@ -292,14 +408,21 @@ const AdminClientFormView: React.FC = () => {
     const { clientId } = useParams<{ clientId: string }>();
     const navigate = useNavigate();
     const { t } = useLanguage();
+    const { refreshUser, user: authUser } = useAuth();
     const isEditing = !!clientId;
+    const apiBase = import.meta.env.VITE_API_BASE || '';
 
     const [activeTab, setActiveTab] = useState<'details' | 'modules' | 'quotas' | 'branding' | 'users'>('details');
     const [isUserModalOpen, setIsUserModalOpen] = useState(false);
     const [editingUser, setEditingUser] = useState<ClientUser | null>(null);
-    
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [isLoadingClient, setIsLoadingClient] = useState(false);
+    const [isSaving, setIsSaving] = useState(false);
+    /** Snapshot after GET — used to send a minimal PUT (diff only, no usage counters). */
+    const loadedSnapshotRef = useRef<ClientData | null>(null);
+
     const [formData, setFormData] = useState<ClientData>({
-        id: 0,
+        id: '',
         clientName: '',
         displayName: '',
         status: 'active',
@@ -322,15 +445,58 @@ const AdminClientFormView: React.FC = () => {
         tagsQuota: { used: 0, total: 20 },
         storageQuota: { used: 0, total: 5 },
         aiCreditsQuota: { used: 0, total: 100 },
-        modules: { ats: true },
+        modules: {
+            candidates: true,
+            candidate_pool: true,
+            jobs: true,
+            job_board: true,
+            misc: true,
+            clients: true,
+            finance: false,
+            reports: true,
+            communication: true,
+            settings: true,
+            ai_parsing: false,
+            hiro_ai: false,
+            portal: false,
+        },
         users: []
     });
 
     useEffect(() => {
-        if (isEditing) {
-            setFormData(mockClientData);
+        loadedSnapshotRef.current = null;
+    }, [clientId]);
+
+    useEffect(() => {
+        if (!isEditing || !clientId) return;
+        if (!apiBase) {
+            setLoadError('חסר VITE_API_BASE');
+            return;
         }
-    }, [isEditing, clientId]);
+        let cancelled = false;
+        setIsLoadingClient(true);
+        setLoadError(null);
+        fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}`)
+            .then((r) => {
+                if (!r.ok) throw new Error('טעינת לקוח נכשלה');
+                return r.json();
+            })
+            .then((raw) => {
+                if (cancelled) return;
+                const fd = clientApiToFormData(raw as Record<string, unknown>);
+                setFormData(fd);
+                loadedSnapshotRef.current = fd;
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setLoadError(e?.message || 'שגיאה');
+            })
+            .finally(() => {
+                if (!cancelled) setIsLoadingClient(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isEditing, clientId, apiBase]);
 
     const handlePackageChange = (newPackage: 'starter' | 'pro' | 'enterprise') => {
         const defaults = packageDefaults[newPackage];
@@ -349,19 +515,68 @@ const AdminClientFormView: React.FC = () => {
         }));
     };
 
-    const handleSave = () => {
-        console.log("Saving client:", formData);
-        navigate('/admin/clients');
+    const handleSave = async () => {
+        if (!apiBase) {
+            setLoadError('חסר VITE_API_BASE');
+            return;
+        }
+        if (!formData.clientName.trim()) {
+            setLoadError('שם חברה נדרש');
+            return;
+        }
+        setIsSaving(true);
+        setLoadError(null);
+        try {
+            let body: Record<string, unknown>;
+            if (isEditing && clientId) {
+                const snap = loadedSnapshotRef.current;
+                if (snap) {
+                    body = buildClientUpdatePatch(formData, snap);
+                } else {
+                    body = { modules: formData.modules };
+                }
+                if (Object.keys(body).length === 0) {
+                    navigate('/admin/clients');
+                    return;
+                }
+            } else {
+                body = buildClientCreatePayload(formData);
+            }
+
+            if (isEditing && clientId) {
+                const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (!res.ok) throw new Error('שמירת לקוח נכשלה');
+                if (authUser?.clientId && clientId === authUser.clientId) {
+                    await refreshUser();
+                }
+            } else {
+                const res = await fetch(`${apiBase}/api/clients`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (!res.ok) throw new Error('יצירת לקוח נכשלה');
+            }
+            navigate('/admin/clients');
+        } catch (e: unknown) {
+            setLoadError(e instanceof Error ? e.message : 'שגיאה');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     const toggleModule = (key: string) => {
-        setFormData(prev => ({
-            ...prev,
-            modules: {
-                ...prev.modules,
-                [key]: !prev.modules[key]
-            }
-        }));
+        setFormData((prev) => {
+            const wasOn = prev.modules[key] !== false;
+            return {
+                ...prev,
+                modules: { ...DEFAULT_MODULES, ...prev.modules, [key]: !wasOn },
+            };
+        });
     };
 
     const handleSaveUser = (user: any) => {
@@ -388,9 +603,21 @@ const AdminClientFormView: React.FC = () => {
         setIsUserModalOpen(true);
     }
 
+    if (isEditing && isLoadingClient) {
+        return (
+            <div className="flex flex-col items-center justify-center flex-1 min-h-[40vh] text-text-muted text-sm">
+                טוען לקוח…
+            </div>
+        );
+    }
+
     return (
         <div className="flex flex-col h-full bg-bg-default relative overflow-hidden">
-            
+            {loadError && (
+                <div className="bg-red-50 border-b border-red-200 text-red-800 text-sm px-6 py-3 shrink-0">
+                    {loadError}
+                </div>
+            )}
             {/* Top Bar */}
             <div className="bg-bg-card border-b border-border-default px-6 py-4 flex items-center justify-between shrink-0">
                 <div className="flex items-center gap-4">
@@ -417,10 +644,11 @@ const AdminClientFormView: React.FC = () => {
                         ביטול
                     </button>
                     <button 
-                        onClick={handleSave} 
-                        className="flex items-center gap-2 bg-primary-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-primary-700 transition shadow-md"
+                        onClick={() => void handleSave()} 
+                        disabled={isSaving}
+                        className="flex items-center gap-2 bg-primary-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-primary-700 transition shadow-md disabled:opacity-60"
                     >
-                        <span>שמור שינויים</span>
+                        <span>{isSaving ? 'שומר…' : 'שמור שינויים'}</span>
                     </button>
                 </div>
             </div>
@@ -543,57 +771,79 @@ const AdminClientFormView: React.FC = () => {
                                     <h3 className="text-lg font-bold text-text-default mb-4 px-1">מודולי ליבה (Core)</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                                         <ModuleCard 
-                                            title="מערכת גיוס (ATS)" 
-                                            description="ניהול מועמדים, משרות, תהליכים ואירועים. בסיס המערכת."
+                                            title="רשימת מועמדים" 
+                                            description="ניהול וצפייה במועמדים, סטטוסים ומסלולי גיוס."
+                                            icon={<ClipboardDocumentListIcon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.candidates}
+                                            onToggle={() => toggleModule('candidates')}
+                                        />
+                                        <ModuleCard 
+                                            title="משרות" 
+                                            description="פרסום משרות, ניהול תיאורים ומעקב אחר מועמדים למשרה."
                                             icon={<BriefcaseIcon className="w-6 h-6"/>}
-                                            isEnabled={formData.modules.ats}
-                                            onToggle={() => toggleModule('ats')}
+                                            isEnabled={!!formData.modules.jobs}
+                                            onToggle={() => toggleModule('jobs')}
                                         />
                                         <ModuleCard 
-                                            title="ניהול לקוחות (CRM)" 
-                                            description="כרטיסי לקוח, אנשי קשר, היסטוריית התקשרות. חובה לחברות השמה."
-                                            icon={<UserGroupIcon className="w-6 h-6"/>}
-                                            isEnabled={formData.modules.crm}
-                                            onToggle={() => toggleModule('crm')}
+                                            title="לוח משרות" 
+                                            description="לוח משרות פתוחות ופרסומים."
+                                            icon={<ViewColumnsIcon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.job_board}
+                                            onToggle={() => toggleModule('job_board')}
                                         />
                                         <ModuleCard 
-                                            title="כספים (Finance)" 
-                                            description="הפקת חשבוניות, מעקב גבייה, חישוב עמלות רכזים."
+                                            title="מאגר מועמדים" 
+                                            description="מאגר מועמדים ומועמדות לפני שיוך למשרה."
+                                            icon={<CircleStackIcon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.candidate_pool}
+                                            onToggle={() => toggleModule('candidate_pool')}
+                                        />
+                                        <ModuleCard 
+                                            title="שונות" 
+                                            description="דף הבית, התראות וקישורים מהירים."
+                                            icon={<Squares2X2Icon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.misc}
+                                            onToggle={() => toggleModule('misc')}
+                                        />
+                                        <ModuleCard 
+                                            title="לקוחות" 
+                                            description="כרטיסי לקוח, אנשי קשר והיסטוריית התקשרות."
+                                            icon={<BuildingOffice2Icon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.clients}
+                                            onToggle={() => toggleModule('clients')}
+                                        />
+                                        <ModuleCard 
+                                            title="כספים" 
+                                            description="חשבוניות, מעקב גבייה וחישוב עמלות."
                                             icon={<BanknotesIcon className="w-6 h-6"/>}
-                                            isEnabled={formData.modules.finance}
+                                            isEnabled={!!formData.modules.finance}
                                             onToggle={() => toggleModule('finance')}
+                                        />
+                                        <ModuleCard 
+                                            title="דוחות" 
+                                            description="דוחות, לוחות בקרה ומדדי ביצועים."
+                                            icon={<ChartBarIcon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.reports}
+                                            onToggle={() => toggleModule('reports')}
+                                        />
+                                        <ModuleCard 
+                                            title="מרכז תקשורת" 
+                                            description="הודעות, מיילים ותקשורת מרוכזת עם הצוות והמועמדים."
+                                            icon={<ChatBubbleBottomCenterTextIcon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.communication}
+                                            onToggle={() => toggleModule('communication')}
+                                        />
+                                        <ModuleCard 
+                                            title="הגדרות" 
+                                            description="הגדרות מערכת, ארגון, הרשאות ופרטי לקוח."
+                                            icon={<Cog6ToothIcon className="w-6 h-6"/>}
+                                            isEnabled={!!formData.modules.settings}
+                                            onToggle={() => toggleModule('settings')}
                                         />
                                     </div>
                                 </div>
 
-                                <div>
-                                    <h3 className="text-lg font-bold text-text-default mb-4 px-1">כלים מתקדמים</h3>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                                         <ModuleCard 
-                                            title="פענוח קוח (AI Parsing)" 
-                                            description="חילוץ אוטומטי של נתונים מקובצי קורות חיים."
-                                            icon={<CloudArrowUpIcon className="w-6 h-6"/>}
-                                            isEnabled={formData.modules.ai_parsing}
-                                            onToggle={() => toggleModule('ai_parsing')}
-                                            isPremium
-                                        />
-                                        <ModuleCard 
-                                            title="Hiro AI Assistant" 
-                                            description="צ'אט בוט חכם לעזרה בכתיבת משרות וסינון מועמדים."
-                                            icon={<SparklesIcon className="w-6 h-6"/>}
-                                            isEnabled={formData.modules.hiro_ai} // Assuming key exists or handled dynamically
-                                            onToggle={() => toggleModule('hiro_ai')}
-                                            isPremium
-                                        />
-                                        <ModuleCard 
-                                            title="פורטל מנהלים" 
-                                            description="גישה למנהלים מגייסים לצפייה במועמדים ומתן משוב."
-                                            icon={<LockClosedIcon className="w-6 h-6"/>}
-                                            isEnabled={formData.modules.portal}
-                                            onToggle={() => toggleModule('portal')}
-                                        />
-                                    </div>
-                                </div>
+                                
                             </div>
                         )}
 

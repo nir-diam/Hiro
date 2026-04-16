@@ -132,7 +132,130 @@ function resolveRawType(ct) {
   return null;
 }
 
-const mapCandidateWithTags = (candidate) => {
+const gridStr = (v) => {
+  if (v == null) return '';
+  const s = String(v).trim();
+  if (!s || s === '-') return '';
+  return s;
+};
+
+const topIndustryLabelFromAnalysis = (ia) => {
+  if (!ia || typeof ia !== 'object') return '';
+  const inds = ia.industries;
+  if (!Array.isArray(inds) || !inds.length) return '';
+  const sorted = [...inds].sort(
+    (a, b) => (Number(b?.percentage) || 0) - (Number(a?.percentage) || 0),
+  );
+  return gridStr(sorted[0]?.label);
+};
+
+const parseEndYearForSort = (endDate) => {
+  if (endDate == null) return 0;
+  const s = String(endDate).trim();
+  if (/present|כיום/i.test(s)) return 9999;
+  const m = s.match(/^(\d{4})/);
+  return m ? parseInt(m[1], 10) : 0;
+};
+
+/** Prefer workExperience; else legacy experience JSON. Pick current job or latest by end year. */
+const pickBestExperienceRow = (payload) => {
+  const wx = payload.workExperience;
+  const ex = payload.experience;
+  const list =
+    Array.isArray(wx) && wx.length ? wx : Array.isArray(ex) && ex.length ? ex : [];
+  if (!list.length) return null;
+  const current = list.find(
+    (e) =>
+      e &&
+      (/present|כיום/i.test(String(e.endDate || e.end || '').trim()) || e.isCurrent === true),
+  );
+  if (current) return current;
+  let best = list[0];
+  let bestY = parseEndYearForSort(best?.endDate || best?.end);
+  for (let i = 1; i < list.length; i++) {
+    const e = list[i];
+    const y = parseEndYearForSort(e?.endDate || e?.end);
+    if (y > bestY) {
+      bestY = y;
+      best = e;
+    }
+  }
+  return best;
+};
+
+const sortTagDetailsByRelevance = (details, rawType) => {
+  const t = String(rawType).toLowerCase();
+  return [...details.filter((d) => String(d.rawType || '').toLowerCase() === t)].sort((a, b) => {
+    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+    return (Number(b.finalScore) || 0) - (Number(a.finalScore) || 0);
+  });
+};
+
+/** Fill empty industry / field / sector / companySize for list & detail from tags + analysis + experience. */
+const enrichGridCompanyFields = (payload) => {
+  const details = payload.tagDetails || [];
+  const bestExp = pickBestExperienceRow(payload);
+
+  if (!gridStr(payload.industry)) {
+    const fromIa = topIndustryLabelFromAnalysis(payload.industryAnalysis);
+    if (fromIa) payload.industry = fromIa;
+  }
+  if (!gridStr(payload.industry)) {
+    const sorted = sortTagDetailsByRelevance(details, 'industry');
+    const tag = sorted[0];
+    if (tag) {
+      payload.industry =
+        gridStr(tag.displayNameHe) || gridStr(tag.displayNameEn) || gridStr(tag.tagKey);
+    }
+  }
+  if (!gridStr(payload.industry) && bestExp) {
+    const v =
+      gridStr(bestExp.companyField) ||
+      gridStr(bestExp.industry) ||
+      gridStr(bestExp.companyIndustry);
+    if (v) payload.industry = v;
+  }
+
+  if (!gridStr(payload.field)) {
+    const sorted = sortTagDetailsByRelevance(details, 'role');
+    const tag = sorted[0];
+    if (tag) {
+      payload.field =
+        gridStr(tag.category) ||
+        gridStr(tag.displayNameHe) ||
+        gridStr(tag.displayNameEn) ||
+        gridStr(tag.tagKey);
+    }
+  }
+  if (!gridStr(payload.field) && bestExp) {
+    const v = gridStr(bestExp.field) || gridStr(bestExp.companyField);
+    if (v) payload.field = v;
+  }
+
+  if (!gridStr(payload.sector)) {
+    const ia = payload.industryAnalysis;
+    const sub = ia?.smartTags?.orgDNA?.subLabel;
+    if (gridStr(sub)) payload.sector = gridStr(sub);
+    else if (Array.isArray(ia?.smartTags?.domains) && ia.smartTags.domains.length) {
+      payload.sector = gridStr(ia.smartTags.domains[0]);
+    }
+  }
+  if (!gridStr(payload.sector) && bestExp) {
+    const v =
+      gridStr(bestExp.type) ||
+      gridStr(bestExp.companyType) ||
+      gridStr(bestExp.sector) ||
+      gridStr(bestExp.orgType);
+    if (v) payload.sector = v;
+  }
+
+  if (!gridStr(payload.companySize) && bestExp) {
+    const v = gridStr(bestExp.size) || gridStr(bestExp.companySize);
+    if (v) payload.companySize = v;
+  }
+};
+
+const mapCandidateWithTags = (candidate, options = {}) => {
   if (!candidate) return null;
   const payload = candidate.toJSON ? candidate.toJSON() : { ...candidate };
   const candidateTags = payload.candidateTags || [];
@@ -162,70 +285,333 @@ const mapCandidateWithTags = (candidate) => {
     updatedAt: ct.updated_at,
   }));
   delete payload.candidateTags;
+
+  let langs = Array.isArray(payload.languages) ? payload.languages : [];
+  if (!langs.length && payload.tagDetails?.length) {
+    const seen = new Set(
+      langs.map((x) => String(x?.name || x?.language || '').trim().toLowerCase()).filter(Boolean),
+    );
+    for (const td of payload.tagDetails) {
+      const rt = String(td.rawType || '').toLowerCase();
+      if (rt !== 'language') continue;
+      const name = String(td.displayNameHe || td.displayNameEn || td.tagKey || '').trim();
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      langs.push({ name });
+    }
+  }
+  payload.languages = langs;
+  payload.jobScopes = Array.isArray(payload.jobScopes) ? payload.jobScopes : [];
+
+  enrichGridCompanyFields(payload);
+
+  if (options.stripListHeavyJson) {
+    delete payload.workExperience;
+    delete payload.experience;
+  }
+
   return payload;
 };
 
 const list = async () =>
-  (await Candidate.findAll({ include: includeCandidateTags })).map(mapCandidateWithTags);
+  (await Candidate.findAll({ include: includeCandidateTags })).map((r) => mapCandidateWithTags(r));
 
 /**
- * Heavy JSON / text not used by GET /api/candidates grid (full profile loads on detail).
- * Dropping these columns is the largest win on wide rows.
+ * GET /api/candidates grid: explicit allowlist so JSONB/array fields (languages, jobScopes) are never
+ * dropped by Sequelize attribute resolution, and heavy columns stay out of the list query.
  */
-const LIST_EXCLUDE_ATTRIBUTES = [
-  'embedding',
-  'searchText',
+const LIST_GRID_ATTRIBUTES = [
+  'id',
+  'fullName',
+  'status',
+  'phone',
+  'email',
+  'address',
+  'idNumber',
+  'maritalStatus',
+  'gender',
+  'drivingLicense',
+  'mobility',
+  'userId',
+  'employmentType',
+  'jobScope',
+  'jobScopes',
+  'availability',
+  'physicalWork',
+  'birthYear',
+  'birthMonth',
+  'birthDay',
+  'age',
+  'location',
+  'title',
+  'professionalSummary',
+  'profilePicture',
+  'resumeUrl',
+  'internalTags',
+  /** Used only to derive sector / company size / field when columns are empty; stripped from list JSON. */
   'workExperience',
   'experience',
-  'education',
-  'skills',
   'languages',
-  'internalNotes',
-  'candidateNotes',
-  'highlights',
-  'jobScopes',
+  'salaryMin',
+  'salaryMax',
+  'source',
+  'lastActivity',
+  'lastActive',
+  'matchScore',
+  'matchAnalysis',
+  'sector',
+  'companySize',
+  'field',
+  'industry',
   'industryAnalysis',
+  'isArchived',
+  'isDeleted',
+  'createdAt',
+  'updatedAt',
 ];
 
-const listPaginated = async ({ page = 1, limit = 100, search = '' } = {}) => {
+const pushBind = (binds, val) => {
+  binds.push(val);
+  return binds.length;
+};
+
+/** Normalize typography so job catalog text matches candidate CV text (e.g. גרשיים vs ASCII "). */
+const normalizeInterestSearchText = (s) =>
+  String(s || '')
+    .trim()
+    .replace(/[\u201c\u201d\u05f4\u201e]/g, '"')
+    .replace(/\s+/g, ' ');
+
+/** e.g. "קצין/ת ביטחון (קב\"ט)" → also "קצין/ת ביטחון" for job.role equality variants. */
+const expandInterestRolePhrases = (roleRaw) => {
+  if (!roleRaw) return [];
+  const phrases = [roleRaw];
+  const stripped = roleRaw
+    .replace(/\s*\([^)]*\)\s*/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (stripped.length >= 3 && stripped !== roleRaw) phrases.push(stripped);
+  return phrases;
+};
+
+/**
+ * Shared WHERE for candidate list + count (parameterized).
+ * @param {string} trimmedSearch - free text (name / email / summary)
+ * @param {object|null} advanced - JSON from GET ?adv= (frontend advanced search panel)
+ */
+const buildCandidateListWhere = (trimmedSearch, advanced) => {
+  const fragments = ['"isDeleted" = false'];
+  const binds = [];
+
+  if (trimmedSearch) {
+    const n = pushBind(binds, `%${trimmedSearch}%`);
+    fragments.push(
+      `("fullName" ILIKE $${n} OR "email" ILIKE $${n} OR "professionalSummary" ILIKE $${n})`,
+    );
+  }
+
+  if (advanced && typeof advanced === 'object' && !Array.isArray(advanced)) {
+    const g = advanced.gender;
+    if (g === 'male') {
+      fragments.push(`(gender ILIKE '%זכר%' OR gender ILIKE '%male%')`);
+    } else if (g === 'female') {
+      fragments.push(`(gender ILIKE '%נקב%' OR gender ILIKE '%female%')`);
+    }
+
+    const statusFilter = String(advanced.statusFilter || '').trim();
+    if (statusFilter === 'active') {
+      fragments.push(`"isArchived" = false`);
+    } else if (statusFilter === 'inactive') {
+      fragments.push(`"isArchived" = true`);
+    }
+
+    if (Array.isArray(advanced.tags)) {
+      for (const tag of advanced.tags) {
+        const t = String(tag || '').trim();
+        if (!t) continue;
+        const n = pushBind(binds, `%${t}%`);
+        fragments.push(`EXISTS (
+          SELECT 1 FROM candidate_tags ct
+          INNER JOIN tags tg ON tg.id = ct.tag_id
+          WHERE ct.candidate_id = candidates.id AND ct.is_active = true
+          AND (tg.tag_key ILIKE $${n} OR tg.display_name_he ILIKE $${n} OR tg.display_name_en ILIKE $${n})
+        )`);
+      }
+    }
+
+    if (Array.isArray(advanced.locations) && advanced.locations.length) {
+      const locParts = [];
+      for (const loc of advanced.locations) {
+        const v = String(loc?.value || '').trim();
+        if (!v) continue;
+        const n = pushBind(binds, `%${v}%`);
+        locParts.push(`(address ILIKE $${n} OR location ILIKE $${n})`);
+      }
+      if (locParts.length) fragments.push(`(${locParts.join(' OR ')})`);
+    }
+
+    if (
+      advanced.jobScopeAll === false &&
+      Array.isArray(advanced.jobScopes) &&
+      advanced.jobScopes.length
+    ) {
+      const n = pushBind(binds, advanced.jobScopes);
+      fragments.push(
+        `("jobScope" = ANY($${n}::text[]) OR "jobScopes" && $${n}::text[])`,
+      );
+    }
+
+    if (advanced.lastUpdated && typeof advanced.lastUpdated === 'object') {
+      const from = String(advanced.lastUpdated.from || '').trim();
+      const to = String(advanced.lastUpdated.to || '').trim();
+      if (from) {
+        const n = pushBind(binds, from);
+        fragments.push(`"updatedAt" >= $${n}::date`);
+      }
+      if (to) {
+        const n = pushBind(binds, `${to}T23:59:59.999Z`);
+        fragments.push(`"updatedAt" <= $${n}::timestamptz`);
+      }
+    }
+
+    const roleRaw = normalizeInterestSearchText(advanced.interestRole || '');
+    const interestFieldRaw = normalizeInterestSearchText(advanced.interestField || '');
+
+    // Match jobs.field / jobs.role (catalog), then only candidates linked in job_candidates.
+    if (interestFieldRaw || roleRaw) {
+      const jobMatchConds = [];
+      if (interestFieldRaw) {
+        const n = pushBind(binds, interestFieldRaw);
+        jobMatchConds.push(`LOWER(TRIM(COALESCE(j.field, ''))) = LOWER(TRIM($${n}::text))`);
+      }
+      if (roleRaw) {
+        const phrases = expandInterestRolePhrases(roleRaw);
+        const roleEqParts = phrases.map((phrase) => {
+          const nn = pushBind(binds, phrase);
+          return `LOWER(TRIM(COALESCE(j.role, ''))) = LOWER(TRIM($${nn}::text))`;
+        });
+        jobMatchConds.push(
+          roleEqParts.length === 1 ? roleEqParts[0] : `(${roleEqParts.join(' OR ')})`,
+        );
+      }
+      fragments.push(`EXISTS (
+        SELECT 1 FROM job_candidates jc
+        INNER JOIN jobs j ON j.id = jc."jobId"
+        WHERE jc."candidateId" = candidates.id
+          AND jc."jobId" IS NOT NULL
+          AND ${jobMatchConds.join(' AND ')}
+      )`);
+    }
+
+    // Age: when ageMin/ageMax sent, filter by range. includeUnknownAge=true → also rows with no parseable age.
+    const amin =
+      advanced.ageMin != null && advanced.ageMin !== '' ? Number(advanced.ageMin) : NaN;
+    const amax =
+      advanced.ageMax != null && advanced.ageMax !== '' ? Number(advanced.ageMax) : NaN;
+    const includeUnknownAge = advanced.includeUnknownAge === true;
+    if (Number.isFinite(amin) && Number.isFinite(amax)) {
+      const cy = new Date().getFullYear();
+      const n1 = pushBind(binds, amin);
+      const n2 = pushBind(binds, amax);
+      const numericAge = `(NULLIF(trim(COALESCE(age::text, '')), '') ~ '^[0-9]+$' AND (NULLIF(trim(COALESCE(age::text, '')), ''))::int BETWEEN $${n1} AND $${n2})`;
+      const birthYearTrim = `NULLIF(trim(COALESCE("birthYear"::text, '')), '')`;
+      const birthAge = `((${birthYearTrim}) ~ '^[0-9]{4}$' AND (${cy} - (${birthYearTrim})::int) BETWEEN $${n1} AND $${n2})`;
+      const inRange = `(${numericAge} OR ${birthAge})`;
+      // IS TRUE so empty/null age (regex → NULL) counts as “unknown”, not excluded by NOT(NULL).
+      const hasKnownAge = `(
+        (NULLIF(trim(COALESCE(age::text, '')), '') ~ '^[0-9]+$' IS TRUE)
+        OR ((${birthYearTrim}) ~ '^[0-9]{4}$' IS TRUE)
+      )`;
+      const unknownAge = `(NOT (${hasKnownAge}))`;
+      // Checked: in range OR no parseable age. Unchecked: in range only among those with a known age (exclude unknown).
+      if (includeUnknownAge) {
+        fragments.push(`(${inRange} OR ${unknownAge})`);
+      } else {
+        fragments.push(`((${inRange}) AND (${hasKnownAge}))`);
+      }
+    }
+
+    // Salary: when salaryMin/salaryMax sent. includeUnknownSalary=true → also rows with no salary fields.
+    const smin =
+      advanced.salaryMin != null && advanced.salaryMin !== '' ? Number(advanced.salaryMin) : NaN;
+    const smax =
+      advanced.salaryMax != null && advanced.salaryMax !== '' ? Number(advanced.salaryMax) : NaN;
+    const includeUnknownSalary = advanced.includeUnknownSalary === true;
+    if (Number.isFinite(smin) && Number.isFinite(smax)) {
+      const n1 = pushBind(binds, smin);
+      const n2 = pushBind(binds, smax);
+      const hasSalary = `("salaryMin" IS NOT NULL OR "salaryMax" IS NOT NULL)`;
+      const overlap = `(COALESCE("salaryMin", 0) <= $${n2} AND COALESCE("salaryMax", "salaryMin", 2147483647) >= $${n1})`;
+      const inSalaryRange = `(${hasSalary} AND ${overlap})`;
+      const unknownSalary = `(NOT (${hasSalary}))`;
+      if (includeUnknownSalary) {
+        fragments.push(`(${inSalaryRange} OR ${unknownSalary})`);
+      } else {
+        fragments.push(inSalaryRange);
+      }
+    }
+
+    // השכלה: at least one active tag classified as education (link raw_type or catalog type degree/education).
+    if (advanced.hasDegree === true) {
+      fragments.push(`EXISTS (
+        SELECT 1 FROM candidate_tags ct
+        INNER JOIN tags tg ON tg.id = ct.tag_id
+        WHERE ct.candidate_id = candidates.id AND ct.is_active = true
+        AND tg.status = 'active'
+        AND (
+          LOWER(TRIM(COALESCE(ct.raw_type, ''))) IN ('education')
+          OR LOWER(TRIM(COALESCE(tg.type::text, ''))) IN ('education')
+        )
+      )`);
+    }
+
+    if (Array.isArray(advanced.languages) && advanced.languages.length) {
+      for (const lf of advanced.languages) {
+        const lang = String(lf?.language || '').trim();
+        if (!lang) continue;
+        const n = pushBind(binds, `%${lang}%`);
+        fragments.push(`languages::text ILIKE $${n}`);
+      }
+    }
+
+    if (Array.isArray(advanced.complexRules)) {
+      for (const rule of advanced.complexRules) {
+        if (rule.field === 'source' && rule.textValue) {
+          const tv = String(rule.textValue).trim();
+          if (tv) {
+            const n = pushBind(binds, `%${tv}%`);
+            fragments.push(`source ILIKE $${n}`);
+          }
+        }
+      }
+    }
+  }
+
+  const whereSql = fragments.join(' AND ');
+  return { whereSql, binds };
+};
+
+const listPaginated = async ({ page = 1, limit = 100, search = '', advanced = null } = {}) => {
   const safeLimit = Number.isFinite(limit) ? limit : 100;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
   const offset = (safePage - 1) * safeLimit;
   const trimmedSearch = String(search || '').trim();
 
-  // Parameterized raw SQL: narrow index-friendly scans (no ORM overhead on COUNT/LIMIT page).
-  let count;
-  let idRows;
-  if (!trimmedSearch) {
-    const [countRows, idQueryRows] = await Promise.all([
-      sequelize.query('SELECT COUNT(*)::int AS c FROM candidates WHERE "isDeleted" = false', {
-        type: QueryTypes.SELECT,
-      }),
-      sequelize.query(
-        'SELECT id FROM candidates WHERE "isDeleted" = false ORDER BY "updatedAt" DESC NULLS LAST LIMIT $1 OFFSET $2',
-        { bind: [safeLimit, offset], type: QueryTypes.SELECT },
-      ),
-    ]);
-    count = countRows[0].c;
-    idRows = idQueryRows;
-  } else {
-    const term = `%${trimmedSearch}%`;
-    const [countRows, idQueryRows] = await Promise.all([
-      sequelize.query(
-        `SELECT COUNT(*)::int AS c FROM candidates WHERE "isDeleted" = false
-         AND ("fullName" ILIKE $1 OR "email" ILIKE $1 OR "professionalSummary" ILIKE $1)`,
-        { bind: [term], type: QueryTypes.SELECT },
-      ),
-      sequelize.query(
-        `SELECT id FROM candidates WHERE "isDeleted" = false
-         AND ("fullName" ILIKE $1 OR "email" ILIKE $1 OR "professionalSummary" ILIKE $1)
-         ORDER BY "updatedAt" DESC NULLS LAST LIMIT $2 OFFSET $3`,
-        { bind: [term, safeLimit, offset], type: QueryTypes.SELECT },
-      ),
-    ]);
-    count = countRows[0].c;
-    idRows = idQueryRows;
-  }
+  const { whereSql, binds } = buildCandidateListWhere(trimmedSearch, advanced);
+  const li = binds.length + 1;
+  const oi = binds.length + 2;
+  const countSql = `SELECT COUNT(*)::int AS c FROM candidates WHERE ${whereSql}`;
+  const idSql = `SELECT id FROM candidates WHERE ${whereSql} ORDER BY "updatedAt" DESC NULLS LAST LIMIT $${li} OFFSET $${oi}`;
+  const idBinds = [...binds, safeLimit, offset];
+
+  const [countRows, idQueryRows] = await Promise.all([
+    sequelize.query(countSql, { bind: binds, type: QueryTypes.SELECT }),
+    sequelize.query(idSql, { bind: idBinds, type: QueryTypes.SELECT }),
+  ]);
+  const count = countRows[0].c;
+  const idRows = idQueryRows;
 
   const ids = idRows.map((r) => r.id).filter(Boolean);
   if (!ids.length) {
@@ -240,14 +626,14 @@ const listPaginated = async ({ page = 1, limit = 100, search = '' } = {}) => {
   const rows = await Candidate.findAll({
     where: { id: ids },
     include: includeCandidateTagsForList,
-    attributes: { exclude: LIST_EXCLUDE_ATTRIBUTES },
+    attributes: LIST_GRID_ATTRIBUTES,
   });
 
   const orderIndex = new Map(ids.map((id, i) => [String(id), i]));
   rows.sort((a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0));
 
   return {
-    rows: rows.map(mapCandidateWithTags),
+    rows: rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true })),
     count,
     page: safePage,
     limit: safeLimit,
@@ -306,7 +692,7 @@ const listByWorkedAtOrganization = async ({
   });
 
   return {
-    rows: filtered.map(mapCandidateWithTags),
+    rows: filtered.map((r) => mapCandidateWithTags(r)),
     count: filtered.length,
   };
 };
@@ -341,7 +727,9 @@ const getByUserId = async (userId) =>
     await Candidate.findOne({ where: { userId }, include: includeCandidateTags }),
   );
 const listByUserId = async (userId) =>
-  (await Candidate.findAll({ where: { userId }, include: includeCandidateTags })).map(mapCandidateWithTags);
+  (await Candidate.findAll({ where: { userId }, include: includeCandidateTags })).map((r) =>
+    mapCandidateWithTags(r),
+  );
 
 const create = async (payload) => {
   const cleanPayload = { ...payload };

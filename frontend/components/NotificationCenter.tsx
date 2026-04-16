@@ -1,15 +1,44 @@
 
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { fetchStaffUsers, type StaffUserDto } from '../services/usersApi';
+import type { Candidate } from './CandidatesListView';
+import { useAuth } from '../context/AuthContext';
 import { 
     ClipboardDocumentListIcon, ChatBubbleOvalLeftEllipsisIcon, InformationCircleIcon, ArchiveBoxIcon, 
     CheckCircleIcon, MagnifyingGlassIcon, ArrowLeftIcon, ArrowUturnLeftIcon, ChevronDownIcon, XMarkIcon,
     ClockIcon, UserGroupIcon
 } from './Icons';
 
+import {
+    NOTIFICATION_MESSAGES_REFRESH_EVENT,
+    NOTIFICATION_MESSAGE_ID_REGEX,
+    requestNotificationInboxCountsRefresh,
+} from '../services/notificationInboxCounts';
+import { deriveLocalCandidateId } from '../utils/candidateId';
+import {
+    EMPTY_LINKED_LABEL,
+    parseLegacyLinkedAppendix,
+    stripTaskLinkedAppendixFromBody,
+} from '../utils/taskLinkedContext';
+
 // --- TYPES ---
 type NotificationType = 'task' | 'message' | 'system';
 type NotificationStatus = 'New' | 'In Progress' | 'Done';
+
+/** Advanced status filter: טופל / לא טופל (`metadata.taskCompleted` — משימות והודעות). לא קשור לנקרא. */
+const NOTIFICATION_READ_FILTER_PENDING = 'pending';
+const NOTIFICATION_READ_FILTER_DONE = 'done_read';
+
+const ADVANCED_FILTER_FIELD_LABELS: Record<string, string> = {
+    sender: 'שולח',
+    recipient: 'מקבל',
+    status: 'סטטוס',
+    category: 'קטגוריה',
+    linkedClient: 'לקוח',
+    fromDate: 'מתאריך',
+    toDate: 'עד תאריך',
+};
 
 interface Notification {
   id: string;
@@ -18,15 +47,31 @@ interface Notification {
   content: string;
   timestamp: string; // Creation date
   dueDate?: string; // Due date for tasks
-  isRead: boolean;
+  /** טופל — `metadata.taskCompleted` (גם להודעות) */
+  handledComplete: boolean;
   sender: string;
   recipient: string;
+  assignee?: string;
+  toEmail?: string;
+  recipientReadAt?: string;
+  senderUserId?: string | null;
   status: NotificationStatus;
   category: 'כללי' | 'גיוס' | 'מכירות';
   urgency?: 'נמוכה' | 'בינונית' | 'גבוהה';
   linkedCandidateId?: number;
+  /** DB UUID for drawer fetch (when local id alone is insufficient). */
+  linkedCandidateBackendId?: string;
+  linkedJobId?: string;
+  linkedClientId?: string;
+  linkedContactId?: string;
   linkedClient?: string;
+  /** תצוגה מתוך taskPayload (מידע מקושר — 3 שורות קבועות) */
+  linkedCandidateLabel?: string;
+  linkedJobLabel?: string;
+  linkedClientLabel?: string;
   backendStatus: 'unread' | 'tasks' | 'archived' | 'deleted';
+  /** Client-only: expanded once in ארכיון (tasks have no separate “read” API). */
+  viewedInArchive?: boolean;
 }
 
 const notificationStyles: { [key in NotificationType]: { icon: React.ReactNode; bg: string; text: string; } } = {
@@ -85,12 +130,94 @@ function formatDueDate(dueDateStr?: string) {
     return date.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit' });
 }
 
+/** Prefer API `senderName` / `senderEmail`; never show raw sender UUIDs. */
+function formatNotificationSender(row: {
+    senderName?: string | null;
+    senderEmail?: string | null;
+    senderUserId?: string | null;
+}): string {
+    const name = row.senderName != null ? String(row.senderName).trim() : '';
+    const email = row.senderEmail != null ? String(row.senderEmail).trim() : '';
+    if (name && email) return `${name} (${email})`;
+    if (name) return name;
+    if (email) return email;
+    if (row.senderUserId) return 'משתמש לא זמין';
+    return 'מערכת';
+}
+
+const NOTIFICATION_PREVIEW_MAX_WORDS = 6;
+
+/** Collapsed row preview: first N words, then "..." (full body only when expanded). */
+function truncatedPreviewWords(text: string, maxWords = NOTIFICATION_PREVIEW_MAX_WORDS): string {
+    const raw = String(text ?? '').trim();
+    if (!raw) return '';
+    const words = raw.split(/\s+/).filter(Boolean);
+    if (words.length <= maxWords) return raw;
+    return `${words.slice(0, maxWords).join(' ')}...`;
+}
+
+function emailInCommaSeparatedField(field: string, emailNorm: string): boolean {
+    const norm = String(emailNorm || '').trim().toLowerCase();
+    if (!norm) return false;
+    return String(field || '')
+        .split(/[,;\n]+/)
+        .map((x) => x.trim().toLowerCase())
+        .filter(Boolean)
+        .includes(norm);
+}
+
+/** Mirrors backend `notificationRecipientMatchesViewer` (email in assignee or toEmail; or assignee equals viewer name). */
+function notificationRecipientMatchesViewer(
+    notification: Pick<Notification, 'assignee' | 'toEmail'>,
+    email?: string | null,
+    name?: string | null
+): boolean {
+    const emailNorm = (email || '').trim().toLowerCase();
+    const nameNorm = (name || '').trim().toLowerCase();
+    const assigneeWhole = String(notification.assignee || '').trim().toLowerCase();
+    if (emailNorm) {
+        if (emailInCommaSeparatedField(notification.toEmail || '', emailNorm)) return true;
+        if (emailInCommaSeparatedField(notification.assignee || '', emailNorm)) return true;
+    }
+    if (nameNorm && assigneeWhole === nameNorm) return true;
+    return false;
+}
+
 interface NotificationCenterProps {
     onOpenCandidateSummary: (candidateId: number) => void;
 }
 
+type AssignAnchor = { top: number; left: number; bottom: number; right: number; width: number; height: number };
+
 const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidateSummary }) => {
     const navigate = useNavigate();
+    const { user } = useAuth();
+
+    const openLinkedCandidate = (n: Notification) => {
+        const backend = n.linkedCandidateBackendId?.trim();
+        if (backend) {
+            const minimal: Candidate = {
+                id: n.linkedCandidateId ?? deriveLocalCandidateId(backend),
+                backendId: backend,
+                name:
+                    n.linkedCandidateLabel && n.linkedCandidateLabel !== EMPTY_LINKED_LABEL
+                        ? n.linkedCandidateLabel
+                        : '',
+                avatar: '',
+                title: '',
+                status: '',
+                lastActivity: '',
+                source: '',
+                tags: [],
+                internalTags: [],
+                matchScore: 0,
+                phone: '',
+            };
+            onOpenCandidateSummary(minimal);
+        } else if (n.linkedCandidateId != null) {
+            onOpenCandidateSummary(n.linkedCandidateId);
+        }
+    };
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [notifications, setNotifications] = useState<Notification[]>([]);
     const [archivedNotifications, setArchivedNotifications] = useState<Notification[]>([]);
@@ -100,28 +227,80 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedNotifications, setSelectedNotifications] = useState<string[]>([]);
     const [isAssignMenuOpen, setIsAssignMenuOpen] = useState(false);
+    const [assignMenuAnchor, setAssignMenuAnchor] = useState<AssignAnchor | null>(null);
+    const [assigneeOptions, setAssigneeOptions] = useState<StaffUserDto[]>([]);
+    const [staffUsersLoading, setStaffUsersLoading] = useState(false);
     const [tempSelectedAgents, setTempSelectedAgents] = useState<string[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [loadError, setLoadError] = useState('');
-    const assignMenuRef = useRef<HTMLDivElement>(null);
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const assignPanelRef = useRef<HTMLDivElement>(null);
+    const bulkAssignBtnRef = useRef<HTMLButtonElement>(null);
+    const loadNotificationsRef = useRef<(() => Promise<void>) | null>(null);
     
     const initialAdvancedFilters = {
-        sender: '', recipient: '', status: '', category: '', fromDate: '', toDate: '', linkedClient: ''
+        sender: '',
+        recipient: '',
+        status: NOTIFICATION_READ_FILTER_PENDING,
+        category: '',
+        fromDate: '',
+        toDate: '',
+        linkedClient: '',
     };
     const [advancedFilters, setAdvancedFilters] = useState(initialAdvancedFilters);
     
     useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            if (assignMenuRef.current && !assignMenuRef.current.contains(event.target as Node)) {
-                setIsAssignMenuOpen(false);
-            }
+        if (!isAssignMenuOpen) return;
+        const handlePointer = (event: MouseEvent) => {
+            const t = event.target as Node;
+            if (assignPanelRef.current?.contains(t)) return;
+            if (bulkAssignBtnRef.current?.contains(t)) return;
+            setIsAssignMenuOpen(false);
+            setAssignMenuAnchor(null);
+            setTempSelectedAgents([]);
         };
-        document.addEventListener('mousedown', handleClickOutside);
+        document.addEventListener('mousedown', handlePointer);
+        window.addEventListener('scroll', handlePointer, true);
         return () => {
-            document.removeEventListener('mousedown', handleClickOutside);
+            document.removeEventListener('mousedown', handlePointer);
+            window.removeEventListener('scroll', handlePointer, true);
         };
-    }, []);
+    }, [isAssignMenuOpen]);
+
+    useEffect(() => {
+        if (!isAssignMenuOpen || !apiBase) return;
+        let cancelled = false;
+        setStaffUsersLoading(true);
+        void fetchStaffUsers()
+            .then((rows) => {
+                if (cancelled) return;
+                setAssigneeOptions(rows.filter((u) => u.isActive !== false));
+            })
+            .catch(() => {
+                if (!cancelled) setAssigneeOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setStaffUsersLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isAssignMenuOpen, apiBase]);
+
+    const assignPopoverLayout = useMemo(() => {
+        if (!assignMenuAnchor) return null;
+        const POPOVER_W = 288;
+        const maxH = typeof window !== 'undefined' ? Math.min(320, window.innerHeight - 24) : 320;
+        let top = assignMenuAnchor.bottom + 8;
+        if (typeof window !== 'undefined' && top + maxH > window.innerHeight - 8) {
+            top = Math.max(8, assignMenuAnchor.top - maxH - 8);
+        }
+        let left = assignMenuAnchor.left;
+        if (typeof window !== 'undefined') {
+            left = Math.min(left, window.innerWidth - POPOVER_W - 8);
+            left = Math.max(8, left);
+        }
+        return { top, left, width: POPOVER_W, maxHeight: maxH };
+    }, [assignMenuAnchor]);
 
     useEffect(() => {
         if (!apiBase) return;
@@ -162,33 +341,75 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
                 const mapped: Notification[] = (Array.isArray(rows) ? rows : []).flatMap((row) => {
                     const backendId = String(row?.id || row?.notificationMessageId || '').trim();
-                    if (!uuidRegex.test(backendId)) {
+                    if (!NOTIFICATION_MESSAGE_ID_REGEX.test(backendId)) {
                         return [];
                     }
                     const metadata = row?.metadata && typeof row.metadata === 'object' ? row.metadata : {};
-                    const deliveryStatus = metadata?.deliveryStatus;
+                    const tp =
+                        metadata.taskPayload &&
+                        typeof metadata.taskPayload === 'object' &&
+                        !Array.isArray(metadata.taskPayload)
+                            ? (metadata.taskPayload as Record<string, unknown>)
+                            : {};
+                    let linkedCandidateId: number | undefined;
+                    const linkedCandidateBackendIdRaw =
+                        tp.linkedCandidateBackendId != null ? String(tp.linkedCandidateBackendId).trim() : '';
+                    const linkedCandidateBackendId =
+                        linkedCandidateBackendIdRaw || undefined;
+                    if (typeof tp.linkedCandidateLocalId === 'number') linkedCandidateId = tp.linkedCandidateLocalId;
+                    else if (linkedCandidateBackendId) {
+                        linkedCandidateId = deriveLocalCandidateId(linkedCandidateBackendId);
+                    }
+                    const linkedJobId = tp.linkedJobId != null ? String(tp.linkedJobId).trim() : undefined;
+                    const linkedClientId = tp.linkedClientId != null ? String(tp.linkedClientId).trim() : undefined;
+                    const linkedContactId = tp.linkedContactId != null ? String(tp.linkedContactId).trim() : undefined;
+                    const rawText = String(row?.text || row?.html || '');
+                    const legacyLinked = parseLegacyLinkedAppendix(rawText);
+                    const linkedCandidateLabel =
+                        typeof tp.linkedCandidateLabel === 'string'
+                            ? tp.linkedCandidateLabel
+                            : legacyLinked.candidate;
+                    const linkedJobLabel =
+                        typeof tp.linkedJobLabel === 'string' ? tp.linkedJobLabel : legacyLinked.job;
+                    const linkedClientLabel =
+                        typeof tp.linkedClientLabel === 'string'
+                            ? tp.linkedClientLabel
+                            : legacyLinked.client;
+                    const handledComplete = Boolean(metadata?.taskCompleted);
+                    const recipientReadRaw = metadata?.recipientReadAt;
+                    const recipientReadAt =
+                        recipientReadRaw != null && String(recipientReadRaw).trim() !== ''
+                            ? String(recipientReadRaw)
+                            : undefined;
                     const isTask = Boolean(row?.isTask) || row?.messageType === 'task';
-                    const status: NotificationStatus = isTask
-                        ? 'New'
-                        : deliveryStatus === 'sent'
-                            ? 'Done'
-                            : 'New';
+                    const status: NotificationStatus = handledComplete ? 'Done' : 'New';
 
                     return [{
                         id: backendId,
                         type: isTask ? 'task' : 'message',
                         title: String(row?.subject || 'הודעה חדשה'),
-                        content: String(row?.text || row?.html || ''),
+                        content: rawText,
                         timestamp: String(row?.createdAt || new Date().toISOString()),
                         dueDate: row?.dueDate ? String(row.dueDate) : undefined,
-                        isRead: deliveryStatus === 'sent',
-                        sender: String(row?.senderUserId || 'מערכת'),
+                        handledComplete,
+                        sender: formatNotificationSender(row),
                         recipient: String(row?.assignee || row?.toEmail || ''),
+                        assignee: row?.assignee != null ? String(row.assignee) : '',
+                        toEmail: row?.toEmail != null ? String(row.toEmail) : '',
+                        recipientReadAt,
+                        senderUserId: row?.senderUserId != null ? String(row.senderUserId) : null,
                         status,
                         category: mapCategory(row?.category),
                         urgency: mapUrgency(row?.sla),
                         linkedClient: undefined,
-                        linkedCandidateId: undefined,
+                        linkedCandidateId,
+                        linkedCandidateBackendId,
+                        linkedJobId: linkedJobId || undefined,
+                        linkedClientId: linkedClientId || undefined,
+                        linkedContactId: linkedContactId || undefined,
+                        linkedCandidateLabel,
+                        linkedJobLabel,
+                        linkedClientLabel,
                         backendStatus: row?.status === 'tasks' || row?.status === 'archived' || row?.status === 'deleted' ? row.status : 'unread',
                     }];
                 });
@@ -204,19 +425,66 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
             }
         };
 
+        loadNotificationsRef.current = loadNotifications;
         void loadNotifications();
         return () => {
             active = false;
+            loadNotificationsRef.current = null;
         };
     }, [apiBase]);
 
-    const unreadCount = useMemo(() => notifications.filter(n => n.backendStatus === 'unread').length, [notifications]);
-    const openTasksCount = useMemo(() => notifications.filter(n => n.backendStatus === 'tasks').length, [notifications]);
+    useEffect(() => {
+        const onRefresh = (e: Event) => {
+            const d = (e as CustomEvent<{ reloadNotificationList?: boolean }>).detail;
+            if (d?.reloadNotificationList) {
+                void loadNotificationsRef.current?.();
+            }
+        };
+        window.addEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onRefresh);
+        return () => window.removeEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onRefresh);
+    }, []);
 
-    const persistStatusUpdate = async (id: string, status: 'unread' | 'tasks' | 'archived' | 'deleted') => {
-        if (!apiBase) return;
-        if (!uuidRegex.test(id)) {
+    /** Tab badges: רק פריטים שלא סומנו כטופל — בלי קשר לנקרא/לא נקרא. */
+    const allUnreadCount = useMemo(
+        () =>
+            notifications.filter((n) => {
+                if (n.type === 'task') return n.backendStatus === 'tasks' && !n.handledComplete;
+                if (n.type === 'message') return !n.handledComplete;
+                return false;
+            }).length,
+        [notifications]
+    );
+    const unreadMessagesCount = useMemo(
+        () => notifications.filter((n) => n.type === 'message' && !n.handledComplete).length,
+        [notifications]
+    );
+    const openUnreadTasksCount = useMemo(
+        () => notifications.filter((n) => n.backendStatus === 'tasks' && !n.handledComplete).length,
+        [notifications]
+    );
+
+    const persistNotificationPatch = async (
+        id: string,
+        body: {
+            status?: 'unread' | 'tasks' | 'archived' | 'deleted';
+            taskCompleted?: boolean;
+            markRecipientRead?: boolean;
+            dueDate?: string | null;
+            dueTime?: string | null;
+        }
+    ): Promise<{ metadata?: { recipientReadAt?: string; taskCompleted?: boolean } } & Record<string, unknown>> => {
+        if (!apiBase) throw new Error('חסר כתובת API');
+        if (!NOTIFICATION_MESSAGE_ID_REGEX.test(id)) {
             throw new Error(`Invalid notification id: ${id}`);
+        }
+        const payload: Record<string, unknown> = {};
+        if (body.status !== undefined) payload.status = body.status;
+        if (body.taskCompleted !== undefined) payload.taskCompleted = body.taskCompleted;
+        if (body.markRecipientRead !== undefined) payload.markRecipientRead = body.markRecipientRead;
+        if (body.dueDate !== undefined) payload.dueDate = body.dueDate;
+        if (body.dueTime !== undefined) payload.dueTime = body.dueTime;
+        if (Object.keys(payload).length === 0) {
+            throw new Error('ריק');
         }
         const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
         const response = await fetch(`${apiBase}/api/email-uploads/messages/${id}/status`, {
@@ -228,7 +496,38 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 Accept: 'application/json',
                 ...(token ? { Authorization: `Bearer ${token}` } : {}),
             },
-            body: JSON.stringify({ status }),
+            body: JSON.stringify(payload),
+        });
+        if (!response.ok) {
+            const text = await response.text().catch(() => '');
+            throw new Error(text || `HTTP ${response.status}`);
+        }
+        return (await response.json()) as { metadata?: { recipientReadAt?: string; taskCompleted?: boolean } } & Record<
+            string,
+            unknown
+        >;
+    };
+
+    const persistStatusUpdate = async (id: string, status: 'unread' | 'tasks' | 'archived' | 'deleted') => {
+        await persistNotificationPatch(id, { status });
+    };
+
+    const persistAssignUpdate = async (id: string, assigneeEmails: string[]) => {
+        if (!apiBase) return;
+        if (!NOTIFICATION_MESSAGE_ID_REGEX.test(id)) {
+            throw new Error(`Invalid notification id: ${id}`);
+        }
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const response = await fetch(`${apiBase}/api/email-uploads/messages/${id}/assign`, {
+            method: 'PATCH',
+            cache: 'no-store',
+            credentials: 'include',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            body: JSON.stringify({ assigneeEmails }),
         });
         if (!response.ok) {
             const text = await response.text().catch(() => '');
@@ -246,22 +545,17 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         return {
             senders: [...new Set(notificationsForFilters.map(n => n.sender))],
             recipients: [...new Set(notificationsForFilters.map(n => n.recipient))],
-            statuses: [...new Set(notificationsForFilters.map(n => n.status))],
             categories: [...new Set(notificationsForFilters.map(n => n.category))],
             linkedClients: [...new Set(notificationsForFilters.map(n => n.linkedClient).filter(Boolean))] as string[],
         };
     }, [notifications, archivedNotifications]);
 
     const filteredNotifications = useMemo(() => {
-        let listToFilter =
-            activeTab === 'archived'
-                ? archivedNotifications
-                : activeTab === 'all'
-                    ? [...notifications, ...archivedNotifications]
-                    : notifications;
+        // הכל + סטטוס «הכל» = כל האינבוקס. סטטוס מתקדם מסנן לפי טופל / לא טופל בלבד.
+        let listToFilter = activeTab === 'archived' ? archivedNotifications : notifications;
         
         if (activeTab === 'unread') {
-            listToFilter = listToFilter.filter(n => n.backendStatus === 'unread');
+            listToFilter = listToFilter.filter((n) => n.type === 'message');
         }
         if (activeTab === 'tasks') {
             listToFilter = listToFilter.filter(n => n.backendStatus === 'tasks');
@@ -269,7 +563,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 
         const search = searchTerm.toLowerCase();
         
-        return listToFilter
+        const filtered = listToFilter
             .filter(n => 
                 n.title.toLowerCase().includes(search) ||
                 n.content.toLowerCase().includes(search) ||
@@ -279,7 +573,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 const { sender, recipient, status, category, fromDate, toDate, linkedClient } = advancedFilters;
                 if (sender && n.sender !== sender) return false;
                 if (recipient && n.recipient !== recipient) return false;
-                if (status && n.status !== status) return false;
+                if (status === NOTIFICATION_READ_FILTER_PENDING && n.handledComplete) return false;
+                if (status === NOTIFICATION_READ_FILTER_DONE && !n.handledComplete) return false;
                 if (category && n.category !== category) return false;
                 if (linkedClient && n.linkedClient !== linkedClient) return false;
 
@@ -289,7 +584,20 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 
                 return true;
             });
-    }, [activeTab, searchTerm, notifications, archivedNotifications, advancedFilters, filterOptions]);
+
+        const byTimeDesc = (a: Notification, b: Notification) =>
+            new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+
+        return [...filtered].sort(byTimeDesc);
+    }, [activeTab, searchTerm, notifications, archivedNotifications, advancedFilters]);
+
+    /** Default read filter is `pending`; don’t treat it as an “active search” for empty-state copy. */
+    const hasAdvancedFilterBeyondDefaults = useMemo(() => {
+        const f = advancedFilters;
+        if (f.sender || f.recipient || f.category || f.fromDate || f.toDate || f.linkedClient) return true;
+        if (f.status && f.status !== NOTIFICATION_READ_FILTER_PENDING) return true;
+        return false;
+    }, [advancedFilters]);
 
     const handleToggleSelect = (id: string) => {
         setSelectedNotifications(prev => 
@@ -316,30 +624,112 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
     };
 
     const handleToggleExpand = (id: string) => {
-        setExpandedId(prevId => (prevId === id ? null : id));
+        setExpandedId((prevId) => {
+            const willOpen = prevId !== id;
+            const next = prevId === id ? null : id;
+            if (willOpen && next === id) {
+                const n = [...notifications, ...archivedNotifications].find((x) => x.id === id);
+                if (
+                    n?.type === 'message' &&
+                    !n.recipientReadAt &&
+                    notificationRecipientMatchesViewer(n, user?.email, user?.name)
+                ) {
+                    void (async () => {
+                        try {
+                            setLoadError('');
+                            const updated = await persistNotificationPatch(id, { markRecipientRead: true });
+                            const at = updated?.metadata?.recipientReadAt;
+                            const patch = (list: Notification[]) =>
+                                list.map((x) =>
+                                    x.id === id ? { ...x, recipientReadAt: at || x.recipientReadAt } : x
+                                );
+                            setNotifications(patch);
+                            setArchivedNotifications((prev) => patch(prev));
+                        } catch (error: any) {
+                            setLoadError(error?.message || 'סימון כנקרא נכשל');
+                        }
+                    })();
+                }
+            }
+            return next;
+        });
     };
 
     const handleMarkAsRead = async (id: string) => {
-        setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true } : n));
+        const n = [...notifications, ...archivedNotifications].find((x) => x.id === id);
+        if (n?.type !== 'message' || !notificationRecipientMatchesViewer(n, user?.email, user?.name)) return;
+        try {
+            setLoadError('');
+            const updated = await persistNotificationPatch(id, { markRecipientRead: true });
+            const at = updated?.metadata?.recipientReadAt;
+            const patch = (list: Notification[]) =>
+                list.map((x) =>
+                    x.id === id ? { ...x, recipientReadAt: at || x.recipientReadAt } : x
+                );
+            setNotifications(patch);
+            setArchivedNotifications((prev) => patch(prev));
+        } catch (error: any) {
+            setLoadError(error?.message || 'סימון כנקרא נכשל');
+        }
     };
     
-    const handleTaskComplete = async (e: React.MouseEvent, id: string) => {
-        e.stopPropagation();
-        await persistStatusUpdate(id, 'tasks');
-        // Mark as read and Done
-        setNotifications(prev => prev.map(n => n.id === id ? { ...n, isRead: true, status: 'Done' } : n));
+    const patchHandledLists = (id: string, complete: boolean) => {
+        const patch = (list: Notification[]) =>
+            list.map((n) =>
+                n.id === id
+                    ? {
+                          ...n,
+                          handledComplete: complete,
+                          status: complete ? ('Done' as const) : ('New' as const),
+                      }
+                    : n
+            );
+        setNotifications((prev) => patch(prev));
+        setArchivedNotifications((prev) => patch(prev));
     };
 
-    const handleRescheduleTask = (e: React.MouseEvent, id: string) => {
+    const handleTaskComplete = async (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        setNotifications(prev => prev.map(n => {
-            if (n.id === id) {
-                const tomorrow = new Date();
-                tomorrow.setDate(tomorrow.getDate() + 1);
-                return { ...n, dueDate: tomorrow.toISOString() };
-            }
-            return n;
-        }));
+        try {
+            setLoadError('');
+            await persistNotificationPatch(id, { taskCompleted: true });
+            patchHandledLists(id, true);
+            requestNotificationInboxCountsRefresh();
+        } catch (error: any) {
+            setLoadError(error?.message || 'שמירת סטטוס נכשלה');
+        }
+    };
+
+    const handleTaskUncomplete = async (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        try {
+            setLoadError('');
+            await persistNotificationPatch(id, { taskCompleted: false });
+            patchHandledLists(id, false);
+            requestNotificationInboxCountsRefresh();
+        } catch (error: any) {
+            setLoadError(error?.message || 'שמירת סטטוס נכשלה');
+        }
+    };
+
+    const handleRescheduleTask = async (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        const tomorrow = new Date();
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const y = tomorrow.getFullYear();
+        const mo = String(tomorrow.getMonth() + 1).padStart(2, '0');
+        const d = String(tomorrow.getDate()).padStart(2, '0');
+        const dueDateStr = `${y}-${mo}-${d}`;
+        try {
+            setLoadError('');
+            await persistNotificationPatch(id, { dueDate: dueDateStr });
+            const patchLists = (list: Notification[]) =>
+                list.map((n) => (n.id === id ? { ...n, dueDate: dueDateStr } : n));
+            setNotifications(patchLists);
+            setArchivedNotifications((prev) => patchLists(prev));
+        } catch (err: any) {
+            setLoadError(err?.message || 'עדכון מועד יעד נכשל');
+        }
     };
 
     const handleArchive = async (id: string) => {
@@ -347,8 +737,9 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         const notificationToArchive = notifications.find(n => n.id === id);
         if (notificationToArchive) {
             setNotifications(prev => prev.filter(n => n.id !== id));
-            setArchivedNotifications(prev => [{ ...notificationToArchive, isRead: true, backendStatus: 'archived' }, ...prev]);
+            setArchivedNotifications(prev => [{ ...notificationToArchive, backendStatus: 'archived' }, ...prev]);
         }
+        requestNotificationInboxCountsRefresh();
     };
 
     const handleRestore = async (id: string) => {
@@ -356,31 +747,65 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         if (notificationToRestore) {
             await persistStatusUpdate(id, notificationToRestore.type === 'task' ? 'tasks' : 'unread');
             setArchivedNotifications(prev => prev.filter(n => n.id !== id));
-            setNotifications(prev => [{ ...notificationToRestore, isRead: false, backendStatus: notificationToRestore.type === 'task' ? 'tasks' : 'unread' }, ...prev]);
+            setNotifications(prev => [
+                {
+                    ...notificationToRestore,
+                    backendStatus: notificationToRestore.type === 'task' ? 'tasks' : 'unread',
+                },
+                ...prev,
+            ]);
         }
+        requestNotificationInboxCountsRefresh();
     };
 
     // Bulk Actions
     const handleBulkMarkAsRead = () => {
-        setNotifications(prev => 
-           prev.map(n => selectedNotifications.includes(n.id) ? { ...n, isRead: true } : n)
-       );
-       setSelectedNotifications([]);
-   };
+        void (async () => {
+            try {
+                setLoadError('');
+                const ids = [...selectedNotifications];
+                for (const id of ids) {
+                    const n = notifications.find((x) => x.id === id);
+                    if (
+                        n?.type !== 'message' ||
+                        !notificationRecipientMatchesViewer(n, user?.email, user?.name)
+                    )
+                        continue;
+                    await persistNotificationPatch(id, { markRecipientRead: true });
+                }
+                setSelectedNotifications([]);
+                void loadNotificationsRef.current?.();
+            } catch (error: any) {
+                setLoadError(error?.message || 'סימון כנקרא נכשל');
+            }
+        })();
+    };
 
     const handleBulkMarkAsDone = () => {
-        setNotifications(prev => 
-            prev.map(n => selectedNotifications.includes(n.id) ? { ...n, status: 'Done', isRead: true } : n)
-        );
-        setSelectedNotifications([]);
+        void (async () => {
+            try {
+                setLoadError('');
+                const ids = [...selectedNotifications];
+                await Promise.all(ids.map((id) => persistNotificationPatch(id, { taskCompleted: true })));
+                setSelectedNotifications([]);
+                void loadNotificationsRef.current?.();
+                requestNotificationInboxCountsRefresh();
+            } catch (error: any) {
+                setLoadError(error?.message || 'סימון כטופל נכשל');
+            }
+        })();
     };
 
     const handleBulkArchive = async () => {
         await Promise.all(selectedNotifications.map((id) => persistStatusUpdate(id, 'archived')));
         const toArchive = notifications.filter(n => selectedNotifications.includes(n.id));
         setNotifications(prev => prev.filter(n => !selectedNotifications.includes(n.id)));
-        setArchivedNotifications(prev => [...toArchive.map(n => ({...n, isRead: true, backendStatus: 'archived' as const})), ...prev]);
+        setArchivedNotifications(prev => [
+            ...toArchive.map((n) => ({ ...n, backendStatus: 'archived' as const })),
+            ...prev,
+        ]);
         setSelectedNotifications([]);
+        requestNotificationInboxCountsRefresh();
     };
 
     const handleAgentToggle = (agent: string) => {
@@ -391,23 +816,30 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
         );
     };
 
-    const handleConfirmAssignment = () => {
+    const handleConfirmAssignment = async () => {
         if (tempSelectedAgents.length === 0) return;
 
-        const newRecipient = tempSelectedAgents.join(', ');
-        setNotifications(prev =>
-            prev.map(n => selectedNotifications.includes(n.id) ? { ...n, recipient: newRecipient } : n)
-        );
+        const ids = [...selectedNotifications];
+        const emails = [...tempSelectedAgents];
+        try {
+            setLoadError('');
+            await Promise.all(ids.map((id) => persistAssignUpdate(id, emails)));
+        } catch (error: any) {
+            setLoadError(error?.message || 'העברת ההודעה לנציג נכשלה');
+            return;
+        }
 
         setSelectedNotifications([]);
         setTempSelectedAgents([]);
         setIsAssignMenuOpen(false);
+        setAssignMenuAnchor(null);
+        void loadNotificationsRef.current?.();
     };
     
-    const filterKeyMap: { [key: string]: keyof typeof filterOptions } = {
+    const filterKeyMap: { [key: string]: keyof typeof filterOptions | 'status_read' } = {
         sender: 'senders',
         recipient: 'recipients',
-        status: 'statuses',
+        status: 'status_read',
         category: 'categories',
         linkedClient: 'linkedClients',
     };
@@ -443,9 +875,9 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 <div className="flex flex-col md:flex-row items-center gap-3">
                     <div className="flex-shrink-0 flex items-center bg-bg-card border border-border-default/50 p-1 rounded-lg w-full md:w-auto overflow-x-auto">
                         {([
-                            ['all', `הכל (${notifications.length})`], 
-                            ['tasks', `משימות פתוחות (${openTasksCount})`],
-                            ['unread', `חדשות (${unreadCount})`], 
+                            ['all', `הכל (${allUnreadCount})`],
+                            ['tasks', `משימות פתוחות (${openUnreadTasksCount})`],
+                            ['unread', `הודעות (${unreadMessagesCount})`],
                             ['archived', `ארכיון (${archivedNotifications.length})`]
                         ] as const).map(([tab, label]) => (
                             <button key={tab} onClick={() => setActiveTab(tab)} className={`flex-1 py-1.5 px-4 text-sm font-semibold rounded-md transition whitespace-nowrap ${activeTab === tab ? 'bg-white shadow-sm text-primary-700 border border-gray-100' : 'text-text-muted hover:text-text-default'}`}>
@@ -492,14 +924,72 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 {isAdvancedFilterOpen && (
                     <div className="pt-3 border-t border-border-default">
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3 items-end">
-                            {Object.keys(filterKeyMap).map(filter => (
-                                <select key={filter} name={filter} value={(advancedFilters as any)[filter]} onChange={handleAdvancedFilterChange} className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm">
-                                    <option value="">{ {sender: 'שולח', recipient: 'מקבל', status: 'סטטוס', category: 'קטגוריה', linkedClient: 'לקוח'}[filter] }</option>
-                                    {filterOptions[filterKeyMap[filter as keyof typeof filterKeyMap]].map((opt: string) => <option key={opt} value={opt}>{opt}</option>)}
-                                </select>
-                            ))}
-                            <input type="date" name="fromDate" value={advancedFilters.fromDate} onChange={handleAdvancedFilterChange} className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm" title="מתאריך"/>
-                            <input type="date" name="toDate" value={advancedFilters.toDate} onChange={handleAdvancedFilterChange} className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm" title="עד תאריך"/>
+                            {Object.keys(filterKeyMap).map((filter) => {
+                                const mapKey = filterKeyMap[filter as keyof typeof filterKeyMap];
+                                const opts =
+                                    mapKey === 'status_read'
+                                        ? []
+                                        : (filterOptions[mapKey as keyof typeof filterOptions] as string[]);
+                                const fieldId = `adv-filter-${filter}`;
+                                const label = ADVANCED_FILTER_FIELD_LABELS[filter] || filter;
+                                return (
+                                    <div key={filter} className="flex flex-col gap-1 min-w-0">
+                                        <label htmlFor={fieldId} className="text-xs font-bold text-text-muted uppercase tracking-wide">
+                                            {label}
+                                        </label>
+                                        <select
+                                            id={fieldId}
+                                            name={filter}
+                                            value={(advancedFilters as Record<string, string>)[filter]}
+                                            onChange={handleAdvancedFilterChange}
+                                            className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm"
+                                        >
+                                            {mapKey === 'status_read' ? (
+                                                <>
+                                                    <option value="">הכל</option>
+                                                    <option value={NOTIFICATION_READ_FILTER_DONE}>טופל</option>
+                                                    <option value={NOTIFICATION_READ_FILTER_PENDING}>לא טופל</option>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <option value="">הכל</option>
+                                                    {opts.map((opt: string) => (
+                                                        <option key={opt} value={opt}>
+                                                            {opt}
+                                                        </option>
+                                                    ))}
+                                                </>
+                                            )}
+                                        </select>
+                                    </div>
+                                );
+                            })}
+                            <div className="flex flex-col gap-1 min-w-0">
+                                <label htmlFor="adv-filter-fromDate" className="text-xs font-bold text-text-muted uppercase tracking-wide">
+                                    {ADVANCED_FILTER_FIELD_LABELS.fromDate}
+                                </label>
+                                <input
+                                    id="adv-filter-fromDate"
+                                    type="date"
+                                    name="fromDate"
+                                    value={advancedFilters.fromDate}
+                                    onChange={handleAdvancedFilterChange}
+                                    className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm"
+                                />
+                            </div>
+                            <div className="flex flex-col gap-1 min-w-0">
+                                <label htmlFor="adv-filter-toDate" className="text-xs font-bold text-text-muted uppercase tracking-wide">
+                                    {ADVANCED_FILTER_FIELD_LABELS.toDate}
+                                </label>
+                                <input
+                                    id="adv-filter-toDate"
+                                    type="date"
+                                    name="toDate"
+                                    value={advancedFilters.toDate}
+                                    onChange={handleAdvancedFilterChange}
+                                    className="w-full bg-bg-card border border-border-default text-text-default text-sm rounded-lg p-2 transition shadow-sm"
+                                />
+                            </div>
                         </div>
                     </div>
                 )}
@@ -514,6 +1004,7 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 )}
                 {filteredNotifications.length > 0 ? (
                     filteredNotifications.map(notification => {
+                        const bodyWithoutLinked = stripTaskLinkedAppendixFromBody(notification.content);
                         const { icon, bg, text } = notificationStyles[notification.type];
                         const isSelected = selectedNotifications.includes(notification.id);
                         
@@ -553,26 +1044,76 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                     </div>
                                 )}
                                 <div className="flex-1 flex flex-row items-start gap-4 cursor-pointer" onClick={() => handleToggleExpand(notification.id)}>
-                                    {!notification.isRead && activeTab !== 'archived' && !isSelected && notification.type !== 'task' && <div className="w-2 h-2 bg-primary-500 rounded-full flex-shrink-0 mt-2" title="לא נקרא" />}
-                                    
-                                    {/* Task Check Circle */}
-                                    {notification.type === 'task' && notification.status !== 'Done' && activeTab !== 'archived' && (
-                                        <button 
-                                            onClick={(e) => handleTaskComplete(e, notification.id)}
-                                            className="mt-1 w-5 h-5 rounded-full border-2 border-gray-300 hover:border-green-500 hover:bg-green-50 transition-colors flex items-center justify-center group/check"
-                                            title="סמן כבוצע"
+                                    {!notification.recipientReadAt &&
+                                        activeTab !== 'archived' &&
+                                        !isSelected &&
+                                        notification.type === 'message' &&
+                                        notificationRecipientMatchesViewer(
+                                            notification,
+                                            user?.email,
+                                            user?.name
+                                        ) && (
+                                            <div
+                                                className="w-2 h-2 bg-primary-500 rounded-full flex-shrink-0 mt-2"
+                                                title="לא נקרא"
+                                            />
+                                        )}
+
+                                    {/* טופל — משימות והודעות */}
+                                    {(notification.type === 'task' || notification.type === 'message') &&
+                                        activeTab !== 'archived' && (
+                                        <button
+                                            type="button"
+                                            onClick={(e) =>
+                                                notification.status === 'Done'
+                                                    ? handleTaskUncomplete(e, notification.id)
+                                                    : handleTaskComplete(e, notification.id)
+                                            }
+                                            className={
+                                                notification.status === 'Done'
+                                                    ? 'mt-1 w-5 h-5 rounded-full border-2 border-green-500 bg-green-50 hover:border-amber-500 hover:bg-amber-50 transition-colors flex items-center justify-center shrink-0'
+                                                    : 'mt-1 w-5 h-5 rounded-full border-2 border-gray-300 hover:border-green-500 hover:bg-green-50 transition-colors flex items-center justify-center group/check shrink-0'
+                                            }
+                                            title={notification.status === 'Done' ? 'סמן כלא בוצע' : 'סמן כבוצע'}
                                         >
-                                            <CheckCircleIcon className="w-0 h-0 text-green-500 group-hover/check:w-3.5 group-hover/check:h-3.5 transition-all duration-200" />
+                                            <CheckCircleIcon
+                                                className={
+                                                    notification.status === 'Done'
+                                                        ? 'w-3.5 h-3.5 text-green-600'
+                                                        : 'w-0 h-0 text-green-500 group-hover/check:w-3.5 group-hover/check:h-3.5 transition-all duration-200'
+                                                }
+                                            />
                                         </button>
-                                    )}
+                                        )}
 
                                     <div className="flex-1 flex flex-col">
-                                        <div className="flex justify-between items-start">
-                                             <p className={`font-semibold text-sm ${urgencyState === 'overdue' ? 'text-red-800' : 'text-text-default'}`}>{notification.title}</p>
-                                             <span className={`text-xs ${dateColorClass} whitespace-nowrap mr-2`}>{displayDate}</span>
+                                        <div className="flex justify-between items-start gap-2">
+                                            <div className="min-w-0 flex-1">
+                                                <p className={`font-semibold text-sm ${urgencyState === 'overdue' ? 'text-red-800' : 'text-text-default'}`}>{notification.title}</p>
+                                                {notification.type === 'message' &&
+                                                    user?.id &&
+                                                    notification.senderUserId &&
+                                                    String(notification.senderUserId) === String(user.id) &&
+                                                    notification.recipientReadAt && (
+                                                        <p className="text-[11px] text-green-700 font-medium mt-0.5">
+                                                            נקרא · {formatRelativeTime(notification.recipientReadAt)}
+                                                        </p>
+                                                    )}
+                                            </div>
+                                            <span className={`text-xs ${dateColorClass} whitespace-nowrap shrink-0 mr-2`}>{displayDate}</span>
                                         </div>
-                                        <p className="text-xs text-text-muted mt-0.5 line-clamp-1">{notification.content}</p>
-                                        
+                                        <p
+                                            className={`text-xs mt-0.5 ${
+                                                expandedId === notification.id
+                                                    ? 'text-text-default whitespace-pre-wrap break-words'
+                                                    : 'text-text-muted'
+                                            }`}
+                                        >
+                                            {expandedId === notification.id
+                                                ? bodyWithoutLinked
+                                                : truncatedPreviewWords(bodyWithoutLinked)}
+                                        </p>
+
                                         {expandedId === notification.id && (
                                             <div className="mt-3 pt-3 border-t border-border-default animate-content-fade-in">
                                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-2 text-xs">
@@ -580,52 +1121,205 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                                                     {notification.sender && <div><strong className="text-text-muted">שולח:</strong> <span className="font-semibold text-text-default">{notification.sender}</span></div>}
                                                     {notification.urgency && <div><strong className="text-text-muted">דחיפות:</strong> <span className="font-semibold text-text-default">{notification.urgency}</span></div>}
                                                     {notification.category && <div><strong className="text-text-muted">קטגוריה:</strong> <span className="font-semibold text-text-default">{notification.category}</span></div>}
-                                                    {notification.linkedClient && <div><strong className="text-text-muted">לקוח:</strong> <span className="font-semibold text-text-default">{notification.linkedClient}</span></div>}
-                                                    {notification.linkedCandidateId && (
-                                                        <div className="md:col-span-2">
-                                                            <strong className="text-text-muted">מועמד:</strong>{' '}
-                                                            <button onClick={(e) => { e.stopPropagation(); onOpenCandidateSummary(notification.linkedCandidateId!); }} className="font-semibold text-primary-600 hover:underline">צפה בפרופיל</button>
-                                                        </div>
-                                                    )}
                                                 </div>
+                                                {(() => {
+                                                    const cand =
+                                                        notification.linkedCandidateLabel || EMPTY_LINKED_LABEL;
+                                                    const job = notification.linkedJobLabel || EMPTY_LINKED_LABEL;
+                                                    const cli = notification.linkedClientLabel || EMPTY_LINKED_LABEL;
+                                                    const hasLinkTarget =
+                                                        Boolean(notification.linkedCandidateId) ||
+                                                        Boolean(notification.linkedCandidateBackendId) ||
+                                                        Boolean(notification.linkedJobId) ||
+                                                        Boolean(notification.linkedClientId);
+                                                    const hasLabel =
+                                                        (cand && cand !== EMPTY_LINKED_LABEL) ||
+                                                        (job && job !== EMPTY_LINKED_LABEL) ||
+                                                        (cli && cli !== EMPTY_LINKED_LABEL);
+                                                    if (!hasLinkTarget && !hasLabel) return null;
+                                                    return (
+                                                        <div className="mt-3 pt-3 border-t border-border-default text-xs space-y-2">
+                                                            <p className="font-bold text-text-muted">מידע מקושר</p>
+                                                            <div className="space-y-1.5">
+                                                                <div>
+                                                                    <strong className="text-text-muted">מועמד:</strong>{' '}
+                                                                    {notification.linkedCandidateId != null ||
+                                                                    notification.linkedCandidateBackendId ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                openLinkedCandidate(notification);
+                                                                            }}
+                                                                            className="font-semibold text-primary-600 hover:underline"
+                                                                        >
+                                                                            {cand !== EMPTY_LINKED_LABEL
+                                                                                ? cand
+                                                                                : 'צפה בפרופיל'}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <span className="font-semibold text-text-default">
+                                                                            {cand}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div>
+                                                                    <strong className="text-text-muted">משרה:</strong>{' '}
+                                                                    {notification.linkedJobId ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                navigate(
+                                                                                    `/jobs/edit/${notification.linkedJobId}`,
+                                                                                );
+                                                                            }}
+                                                                            className="font-semibold text-primary-600 hover:underline"
+                                                                        >
+                                                                            {job !== EMPTY_LINKED_LABEL
+                                                                                ? job
+                                                                                : 'פתח משרה'}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <span className="font-semibold text-text-default">
+                                                                            {job}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                                <div>
+                                                                    <strong className="text-text-muted">לקוח:</strong>{' '}
+                                                                    {notification.linkedClientId ? (
+                                                                        <button
+                                                                            type="button"
+                                                                            onClick={(e) => {
+                                                                                e.stopPropagation();
+                                                                                navigate(
+                                                                                    notification.linkedContactId
+                                                                                        ? `/clients/${notification.linkedClientId}/contacts/${notification.linkedContactId}`
+                                                                                        : `/clients/${notification.linkedClientId}`,
+                                                                                );
+                                                                            }}
+                                                                            className="font-semibold text-primary-600 hover:underline"
+                                                                        >
+                                                                            {cli !== EMPTY_LINKED_LABEL
+                                                                                ? cli
+                                                                                : 'פתח כרטיס'}
+                                                                        </button>
+                                                                    ) : (
+                                                                        <span className="font-semibold text-text-default">
+                                                                            {cli}
+                                                                        </span>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })()}
                                                 <div className="flex items-center gap-2 mt-3 flex-wrap">
-                                                    {notification.type === 'task' && activeTab !== 'archived' ? (
+                                                    {activeTab === 'archived' ? (
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleRestore(notification.id);
+                                                            }}
+                                                            className="flex items-center gap-1 text-xs font-semibold text-text-muted hover:text-primary-600 p-1.5 rounded-md hover:bg-primary-50"
+                                                        >
+                                                            <ArrowUturnLeftIcon className="w-4 h-4" />
+                                                            שחזר
+                                                        </button>
+                                                    ) : notification.type === 'task' || notification.type === 'message' ? (
                                                         <>
-                                                            <button onClick={(e) => handleTaskComplete(e, notification.id)} className="flex items-center gap-1.5 text-xs font-semibold text-green-700 bg-green-50 border border-green-200 px-3 py-1.5 rounded-md hover:bg-green-100 transition-colors">
-                                                                <CheckCircleIcon className="w-4 h-4"/>
-                                                                סמן כבוצע
-                                                            </button>
-                                                            <button onClick={(e) => handleRescheduleTask(e, notification.id)} className="flex items-center gap-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-md hover:bg-amber-100 transition-colors">
-                                                                <ClockIcon className="w-4 h-4"/>
-                                                                דחה למחר
-                                                            </button>
-                                                            <button 
+                                                            {notification.status === 'Done' ? (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) =>
+                                                                        handleTaskUncomplete(e, notification.id)
+                                                                    }
+                                                                    className="flex items-center gap-1.5 text-xs font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-md hover:bg-amber-100 transition-colors"
+                                                                >
+                                                                    <CheckCircleIcon className="w-4 h-4 text-amber-700" />
+                                                                    סמן כלא בוצע
+                                                                </button>
+                                                            ) : (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => handleTaskComplete(e, notification.id)}
+                                                                    className="flex items-center gap-1.5 text-xs font-semibold text-green-700 bg-green-50 border border-green-200 px-3 py-1.5 rounded-md hover:bg-green-100 transition-colors"
+                                                                >
+                                                                    <CheckCircleIcon className="w-4 h-4" />
+                                                                    סמן כבוצע
+                                                                </button>
+                                                            )}
+                                                            {notification.type === 'task' && (
+                                                                <button
+                                                                    onClick={(e) => handleRescheduleTask(e, notification.id)}
+                                                                    className="flex items-center gap-1.5 text-xs font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-3 py-1.5 rounded-md hover:bg-amber-100 transition-colors"
+                                                                >
+                                                                    <ClockIcon className="w-4 h-4" />
+                                                                    דחה למחר
+                                                                </button>
+                                                            )}
+                                                            <button
+                                                                type="button"
                                                                 onClick={(e) => {
                                                                     e.stopPropagation();
                                                                     setSelectedNotifications([notification.id]);
+                                                                    setTempSelectedAgents([]);
+                                                                    const r = e.currentTarget.getBoundingClientRect();
+                                                                    setAssignMenuAnchor({
+                                                                        top: r.top,
+                                                                        left: r.left,
+                                                                        bottom: r.bottom,
+                                                                        right: r.right,
+                                                                        width: r.width,
+                                                                        height: r.height,
+                                                                    });
                                                                     setIsAssignMenuOpen(true);
-                                                                }} 
+                                                                }}
                                                                 className="flex items-center gap-1.5 text-xs font-semibold text-primary-700 bg-primary-50 border border-primary-200 px-3 py-1.5 rounded-md hover:bg-primary-100 transition-colors"
                                                             >
-                                                                <UserGroupIcon className="w-4 h-4"/>
+                                                                <UserGroupIcon className="w-4 h-4" />
                                                                 העבר לנציג
                                                             </button>
-                                                            <button onClick={(e) => { e.stopPropagation(); handleArchive(notification.id); }} className="flex items-center gap-1.5 text-xs font-semibold text-text-muted border border-border-default px-3 py-1.5 rounded-md hover:bg-bg-hover transition-colors">
-                                                                <ArchiveBoxIcon className="w-4 h-4"/>
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    handleArchive(notification.id);
+                                                                }}
+                                                                className="flex items-center gap-1.5 text-xs font-semibold text-text-muted border border-border-default px-3 py-1.5 rounded-md hover:bg-bg-hover transition-colors"
+                                                            >
+                                                                <ArchiveBoxIcon className="w-4 h-4" />
                                                                 ארכיון
                                                             </button>
+                                                            {notification.type === 'message' &&
+                                                                !notification.recipientReadAt &&
+                                                                notificationRecipientMatchesViewer(
+                                                                    notification,
+                                                                    user?.email,
+                                                                    user?.name
+                                                                ) && (
+                                                                    <button
+                                                                        onClick={(e) => {
+                                                                            e.stopPropagation();
+                                                                            handleMarkAsRead(notification.id);
+                                                                        }}
+                                                                        className="flex items-center gap-1 text-xs font-semibold text-text-muted hover:text-green-600 p-1.5 rounded-md hover:bg-green-50"
+                                                                    >
+                                                                        <CheckCircleIcon className="w-4 h-4" />
+                                                                        סמן כנקרא
+                                                                    </button>
+                                                                )}
                                                         </>
                                                     ) : (
-                                                        <>
-                                                            {activeTab !== 'archived' ? (
-                                                                <>
-                                                                    <button onClick={(e) => { e.stopPropagation(); handleArchive(notification.id); }} className="flex items-center gap-1 text-xs font-semibold text-text-muted hover:text-red-600 p-1.5 rounded-md hover:bg-red-50"><ArchiveBoxIcon className="w-4 h-4"/> ארכיון</button>
-                                                                    {!notification.isRead && notification.type !== 'task' && <button onClick={(e) => { e.stopPropagation(); handleMarkAsRead(notification.id); }} className="flex items-center gap-1 text-xs font-semibold text-text-muted hover:text-green-600 p-1.5 rounded-md hover:bg-green-50"><CheckCircleIcon className="w-4 h-4"/> סמן כנקרא</button>}
-                                                                </>
-                                                            ) : (
-                                                                <button onClick={(e) => { e.stopPropagation(); handleRestore(notification.id); }} className="flex items-center gap-1 text-xs font-semibold text-text-muted hover:text-primary-600 p-1.5 rounded-md hover:bg-primary-50"><ArrowUturnLeftIcon className="w-4 h-4"/> שחזר</button>
-                                                            )}
-                                                        </>
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleArchive(notification.id);
+                                                            }}
+                                                            className="flex items-center gap-1 text-xs font-semibold text-text-muted hover:text-red-600 p-1.5 rounded-md hover:bg-red-50"
+                                                        >
+                                                            <ArchiveBoxIcon className="w-4 h-4" /> ארכיון
+                                                        </button>
                                                     )}
                                                 </div>
                                             </div>
@@ -641,8 +1335,8 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                 ) : (
                      <div className="text-center py-20 text-text-muted flex flex-col items-center">
                         <MagnifyingGlassIcon className="w-12 h-12 text-text-subtle mb-4" />
-                        <p className="font-semibold text-lg">{searchTerm || Object.values(advancedFilters).some(v=>v) ? 'לא נמצאו התראות' : activeTab === 'archived' ? 'הארכיון ריק' : 'אין הודעות חדשות'}</p>
-                        <p className="text-sm mt-1">{searchTerm || Object.values(advancedFilters).some(v=>v) ? 'נסה מונח חיפוש אחר.' : activeTab === 'archived' ? 'הודעות שסומנו כטופלו יופיעו כאן.' : 'הכל מעודכן!'}</p>
+                        <p className="font-semibold text-lg">{searchTerm || hasAdvancedFilterBeyondDefaults ? 'לא נמצאו התראות' : activeTab === 'archived' ? 'הארכיון ריק' : 'אין הודעות חדשות'}</p>
+                        <p className="text-sm mt-1">{searchTerm || hasAdvancedFilterBeyondDefaults ? 'נסה מונח חיפוש אחר.' : activeTab === 'archived' ? 'הודעות שסומנו כטופלו יופיעו כאן.' : 'הכל מעודכן!'}</p>
                     </div>
                 )}
             </main>
@@ -658,50 +1352,94 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
                         <button onClick={handleBulkMarkAsDone} className="text-sm font-semibold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md hover:bg-primary-50 transition-colors">סמן כטופל</button>
                         <button onClick={handleBulkArchive} className="text-sm font-semibold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md hover:bg-primary-50 transition-colors">העבר לארכיון</button>
                         
-                        <div className="relative" ref={assignMenuRef}>
-                            <button
-                                type="button"
-                                onClick={() => {
-                                    setIsAssignMenuOpen(prev => !prev);
-                                    if (isAssignMenuOpen) {
+                        <button
+                            ref={bulkAssignBtnRef}
+                            type="button"
+                            onClick={() => {
+                                setIsAssignMenuOpen((open) => {
+                                    if (open) {
+                                        setAssignMenuAnchor(null);
                                         setTempSelectedAgents([]);
+                                        return false;
                                     }
-                                }}
-                                className="text-sm font-semibold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md hover:bg-primary-50 transition-colors"
-                            >
-                                העבר לנציג
-                            </button>
-                            {isAssignMenuOpen && (
-                                <div className="absolute bottom-full mb-2 right-1/2 translate-x-1/2 bg-bg-card rounded-lg shadow-xl border border-border-default z-30 w-56 p-3">
-                                    <p className="text-xs font-semibold text-text-muted px-1 pb-2">בחר נציגים לשיוך</p>
-                                    <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                                        {filterOptions.recipients
-                                            .filter(r => r !== 'עצמי' && r !== 'כולם')
-                                            .map(agent => (
-                                                <label key={agent} className="flex items-center gap-2 text-sm text-text-default hover:bg-bg-hover p-1 rounded cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={tempSelectedAgents.includes(agent)}
-                                                        onChange={() => handleAgentToggle(agent)}
-                                                        className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
-                                                    />
-                                                    {agent}
-                                                </label>
-                                            ))}
-                                    </div>
-                                    <button
-                                        onClick={handleConfirmAssignment}
-                                        disabled={tempSelectedAgents.length === 0}
-                                        className="w-full mt-3 bg-primary-500 text-white font-semibold py-1.5 rounded-md hover:bg-primary-600 transition disabled:bg-gray-300"
-                                    >
-                                        שייך ({tempSelectedAgents.length})
-                                    </button>
-                                </div>
-                            )}
-                        </div>
+                                    const el = bulkAssignBtnRef.current;
+                                    if (el) {
+                                        const r = el.getBoundingClientRect();
+                                        setAssignMenuAnchor({
+                                            top: r.top,
+                                            left: r.left,
+                                            bottom: r.bottom,
+                                            right: r.right,
+                                            width: r.width,
+                                            height: r.height,
+                                        });
+                                    }
+                                    setTempSelectedAgents([]);
+                                    return true;
+                                });
+                            }}
+                            className="text-sm font-semibold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md hover:bg-primary-50 transition-colors"
+                        >
+                            העבר לנציג
+                        </button>
                         
                         <button onClick={() => setSelectedNotifications([])} className="p-2 rounded-full text-text-subtle hover:bg-bg-hover" title="נקה בחירה">
                             <XMarkIcon className="w-5 h-5"/>
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {isAssignMenuOpen && assignMenuAnchor && assignPopoverLayout && (
+                <div
+                    ref={assignPanelRef}
+                    className="fixed z-[200] bg-bg-card rounded-xl shadow-2xl border border-border-default flex flex-col overflow-hidden"
+                    style={{
+                        top: assignPopoverLayout.top,
+                        left: assignPopoverLayout.left,
+                        width: assignPopoverLayout.width,
+                        maxHeight: assignPopoverLayout.maxHeight,
+                    }}
+                >
+                    <div className="px-3 pt-3 pb-2 border-b border-border-default bg-bg-subtle/40 shrink-0">
+                        <p className="text-sm font-bold text-text-default">בחר נציגים לשיוח</p>
+                        <p className="text-xs text-text-muted mt-0.5">כל משתמשי הצוות של הלקוח (מהמערכת)</p>
+                    </div>
+                    <div className="overflow-y-auto flex-1 min-h-0 p-2 space-y-1">
+                        {staffUsersLoading ? (
+                            <p className="text-sm text-text-muted px-2 py-3 text-center">טוען משתמשים…</p>
+                        ) : assigneeOptions.length === 0 ? (
+                            <p className="text-sm text-text-muted px-2 py-3 text-center">לא נמצאו משתמשים</p>
+                        ) : (
+                            assigneeOptions.map((u) => {
+                                const email = String(u.email || '').trim();
+                                if (!email) return null;
+                                const label = u.name?.trim() ? `${u.name.trim()} (${email})` : email;
+                                return (
+                                    <label
+                                        key={u.id}
+                                        className="flex items-center gap-2 text-sm text-text-default hover:bg-bg-hover p-2 rounded-lg cursor-pointer"
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={tempSelectedAgents.includes(email)}
+                                            onChange={() => handleAgentToggle(email)}
+                                            className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500 shrink-0"
+                                        />
+                                        <span className="min-w-0 break-words">{label}</span>
+                                    </label>
+                                );
+                            })
+                        )}
+                    </div>
+                    <div className="p-2 border-t border-border-default shrink-0 bg-bg-card">
+                        <button
+                            type="button"
+                            onClick={handleConfirmAssignment}
+                            disabled={tempSelectedAgents.length === 0}
+                            className="w-full bg-primary-600 text-white font-semibold py-2 rounded-lg hover:bg-primary-700 transition disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                        >
+                            העבר ({tempSelectedAgents.length})
                         </button>
                     </div>
                 </div>
@@ -711,3 +1449,4 @@ const NotificationCenter: React.FC<NotificationCenterProps> = ({ onOpenCandidate
 };
 
 export default NotificationCenter;
+

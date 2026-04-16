@@ -9,6 +9,8 @@ router.post('/verify-login-code', authController.verifyLoginCode);
 router.post('/resend-login-code', authController.resendLoginCode);
 router.post('/google', authController.loginWithGoogle);
 router.post('/signup', authController.signup);
+router.get('/activation/:guid', authController.getActivationCheck);
+router.post('/activation/:guid', authController.postActivationComplete);
 router.get('/me', authMiddleware, authController.me);
 
 module.exports = router;

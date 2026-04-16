@@ -1,5 +1,6 @@
 const authService = require('../services/authService');
 const User = require('../models/User');
+const Client = require('../models/Client');
 const { serializeAuthUser } = require('../services/permissionService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
 
@@ -118,12 +119,61 @@ const me = async (req, res) => {
   try {
     const userId = req.user?.sub;
     if (!userId) return res.status(401).json({ message: 'Invalid token' });
-    const user = await User.findByPk(userId);
+    const user = await User.findByPk(userId, {
+      include: [
+        { model: Client, as: 'client', attributes: ['id', 'name', 'displayName', 'modules'], required: false },
+      ],
+    });
     if (!user) return res.status(404).json({ message: 'User not found' });
     return res.json(await serializeAuthUserWithUsage(user));
   } catch (err) {
     const status = err?.status || 400;
     return res.status(status).json({ message: err.message || 'Failed to load user' });
+  }
+};
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const getActivationCheck = async (req, res) => {
+  try {
+    const { guid } = req.params;
+    if (!guid || !UUID_RE.test(guid)) {
+      return res.status(400).json({ valid: false, message: 'Invalid activation link' });
+    }
+    const user = await User.findOne({ where: { activationGuid: guid } });
+    if (!user) {
+      return res.status(404).json({ valid: false, message: 'This link is invalid or has already been used' });
+    }
+    const email = user.email || '';
+    const masked = email.replace(/(^.).*(@.*$)/, '$1***$2');
+    return res.json({ valid: true, email: masked });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || 'Activation check failed' });
+  }
+};
+
+const postActivationComplete = async (req, res) => {
+  try {
+    const { guid } = req.params;
+    const { password } = req.body;
+    if (!guid || !UUID_RE.test(guid)) {
+      return res.status(400).json({ message: 'Invalid activation link' });
+    }
+    if (!password || String(password).length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters' });
+    }
+    const user = await User.findOne({ where: { activationGuid: guid } });
+    if (!user) {
+      return res.status(404).json({ message: 'This link is invalid or has already been used' });
+    }
+    await user.update({
+      password,
+      activationGuid: null,
+      isActive: true,
+    });
+    return res.json({ ok: true, message: 'Password saved. You can log in.' });
+  } catch (err) {
+    return res.status(400).json({ message: err.message || 'Activation failed' });
   }
 };
 
@@ -134,5 +184,7 @@ module.exports = {
   loginWithGoogle,
   signup,
   me,
+  getActivationCheck,
+  postActivationComplete,
 };
 

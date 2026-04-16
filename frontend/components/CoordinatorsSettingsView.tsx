@@ -42,7 +42,6 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
     const { t } = useLanguage();
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
     const [role, setRole] = useState<'manager' | 'recruiter'>('recruiter');
     const [phone, setPhone] = useState('');
     const [extension, setExtension] = useState('');
@@ -53,7 +52,6 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
         if (!open) {
             setName('');
             setEmail('');
-            setPassword('');
             setRole('recruiter');
             setPhone('');
             setExtension('');
@@ -69,7 +67,7 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
         try {
             await createStaffUser({
                 email: email.trim(),
-                password,
+                invite: true,
                 name: name.trim() || email.trim(),
                 role,
                 phone: phone.trim() || undefined,
@@ -101,6 +99,7 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
                 </div>
                 <form onSubmit={submit} className="p-5 space-y-4">
                     {err && <p className="text-sm text-red-600">{err}</p>}
+                    <p className="text-sm text-text-muted">{t('coordinators.invite_hint')}</p>
                     <div>
                         <label className="block text-sm font-semibold text-text-muted mb-1">שם מלא</label>
                         <input
@@ -117,17 +116,6 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
                             required
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
-                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-semibold text-text-muted mb-1">סיסמה *</label>
-                        <input
-                            type="password"
-                            required
-                            minLength={6}
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm"
                         />
                     </div>
@@ -173,7 +161,7 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
                             disabled={saving}
                             className="flex-1 py-2.5 rounded-lg bg-primary-600 text-white font-semibold hover:bg-primary-700 disabled:opacity-60"
                         >
-                            {saving ? 'שומר...' : 'צור משתמש'}
+                            {saving ? 'שומר...' : 'שלח הזמנה'}
                         </button>
                     </div>
                 </form>

@@ -1,5 +1,7 @@
+const { Op } = require('sequelize');
 const JobCandidate = require('../models/JobCandidate');
 const Candidate = require('../models/Candidate');
+const Job = require('../models/Job');
 
 const candidateAttributes = [
   'id',
@@ -58,6 +60,33 @@ const listForJob = async (jobId) => {
   return records.map(buildCandidateView).filter((payload) => payload.id);
 };
 
+/** Job rows linked to a candidate (התעניינות במשרה) — from job_candidates + jobs. */
+const listForCandidate = async (candidateId) => {
+  if (!candidateId) return [];
+  const records = await JobCandidate.findAll({
+    where: { candidateId, jobId: { [Op.ne]: null } },
+    include: [{ model: Job, as: 'job', required: true }],
+    order: [
+      ['updatedAt', 'DESC'],
+      ['createdAt', 'DESC'],
+    ],
+  });
+  return records.map((jc) => {
+    const plain = jc.get({ plain: true });
+    const job = plain.job || {};
+    return {
+      jobCandidateId: plain.id,
+      jobId: plain.jobId,
+      candidateId: plain.candidateId,
+      status: plain.status,
+      source: plain.source,
+      updatedAt: plain.updatedAt,
+      createdAt: plain.createdAt,
+      job,
+    };
+  });
+};
+
 const associateCandidateWithJob = async ({ jobId, candidateId, status, source }) => {
   if (!candidateId) return null;
   const whereClause = jobId ? { jobId, candidateId } : { jobId: null, candidateId };
@@ -78,5 +107,5 @@ const associateCandidateWithJob = async ({ jobId, candidateId, status, source })
   return record;
 };
 
-module.exports = { listForJob, associateCandidateWithJob };
+module.exports = { listForJob, listForCandidate, associateCandidateWithJob };
 

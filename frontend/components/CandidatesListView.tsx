@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { 
     PlusIcon, MagnifyingGlassIcon, Cog6ToothIcon, AvatarIcon, ChevronDownIcon, ArrowPathIcon,
     TargetIcon, CalendarIcon, BriefcaseIcon, PencilIcon, WalletIcon, GenderMaleIcon, GenderFemaleIcon, UserIcon,
@@ -17,8 +17,12 @@ import DevAnnotation from './DevAnnotation';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
+import TagSelectorModal, { type TagOption } from './TagSelectorModal';
 import { useLanguage } from '../context/LanguageContext';
 import { deriveLocalCandidateId } from '../utils/candidateId';
+
+/** Blue ring when an advanced filter differs from its default. */
+const advFieldModifiedClass = 'ring-2 ring-primary-500 rounded-xl';
 
 type Operator = 'AND' | 'OR' | 'NOT';
 
@@ -29,6 +33,32 @@ interface ComplexFilterRule {
     value?: string;
     textValue?: string;
     dateRange?: DateRange | null;
+}
+
+/** Snapshot sent to GET /api/candidates?adv=… when user applies advanced search */
+interface AppliedAdvancedSearchPayload {
+    gender: 'any' | 'male' | 'female';
+    statusFilter: string;
+    tags: string[];
+    locations: { type: LocationItem['type']; value: string }[];
+    jobScopes: string[];
+    jobScopeAll: boolean;
+    lastUpdated: DateRange | null;
+    /** Job-field category from JobFieldSelector (תחום עליון) */
+    interestField: string;
+    interestRole: string;
+    interestDate: DateRange | null;
+    ageMin: number;
+    ageMax: number;
+    salaryMin: number;
+    salaryMax: number;
+    /** כלול גיל לא ידוע — when true, candidates with no parseable age are also returned. */
+    includeUnknownAge: boolean;
+    /** כלול ציפיות שכר לא ידועות — when true, candidates with no salary fields are also returned. */
+    includeUnknownSalary: boolean;
+    hasDegree: boolean;
+    languages: { language: string; level: string }[];
+    complexRules: { field: string; textValue?: string; value?: string; operator: string }[];
 }
 
 export interface Candidate {
@@ -67,6 +97,16 @@ export interface Candidate {
       };
   };
   resumeUrl?: string;
+  /** רשימת תחומי עיסוק / היקף (מסונכרן עם חיפוש מתקדם) */
+  jobScopes?: string[];
+  /** שפות מובנה מה-API (JSONB): name / level / levelText (+ legacy language) */
+  languages?: { name?: string; language?: string; level?: string | number; levelText?: string }[];
+  gender?: string;
+  age?: string;
+  salaryMin?: number | null;
+  salaryMax?: number | null;
+  /** מיקום / כתובת לתצוגה בטבלה */
+  location?: string;
 }
 
 export const candidatesData: Candidate[] = [
@@ -235,7 +275,9 @@ const DoubleRangeSlider: React.FC<{
     includeUnknown?: boolean;
     onIncludeUnknownChange?: (checked: boolean) => void;
     unknownLabel?: string;
-}> = ({ label, min, max, step, valueMin, valueMax, onChange, nameMin, nameMax, unit = '', colorVar = '--color-primary-500', icon, includeUnknown, onIncludeUnknownChange, unknownLabel }) => {
+    /** Highlight when value differs from default (blue ring). */
+    modified?: boolean;
+}> = ({ label, min, max, step, valueMin, valueMax, onChange, nameMin, nameMax, unit = '', colorVar = '--color-primary-500', icon, includeUnknown, onIncludeUnknownChange, unknownLabel, modified = false }) => {
     const minVal = Math.min(valueMin, valueMax);
     const maxVal = Math.max(valueMin, valueMax);
     const minPercent = ((minVal - min) / (max - min)) * 100;
@@ -252,7 +294,9 @@ const DoubleRangeSlider: React.FC<{
     }, [min, max, step]);
 
     return (
-        <div className="w-full pt-2 pb-6 relative group/slider">
+        <div
+            className={`w-full pt-2 pb-6 relative group/slider ${modified ? `${advFieldModifiedClass} px-1 -mx-0.5` : ''}`}
+        >
             <div className="flex flex-col items-center mb-6">
                 <div className="flex items-center gap-2 mb-2">
                     {icon}
@@ -344,7 +388,7 @@ const DoubleRangeSlider: React.FC<{
                 <label className="flex items-center gap-2 cursor-pointer mt-3 px-1 justify-center">
                     <input 
                         type="checkbox" 
-                        checked={includeUnknown} 
+                        checked={includeUnknown !== false} 
                         onChange={(e) => onIncludeUnknownChange(e.target.checked)} 
                         className="w-3.5 h-3.5 text-primary-600 rounded border-gray-300 focus:ring-primary-500"
                     />
@@ -411,6 +455,13 @@ const TablePaginationControls: React.FC<TablePaginationControlsProps> = ({
 );
 
 const jobScopeOptions = ['מלאה', 'חלקית', 'משמרות', 'פרילנס'];
+
+function isJobScopesDefaultSelection(scopes: string[]): boolean {
+    return (
+        scopes.length === jobScopeOptions.length &&
+        jobScopeOptions.every((s) => scopes.includes(s))
+    );
+}
 
 interface CandidatesListViewProps {
     openSummaryDrawer: (candidate: Candidate | number) => void;
@@ -539,60 +590,296 @@ const SmartSearchPanel: React.FC<{
 
 const VIEW_STATE_KEY = 'hiro.candidates.listViewState';
 
-/** When returning to the list with semantic search results saved, hydrate immediately so no loading overlay runs. */
-function loadSemanticListSessionRestore(): {
+type ListSearchParamsState = {
+    mainFieldTags: string[];
+    jobScopes: string[];
+    locations: LocationItem[];
+    status: string;
+    statusFilter: '' | 'active' | 'inactive';
+    interestField: string;
+    interestRole: string;
+    interestJob: string;
+    ageMin: number;
+    ageMax: number;
+    salaryMin: number;
+    salaryMax: number;
+    internalSalaryMin: number;
+    internalSalaryMax: number;
+    gender: 'any' | 'male' | 'female';
+    hasDegree: boolean;
+    includeUnknownAge: boolean;
+    includeUnknownSalary: boolean;
+    industryExperience: string;
+    lastUpdated: DateRange | null;
+    interestDate: DateRange | null;
+};
+
+function createDefaultListSearchParams(): ListSearchParamsState {
+    return {
+        mainFieldTags: [],
+        jobScopes: [...jobScopeOptions],
+        locations: [],
+        status: '',
+        statusFilter: '',
+        interestField: '',
+        interestRole: '',
+        interestJob: '',
+        ageMin: 18,
+        ageMax: 65,
+        salaryMin: 5000,
+        salaryMax: 30000,
+        internalSalaryMin: 5000,
+        internalSalaryMax: 30000,
+        gender: 'any',
+        hasDegree: false,
+        includeUnknownAge: true,
+        includeUnknownSalary: true,
+        industryExperience: '',
+        lastUpdated: null,
+        interestDate: null,
+    };
+}
+
+function mergeListSearchParams(saved: Partial<ListSearchParamsState> | null | undefined): ListSearchParamsState {
+    const base = createDefaultListSearchParams();
+    if (!saved || typeof saved !== 'object') return base;
+    return {
+        ...base,
+        ...saved,
+        mainFieldTags: Array.isArray(saved.mainFieldTags) ? saved.mainFieldTags : base.mainFieldTags,
+        jobScopes: Array.isArray(saved.jobScopes) && saved.jobScopes.length ? saved.jobScopes : base.jobScopes,
+        locations: Array.isArray(saved.locations) ? (saved.locations as LocationItem[]) : base.locations,
+        statusFilter:
+            saved.statusFilter === 'active' || saved.statusFilter === 'inactive' || saved.statusFilter === ''
+                ? saved.statusFilter
+                : base.statusFilter,
+        gender:
+            saved.gender === 'male' || saved.gender === 'female' || saved.gender === 'any'
+                ? saved.gender
+                : base.gender,
+        lastUpdated: saved.lastUpdated ?? base.lastUpdated,
+        interestDate: saved.interestDate ?? base.interestDate,
+        // Always on when hydrating from saved/session; user can uncheck for the current session only.
+        includeUnknownAge: true,
+        includeUnknownSalary: true,
+    };
+}
+
+/** Full `adv` object for GET /api/candidates — always includes age/salary and include-unknown flags. */
+function buildAdvancedPayloadFromPanel(
+    searchParams: ListSearchParamsState,
+    languageFilters: { language: string; level: string }[],
+    complexRules: ComplexFilterRule[],
+): AppliedAdvancedSearchPayload {
+    const jobScopeAll =
+        jobScopeOptions.length > 0 &&
+        jobScopeOptions.every((s) => searchParams.jobScopes.includes(s));
+    return {
+        gender: searchParams.gender,
+        statusFilter: searchParams.statusFilter || '',
+        tags: [...searchParams.mainFieldTags],
+        locations: searchParams.locations.map((l) => ({ type: l.type, value: l.value })),
+        jobScopes: [...searchParams.jobScopes],
+        jobScopeAll,
+        lastUpdated: searchParams.lastUpdated,
+        interestField: String(searchParams.interestField || '').trim(),
+        interestRole: searchParams.interestRole,
+        interestDate: searchParams.interestDate,
+        ageMin: Number(searchParams.ageMin),
+        ageMax: Number(searchParams.ageMax),
+        salaryMin: Number(searchParams.salaryMin),
+        salaryMax: Number(searchParams.salaryMax),
+        includeUnknownAge: searchParams.includeUnknownAge !== false,
+        includeUnknownSalary: searchParams.includeUnknownSalary !== false,
+        hasDegree: !!searchParams.hasDegree,
+        languages: languageFilters.map((l) => ({ language: l.language, level: l.level })),
+        complexRules: complexRules.map((r) => ({
+            field: r.field,
+            textValue: r.textValue,
+            value: r.value,
+            operator: r.operator,
+        })),
+    };
+}
+
+type ListViewSnapshotV1 = {
+    listSnapshotVersion: 1 | 2 | 3;
     candidates: Candidate[];
     searchTerm: string;
+    debouncedSearchTerm: string;
     page: number;
     pageSize: number;
+    totalCandidates: number;
+    appliedAdvancedFilters: AppliedAdvancedSearchPayload | null;
     showNeedsAttention: boolean;
     showFavoritesOnly: boolean;
-} | null {
+    semanticListActive: boolean;
+    listSearchParams: ListSearchParamsState;
+    languageFilters: { language: string; level: string }[];
+    complexRules: ComplexFilterRule[];
+};
+
+/** Restore list + advanced search after navigating to a candidate and back. */
+function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
     if (typeof sessionStorage === 'undefined') return null;
     try {
         const raw = sessionStorage.getItem(VIEW_STATE_KEY);
         if (!raw) return null;
         const saved = JSON.parse(raw);
-        if (!saved.semanticListActive || !Array.isArray(saved.candidates) || !saved.candidates.length) {
-            return null;
+        if (!Array.isArray(saved.candidates)) return null;
+
+        const snapVer = saved.listSnapshotVersion;
+        const legacySemantic = saved.semanticListActive === true && saved.candidates.length > 0;
+        if (![1, 2, 3].includes(snapVer) && !legacySemantic) return null;
+
+        const debounced =
+            typeof saved.debouncedSearchTerm === 'string'
+                ? saved.debouncedSearchTerm
+                : (() => {
+                      const st = String(saved.searchTerm || '').trim();
+                      return st.length >= 3 ? st : '';
+                  })();
+
+        const listSearchParams = mergeListSearchParams(saved.listSearchParams as Partial<ListSearchParamsState>);
+        const languageFilters = Array.isArray(saved.languageFilters) ? saved.languageFilters : [];
+        const complexRules = Array.isArray(saved.complexRules) ? (saved.complexRules as ComplexFilterRule[]) : [];
+
+        let applied: AppliedAdvancedSearchPayload | null = null;
+        if (saved.appliedAdvancedFilters != null && typeof saved.appliedAdvancedFilters === 'object') {
+            applied = buildAdvancedPayloadFromPanel(listSearchParams, languageFilters, complexRules);
+        } else if (!legacySemantic) {
+            applied = null;
         }
+
+        const total =
+            typeof saved.totalCandidates === 'number' && Number.isFinite(saved.totalCandidates)
+                ? saved.totalCandidates
+                : saved.candidates.length;
+
         return {
-            candidates: saved.candidates,
-            searchTerm: saved.searchTerm || '',
-            page: saved.page || 1,
-            pageSize: saved.pageSize || 100,
+            listSnapshotVersion: 3,
+            candidates: saved.candidates as Candidate[],
+            searchTerm: String(saved.searchTerm || ''),
+            debouncedSearchTerm: debounced,
+            page: Math.max(1, Number(saved.page) || 1),
+            pageSize: Math.min(500, Math.max(10, Number(saved.pageSize) || 100)),
+            totalCandidates: Math.max(0, total),
+            appliedAdvancedFilters: applied,
             showNeedsAttention: !!saved.showNeedsAttention,
             showFavoritesOnly: !!saved.showFavoritesOnly,
+            semanticListActive: !!saved.semanticListActive,
+            listSearchParams,
+            languageFilters,
+            complexRules,
         };
     } catch {
         return null;
     }
 }
 
-const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite }) => {
-    const apiBase = import.meta.env.VITE_API_BASE || '';
-    const semanticListSessionRef = useRef<ReturnType<typeof loadSemanticListSessionRestore> | undefined>(undefined);
-    if (semanticListSessionRef.current === undefined) {
-        semanticListSessionRef.current = loadSemanticListSessionRestore();
+/** API may send jobScopes[] and/or legacy jobScope string. */
+function normalizeJobScopesFromApi(c: any): string[] {
+    const fromArr = Array.isArray(c?.jobScopes)
+        ? c.jobScopes.map((x: unknown) => String(x || '').trim()).filter(Boolean)
+        : [];
+    const single = c?.jobScope != null && c.jobScope !== '' ? String(c.jobScope).trim() : '';
+    if (!single) return fromArr;
+    const set = new Set(fromArr);
+    if (!set.has(single)) fromArr.push(single);
+    return fromArr;
+}
+
+/** Backend stores { name, level, levelText }; some payloads use language / string rows. */
+function normalizeLanguagesFromApi(raw: unknown): NonNullable<Candidate['languages']> {
+    if (!Array.isArray(raw)) return [];
+    const out: NonNullable<Candidate['languages']> = [];
+    for (const x of raw) {
+        if (x == null) continue;
+        if (typeof x === 'string') {
+            const name = x.trim();
+            if (name) out.push({ name, language: name });
+            continue;
+        }
+        if (typeof x === 'object') {
+            const o = x as Record<string, unknown>;
+            const name = String(o.name || o.language || '').trim();
+            if (!name) continue;
+            out.push({
+                name,
+                language: name,
+                level: o.level as string | number | undefined,
+                levelText: o.levelText != null ? String(o.levelText) : undefined,
+            });
+        }
     }
-    const [candidates, setCandidates] = useState<Candidate[]>(
-        () => semanticListSessionRef.current?.candidates ?? [],
-    );
-    const [isRemoteLoading, setIsRemoteLoading] = useState(() => semanticListSessionRef.current === null);
-    const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(() => semanticListSessionRef.current !== null);
-    const [suspendListPolling, setSuspendListPolling] = useState(() => semanticListSessionRef.current !== null);
+    return out;
+}
+
+function languageRowSortText(x: NonNullable<Candidate['languages']>[number]): string {
+    const name = x?.name || x?.language || '';
+    const lt = x?.levelText != null ? String(x.levelText).trim() : '';
+    if (lt) return `${name} ${lt}`.trim();
+    const lv = x?.level;
+    if (lv != null && lv !== '' && Number(lv) !== 50) return `${name} ${lv}`.trim();
+    return name;
+}
+
+function candidateSortComparable(candidate: Candidate, key: keyof Candidate): string | number {
+    const v = candidate[key];
+    if (key === 'matchScore' || key === 'salaryMin' || key === 'salaryMax') {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : -1;
+    }
+    if (Array.isArray(v)) {
+        if (key === 'languages') {
+            return (v as NonNullable<Candidate['languages']>).map(languageRowSortText).join(', ');
+        }
+        return (v as string[]).join(', ');
+    }
+    if (v == null) return '';
+    return typeof v === 'number' ? v : String(v);
+}
+
+function formatSalaryExpectationCell(c: Candidate): string {
+    const min = c.salaryMin;
+    const max = c.salaryMax;
+    if ((min == null || !Number.isFinite(min)) && (max == null || !Number.isFinite(max))) return '';
+    const fmt = (n: number) => `₪${Math.round(n).toLocaleString()}`;
+    if (min != null && Number.isFinite(min) && max != null && Number.isFinite(max)) {
+        if (min === max) return fmt(min);
+        return `${fmt(min)}–${fmt(max)}`;
+    }
+    if (min != null && Number.isFinite(min)) return `${fmt(min)}+`;
+    return `≤${fmt(max!)}`;
+}
+
+const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite }) => {
+    /** Fresh read on each mount so returning from a candidate profile restores session-backed filters. */
+    const listViewSnapshot = useMemo(() => loadListViewSnapshotFromSession(), []);
+
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [candidates, setCandidates] = useState<Candidate[]>(() => listViewSnapshot?.candidates ?? []);
+    const [isRemoteLoading, setIsRemoteLoading] = useState(() => listViewSnapshot === null);
+    const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(() => listViewSnapshot !== null);
+    const [suspendListPolling, setSuspendListPolling] = useState(() => listViewSnapshot?.semanticListActive === true);
     const [jobs, setJobs] = useState<{ id: string; title: string }[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
     const [jobsError, setJobsError] = useState<string | null>(null);
     const [selectedJobId, setSelectedJobId] = useState('');
 
     const navigate = useNavigate();
+    const location = useLocation();
     const [searchParamsFromUrl, setUrlSearchParams] = useSearchParams();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const { t } = useLanguage();
 
-    const [searchTerm, setSearchTerm] = useState(() => semanticListSessionRef.current?.searchTerm ?? '');
+    const [searchTerm, setSearchTerm] = useState(() => listViewSnapshot?.searchTerm ?? '');
+    const skipSearchDebounceOnceRef = useRef(listViewSnapshot !== null);
     useEffect(() => {
+        if (skipSearchDebounceOnceRef.current) {
+            skipSearchDebounceOnceRef.current = false;
+            return;
+        }
         const handler = setTimeout(() => {
             const trimmed = searchTerm.trim();
             setDebouncedSearchTerm(trimmed.length >= 3 ? trimmed : '');
@@ -604,42 +891,33 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const settingsRef = useRef<HTMLDivElement>(null);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [page, setPage] = useState(() => semanticListSessionRef.current?.page ?? 1);
-    const [pageSize, setPageSize] = useState(() => semanticListSessionRef.current?.pageSize ?? 100);
+    const [page, setPage] = useState(() => listViewSnapshot?.page ?? 1);
+    const [pageSize, setPageSize] = useState(() => listViewSnapshot?.pageSize ?? 100);
     const [totalCandidates, setTotalCandidates] = useState(() =>
-        semanticListSessionRef.current ? semanticListSessionRef.current.candidates.length : 0,
+        listViewSnapshot != null ? listViewSnapshot.totalCandidates : 0,
     );
     const totalPages = Math.max(1, Math.ceil((totalCandidates || 0) / pageSize));
-    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => listViewSnapshot?.debouncedSearchTerm ?? '');
     const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
     const dragItemIndex = useRef<number | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     
-    const [complexRules, setComplexRules] = useState<ComplexFilterRule[]>([]);
+    const [complexRules, setComplexRules] = useState<ComplexFilterRule[]>(
+        () => listViewSnapshot?.complexRules ?? [],
+    );
 
-    const [searchParams, setSearchParams] = useState({
-        mainFieldTags: [] as string[],
-        jobScopes: jobScopeOptions, 
-        locations: [] as LocationItem[],
-        status: '',
-        interestField: '', 
-        interestRole: '', 
-        interestJob: '',
-        ageMin: 18, 
-        ageMax: 65, 
-        salaryMin: 5000, 
-        salaryMax: 30000,
-        internalSalaryMin: 5000,
-        internalSalaryMax: 30000,
-        gender: 'any' as 'any' | 'male' | 'female',
-        hasDegree: false,
-        includeUnknownAge: true,
-        includeUnknownSalary: true,
-        industryExperience: '',
-        lastUpdated: null as DateRange | null,
-        interestDate: null as DateRange | null,
+    const [searchParams, setSearchParams] = useState<ListSearchParamsState>(() => {
+        const raw =
+            listViewSnapshot != null
+                ? listViewSnapshot.listSearchParams
+                : createDefaultListSearchParams();
+        return {
+            ...raw,
+            includeUnknownAge: raw.includeUnknownAge !== false,
+            includeUnknownSalary: raw.includeUnknownSalary !== false,
+        };
     });
     
     const [isCompanyFilterOpen, setIsCompanyFilterOpen] = useState(false);
@@ -651,8 +929,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }>({ sizes: [], sectors: [], industry: '', field: '' });
     const companyFilterButtonRef = useRef<HTMLButtonElement>(null);
     
-    const [mainFieldInput, setMainFieldInput] = useState('');
-    const [languageFilters, setLanguageFilters] = useState<{ language: string; level: string }[]>([]);
+    const [isFilterTagModalOpen, setIsFilterTagModalOpen] = useState(false);
+    const [languageFilters, setLanguageFilters] = useState<{ language: string; level: string }[]>(
+        () => listViewSnapshot?.languageFilters ?? [],
+    );
     const [currentLanguage, setCurrentLanguage] = useState('אנגלית');
     const [currentLevel, setCurrentLevel] = useState('רמה גבוהה');
     
@@ -667,6 +947,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
     const [loadedSearch, setLoadedSearch] = useState<SavedSearch | null>(null);
 
+    const [appliedAdvancedFilters, setAppliedAdvancedFilters] = useState<AppliedAdvancedSearchPayload | null>(
+        () => listViewSnapshot?.appliedAdvancedFilters ?? null,
+    );
+    const pendingAdvancedSearchFeedback = useRef(false);
+    /** Skip one auto list effect run after an imperative fetch (advanced apply / clear) to avoid duplicate GET. */
+    const suppressNextListFetchEffectRef = useRef(false);
+    /** After hydrating from session, skip the first page/dependency-driven fetch so restored rows stay visible. */
+    const skipListFetchAfterHydrateRef = useRef(listViewSnapshot !== null);
+
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
     const [isBulkActionsMobileOpen, setIsBulkActionsMobileOpen] = useState(false);
@@ -677,14 +966,51 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>(null);
     
     const [showNeedsAttention, setShowNeedsAttention] = useState(
-        () => semanticListSessionRef.current?.showNeedsAttention ?? false,
+        () => listViewSnapshot?.showNeedsAttention ?? false,
     );
     const [showFavoritesOnly, setShowFavoritesOnly] = useState(
-        () => semanticListSessionRef.current?.showFavoritesOnly ?? false,
+        () => listViewSnapshot?.showFavoritesOnly ?? false,
     );
+
+    const skipUrlHydrateOnceRef = useRef(listViewSnapshot !== null);
+
+    const advDefaults = useMemo(() => createDefaultListSearchParams(), []);
+    const advFieldModified = useMemo(() => {
+        const d = advDefaults;
+        return {
+            tags: searchParams.mainFieldTags.length > 0,
+            locations: searchParams.locations.length > 0,
+            status: searchParams.statusFilter !== d.statusFilter,
+            lastUpdated: searchParams.lastUpdated != null,
+            jobScopes: !isJobScopesDefaultSelection(searchParams.jobScopes),
+            interestRole:
+                String(searchParams.interestRole || '').trim() !== '' ||
+                String(searchParams.interestField || '').trim() !== '',
+            interestDate: searchParams.interestDate != null,
+            gender: searchParams.gender !== d.gender,
+            age:
+                searchParams.ageMin !== d.ageMin ||
+                searchParams.ageMax !== d.ageMax ||
+                searchParams.includeUnknownAge === false,
+            hasDegree: searchParams.hasDegree !== d.hasDegree,
+            salary:
+                searchParams.salaryMin !== d.salaryMin ||
+                searchParams.salaryMax !== d.salaryMax ||
+                searchParams.includeUnknownSalary === false,
+            internalSalary:
+                searchParams.internalSalaryMin !== d.internalSalaryMin ||
+                searchParams.internalSalaryMax !== d.internalSalaryMax,
+            languages: languageFilters.length > 0,
+            complexRules: complexRules.length > 0,
+        };
+    }, [advDefaults, searchParams, languageFilters, complexRules]);
 
     // Initialize basic search/filter state from URL on first mount
     useEffect(() => {
+        if (skipUrlHydrateOnceRef.current) {
+            skipUrlHydrateOnceRef.current = false;
+            return;
+        }
         const q = searchParamsFromUrl.get('q') || '';
         if (q && q !== searchTerm) {
             setSearchTerm(q);
@@ -712,17 +1038,30 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }));
     }, [searchParamsFromUrl]);
 
-    // Persist basic search/filter state into URL so it survives navigation back from profile
+    // Persist basic search/filter state into URL so it survives navigation back from profile.
+    // Merge into existing params so savedSearchId, tag, etc. are not wiped.
     useEffect(() => {
-        const params = new URLSearchParams();
-        if (searchTerm.trim()) params.set('q', searchTerm.trim());
-        if (showNeedsAttention) params.set('needs', '1');
-        if (showFavoritesOnly) params.set('fav', '1');
-        if (companyFilters.field) params.set('field', companyFilters.field);
-        if (companyFilters.industry) params.set('industry', companyFilters.industry);
-        if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join(','));
-        if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join(','));
-        setUrlSearchParams(params, { replace: true });
+        setUrlSearchParams(
+            (prev) => {
+                const params = new URLSearchParams(prev);
+                if (searchTerm.trim()) params.set('q', searchTerm.trim());
+                else params.delete('q');
+                if (showNeedsAttention) params.set('needs', '1');
+                else params.delete('needs');
+                if (showFavoritesOnly) params.set('fav', '1');
+                else params.delete('fav');
+                if (companyFilters.field) params.set('field', companyFilters.field);
+                else params.delete('field');
+                if (companyFilters.industry) params.set('industry', companyFilters.industry);
+                else params.delete('industry');
+                if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join(','));
+                else params.delete('sizes');
+                if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join(','));
+                else params.delete('sectors');
+                return params;
+            },
+            { replace: true },
+        );
     }, [searchTerm, showNeedsAttention, showFavoritesOnly, companyFilters, setUrlSearchParams]);
 
     // --- SMART SEARCH STATE ---
@@ -750,44 +1089,96 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         matchScore: Number(c.profileCompleteness || c.matchScore || 0),
         address: c.address || '',
         phone: c.phone || '',
-        industry: c.industry || '',
+        industry:
+            (c.industry && String(c.industry).trim()) ||
+            (() => {
+                const inds = c.industryAnalysis?.industries;
+                if (!Array.isArray(inds) || !inds.length) return '';
+                const sorted = [...inds].sort(
+                    (a: { percentage?: number }, b: { percentage?: number }) =>
+                        (Number(b?.percentage) || 0) - (Number(a?.percentage) || 0),
+                );
+                return String(sorted[0]?.label || '').trim();
+            })() ||
+            '',
         field: c.field || '',
         sector: c.sector || '',
         companySize: c.companySize || '',
         professionalSummary: c.professionalSummary || '',
         industryAnalysis: c.industryAnalysis,
         resumeUrl: c.resumeUrl || '',
+        jobScopes: normalizeJobScopesFromApi(c),
+        languages: normalizeLanguagesFromApi(c.languages),
+        gender: c.gender != null ? String(c.gender) : '',
+        age: c.age != null ? String(c.age) : '',
+        salaryMin: c.salaryMin != null && c.salaryMin !== '' ? Number(c.salaryMin) : null,
+        salaryMax: c.salaryMax != null && c.salaryMax !== '' ? Number(c.salaryMax) : null,
+        location: [c.location, c.address].map((x: unknown) => String(x || '').trim()).filter(Boolean).join(' · ') || '',
         };
     }, []);
 
-    const fetchCandidates = useCallback(async () => {
-        if (!apiBase) return;
-        setSuspendListPolling(false);
-        setIsRemoteLoading(true);
-        try {
-            const params = new URLSearchParams({
-                page: String(page),
-                limit: String(pageSize),
-            });
-            const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
-            if (!res.ok) throw new Error('failed to load');
-            const payload = await res.json();
-            const list = Array.isArray(payload.data)
-                ? payload.data
-                : Array.isArray(payload.rows)
-                    ? payload.rows
-                    : [];
-            const mapped = list.map(mapCandidate);
-            setCandidates(mapped);
-            setTotalCandidates(Number(payload?.total || mapped.length || 0));
-        } catch (e) {
-            setCandidates([]);
-            setTotalCandidates(0);
-        } finally {
-            setIsRemoteLoading(false);
-            setHasInitiallyLoaded(true);
-        }
-    }, [apiBase, mapCandidate, page, pageSize]);
+    const fetchCandidatesList = useCallback(
+        async (opts: {
+            page: number;
+            limit: number;
+            search: string;
+            advanced: AppliedAdvancedSearchPayload | null;
+        }) => {
+            if (!apiBase) return;
+            setSuspendListPolling(false);
+            setIsRemoteLoading(true);
+            try {
+                const params = new URLSearchParams({
+                    page: String(opts.page),
+                    limit: String(opts.limit),
+                });
+                const st = opts.search.trim();
+                if (st) params.set('search', st);
+                if (opts.advanced != null) {
+                    params.set('adv', JSON.stringify(opts.advanced));
+                }
+                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
+                if (!res.ok) throw new Error('failed to load');
+                const payload = await res.json();
+                const list = Array.isArray(payload.data)
+                    ? payload.data
+                    : Array.isArray(payload.rows)
+                        ? payload.rows
+                        : [];
+                const mapped = list.map(mapCandidate);
+                setCandidates(mapped);
+                setTotalCandidates(Number(payload?.total || mapped.length || 0));
+            } catch (e) {
+                setCandidates([]);
+                setTotalCandidates(0);
+            } finally {
+                setIsRemoteLoading(false);
+                setHasInitiallyLoaded(true);
+            }
+        },
+        [apiBase, mapCandidate],
+    );
+
+    const fetchCandidates = useCallback(() => {
+        return fetchCandidatesList({
+            page,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced:
+                appliedAdvancedFilters == null
+                    ? null
+                    : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+        });
+    }, [
+        page,
+        pageSize,
+        debouncedSearchTerm,
+        appliedAdvancedFilters,
+        searchParams,
+        languageFilters,
+        complexRules,
+        fetchCandidatesList,
+    ]);
 
     // Poll backend for updates every 10s on current page
     useEffect(() => {
@@ -800,6 +1191,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             inFlight = true;
             try {
                 const params = new URLSearchParams({ page: String(page), limit: String(pageSize) });
+                const st = debouncedSearchTerm.trim();
+                if (st) params.set('search', st);
+                if (appliedAdvancedFilters != null) {
+                    params.set(
+                        'adv',
+                        JSON.stringify(
+                            buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+                        ),
+                    );
+                }
                 const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, {
                     cache: 'no-store',
                 } as any);
@@ -828,7 +1229,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             window.clearTimeout(t0);
             window.clearInterval(id);
         };
-    }, [apiBase, hasInitiallyLoaded, mapCandidate, page, pageSize, suspendListPolling]);
+    }, [
+        apiBase,
+        hasInitiallyLoaded,
+        mapCandidate,
+        page,
+        pageSize,
+        suspendListPolling,
+        debouncedSearchTerm,
+        appliedAdvancedFilters,
+        searchParams,
+        languageFilters,
+        complexRules,
+    ]);
 
     const goToPage = useCallback((target: number) => {
         const normalized = Math.max(1, Math.min(totalPages, target));
@@ -840,57 +1253,52 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setPage(1);
     }, []);
 
-    // On first mount, try to restore full view state from sessionStorage.
-    // If found, skip backend fetch; otherwise load from backend once.
     useEffect(() => {
-        // First paint already restored from session (no loading spinner); do not fetch or duplicate setState.
-        if (semanticListSessionRef.current !== null) {
+        if (listViewSnapshot !== null) {
             return;
         }
-        let skipFetchAfterRestore = false;
-        try {
-            const raw = sessionStorage.getItem(VIEW_STATE_KEY);
-            if (raw) {
-                const saved = JSON.parse(raw);
-                if (Array.isArray(saved.candidates) && saved.candidates.length) {
-                    setCandidates(saved.candidates);
-                    setSearchTerm(saved.searchTerm || '');
-                    setPage(saved.page || 1);
-                    setPageSize(saved.pageSize || 100);
-                    setShowNeedsAttention(!!saved.showNeedsAttention);
-                    setShowFavoritesOnly(!!saved.showFavoritesOnly);
-                    setHasInitiallyLoaded(true);
-                    if (saved.semanticListActive) {
-                        setSuspendListPolling(true);
-                        skipFetchAfterRestore = true;
-                    }
-                }
-            }
-        } catch {
-            // ignore restore errors
-        }
-        // Skip refresh when returning from profile with an active semantic-search list (same results).
-        if (!skipFetchAfterRestore) {
-            fetchCandidates();
-        }
+        void fetchCandidates();
     }, []);
 
     // Refetch when paging changes only. Do not depend on `hasInitiallyLoaded`; when it flips after the
     // initial mount fetch, deps here stay the same so we avoid a duplicate GET.
     useEffect(() => {
         if (!hasInitiallyLoaded || suspendListPolling) return;
-        fetchCandidates();
+        if (suppressNextListFetchEffectRef.current) {
+            suppressNextListFetchEffectRef.current = false;
+            return;
+        }
+        if (skipListFetchAfterHydrateRef.current) {
+            skipListFetchAfterHydrateRef.current = false;
+            return;
+        }
+        void fetchCandidates();
     }, [page, pageSize, fetchCandidates]);
 
-    // Persist current view state (candidates + filters + paging) into sessionStorage
-    // so that navigation to profile and back restores the exact same view.
+    useEffect(() => {
+        if (!pendingAdvancedSearchFeedback.current || isRemoteLoading || !hasInitiallyLoaded) return;
+        pendingAdvancedSearchFeedback.current = false;
+        setFeedbackMessage(t('candidates.found_count', { count: totalCandidates }));
+    }, [isRemoteLoading, hasInitiallyLoaded, totalCandidates, t]);
+
+    // Persist list + advanced payload so returning from a candidate profile keeps the same results and filters.
     useEffect(() => {
         if (!hasInitiallyLoaded) return;
         const stateToSave = {
+            listSnapshotVersion: 3,
             candidates,
             searchTerm,
+            debouncedSearchTerm,
             page,
             pageSize,
+            totalCandidates,
+            appliedAdvancedFilters:
+                appliedAdvancedFilters == null
+                    ? null
+                    : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+            listSearchParams: searchParams,
+            languageFilters,
+            complexRules,
             showNeedsAttention,
             showFavoritesOnly,
             semanticListActive: suspendListPolling,
@@ -900,7 +1308,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         } catch {
             // ignore storage errors
         }
-    }, [candidates, searchTerm, page, pageSize, showNeedsAttention, showFavoritesOnly, hasInitiallyLoaded, suspendListPolling]);
+    }, [
+        candidates,
+        searchTerm,
+        debouncedSearchTerm,
+        page,
+        pageSize,
+        totalCandidates,
+        appliedAdvancedFilters,
+        searchParams,
+        languageFilters,
+        complexRules,
+        showNeedsAttention,
+        showFavoritesOnly,
+        hasInitiallyLoaded,
+        suspendListPolling,
+    ]);
 
 
 
@@ -919,10 +1342,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         { id: 'status', header: t('col.status') },
         { id: 'lastActivity', header: t('col.last_activity') },
         { id: 'source', header: t('col.source') },
+        { id: 'tags', header: t('col.tags') },
+        { id: 'location', header: t('col.location') },
         { id: 'industry', header: t('col.industry') },
         { id: 'field', header: t('col.field') },
         { id: 'sector', header: t('col.sector') },
         { id: 'companySize', header: t('col.company_size') },
+        { id: 'jobScopes', header: t('col.job_scopes') },
+        { id: 'gender', header: t('col.gender') },
+        { id: 'age', header: t('col.age') },
+        { id: 'salaryMin', header: t('col.salary_expectation') },
+        { id: 'languages', header: t('col.languages') },
     ], [t]);
 
     // Use a subset for default visibility
@@ -1008,7 +1438,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             const searchToLoad = savedSearches.find(s => s.id === Number(savedSearchId));
             if (searchToLoad) {
                 if (loadedSearch?.id !== searchToLoad.id) {
-                    setSearchParams(searchToLoad.searchParams);
+                    setSearchParams(mergeListSearchParams(searchToLoad.searchParams));
                     setAdditionalFilters(searchToLoad.additionalFilters);
                     setLanguageFilters(searchToLoad.languageFilters);
                     
@@ -1039,15 +1469,20 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [searchParamsFromUrl]);
 
     const handleJobFieldSelect = (selectedField: SelectedJobField | null) => {
-        if (selectedField) {
-            setSearchParams(prev => ({
-                ...prev,
-                interestRole: selectedField.role,
-                interestField: selectedField.category
-            }));
-        }
+        setSearchParams((prev) => ({
+            ...prev,
+            interestRole: selectedField?.role?.trim() || '',
+            interestField: selectedField?.category?.trim() || '',
+        }));
         setIsJobFieldSelectorOpen(false);
     };
+
+    const selectedJobFieldForAdvancedSearch = useMemo((): SelectedJobField | null => {
+        const role = String(searchParams.interestRole || '').trim();
+        const cat = String(searchParams.interestField || '').trim();
+        if (!role || !cat) return null;
+        return { category: cat, fieldType: '', role };
+    }, [searchParams.interestRole, searchParams.interestField]);
 
     const loadJobs = useCallback(async () => {
         if (!apiBase) return;
@@ -1150,21 +1585,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         });
     };
     
-    const handleMainFieldKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === 'Enter' && mainFieldInput.trim()) {
-            e.preventDefault();
-            const newTags = mainFieldInput.split(',').map(tag => tag.trim()).filter(tag => tag);
-            const uniqueNewTags = newTags.filter(tag => !searchParams.mainFieldTags.includes(tag));
-            if (uniqueNewTags.length > 0) {
-                setSearchParams(prev => ({
-                    ...prev,
-                    mainFieldTags: [...prev.mainFieldTags, ...uniqueNewTags],
-                }));
-            }
-            setMainFieldInput('');
-        }
-    };
-    
+    const handleTagFilterModalSave = useCallback((selectedTags: TagOption[]) => {
+        const labels = selectedTags
+            .map((tag) => (tag.nameHe?.trim() || tag.nameEn?.trim() || tag.tagKey?.trim() || '').trim())
+            .filter(Boolean);
+        if (!labels.length) return;
+        setSearchParams((prev) => ({
+            ...prev,
+            mainFieldTags: [...new Set([...prev.mainFieldTags, ...labels])],
+        }));
+    }, []);
+
     const handleRemoveMainFieldTag = (tagToRemove: string) => {
         setSearchParams(prev => ({
             ...prev,
@@ -1236,28 +1667,21 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
              filtered = filtered.filter(c => c.sector && companyFilters.sectors.includes(c.sector));
         }
 
-        let sortableItems = filtered.filter(candidate => 
-            candidate.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-            candidate.title.toLowerCase().includes(searchTerm.toLowerCase())
-        );
+        // Free-text search is applied on the server via ?search= (debounced) when listing from API.
+        let sortableItems = filtered;
 
         if (sortConfig !== null) {
             sortableItems.sort((a, b) => {
-                const aValue = a[sortConfig.key];
-                const bValue = b[sortConfig.key];
-                
-                if (aValue < bValue) {
-                    return sortConfig.direction === 'asc' ? -1 : 1;
-                }
-                if (aValue > bValue) {
-                    return sortConfig.direction === 'asc' ? 1 : -1;
-                }
+                const aValue = candidateSortComparable(a, sortConfig.key);
+                const bValue = candidateSortComparable(b, sortConfig.key);
+                if (aValue < bValue) return sortConfig.direction === 'asc' ? -1 : 1;
+                if (aValue > bValue) return sortConfig.direction === 'asc' ? 1 : -1;
                 return 0;
             });
         }
 
         return sortableItems;
-    }, [candidates, searchTerm, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
+    }, [candidates, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
 
     // Server already returns paginated candidates for the selected page.
     const paginatedCandidates = useMemo(() => {
@@ -1309,15 +1733,52 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     };
 
     const handleShowResults = () => {
+        const snapshot = buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules);
+        setSuspendListPolling(false);
+        suppressNextListFetchEffectRef.current = true;
+        setAppliedAdvancedFilters(snapshot);
+        setPage(1);
         setIsAdvancedSearchOpen(false);
-        setFeedbackMessage(t('candidates.found_count', { count: processedCandidates.length }));
+        pendingAdvancedSearchFeedback.current = true;
+        setFeedbackMessage(null);
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced: snapshot,
+        });
     };
+
+    const handleResetAdvancedToDefaults = useCallback(() => {
+        setSearchParams(createDefaultListSearchParams());
+        setLanguageFilters([]);
+        setComplexRules([]);
+        setAdditionalFilters([]);
+        setLoadedSearch(null);
+        setUrlSearchParams((prev) => {
+            const params = new URLSearchParams(prev);
+            params.delete('savedSearchId');
+            return params;
+        }, { replace: true });
+        setSuspendListPolling(false);
+        suppressNextListFetchEffectRef.current = true;
+        setAppliedAdvancedFilters(null);
+        setPage(1);
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced: null,
+        });
+    }, [pageSize, debouncedSearchTerm, fetchCandidatesList, setUrlSearchParams]);
 
     const handleClearSearch = () => {
         // Clear free search
         setSearchTerm('');
         setDebouncedSearchTerm('');
+        setAppliedAdvancedFilters(null);
         setPage(1);
+        setSuspendListPolling(false);
 
         // Reset saved view (so we don't restore old filters on next mount)
         try {
@@ -1329,8 +1790,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         // Show loading buffer again while reloading base list
         setHasInitiallyLoaded(false);
 
-        // Reload fresh data from backend
-        fetchCandidates();
+        suppressNextListFetchEffectRef.current = true;
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: '',
+            advanced: null,
+        });
     };
 
     const handleNameClick = useCallback(
@@ -1429,6 +1895,37 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         </button>
                     </div>
                  );
+            case 'tags':
+                return candidate.tags?.length
+                    ? candidate.tags.join(', ')
+                    : '';
+            case 'location':
+                return candidate.location || candidate.address || '';
+            case 'jobScopes':
+                return candidate.jobScopes?.length ? candidate.jobScopes.join(', ') : '';
+            case 'gender':
+                return candidate.gender || '';
+            case 'age':
+                return candidate.age || '';
+            case 'salaryMin':
+                return formatSalaryExpectationCell(candidate);
+            case 'languages': {
+                const langs = candidate.languages;
+                if (!langs?.length) return '';
+                return langs
+                    .map((x) => {
+                        const name = x?.name || x?.language || '';
+                        const lt = x?.levelText != null ? String(x.levelText).trim() : '';
+                        if (lt) return `${name}${name && lt ? ' · ' : ''}${lt}`;
+                        const lv = x?.level;
+                        if (lv != null && lv !== '' && String(lv) !== '50') {
+                            return `${name}${name ? ' · ' : ''}${lv}`;
+                        }
+                        return name;
+                    })
+                    .filter(Boolean)
+                    .join(', ');
+            }
             default:
                 return (candidate as any)[columnId];
         }
@@ -1609,11 +2106,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
                         <div className="lg:col-span-2">
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.tags_skills')}</label>
-                            <div className="w-full bg-bg-input border border-border-default rounded-xl p-1.5 flex items-center flex-wrap gap-2 min-h-[38px] focus-within:ring-2 focus-within:ring-primary-500 transition-shadow">
+                            <div
+                                className={`w-full bg-bg-input border border-border-default rounded-xl p-1.5 flex items-center flex-wrap gap-2 min-h-[38px] focus-within:ring-2 focus-within:ring-primary-500 transition-shadow ${advFieldModified.tags ? advFieldModifiedClass : ''}`}
+                            >
                                 {searchParams.mainFieldTags.map((tag, index) => (
                                     <span key={index} className="flex items-center bg-primary-100 text-primary-800 text-xs font-medium pl-2 pr-1.5 py-0.5 rounded-full animate-fade-in">
                                         {tag}
                                         <button
+                                            type="button"
                                             onClick={() => handleRemoveMainFieldTag(tag)}
                                             className="me-1 text-primary-500 hover:text-primary-700"
                                             aria-label={`Remove ${tag}`}
@@ -1622,14 +2122,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                         </button>
                                     </span>
                                 ))}
-                                <input 
-                                    type="text" 
-                                    value={mainFieldInput} 
-                                    onChange={(e) => setMainFieldInput(e.target.value)} 
-                                    onKeyDown={handleMainFieldKeyDown} 
-                                    placeholder={t('filter.tags_placeholder')} 
-                                    className="flex-grow bg-transparent outline-none text-sm min-w-[100px]" 
-                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setIsFilterTagModalOpen(true)}
+                                    className="flex items-center gap-1.5 ms-auto shrink-0 text-xs font-semibold text-primary-700 bg-primary-50 hover:bg-primary-100 border border-primary-200 rounded-lg px-2.5 py-1.5 transition-colors"
+                                >
+                                    <PlusIcon className="w-3.5 h-3.5" />
+                                    {t('filter.tags_select_catalog')}
+                                </button>
                             </div>
                         </div>
                         <div>
@@ -1637,16 +2137,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                              <LocationSelector 
                                 selectedLocations={searchParams.locations}
                                 onChange={(newLocations) => setSearchParams(prev => ({ ...prev, locations: newLocations }))}
-                                className="w-full"
+                                className={`w-full ${advFieldModified.locations ? advFieldModifiedClass : ''}`}
                                 placeholder={t('filter.location_placeholder')}
                             />
                         </div>
                          <div>
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.status')}</label>
-                            <select className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-primary-500 focus:border-primary-500">
-                                <option>{t('filter.status_all')}</option>
-                                <option>{t('filter.status_active')}</option>
-                                <option>{t('filter.status_inactive')}</option>
+                            <select
+                                value={searchParams.statusFilter}
+                                onChange={(e) =>
+                                    setSearchParams((prev) => ({
+                                        ...prev,
+                                        statusFilter: e.target.value as '' | 'active' | 'inactive',
+                                    }))
+                                }
+                                className={`w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-primary-500 focus:border-primary-500 ${advFieldModified.status ? advFieldModifiedClass : ''}`}
+                            >
+                                <option value="">{t('filter.status_all')}</option>
+                                <option value="active">{t('filter.status_active')}</option>
+                                <option value="inactive">{t('filter.status_inactive')}</option>
                             </select>
                         </div>
                         
@@ -1656,10 +2165,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 value={searchParams.lastUpdated} 
                                 onChange={(val) => setSearchParams(prev => ({...prev, lastUpdated: val}))} 
                                 placeholder={t('filter.status_all')}
+                                className={advFieldModified.lastUpdated ? advFieldModifiedClass : ''}
                             />
                         </div>
 
-                         <div className="lg:col-span-2">
+                         <div className={`lg:col-span-2 ${advFieldModified.jobScopes ? `${advFieldModifiedClass} p-1 -m-0.5` : ''}`}>
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.job_scope')}</label>
                             <div className="flex flex-wrap gap-2">
                                 {jobScopeOptions.map(scope => (
@@ -1681,26 +2191,31 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                              <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.interest_role')}</label>
                              <button 
                                 onClick={() => setIsJobFieldSelectorOpen(true)}
-                                className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm flex justify-between items-center text-start hover:border-primary-300 transition-colors h-[38px]"
+                                className={`w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm flex justify-between items-center text-start hover:border-primary-300 transition-colors h-[38px] ${advFieldModified.interestRole ? advFieldModifiedClass : ''}`}
                             >
-                                <span className="truncate">{searchParams.interestRole || t('filter.interest_role_placeholder')}</span>
+                                <span className="truncate">
+                                    {searchParams.interestField && searchParams.interestRole
+                                        ? `${searchParams.interestField} > ${searchParams.interestRole}`
+                                        : searchParams.interestRole || t('filter.interest_role_placeholder')}
+                                </span>
                                 <BriefcaseIcon className="w-4 h-4 text-text-subtle" />
                             </button>
                         </div>
                         
-                        <div className={`transition-all duration-300 ease-in-out relative z-30 ${searchParams.interestRole ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 pointer-events-none'}`}>
+                        <div className={`transition-all duration-300 ease-in-out relative z-30 ${searchParams.interestRole || searchParams.interestField ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4 pointer-events-none'}`}>
                              <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.interest_date')}</label>
                              <DateRangeSelector 
                                 value={searchParams.interestDate} 
                                 onChange={(val) => setSearchParams(prev => ({...prev, interestDate: val}))} 
                                 placeholder={t('filter.status_all')}
-                                disabled={!searchParams.interestRole}
+                                disabled={!searchParams.interestRole && !searchParams.interestField}
+                                className={advFieldModified.interestDate ? advFieldModifiedClass : ''}
                             />
                         </div>
 
                          <div>
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.gender')}</label>
-                            <div className="flex bg-bg-input border border-border-default rounded-xl p-1 h-[38px]">
+                            <div className={`flex bg-bg-input border border-border-default rounded-xl p-1 h-[38px] ${advFieldModified.gender ? advFieldModifiedClass : ''}`}>
                                 <button 
                                     onClick={() => setSearchParams(prev => ({...prev, gender: 'any'}))} 
                                     className={`flex-1 text-xs font-medium rounded-lg transition-colors ${searchParams.gender === 'any' ? 'bg-primary-100 text-primary-700 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
@@ -1725,9 +2240,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 label={t('filter.age_range')} min={18} max={80} step={1}
                                 valueMin={Number(searchParams.ageMin)} valueMax={Number(searchParams.ageMax)}
                                 onChange={handleSliderChange} nameMin="ageMin" nameMax="ageMax"
-                                includeUnknown={searchParams.includeUnknownAge}
+                                includeUnknown={searchParams.includeUnknownAge !== false}
                                 onIncludeUnknownChange={(checked) => setSearchParams(prev => ({...prev, includeUnknownAge: checked}))}
                                 unknownLabel={t('filter.include_unknown_age')}
+                                modified={advFieldModified.age}
                             />
                         </div>
                         
@@ -1735,7 +2251,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.education')}</label>
                              <button 
                                 onClick={() => setSearchParams(p => ({ ...p, hasDegree: !p.hasDegree }))} 
-                                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border-2 transition-all h-[38px] ${searchParams.hasDegree ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-sm' : 'bg-bg-input border-border-default text-text-muted hover:border-primary-300'}`}
+                                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border-2 transition-all h-[38px] ${searchParams.hasDegree ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-sm' : 'bg-bg-input border-border-default text-text-muted hover:border-primary-300'} ${advFieldModified.hasDegree ? advFieldModifiedClass : ''}`}
                             >
                                 <span className="font-semibold text-xs">{t('filter.has_degree')}</span>
                                 {searchParams.hasDegree ? <CheckCircleIcon className="w-4 h-4" /> : <AcademicCapIcon className="w-4 h-4 opacity-50"/>}
@@ -1748,10 +2264,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 valueMin={Number(searchParams.salaryMin)} valueMax={Number(searchParams.salaryMax)}
                                 onChange={handleSliderChange} nameMin="salaryMin" nameMax="salaryMax" unit="₪"
                                 colorVar="--color-secondary-500"
-                                includeUnknown={searchParams.includeUnknownSalary}
+                                includeUnknown={searchParams.includeUnknownSalary !== false}
                                 onIncludeUnknownChange={(checked) => setSearchParams(prev => ({...prev, includeUnknownSalary: checked}))}
                                 unknownLabel={t('filter.include_unknown_salary')}
                                 icon={<WalletIcon className="w-4 h-4 text-primary-600"/>}
+                                modified={advFieldModified.salary}
                             />
                              <DoubleRangeSlider
                                 label={t('filter.salary_internal')} min={5000} max={50000} step={500}
@@ -1759,10 +2276,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 onChange={handleSliderChange} nameMin="internalSalaryMin" nameMax="internalSalaryMax" unit="₪"
                                 colorVar="--color-primary-600"
                                 icon={<SparklesIcon className="w-4 h-4 text-primary-600"/>}
+                                modified={advFieldModified.internalSalary}
                             />
                         </div>
                         
-                        <div className="lg:col-span-1">
+                        <div className={`lg:col-span-1 ${advFieldModified.languages ? `${advFieldModifiedClass} p-1 -m-0.5` : ''}`}>
                              <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.languages')}</label>
                              <div className="flex gap-1.5">
                                 <select value={currentLanguage} onChange={(e) => setCurrentLanguage(e.target.value)} className="flex-1 bg-bg-input border border-border-default rounded-xl py-1.5 px-2 text-[11px] h-[38px]"><option>עברית</option><option>אנגלית</option><option>רוסית</option></select>
@@ -1780,7 +2298,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         </div>
                     </div>
                     
-                    <div className="bg-bg-subtle/40 rounded-xl p-3 border border-border-default/50 mt-2">
+                    <div className={`bg-bg-subtle/40 rounded-xl p-3 border border-border-default/50 mt-2 ${advFieldModified.complexRules ? advFieldModifiedClass : ''}`}>
                          <div className="flex items-center gap-2 mb-2">
                              <FunnelIcon className="w-4 h-4 text-primary-500" />
                              <h4 className="text-xs font-bold text-primary-700 uppercase tracking-wide">{t('filter.complex_queries')}</h4>
@@ -1849,10 +2367,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                          </div>
                     </div>
 
-                    <div className="mt-4 pt-3 border-t border-border-default flex justify-between items-center">
-                        <div className="flex items-center gap-2">
-                            <button onClick={() => {setSearchParams(prev => ({...prev, mainFieldTags: [], locations: [], interestRole: '', industryExperience: '', hasDegree: false, jobScopes: jobScopeOptions, lastUpdated: null, interestDate: null })); setLanguageFilters([]); setMainFieldInput(''); setComplexRules([]);}} className="text-xs font-semibold text-text-muted hover:text-red-500 transition-colors">
-                                {t('candidates.reset_all')}
+                    <div className="mt-4 pt-3 border-t border-border-default flex flex-wrap justify-between items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={handleResetAdvancedToDefaults}
+                                className="flex items-center gap-1.5 text-xs font-semibold border-2 border-border-default rounded-xl px-3 py-2 text-text-default hover:border-primary-500 hover:text-primary-700 transition-colors bg-bg-subtle/50"
+                            >
+                                <ArrowPathIcon className="w-4 h-4 shrink-0" aria-hidden />
+                                {t('candidates.clear_selections')}
                             </button>
                             <button onClick={handleOpenSaveModal} className="flex items-center gap-1 text-xs font-semibold text-primary-600 hover:text-primary-800 bg-primary-50 px-3 py-1.5 rounded-lg hover:bg-primary-100 transition">
                                 <BookmarkIcon className="w-3.5 h-3.5"/>
@@ -2014,6 +2537,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 />
             )}
 
+            <TagSelectorModal
+                isOpen={isFilterTagModalOpen}
+                onClose={() => setIsFilterTagModalOpen(false)}
+                onSave={handleTagFilterModalSave}
+                existingTags={searchParams.mainFieldTags}
+            />
+
             {isSaveModalOpen && (
                 <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-center justify-center p-4" onClick={() => setIsSaveModalOpen(false)}>
                     <div className="bg-bg-card rounded-lg shadow-xl p-6 w-full max-w-sm" onClick={e => e.stopPropagation()}>
@@ -2120,7 +2650,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             )}
             
             <JobFieldSelector
-                value={null}
+                value={selectedJobFieldForAdvancedSearch}
                 onChange={handleJobFieldSelect}
                 isModalOpen={isJobFieldSelectorOpen}
                 setIsModalOpen={setIsJobFieldSelectorOpen}

@@ -14,7 +14,7 @@ const attachDbUser = async (req, res, next) => {
     }
     const user = await User.findByPk(userId, {
       include: [
-        { model: Client, as: 'client', attributes: ['id', 'name', 'displayName'], required: false },
+        { model: Client, as: 'client', attributes: ['id', 'name', 'displayName', 'modules'], required: false },
       ],
     });
     if (!user) {
@@ -37,7 +37,11 @@ const requirePagePermission = (pageKey) => async (req, res, next) => {
     if (!userId) {
       return res.status(401).json({ message: 'Unauthorized' });
     }
-    const user = await User.findByPk(userId);
+    const user = await User.findByPk(userId, {
+      include: [
+        { model: Client, as: 'client', attributes: ['id', 'name', 'displayName', 'modules'], required: false },
+      ],
+    });
     if (!user) {
       return res.status(401).json({ message: 'User not found' });
     }

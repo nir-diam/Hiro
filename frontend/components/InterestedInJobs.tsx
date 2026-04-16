@@ -8,7 +8,7 @@ import { Job } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
 
 
-type Status = 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון';
+type Status = 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'חדש';
 
 interface MatchDetails {
   positive: string[];
@@ -17,28 +17,76 @@ interface MatchDetails {
 }
 
 interface JobInterest {
-  id: number;
+  /** job_candidates.id */
+  linkId: string;
+  /** jobs.id */
+  jobId: string;
   industry: string;
   role: string;
   jobTitle: string;
   company: string;
   location: string;
   lastUpdated: string;
-  status: Status;
+  status: Status | string;
   matchScore: number;
   matchDetails: MatchDetails;
   lastAnalyzed: string;
+  linkSource?: string | null;
+}
+
+type LinkedJobApiRow = {
+  jobCandidateId: string;
+  jobId: string;
+  status?: string | null;
+  source?: string | null;
+  updatedAt?: string | null;
+  createdAt?: string | null;
+  job: Record<string, unknown>;
+};
+
+function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
+  const job = row.job || {};
+  const title = String(job.title || job.publicJobTitle || '').trim() || '—';
+  const city = String(job.city || '').trim();
+  const loc = String(job.location || '').trim();
+  const location = [city, loc].filter(Boolean).join(', ') || '—';
+  const updatedRaw = row.updatedAt || row.createdAt;
+  const lastUpdated = updatedRaw
+    ? new Date(updatedRaw).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' })
+    : '—';
+  const desc = typeof job.description === 'string' ? job.description.trim().slice(0, 400) : '';
+  const rating = typeof job.rating === 'number' ? job.rating : 0;
+  return {
+    linkId: row.jobCandidateId,
+    jobId: row.jobId,
+    industry: String(job.field || '').trim(),
+    role: String(job.role || '').trim(),
+    jobTitle: title,
+    company: String(job.client || '').trim() || '—',
+    location,
+    lastUpdated,
+    status: String(row.status || 'חדש').trim() || 'חדש',
+    matchScore: Math.min(100, Math.max(0, rating ? Math.round((rating / 5) * 100) : 0)),
+    matchDetails: {
+      positive: [],
+      negative: [],
+      summary: desc || '—',
+    },
+    lastAnalyzed: lastUpdated,
+    linkSource: row.source,
+  };
 }
 
 export const jobsData: JobInterest[] = [
-  { id: 1, industry: 'לוגיסטיקה', role: 'מחסנאי/ת', jobTitle: 'דרוש/ה מחסנאי/ת למפעל מוביל', company: 'תנובה', location: 'רחובות', lastUpdated: '14/07/2025', status: 'פעיל', matchScore: 92, matchDetails: { positive: ['5+ שנות ניסיון בניהול מחסן ממוחשב', 'ניסיון עבודה עם מערכת WMS', 'רישיון מלגזה בתוקף'], negative: ['לא צוין ניסיון עם מערכת SAP'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '15.11.2025' },
-  { id: 2, industry: 'שיווק', role: 'מנהל/ת שיווק דיגיטלי', jobTitle: 'מנהל/ת קמפיינים PPC', company: 'בזק', location: 'תל אביב', lastUpdated: '10/07/2025', status: 'הוזמן לראיון', matchScore: 85, matchDetails: { positive: ['ניסיון מוכח בניהול קמפיינים בגוגל ופייסבוק', 'שליטה מלאה ב-Google Analytics', 'תואר ראשון רלוונטי'], negative: ['ניסיון של 3 שנים בלבד (נדרש 4+)', 'לא צוין ניסיון עם Taboola/Outbrain'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '27/07/2025' },
-  { id: 3, industry: 'פיננסים', role: 'אנליסט/ית', jobTitle: 'אנליסט/ית לחברת השקעות', company: 'מיטב דש', location: 'גבעתיים', lastUpdated: '05/07/2025', status: 'מועמד משך עניין', matchScore: 68, matchDetails: { positive: ['תואר ראשון בכלכלה', 'שליטה מעולה באקסל'], negative: ['חוסר ניסיון בשוק ההון', 'ניסיון מועט בניתוח דוחות כספיים'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '26/07/2025' },
-  { id: 4, industry: 'טכנולוגיה', role: 'מהנדס/ת תוכנה', jobTitle: 'Fullstack Developer (React & Node)', company: 'Wix', location: 'הרצליה', lastUpdated: '01/07/2025', status: 'לא רלוונטי', matchScore: 45, matchDetails: { positive: ['ניסיון עם React'], negative: ['אין ניסיון עם Node.js', 'אין ניסיון בעבודה עם TypeScript', 'רק שנתיים ניסיון בתעשייה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '25/07/2025' },
-  { id: 5, industry: 'קמעונאות', role: 'מנהל/ת סניף', jobTitle: 'מנהל/ת סניף לרשת אופנה', company: 'קסטרו', location: 'ירושלים', lastUpdated: '28/06/2025', status: 'בארכיון', matchScore: 20, matchDetails: { positive: ['ניסיון ניהולי כללי'], negative: ['אין ניסיון מתחום הקמעונאות', 'אין ניסיון בניהול צוות של מעל 5 עובדים', 'אין היכרות עם עולם האופנה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '24/07/2025' },
+  { linkId: 'mock-1', jobId: 'mock-job-1', industry: 'לוגיסטיקה', role: 'מחסנאי/ת', jobTitle: 'דרוש/ה מחסנאי/ת למפעל מוביל', company: 'תנובה', location: 'רחובות', lastUpdated: '14/07/2025', status: 'פעיל', matchScore: 92, matchDetails: { positive: ['5+ שנות ניסיון בניהול מחסן ממוחשב', 'ניסיון עבודה עם מערכת WMS', 'רישיון מלגזה בתוקף'], negative: ['לא צוין ניסיון עם מערכת SAP'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '15.11.2025' },
+  { linkId: 'mock-2', jobId: 'mock-job-2', industry: 'שיווק', role: 'מנהל/ת שיווק דיגיטלי', jobTitle: 'מנהל/ת קמפיינים PPC', company: 'בזק', location: 'תל אביב', lastUpdated: '10/07/2025', status: 'הוזמן לראיון', matchScore: 85, matchDetails: { positive: ['ניסיון מוכח בניהול קמפיינים בגוגל ופייסבוק', 'שליטה מלאה ב-Google Analytics', 'תואר ראשון רלוונטי'], negative: ['ניסיון של 3 שנים בלבד (נדרש 4+)', 'לא צוין ניסיון עם Taboola/Outbrain'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '27/07/2025' },
+  { linkId: 'mock-3', jobId: 'mock-job-3', industry: 'פיננסים', role: 'אנליסט/ית', jobTitle: 'אנליסט/ית לחברת השקעות', company: 'מיטב דש', location: 'גבעתיים', lastUpdated: '05/07/2025', status: 'מועמד משך עניין', matchScore: 68, matchDetails: { positive: ['תואר ראשון בכלכלה', 'שליטה מעולה באקסל'], negative: ['חוסר ניסיון בשוק ההון', 'ניסיון מועט בניתוח דוחות כספיים'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '26/07/2025' },
+  { linkId: 'mock-4', jobId: 'mock-job-4', industry: 'טכנולוגיה', role: 'מהנדס/ת תוכנה', jobTitle: 'Fullstack Developer (React & Node)', company: 'Wix', location: 'הרצליה', lastUpdated: '01/07/2025', status: 'לא רלוונטי', matchScore: 45, matchDetails: { positive: ['ניסיון עם React'], negative: ['אין ניסיון עם Node.js', 'אין ניסיון בעבודה עם TypeScript', 'רק שנתיים ניסיון בתעשייה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '25/07/2025' },
+  { linkId: 'mock-5', jobId: 'mock-job-5', industry: 'קמעונאות', role: 'מנהל/ת סניף', jobTitle: 'מנהל/ת סניף לרשת אופנה', company: 'קסטרו', location: 'ירושלים', lastUpdated: '28/06/2025', status: 'בארכיון', matchScore: 20, matchDetails: { positive: ['ניסיון ניהולי כללי'], negative: ['אין ניסיון מתחום הקמעונאות', 'אין ניסיון בניהול צוות של מעל 5 עובדים', 'אין היכרות עם עולם האופנה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '24/07/2025' },
 ];
 
 const statusStyles: { [key in Status]: { bg: string; text: string; icon: React.ReactElement<{ className?: string }> } } = {
+  'חדש': { bg: 'bg-sky-100', text: 'text-sky-800', icon: <InformationCircleIcon className="w-4 h-4 text-sky-600" /> },
   'פעיל': { bg: 'bg-accent-100', text: 'text-accent-800', icon: <CheckCircleIcon className="w-4 h-4 text-accent-600" /> },
   'הוזמן לראיון': { bg: 'bg-secondary-100', text: 'text-secondary-800', icon: <CalendarIcon className="w-4 h-4 text-secondary-600" /> },
   'לא רלוונטי': { bg: 'bg-gray-200', text: 'text-gray-700', icon: <NoSymbolIcon className="w-4 h-4 text-gray-500" /> },
@@ -46,8 +94,8 @@ const statusStyles: { [key in Status]: { bg: string; text: string; icon: React.R
   'בארכיון': { bg: 'bg-bg-card border border-border-default', text: 'text-text-muted', icon: <ArchiveBoxIcon className="w-4 h-4 text-text-subtle" /> },
 };
 
-const StatusBadge: React.FC<{ status: Status; onClick: () => void }> = ({ status, onClick }) => {
-  const { bg, text, icon } = statusStyles[status];
+const StatusBadge: React.FC<{ status: string; onClick: () => void }> = ({ status, onClick }) => {
+  const { bg, text, icon } = statusStyles[status as Status] ?? statusStyles['חדש'];
   return (
     <button onClick={onClick} className={`flex items-center gap-2 text-xs font-semibold px-2.5 py-1 rounded-full w-fit ${bg} ${text} hover:scale-105 transition-transform`}>
       {icon}
@@ -174,12 +222,17 @@ const JobInterestCard: React.FC<{ job: JobInterest; onStatusClick: () => void; o
 );
 
 
-const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask }) => {
+const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: string | null }> = ({
+    onOpenNewTask,
+    candidateId = null,
+}) => {
     const { t } = useLanguage();
-const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
-    const [activePopoverId, setActivePopoverId] = useState<number | null>(null);
+    const [jobs, setJobs] = useState<JobInterest[]>([]);
+    const [linkedJobsLoading, setLinkedJobsLoading] = useState(false);
+    const [linkedJobsError, setLinkedJobsError] = useState<string | null>(null);
+    const [activePopoverId, setActivePopoverId] = useState<string | null>(null);
     const popoverRef = useRef<HTMLDivElement>(null);
-    const [recalculatingId, setRecalculatingId] = useState<number | null>(null);
+    const [recalculatingId, setRecalculatingId] = useState<string | null>(null);
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     
     // New state for advanced table features & modals
@@ -237,6 +290,41 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
         };
     }, [apiBase]);
 
+    useEffect(() => {
+        const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
+        if (!apiBase || !id) {
+            setJobs([]);
+            setLinkedJobsLoading(false);
+            setLinkedJobsError(null);
+            return;
+        }
+        let cancelled = false;
+        setLinkedJobsLoading(true);
+        setLinkedJobsError(null);
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/linked-jobs`, {
+            credentials: 'include',
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+        })
+            .then((res) => (res.ok ? res.json() : Promise.reject(new Error('טעינת התעניינות במשרות נכשלה'))))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : [];
+                setJobs(list.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
+            })
+            .catch((err: Error) => {
+                if (!cancelled) setLinkedJobsError(err.message || 'שגיאה');
+            })
+            .finally(() => {
+                if (!cancelled) setLinkedJobsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, candidateId]);
 
     // Sorting logic
     const requestSort = (key: string) => {
@@ -305,42 +393,53 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
     const handleDragEnd = () => { dragItemIndex.current = null; setDraggingColumn(null); };
 
     // Existing component logic
-    const handleScoreClick = (e: React.MouseEvent, jobId: number) => {
+    const handleScoreClick = (e: React.MouseEvent, linkId: string) => {
         e.stopPropagation();
-        setActivePopoverId(currentId => currentId === jobId ? null : jobId);
-    }
+        setActivePopoverId((currentId) => (currentId === linkId ? null : linkId));
+    };
 
-    const handleRecalculateMatch = async (jobId: number) => {
-        setRecalculatingId(jobId);
-        await new Promise(resolve => setTimeout(resolve, 1500));
-        setJobs(prevJobs => prevJobs.map(job =>
-            job.id === jobId
-                ? { ...job, matchScore: Math.floor(Math.random() * 30) + 70, lastAnalyzed: new Date().toLocaleDateString('he-IL') }
-                : job
-        ));
+    const handleRecalculateMatch = async (linkId: string) => {
+        setRecalculatingId(linkId);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        setJobs((prevJobs) =>
+            prevJobs.map((job) =>
+                job.linkId === linkId
+                    ? {
+                          ...job,
+                          matchScore: Math.floor(Math.random() * 30) + 70,
+                          lastAnalyzed: new Date().toLocaleDateString('he-IL'),
+                      }
+                    : job,
+            ),
+        );
         setRecalculatingId(null);
         setActivePopoverId(null);
     };
 
-    const handleFieldSelected = (selectedField: SelectedJobField) => {
+    const handleFieldSelected = (selectedField: SelectedJobField | null) => {
+        if (!selectedField) {
+            setIsJobFieldSelectorOpen(false);
+            return;
+        }
         const newInterest: JobInterest = {
-            id: Date.now(),
+            linkId: `local-${Date.now()}`,
+            jobId: '',
             industry: selectedField.category,
             role: selectedField.role,
             jobTitle: `${selectedField.role} (יש לערוך)`,
             company: 'לא צוין',
             location: 'לא צוין',
-            lastUpdated: new Date().toLocaleDateString('he-IL', {day: '2-digit', month: '2-digit', year: 'numeric'}),
+            lastUpdated: new Date().toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' }),
             status: 'פעיל',
             matchScore: 30,
             matchDetails: {
                 positive: ['נוסף ידנית מתחום'],
                 negative: ['נדרש למלא פרטים נוספים'],
-                summary: 'התעניינות נוספה מבחירת תחום בלבד. יש לעדכן פרטים נוספים.'
+                summary: 'התעניינות נוספה מבחירת תחום בלבד. יש לעדכן פרטים נוספים.',
             },
             lastAnalyzed: new Date().toLocaleDateString('he-IL'),
         };
-        setJobs(prevJobs => [newInterest, ...prevJobs]);
+        setJobs((prevJobs) => [newInterest, ...prevJobs]);
         setIsJobFieldSelectorOpen(false);
     };
 
@@ -351,14 +450,20 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
 
     const handleSaveStatus = (data: any) => {
         if (editingInterest) {
-            setJobs(prev => prev.map(job => job.id === editingInterest.id ? { ...job, status: data.status, lastUpdated: new Date().toLocaleDateString('he-IL') } : job));
+            setJobs((prev) =>
+                prev.map((job) =>
+                    job.linkId === editingInterest.linkId
+                        ? { ...job, status: data.status, lastUpdated: new Date().toLocaleDateString('he-IL') }
+                        : job,
+                ),
+            );
         }
         setIsStatusModalOpen(false);
         setEditingInterest(null);
     };
     
     const buildFallbackJob = (interest: JobInterest): Job => ({
-        id: interest.id,
+        id: 0,
         title: interest.jobTitle,
         client: interest.company,
         field: interest.industry,
@@ -370,7 +475,7 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
         gender: 'לא משנה',
         mobility: false,
         licenseType: 'לא צויין',
-        postingCode: '',
+        postingCode: interest.jobId || '',
         validityDays: 30,
         recruitingCoordinator: 'מערכת',
         accountManager: 'מערכת',
@@ -391,18 +496,19 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
         requirements: [],
         rating: 0,
         healthProfile: 'standard',
-    });
+    } as Job);
 
-    const handleOpenJobDrawer = (jobId: number) => {
-        const jobFromCatalog = jobCatalog.find(j => j.id === jobId);
+    const handleOpenJobDrawer = (jobId: string) => {
+        if (!jobId) return;
+        const jobFromCatalog = jobCatalog.find((j) => String(j.id) === String(jobId));
         if (jobFromCatalog) {
             setSelectedJob(jobFromCatalog);
             setIsDrawerOpen(true);
             return;
         }
-        const interest = jobs.find(i => i.id === jobId);
+        const interest = jobs.find((i) => i.jobId === jobId);
         if (interest) {
-            const jobByTitle = jobCatalog.find(j => j.title === interest.jobTitle);
+            const jobByTitle = jobCatalog.find((j) => j.title === interest.jobTitle);
             if (jobByTitle) {
                 setSelectedJob(jobByTitle);
                 setIsDrawerOpen(true);
@@ -416,14 +522,21 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
     const renderCell = (job: JobInterest, columnId: string) => {
         switch(columnId) {
             case 'jobTitle':
-                return <button onClick={() => handleOpenJobDrawer(job.id)} className="font-semibold text-primary-700 hover:underline cursor-pointer text-right">{job.jobTitle}</button>;
+                return (
+                    <button
+                        onClick={() => handleOpenJobDrawer(job.jobId)}
+                        className="font-semibold text-primary-700 hover:underline cursor-pointer text-right"
+                    >
+                        {job.jobTitle}
+                    </button>
+                );
             case 'status':
                 return <StatusBadge status={job.status} onClick={() => handleOpenStatusModal(job)} />;
             case 'matchScore':
                 return (
                     <div className="relative" data-popover-trigger>
-                        <button onClick={(e) => handleScoreClick(e, job.id)} disabled={recalculatingId === job.id}>
-                            {recalculatingId === job.id ? (
+                        <button onClick={(e) => handleScoreClick(e, job.linkId)} disabled={recalculatingId === job.linkId}>
+                            {recalculatingId === job.linkId ? (
                                 <div className="w-10 h-10 flex items-center justify-center">
                                     <svg className="animate-spin h-5 w-5 text-purple-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
@@ -434,12 +547,12 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
                                 <MatchScore score={job.matchScore} />
                             )}
                         </button>
-                        {activePopoverId === job.id && (
+                        {activePopoverId === job.linkId && (
                             <div ref={popoverRef}>
                                 <MatchScorePopover 
                                     details={job.matchDetails} 
                                     onClose={() => setActivePopoverId(null)}
-                                    onRecalculate={() => handleRecalculateMatch(job.id)}
+                                    onRecalculate={() => handleRecalculateMatch(job.linkId)}
                                     lastAnalyzed={job.lastAnalyzed}
                                 />
                             </div>
@@ -454,6 +567,11 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm">
              <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
+            {linkedJobsError && (
+                <div className="mx-3 mt-3 rounded-lg border border-red-200 bg-red-50 text-sm text-red-700 px-4 py-2">
+                    {linkedJobsError}
+                </div>
+            )}
             {/* Toolbar */}
             <header className="flex items-center justify-between p-3 border-b border-border-default bg-bg-card">
                  <div className="flex items-center gap-3">
@@ -467,7 +585,9 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
                     </div>
                 </div>
                 <div className="flex items-center gap-3">
-                    <span className="text-sm font-semibold text-text-muted ml-3">{t('candidates.found_count', { count: jobs.length })}</span>
+                    <span className="text-sm font-semibold text-text-muted ml-3">
+                        {linkedJobsLoading ? t('interested_jobs.loading') || 'טוען…' : t('candidates.found_count', { count: jobs.length })}
+                    </span>
                     <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
                         <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
                         <button onClick={() => setViewMode('grid')} title={t('candidates.view_grid')} className={`p-1.5 rounded-md ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><Squares2X2Icon className="w-5 h-5"/></button>
@@ -504,7 +624,7 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
                     </thead>
                     <tbody className="divide-y divide-border-subtle">
                         {sortedJobs.map(job => (
-                            <tr key={job.id} className="hover:bg-bg-hover">
+                            <tr key={job.linkId} className="hover:bg-bg-hover">
                                 {visibleColumns.map(colId => (
                                     <td key={colId} className="p-4 text-text-muted">{renderCell(job, colId)}</td>
                                 ))}
@@ -517,10 +637,10 @@ const [jobs, setJobs] = useState<JobInterest[]>(jobsData);
                 <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {sortedJobs.map(job => (
                         <JobInterestCard 
-                            key={job.id} 
+                            key={job.linkId} 
                             job={job} 
                             onStatusClick={() => handleOpenStatusModal(job)}
-                            onTitleClick={() => handleOpenJobDrawer(job.id)}
+                            onTitleClick={() => handleOpenJobDrawer(job.jobId)}
                         />
                     ))}
                 </div>

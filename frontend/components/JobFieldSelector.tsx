@@ -27,7 +27,7 @@ interface JobFieldSelectorProps {
     setIsModalOpen: (isOpen: boolean) => void;
 }
 
-const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOpen, setIsModalOpen }) => {
+const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, isModalOpen, setIsModalOpen }) => {
     const [selectedCategory, setSelectedCategory] = useState<JobCategory | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [categories, setCategories] = useState<JobCategory[]>([]);
@@ -67,6 +67,16 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ onChange, isModalOp
         };
         fetchJobFields();
     }, [isModalOpen]);
+
+    useEffect(() => {
+        if (!isModalOpen || !categories.length) return;
+        const name = String(value?.category || '').trim();
+        if (!name) return;
+        const match = categories.find(
+            (c) => c.name === name || String(c.name).toLowerCase() === name.toLowerCase(),
+        );
+        if (match) setSelectedCategory(match);
+    }, [isModalOpen, value?.category, categories]);
 
     useEffect(() => {
         const handleEsc = (event: KeyboardEvent) => {

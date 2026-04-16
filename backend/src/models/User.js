@@ -45,6 +45,11 @@ const User = sequelize.define(
       onDelete: 'SET NULL',
       onUpdate: 'CASCADE',
     },
+    /** One-time staff invite link; cleared after password is set */
+    activationGuid: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
   },
   {
     tableName: 'users',

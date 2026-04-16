@@ -108,6 +108,18 @@ const deleteSubcategory = async (req, res) => {
   }
 };
 
+const listValuesByCategoryKey = async (req, res) => {
+  try {
+    const key = String(req.params.key || '').trim();
+    if (!key) return res.status(400).json({ message: 'key is required' });
+    const values = await picklistService.listCategoryValuesByKey(key);
+    res.json(values);
+  } catch (err) {
+    console.error('[picklistController.listValuesByCategoryKey]', err);
+    res.status(500).json({ message: err.message || 'Failed to load picklist values' });
+  }
+};
+
 const listCategoryValues = async (req, res) => {
   const values = await picklistService.listCategoryValues(req.params.categoryId);
   res.json(values);
@@ -235,6 +247,7 @@ module.exports = {
   createSubcategory,
   updateSubcategory,
   deleteSubcategory,
+  listValuesByCategoryKey,
   listCategoryValues,
   createCategoryValue,
   updateCategoryValue,

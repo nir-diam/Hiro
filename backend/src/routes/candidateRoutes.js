@@ -14,6 +14,7 @@ router.post('/ai', candidateController.createFromAi);
 router.post('/:id/generate-experience-summary', candidateController.generateExperienceSummary);
 router.post('/:id/generate-internal-opinion', candidateController.generateInternalOpinion);
 router.get('/:id/relevant-jobs', candidateController.getRelevantJobs);
+router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.get('/:id/screening-data', candidateController.getScreeningData);
 router.put('/:id/screening-data', candidateController.saveScreeningData);
 

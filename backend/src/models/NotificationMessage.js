@@ -89,4 +89,7 @@ const NotificationMessage = sequelize.define(
   },
 );
 
+const User = require('./User');
+NotificationMessage.belongsTo(User, { foreignKey: 'senderUserId', as: 'sender' });
+
 module.exports = NotificationMessage;

@@ -55,6 +55,31 @@ const isSmtpComplete = (cfg) =>
 
 const isValidEmail = (s) => Boolean(s && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(s).trim()));
 
+/**
+ * Humand env uses e.g. no-reply@humand.co.il; outbound mail should use the logged-in sender's
+ * local-part with the same domain (Resend verified domain).
+ */
+const buildHumandFrom = (defaultFrom, senderEmail) => {
+  const base = String(defaultFrom || '').trim();
+  const se = String(senderEmail || '').trim();
+  if (!isValidEmail(base) || !isValidEmail(se)) return null;
+  const at = base.indexOf('@');
+  if (at < 1) return null;
+  const domain = base.slice(at + 1);
+  const local = se.split('@')[0];
+  if (!domain || !local) return null;
+  const next = `${local}@${domain}`;
+  return isValidEmail(next) ? next : null;
+};
+
+const resolveHumandSenderFrom = ({ clientName, fromEmail, senderEmail }) => {
+  if (fromEmail) return fromEmail;
+  const clientLabel = clientName ? String(clientName).trim() : '';
+  if (clientLabel !== humandClientName || !isResendHumandConfigured() || !senderEmail) return null;
+  const humand = pickHumand();
+  return buildHumandFrom(humand.defaultFrom, senderEmail);
+};
+
 /** Hiro / platform email lane (Resend or HIRO_SMTP_*) */
 const isHiroSenderRole = (role) => {
   const r = role ? String(role).toLowerCase() : '';
@@ -177,18 +202,27 @@ const sendEmail = async ({
   fromEmail,
   userRole = null,
   clientName = null,
+  senderEmail = null,
 }) => {
   if (!toEmail) throw new Error('Missing toEmail');
   if (!subject) throw new Error('Missing subject');
 
   const plan = resolveSendPlan({ userRole, clientName });
 
+  const humandFrom = resolveHumandSenderFrom({ clientName, fromEmail, senderEmail });
+
   if (plan.type === 'resend') {
-    return sendWithResend(plan, { toEmail, subject, text, html, fromEmail });
+    return sendWithResend(plan, {
+      toEmail,
+      subject,
+      text,
+      html,
+      fromEmail: humandFrom || fromEmail,
+    });
   }
 
   const { host, port, user, pass, defaultFrom } = plan;
-  const resolvedFrom = fromEmail || defaultFrom;
+  const resolvedFrom = humandFrom || fromEmail || defaultFrom;
 
   if (!host || !user || !pass) {
     throw new Error('SMTP is not configured for this sender context (missing host/user/password)');

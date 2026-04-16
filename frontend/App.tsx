@@ -164,15 +164,29 @@ const AppContent: React.FC = () => {
 
     const handleSaveTask = (taskData: any) => {
         console.log("Saving new task:", taskData);
+        const due =
+            taskData.dueDate && taskData.dueTime
+                ? new Date(`${taskData.dueDate}T${taskData.dueTime}`)
+                : new Date();
+        const dateIso = Number.isNaN(due.getTime()) ? new Date().toISOString() : due.toISOString();
+        const primaryAssignee =
+            Array.isArray(taskData.assigneeEmails) && taskData.assigneeEmails.length > 0
+                ? String(taskData.assigneeEmails[0]).trim()
+                : 'אני';
+        const allocatedDays =
+            taskData.isTask && Number.isFinite(Number(taskData.allocatedDays))
+                ? Number(taskData.allocatedDays)
+                : undefined;
         const newEvent: Event = {
             id: Date.now(),
             type: taskData.isTask ? 'משימת מערכת' : 'תזכורת',
             title: taskData.messageText.substring(0, 50) + (taskData.messageText.length > 50 ? '...' : ''),
             description: taskData.messageText,
-            date: new Date(`${taskData.dueDate}T${taskData.dueTime}`).toISOString(),
-            coordinator: taskData.assignee,
+            date: dateIso,
+            coordinator: primaryAssignee,
             status: 'עתידי',
-            linkedTo: { type: 'מועמד', name: 'שפירא גדעון' }, 
+            linkedTo: { type: 'מועמד', name: 'שפירא גדעון' },
+            ...(allocatedDays != null ? { allocatedDays } : {}),
         };
         setEvents(prevEvents => [newEvent, ...prevEvents].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
         closeNewTask();
@@ -196,6 +210,7 @@ const AppContent: React.FC = () => {
     const isStandalonePage = 
         location.pathname.startsWith('/p/') || 
         location.pathname === '/login' || 
+        location.pathname === '/activation' ||
         location.pathname === '/landing' ||
         location.pathname.startsWith('/candidate-portal') ||
         location.pathname.startsWith('/portal/manager') ||

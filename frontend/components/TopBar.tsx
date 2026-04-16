@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { 
     PaperAirplaneIcon, BellIcon, QuestionMarkCircleIcon, Cog6ToothIcon, PaintBrushIcon, Bars3Icon,
@@ -10,9 +10,19 @@ import { specs } from '../data/specs';
 import SpecDrawer from './SpecDrawer';
 import HelpCenterDrawer from './HelpCenterDrawer';
 import { useAuth } from '../context/AuthContext';
+import {
+    NOTIFICATION_MESSAGES_REFRESH_EVENT,
+    countInboxAttentionFromApiRows,
+} from '../services/notificationInboxCounts';
 
-
-const ActionButton: React.FC<{ children: React.ReactNode; tooltip: string; hasNotification?: boolean; notificationCount?: number; onClick?: () => void; 'aria-expanded'?: boolean; className?: string }> = ({ children, tooltip, hasNotification, notificationCount, onClick, className = '', ...props }) => (
+const ActionButton: React.FC<{
+    children: React.ReactNode;
+    tooltip: string;
+    notificationCount?: number;
+    onClick?: () => void;
+    'aria-expanded'?: boolean;
+    className?: string;
+}> = ({ children, tooltip, notificationCount, onClick, className = '', ...props }) => (
     <button
         onClick={onClick}
         title={tooltip}
@@ -20,9 +30,9 @@ const ActionButton: React.FC<{ children: React.ReactNode; tooltip: string; hasNo
         {...props}
     >
         {children}
-        {hasNotification && notificationCount && notificationCount > 0 && (
-            <span className="absolute -top-1 -right-1 w-5 h-5 bg-orange-500 text-white text-xs font-bold rounded-full flex items-center justify-center border-2 border-bg-card">
-                {notificationCount}
+        {notificationCount != null && notificationCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[1.25rem] h-5 px-1 bg-orange-500 text-white text-[10px] font-bold rounded-full flex items-center justify-center border-2 border-bg-card leading-none">
+                {notificationCount > 99 ? '99+' : notificationCount}
             </span>
         )}
     </button>
@@ -84,7 +94,48 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
     
     const userMenuRef = useRef<HTMLDivElement>(null);
     const settingsMenuRef = useRef<HTMLDivElement>(null);
-    const unreadCount = 0;
+    const [inboxAttentionCount, setInboxAttentionCount] = useState(0);
+    const showNotificationsPage = canPage('page:notifications');
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    const refreshInboxAttentionCount = useCallback(async () => {
+        if (!showNotificationsPage || !apiBase) {
+            setInboxAttentionCount(0);
+            return;
+        }
+        try {
+            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+            const response = await fetch(`${apiBase}/api/email-uploads/messages`, {
+                method: 'GET',
+                cache: 'no-store',
+                credentials: 'include',
+                headers: {
+                    Accept: 'application/json',
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+            });
+            if (!response.ok) {
+                setInboxAttentionCount(0);
+                return;
+            }
+            const rows: unknown = await response.json();
+            setInboxAttentionCount(countInboxAttentionFromApiRows(rows));
+        } catch {
+            setInboxAttentionCount(0);
+        }
+    }, [showNotificationsPage, apiBase]);
+
+    useEffect(() => {
+        void refreshInboxAttentionCount();
+    }, [refreshInboxAttentionCount]);
+
+    useEffect(() => {
+        const onRefresh = () => {
+            void refreshInboxAttentionCount();
+        };
+        window.addEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onRefresh);
+        return () => window.removeEventListener(NOTIFICATION_MESSAGES_REFRESH_EVENT, onRefresh);
+    }, [refreshInboxAttentionCount]);
 
     // Check if current route has a spec
     const currentSpec = specs[location.pathname];
@@ -195,8 +246,7 @@ const TopBar: React.FC<TopBarProps> = ({ breadcrumbs, onOpenPreferences, onOpenN
                     {canPage('page:notifications') && (
                     <ActionButton 
                         tooltip="מרכז עדכונים ומשימות" 
-                        hasNotification={unreadCount > 0} 
-                        notificationCount={unreadCount}
+                        notificationCount={inboxAttentionCount}
                         onClick={() => navigate('/notifications')}
                     >
                         <BellIcon className="w-6 h-6" />

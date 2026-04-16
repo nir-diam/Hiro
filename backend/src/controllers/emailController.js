@@ -16,31 +16,119 @@ const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
 const NotificationMessage = require('../models/NotificationMessage');
 const { Op, Sequelize } = require('sequelize');
+const { sequelize } = require('../config/db');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
+
+const NOTIFICATION_TASK_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Staff app origin for deep links — no trailing slash (`PUBLIC_APP_URL` / `FRONTEND_URL`). */
+const publicStaffAppOrigin = () =>
+  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://hiro.co.il').replace(/\/$/, '');
+
+/** Hash-router URLs e.g. `https://hiro.co.il/#/candidates/{uuid}`. */
+const staffSpaUrl = (origin, routePath) => {
+  const base = String(origin || '').replace(/\/$/, '');
+  const path = String(routePath || '').startsWith('/') ? routePath : `/${routePath}`;
+  return `${base}/#${path}`;
+};
+
+const escapeHtmlMail = (s) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+const htmlFromPlainTextForMail = (t) =>
+  escapeHtmlMail(t ?? '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .join('<br/>');
+
+/**
+ * Clickable links (HTML + plain text) for linked candidate / job / client in outgoing task & message mail.
+ */
+function buildLinkedEntityMailAppend(taskPayload, origin) {
+  const tp =
+    taskPayload && typeof taskPayload === 'object' && !Array.isArray(taskPayload) ? taskPayload : {};
+  const base = String(origin || '').replace(/\/$/, '');
+  if (!base) return { htmlAppend: '', storedTextSuffix: '' };
+
+  const links = [];
+
+  const candId = String(tp.linkedCandidateBackendId || '').trim();
+  if (NOTIFICATION_TASK_UUID_RE.test(candId)) {
+    const url = staffSpaUrl(base, `/candidates/${candId}`);
+    const label = String(tp.linkedCandidateLabel || '').trim() || 'פתיחת פרופיל המועמד';
+    links.push({ label, url });
+  }
+
+  const jobId = String(tp.linkedJobId || '').trim();
+  if (NOTIFICATION_TASK_UUID_RE.test(jobId)) {
+    const url = staffSpaUrl(base, `/jobs/edit/${jobId}`);
+    const label = String(tp.linkedJobLabel || '').trim() || 'פתיחת המשרה';
+    links.push({ label, url });
+  }
+
+  const clientId = String(tp.linkedClientId || '').trim();
+  if (NOTIFICATION_TASK_UUID_RE.test(clientId)) {
+    const contactId = String(tp.linkedContactId || '').trim();
+    const path = NOTIFICATION_TASK_UUID_RE.test(contactId)
+      ? `/clients/${clientId}/contacts/${contactId}`
+      : `/clients/${clientId}`;
+    const url = staffSpaUrl(base, path);
+    const label = String(tp.linkedClientLabel || '').trim() || 'פתיחת כרטיס לקוח';
+    links.push({ label, url });
+  }
+
+  if (!links.length) return { htmlAppend: '', storedTextSuffix: '' };
+
+  const textLinksBlock = links.map((l) => `${l.label}: ${l.url}`).join('\n');
+  const storedTextSuffix = `\n\n---\nקישורים מהמערכת:\n${textLinksBlock}`;
+  const htmlAppend =
+    `<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0"/>` +
+    `<p dir="rtl" style="margin:0 0 10px;font-weight:bold;color:#111;font-family:sans-serif;font-size:14px">` +
+    `קישורים מהמערכת</p>` +
+    `<ul dir="rtl" style="margin:0;padding-inline-start:20px;line-height:1.6;font-family:sans-serif;font-size:14px;color:#111">` +
+    links
+      .map(
+        (l) =>
+          `<li style="margin:6px 0"><a href="${escapeHtmlMail(l.url)}" style="color:#2563eb;text-decoration:underline">` +
+          `${escapeHtmlMail(l.label)}</a></li>`,
+      )
+      .join('') +
+    `</ul>`;
+
+  return { htmlAppend, storedTextSuffix };
+}
 
 /**
  * SMTP profile: admin → HIRO_* / Resend; tenant «מימד אנושי» → HUMAND_*; else legacy SMTP_*.
  * Expects `authMiddleware` on `/send` so `req.user.sub` is set (no manual Authorization parsing).
  */
 async function resolveEmailSenderSmtpContext(req) {
-  return { userRole: null, clientName: null };
 
   
   const userId = req.user?.sub || req.user?.id;
-  if (!userId) return { userRole: null, clientName: null };
+  if (!userId) return { userRole: null, clientName: null, senderEmail: null };
   try {
     const user = await User.findByPk(userId, {
-      attributes: ['role', 'clientId'],
+      attributes: ['role', 'clientId', 'email'],
       include: [{ model: Client, as: 'client', attributes: ['name', 'displayName'], required: false }],
     });
-    if (!user) return { userRole: null, clientName: null };
+    if (!user) return { userRole: null, clientName: null, senderEmail: null };
     const c = user.client;
     const label = c ? String(c.displayName || c.name || '').trim() : '';
-    return { userRole: user.role || null, clientName: label || null };
+    return {
+      userRole: user.role || null,
+      clientName: label || null,
+      senderEmail: user.email ? String(user.email).trim() : null,
+    };
   } catch {
-    return { userRole: null, clientName: null };
+    return { userRole: null, clientName: null, senderEmail: null };
   }
 }
 
@@ -258,20 +346,46 @@ async function resolveNotificationViewerContext(req) {
   return { userId: user.id, emailNorm, nameNorm };
 }
 
+function emailInCommaSeparatedField(field, emailNorm) {
+  const norm = String(emailNorm || '').trim().toLowerCase();
+  if (!norm) return false;
+  return String(field || '')
+    .split(/[,;\n]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean)
+    .includes(norm);
+}
+
 function notificationVisibleToViewer(record, ctx) {
   if (!ctx) return false;
-  const toEmail = String(record.toEmail || '').trim().toLowerCase();
-  const assignee = String(record.assignee || '').trim().toLowerCase();
-  if (ctx.emailNorm && toEmail === ctx.emailNorm) return true;
-  if (ctx.emailNorm && assignee === ctx.emailNorm) return true;
-  if (ctx.nameNorm && assignee === ctx.nameNorm) return true;
+  if (ctx.userId != null && record.senderUserId != null) {
+    if (String(record.senderUserId) === String(ctx.userId)) return true;
+  }
+  const assigneeWhole = String(record.assignee || '').trim().toLowerCase();
+  if (ctx.emailNorm) {
+    if (emailInCommaSeparatedField(record.toEmail, ctx.emailNorm)) return true;
+    if (emailInCommaSeparatedField(record.assignee, ctx.emailNorm)) return true;
+  }
+  if (ctx.nameNorm && assigneeWhole === ctx.nameNorm) return true;
+  return false;
+}
+
+/** True when the viewer is an intended recipient (not only the sender viewing "sent"). */
+function notificationRecipientMatchesViewer(record, ctx) {
+  if (!ctx) return false;
+  const assigneeWhole = String(record.assignee || '').trim().toLowerCase();
+  if (ctx.emailNorm) {
+    if (emailInCommaSeparatedField(record.toEmail, ctx.emailNorm)) return true;
+    if (emailInCommaSeparatedField(record.assignee, ctx.emailNorm)) return true;
+  }
+  if (ctx.nameNorm && assigneeWhole === ctx.nameNorm) return true;
   return false;
 }
 
 const getNotificationMessages = async (req, res) => {
   try {
     const ctx = await resolveNotificationViewerContext(req);
-    if (!ctx || !ctx.emailNorm) {
+    if (!ctx) {
       res.set('Cache-Control', 'private, no-store');
       return res.json([]);
     }
@@ -279,41 +393,148 @@ const getNotificationMessages = async (req, res) => {
     const trimmedLower = (col) =>
       Sequelize.fn('lower', Sequelize.fn('trim', Sequelize.col(col)));
 
-    const orConditions = [
-      Sequelize.where(trimmedLower('toEmail'), ctx.emailNorm),
-      Sequelize.where(trimmedLower('assignee'), ctx.emailNorm),
-    ];
-    if (ctx.nameNorm) {
+    const orConditions = [];
+
+    if (ctx.emailNorm) {
+      const emailListPattern = `%,${ctx.emailNorm},%`;
+      orConditions.push(
+        Sequelize.literal(
+          `(',' || REPLACE(LOWER(TRIM(COALESCE("NotificationMessage"."toEmail", ''))), ' ', '') || ',') LIKE ${sequelize.escape(
+            emailListPattern
+          )}`
+        ),
+        Sequelize.literal(
+          `(',' || REPLACE(LOWER(TRIM(COALESCE("NotificationMessage"."assignee", ''))), ' ', '') || ',') LIKE ${sequelize.escape(
+            emailListPattern
+          )}`
+        )
+      );
+      if (ctx.nameNorm) {
+        orConditions.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
+      }
+    } else if (ctx.nameNorm) {
       orConditions.push(Sequelize.where(trimmedLower('assignee'), ctx.nameNorm));
+    }
+
+    if (ctx.userId != null) {
+      orConditions.push({ senderUserId: ctx.userId });
+    }
+
+    if (orConditions.length === 0) {
+      res.set('Cache-Control', 'private, no-store');
+      return res.json([]);
     }
 
     const records = await NotificationMessage.findAll({
       where: {
         [Op.and]: [{ status: { [Op.ne]: 'deleted' } }, { [Op.or]: orConditions }],
       },
+      include: [
+        {
+          model: User,
+          as: 'sender',
+          attributes: ['id', 'name', 'email'],
+          required: false,
+        },
+      ],
       order: [['createdAt', 'DESC']],
       limit: 500,
     });
+    const payload = records.map((r) => {
+      const row = r.get({ plain: true });
+      const s = row.sender;
+      delete row.sender;
+      const senderName = s?.name != null ? String(s.name).trim() : '';
+      const senderEmail = s?.email != null ? String(s.email).trim() : '';
+      return { ...row, senderName, senderEmail };
+    });
     res.set('Cache-Control', 'private, no-store');
-    return res.json(records);
+    return res.json(payload);
   } catch (error) {
     console.error('[email][getNotificationMessages]', error);
     return res.status(500).json({ message: 'Failed to load notification messages' });
   }
 };
 
-const updateNotificationMessageStatus = async (req, res) => {
+const updateNotificationMessageAssignee = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body || {};
+    const { assigneeEmails } = req.body || {};
     const isUuid =
       typeof id === 'string' &&
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
     if (!isUuid) {
       return res.status(400).json({ message: 'id must be a valid UUID' });
     }
+
+    const rawList = Array.isArray(assigneeEmails) ? assigneeEmails : [];
+    const emails = [
+      ...new Set(
+        rawList
+          .map((e) => String(e || '').trim().toLowerCase())
+          .filter((e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e))
+      ),
+    ];
+    if (!emails.length) {
+      return res.status(400).json({ message: 'assigneeEmails must include at least one valid email' });
+    }
+
+    const record = await NotificationMessage.findByPk(id);
+    if (!record) {
+      return res.status(404).json({ message: 'Notification message not found' });
+    }
+
+    const ctx = await resolveNotificationViewerContext(req);
+    if (!ctx || !notificationVisibleToViewer(record, ctx)) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const assigneeField = emails.join(', ');
+    const primaryTo = emails[0];
+
+    await record.update({
+      toEmail: primaryTo,
+      assignee: assigneeField,
+    });
+
+    return res.json(record.get({ plain: true }));
+  } catch (error) {
+    console.error('[email][updateNotificationMessageAssignee]', error);
+    return res.status(500).json({ message: 'Failed to assign notification message' });
+  }
+};
+
+async function resolveRequesterEmail(req) {
+  const userId = req.user?.sub || req.user?.id;
+  if (!userId) return null;
+  const u = await User.findByPk(userId, { attributes: ['email'] });
+  const em = u?.email != null ? String(u.email).trim() : '';
+  return em || null;
+}
+
+const updateNotificationMessageStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, taskCompleted, markRecipientRead, dueDate, dueTime } = req.body || {};
+    const isUuid =
+      typeof id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+    if (!isUuid) {
+      return res.status(400).json({ message: 'id must be a valid UUID' });
+    }
+    const hasStatus = status !== undefined && status !== null && String(status).trim() !== '';
+    const hasTaskCompleted = typeof taskCompleted === 'boolean';
+    const hasMarkRecipientRead = markRecipientRead === true;
+    const hasDueDate = dueDate !== undefined;
+    const hasDueTime = dueTime !== undefined;
+    if (!hasStatus && !hasTaskCompleted && !hasMarkRecipientRead && !hasDueDate && !hasDueTime) {
+      return res.status(400).json({
+        message: 'Provide status, taskCompleted, markRecipientRead, dueDate, and/or dueTime',
+      });
+    }
+
     const allowedStatuses = new Set(['unread', 'tasks', 'archived', 'deleted']);
-    if (!allowedStatuses.has(status)) {
+    if (hasStatus && !allowedStatuses.has(status)) {
       return res.status(400).json({ message: 'status must be one of unread/tasks/archived/deleted' });
     }
 
@@ -327,8 +548,52 @@ const updateNotificationMessageStatus = async (req, res) => {
       return res.status(403).json({ message: 'Forbidden' });
     }
 
-    await record.update({ status });
-    return res.json(record);
+    if (hasMarkRecipientRead) {
+      const isTaskRow = Boolean(record.isTask) || record.messageType === 'task';
+      if (isTaskRow) {
+        return res.status(400).json({ message: 'markRecipientRead applies to messages only' });
+      }
+      if (!notificationRecipientMatchesViewer(record, ctx)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
+      const existingRead = record.metadata && record.metadata.recipientReadAt;
+      if (existingRead) {
+        return res.json(record.get({ plain: true }));
+      }
+    }
+
+    const patch = {};
+    const nextMeta = { ...(record.metadata || {}) };
+    let metaTouched = false;
+    if (hasTaskCompleted) {
+      nextMeta.taskCompleted = taskCompleted;
+      metaTouched = true;
+    }
+    if (hasMarkRecipientRead) {
+      nextMeta.recipientReadAt = new Date().toISOString();
+      metaTouched = true;
+    }
+    if (hasStatus) patch.status = status;
+    if (metaTouched) patch.metadata = nextMeta;
+
+    if (hasDueDate) {
+      if (dueDate === null || dueDate === '') {
+        patch.dueDate = null;
+      } else if (typeof dueDate === 'string') {
+        patch.dueDate = dueDate.trim() || null;
+      }
+    }
+    if (hasDueTime) {
+      if (dueTime === null || dueTime === '') {
+        patch.dueTime = null;
+      } else if (typeof dueTime === 'string') {
+        patch.dueTime = dueTime.trim() || null;
+      }
+    }
+
+    await record.update(patch);
+    await record.reload();
+    return res.json(record.get({ plain: true }));
   } catch (error) {
     console.error('[email][updateNotificationMessageStatus]', error);
     return res.status(500).json({ message: 'Failed to update notification status' });
@@ -351,6 +616,15 @@ const upload = async (req, res) => {
   }
 };
 
+/** `to` / `toEmail`: one address, comma/semicolon-separated list, or array — each gets its own notification + send. */
+const expandSendRecipients = (to, toEmail) => {
+  const raw = toEmail != null && toEmail !== '' ? toEmail : to;
+  if (raw == null || raw === '') return [];
+  if (Array.isArray(raw)) return raw.map((x) => String(x || '').trim()).filter(Boolean);
+  if (typeof raw === 'string') return raw.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+  return [];
+};
+
 const send = async (req, res) => {
   try {
     const payload = req.body || {};
@@ -371,128 +645,198 @@ const send = async (req, res) => {
       sla,
       allocatedDays,
       taskPayload,
+      skipSmtp,
     } = payload;
 
+    const normalizedSkipSmtp = Boolean(skipSmtp);
+
     console.log('[email][send] request received', {
-      to: typeof to === 'string' ? to : undefined,
-      toEmail: typeof toEmail === 'string' ? toEmail : undefined,
+      to: Array.isArray(to) ? `array(${to.length})` : typeof to,
+      toEmail: typeof toEmail,
       subject: typeof subject === 'string' ? subject : undefined,
       hasText: typeof text === 'string' && text.trim().length > 0,
       hasHtml: typeof html === 'string' && html.trim().length > 0,
     });
 
     if (!subject) return res.status(400).json({ message: 'subject is required' });
-    const bodyText = typeof text === 'string' ? text : undefined;
-
-    const emailCandidate = String(toEmail || to || '').trim();
-    if (!emailCandidate) return res.status(400).json({ message: 'recipient (to/toEmail) is required' });
-
-    const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailCandidate);
-    let resolvedToEmail = emailCandidate;
-
-    if (!isEmail) {
-      console.log('[email][send] resolving recipient name -> user.email', {
-        assigneeOrName: emailCandidate,
-      });
-      const user = await User.findOne({
-        where: { name: { [Op.iLike]: `%${emailCandidate}%` } },
-        attributes: ['email'],
-      });
-      if (!user?.email) {
-        return res.status(404).json({ message: `No user.email found for assignee/name: ${emailCandidate}` });
-      }
-      resolvedToEmail = user.email;
+    const baseText = typeof text === 'string' ? text : '';
+    const { htmlAppend, storedTextSuffix } = buildLinkedEntityMailAppend(
+      taskPayload,
+      publicStaffAppOrigin(),
+    );
+    const storedText = baseText + storedTextSuffix;
+    const clientHtml = typeof html === 'string' && html.trim() ? html : null;
+    let storedHtml = null;
+    if (clientHtml) {
+      storedHtml = htmlAppend ? `${clientHtml}${htmlAppend}` : clientHtml;
+    } else if (htmlAppend) {
+      storedHtml = `${htmlFromPlainTextForMail(baseText)}${htmlAppend}`;
     }
 
-    console.log('[email][send] resolved recipient', {
-      isEmail,
-      resolvedToEmail,
-    });
+    const rawList = expandSendRecipients(to, toEmail);
+    const seen = new Set();
+    const recipients = [];
+    for (const r of rawList) {
+      const trimmed = String(r || '').trim();
+      if (!trimmed) continue;
+      const key = trimmed.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      recipients.push(trimmed);
+    }
+
+    if (recipients.length === 0) {
+      if (normalizedSkipSmtp) {
+        const selfEmail = await resolveRequesterEmail(req);
+        if (!selfEmail) {
+          return res.status(400).json({
+            message: 'לא ניתן ליצור משימה/הודעה ללא מייל — חסר אימייל למשתמש המחובר',
+          });
+        }
+        recipients.push(selfEmail);
+      } else {
+        return res.status(400).json({ message: 'recipient (to/toEmail) is required' });
+      }
+    }
 
     const normalizedIsTask = Boolean(isTask);
     const normalizedMessageType = messageType === 'task' || normalizedIsTask ? 'task' : 'message';
+    const {
+      userRole: smtpUserRole,
+      clientName: smtpClientName,
+      senderEmail: smtpSenderEmail,
+    } = await resolveEmailSenderSmtpContext(req);
 
-    const savedMessage = await NotificationMessage.create({
-      toEmail: resolvedToEmail,
-      subject: String(subject || ''),
-      text: typeof text === 'string' ? text : null,
-      html: typeof html === 'string' ? html : null,
-      messageType: normalizedMessageType,
-      status: normalizedMessageType === 'task' ? 'tasks' : 'unread',
-      isTask: normalizedIsTask,
-      assignee: typeof assignee === 'string' ? assignee : null,
-      category: typeof category === 'string' ? category : null,
-      dueDate: typeof dueDate === 'string' ? dueDate : null,
-      dueTime: typeof dueTime === 'string' ? dueTime : null,
-      submissionPopup: Boolean(submissionPopup),
-      submissionEmail: submissionEmail === undefined ? true : Boolean(submissionEmail),
-      sla: typeof sla === 'string' ? sla : null,
-      allocatedDays: Number.isFinite(Number(allocatedDays)) ? Number(allocatedDays) : null,
-      senderUserId: req?.user?.sub || req?.user?.id || null,
-      metadata: {
-        deliveryStatus: 'pending',
-        taskPayload:
-          taskPayload && typeof taskPayload === 'object' && !Array.isArray(taskPayload)
-            ? taskPayload
-            : {},
-      },
-    });
+    const results = [];
 
-    const { userRole: smtpUserRole, clientName: smtpClientName } = await resolveEmailSenderSmtpContext(req);
+    for (const emailCandidate of recipients) {
+      const isEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(emailCandidate);
+      let resolvedToEmail = emailCandidate;
 
-    let result;
-    try {
-      result = await emailService.sendEmail({
+      if (!isEmail) {
+        console.log('[email][send] resolving recipient name -> user.email', {
+          assigneeOrName: emailCandidate,
+        });
+        const userRow = await User.findOne({
+          where: { name: { [Op.iLike]: `%${emailCandidate}%` } },
+          attributes: ['email'],
+        });
+        if (!userRow?.email) {
+          return res.status(404).json({ message: `No user.email found for assignee/name: ${emailCandidate}` });
+        }
+        resolvedToEmail = userRow.email;
+      }
+
+      const assigneeField =
+        recipients.length === 1 && typeof assignee === 'string' && assignee.trim()
+          ? assignee.trim()
+          : resolvedToEmail;
+
+      const savedMessage = await NotificationMessage.create({
         toEmail: resolvedToEmail,
-        subject,
-        text: bodyText || (typeof html === 'string' ? undefined : ''),
-        html: typeof html === 'string' ? html : undefined,
-        userRole: smtpUserRole,
-        clientName: smtpClientName,
+        subject: String(subject || ''),
+        text: storedText.trim() ? storedText : null,
+        html: storedHtml,
+        messageType: normalizedMessageType,
+        status: normalizedMessageType === 'task' ? 'tasks' : 'unread',
+        isTask: normalizedIsTask,
+        assignee: assigneeField,
+        category: typeof category === 'string' ? category : null,
+        dueDate: typeof dueDate === 'string' ? dueDate : null,
+        dueTime: typeof dueTime === 'string' ? dueTime : null,
+        submissionPopup: Boolean(submissionPopup),
+        submissionEmail: submissionEmail === undefined ? true : Boolean(submissionEmail),
+        sla: typeof sla === 'string' ? sla : null,
+        allocatedDays: Number.isFinite(Number(allocatedDays)) ? Number(allocatedDays) : null,
+        senderUserId: req?.user?.sub || req?.user?.id || null,
+        metadata: {
+          deliveryStatus: 'pending',
+          taskPayload:
+            taskPayload && typeof taskPayload === 'object' && !Array.isArray(taskPayload)
+              ? taskPayload
+              : {},
+        },
       });
 
-      await savedMessage.update({
-        metadata: {
-          ...(savedMessage.metadata || {}),
-          deliveryStatus: 'sent',
-          providerMessageId: result?.messageId || null,
-        },
+      if (normalizedSkipSmtp) {
+        await savedMessage.update({
+          metadata: {
+            ...(savedMessage.metadata || {}),
+            deliveryStatus: 'in_app_only',
+          },
+        });
+        results.push({
+          notificationMessageId: savedMessage.id,
+          to: resolvedToEmail,
+          messageId: null,
+        });
+        continue;
+      }
+
+      let result;
+      try {
+        result = await emailService.sendEmail({
+          toEmail: resolvedToEmail,
+          subject,
+          text: storedText || '',
+          html: storedHtml || undefined,
+          userRole: smtpUserRole,
+          clientName: smtpClientName,
+          senderEmail: smtpSenderEmail,
+        });
+
+        await savedMessage.update({
+          metadata: {
+            ...(savedMessage.metadata || {}),
+            deliveryStatus: 'sent',
+            providerMessageId: result?.messageId || null,
+          },
+        });
+      } catch (sendErr) {
+        await savedMessage.update({
+          metadata: {
+            ...(savedMessage.metadata || {}),
+            deliveryStatus: 'failed',
+            deliveryError: sendErr?.message || String(sendErr),
+          },
+        });
+        throw sendErr;
+      }
+
+      results.push({
+        notificationMessageId: savedMessage.id,
+        to: resolvedToEmail,
+        messageId: result?.messageId || null,
       });
-    } catch (sendErr) {
-      await savedMessage.update({
-        metadata: {
-          ...(savedMessage.metadata || {}),
-          deliveryStatus: 'failed',
-          deliveryError: sendErr?.message || String(sendErr),
-        },
-      });
-      throw sendErr;
     }
 
-    console.log('[email][send] sendEmail succeeded', {
-      messageId: result?.messageId || null,
-      accepted: result?.accepted?.length || null,
-      rejected: result?.rejected?.length || null,
-      notificationMessageId: savedMessage?.id || null,
-    });
+    console.log('[email][send] sendEmail batch succeeded', { count: results.length });
 
     return res.json({
       ok: true,
-      messageId: result?.messageId || null,
-      notificationMessageId: savedMessage?.id || null,
+      count: results.length,
+      results,
+      messageId: results[0]?.messageId ?? null,
+      notificationMessageId: results[0]?.notificationMessageId ?? null,
     });
   } catch (err) {
     console.error('[email][send] send failed', {
       message: err?.message || err,
       name: err?.name,
-      // Avoid dumping entire transporter/config to prevent leaking anything sensitive.
       stack: err?.stack,
     });
     return res.status(400).json({ message: err?.message || 'Failed to send email' });
   }
 };
 
-module.exports = { upload, getByCandidate, send, getNotificationMessages, updateNotificationMessageStatus };
+module.exports = {
+  upload,
+  getByCandidate,
+  send,
+  getNotificationMessages,
+  updateNotificationMessageStatus,
+  updateNotificationMessageAssignee,
+};
 
 const normalizeStringArray = (val) => {
   if (!val) return [];

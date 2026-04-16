@@ -56,6 +56,12 @@ const login = async ({ email, password, role }) => {
 
   ensureRoleMatches(user, role);
 
+  if (!user.isActive) {
+    const error = new Error('Account is not active. Complete activation or contact your administrator.');
+    error.status = 403;
+    throw error;
+  }
+
   const fullUser = await loadUserWithClientUsage(user.id);
   if (!fullUser) {
     const error = new Error('Invalid credentials');
@@ -82,6 +88,12 @@ const verifyLoginCode = async ({ email, code, role }) => {
 
   ensureRoleMatches(user, role);
 
+  if (!user.isActive) {
+    const error = new Error('Account is not active. Complete activation or contact your administrator.');
+    error.status = 403;
+    throw error;
+  }
+
   const result = await loginOtpService.verifyOtp(user.id, String(code || '').trim());
   if (!result.ok) {
     let message = result.message;
@@ -100,7 +112,8 @@ const verifyLoginCode = async ({ email, code, role }) => {
   }
 
   const token = issueToken(user);
-  return { token, user };
+  const fullUser = await loadUserWithClientUsage(user.id);
+  return { token, user: fullUser || user };
 };
 
 const resendLoginCode = async ({ email, password, role }) => {
@@ -206,10 +219,16 @@ const loginWithGoogle = async ({ credential, role }) => {
     });
   } else {
     ensureRoleMatches(user, role);
+    if (!user.isActive) {
+      const error = new Error('Account is not active. Complete activation or contact your administrator.');
+      error.status = 403;
+      throw error;
+    }
   }
 
   const token = issueToken(user);
-  return { token, user };
+  const fullUser = await loadUserWithClientUsage(user.id);
+  return { token, user: fullUser || user };
 };
 
 module.exports = { login, loginWithGoogle, signup, verifyLoginCode, resendLoginCode };

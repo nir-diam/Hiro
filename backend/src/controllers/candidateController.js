@@ -11,21 +11,56 @@ const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const Candidate = require('../models/Candidate');
 const User = require('../models/User');
+const jobCandidateService = require('../services/jobCandidateService');
 const { sequelize } = require('../config/db');
 
 /** Until DB migration runs (add_job_candidate_screening_rejection.sql), skip rejection columns */
 let screeningRejectionColumnsCache = null;
-async function jobCandidateScreeningHasRejectionColumns() {
-  if (screeningRejectionColumnsCache !== null) return screeningRejectionColumnsCache;
+
+function dbErrorText(err) {
+  if (!err) return '';
+  const parts = [];
+  const seen = new Set();
+  let e = err;
+  while (e && !seen.has(e)) {
+    seen.add(e);
+    if (typeof e.message === 'string' && e.message) parts.push(e.message);
+    e = e.parent || e.original;
+  }
+  return parts.join(' ');
+}
+
+function isMissingScreeningRejectionColumnError(err) {
+  const msg = dbErrorText(err);
+  const code = err && (err.parent?.code || err.original?.code || err.code);
+  if (code === '42703' && /screeningStatus|rejectionReason|rejectionNotes/i.test(msg)) return true;
+  if (!/does not exist/i.test(msg)) return false;
+  return /screeningStatus|rejectionReason|rejectionNotes/i.test(msg);
+}
+
+async function jobCandidateScreeningHasRejectionColumns(options = {}) {
+  const { forceRefresh = false } = options;
+  if (!forceRefresh && screeningRejectionColumnsCache !== null) return screeningRejectionColumnsCache;
   try {
+    if (sequelize.getDialect() !== 'postgres') {
+      screeningRejectionColumnsCache = false;
+      return screeningRejectionColumnsCache;
+    }
     const [rows] = await sequelize.query(
-      `SELECT 1 FROM information_schema.columns
-       WHERE table_schema = current_schema()
-         AND table_name = 'job_candidate_screening'
-         AND column_name = 'screeningStatus'
-       LIMIT 1`,
+      `SELECT COALESCE((
+        SELECT COUNT(DISTINCT a.attname)::int
+        FROM pg_attribute a
+        INNER JOIN pg_class c ON c.oid = a.attrelid
+        INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = current_schema()
+          AND c.relname = 'job_candidate_screening'
+          AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND a.attname IN ('screeningStatus', 'rejectionReason', 'rejectionNotes')
+      ), 0) AS cnt`,
     );
-    screeningRejectionColumnsCache = Array.isArray(rows) && rows.length > 0;
+    const cnt = rows && rows[0] != null ? Number(rows[0].cnt) : 0;
+    screeningRejectionColumnsCache = cnt === 3;
   } catch (e) {
     console.warn('[jobCandidateScreeningHasRejectionColumns]', e.message);
     screeningRejectionColumnsCache = false;
@@ -175,6 +210,7 @@ const ensureRoleTagCoverage = (existingTags = [], workExperience = []) => {
   );
 
   const merged = [...sourceTags];
+  if(false){
   for (const exp of experienceList) {
     const title = String(exp?.title || '').trim();
     if (!title) continue;
@@ -191,6 +227,7 @@ const ensureRoleTagCoverage = (existingTags = [], workExperience = []) => {
       confidence_score: 1,
     });
     roleNameSet.add(normalizedTitle);
+  }
   }
 
   return merged;
@@ -513,10 +550,27 @@ const list = async (req, res) => {
     const limit = Number.isFinite(incomingLimit) ? Math.round(incomingLimit) : 100;
     const clampedLimit = Math.min(500, Math.max(10, limit));
     const search = String(req.query.search || '').trim();
+    let advanced = null;
+    const advRaw = req.query.adv;
+    if (advRaw != null && String(advRaw).trim() !== '') {
+      try {
+        const parsed = JSON.parse(String(advRaw));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const encoded = JSON.stringify(parsed);
+          if (encoded.length > 16_000) {
+            return res.status(400).json({ message: 'adv payload too large' });
+          }
+          advanced = parsed;
+        }
+      } catch {
+        return res.status(400).json({ message: 'Invalid adv JSON' });
+      }
+    }
     const payload = await candidateService.listPaginated({
       page,
       limit: clampedLimit,
       search,
+      advanced,
     });
     const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
       if (!row || typeof row !== 'object') return row;
@@ -525,6 +579,8 @@ const list = async (req, res) => {
       delete out.searchText;
       return out;
     });
+    res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
     res.json({
       data: safeRows,
       total: payload.count || 0,
@@ -684,6 +740,7 @@ const createFromAi = async (req, res) => {
           })
           .filter(Boolean)
       : [];
+      //DISABLE CANDIDATE TAGS BY JOB
     const roleCoveredTags = ensureRoleTagCoverage(aiTagObjects, normalizedWorkExperience);
 
     let tags = normalizeStringArray(roleCoveredTags.map((t) => t.name));
@@ -1503,6 +1560,20 @@ const generateInternalOpinion = async (req, res) => {
   }
 };
 
+/** Explicit job–candidate links (job_candidates + jobs) for “התעניינות במשרה”. */
+const listLinkedJobs = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const rows = await jobCandidateService.listForCandidate(candidateId);
+    res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.json(rows);
+  } catch (err) {
+    console.error('[listLinkedJobs]', err.message || err);
+    res.status(400).json({ message: err.message || 'Failed to list linked jobs' });
+  }
+};
+
 // Get 1–5 most relevant jobs for this candidate (from JobCandidate + Job by fit), with match percentage.
 // Uses this candidate's embedding only so each candidate gets their own ranked list. No caching.
 const getRelevantJobs = async (req, res) => {
@@ -1531,11 +1602,19 @@ const getRelevantJobs = async (req, res) => {
 
     let rejectedJobIds = new Set();
     if (await jobCandidateScreeningHasRejectionColumns()) {
-      const rejectedRows = await JobCandidateScreening.findAll({
-        where: { candidateId, screeningStatus: 'rejected' },
-        attributes: ['jobId'],
-      });
-      rejectedJobIds = new Set(rejectedRows.map((r) => String(r.jobId)));
+      try {
+        const rejectedRows = await JobCandidateScreening.findAll({
+          where: { candidateId, screeningStatus: 'rejected' },
+          attributes: ['jobId'],
+        });
+        rejectedJobIds = new Set(rejectedRows.map((r) => String(r.jobId)));
+      } catch (e) {
+        if (isMissingScreeningRejectionColumnError(e)) {
+          screeningRejectionColumnsCache = false;
+        } else {
+          throw e;
+        }
+      }
     }
 
     const seenJobIds = new Set();
@@ -1613,10 +1692,12 @@ const getRelevantJobs = async (req, res) => {
 
 // Get all screening data for a candidate (keyed by jobId)
 const getScreeningData = async (req, res) => {
-  try {
-    const candidateId = req.params.id;
-    const baseAttrs = ['jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
-    const hasReject = await jobCandidateScreeningHasRejectionColumns();
+  const candidateId = req.params.id;
+  const baseAttrs = ['jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
+  const load = async (forceCoreOnly) => {
+    const hasReject = forceCoreOnly
+      ? false
+      : await jobCandidateScreeningHasRejectionColumns({ forceRefresh: true });
     const attrs = hasReject
       ? [...baseAttrs, 'screeningStatus', 'rejectionReason', 'rejectionNotes']
       : baseAttrs;
@@ -1636,6 +1717,17 @@ const getScreeningData = async (req, res) => {
         rejectionNotes: hasReject ? (r.rejectionNotes || '') : '',
       };
     }
+    return byJob;
+  };
+  try {
+    let byJob;
+    try {
+      byJob = await load(false);
+    } catch (err) {
+      if (!isMissingScreeningRejectionColumnError(err)) throw err;
+      screeningRejectionColumnsCache = false;
+      byJob = await load(true);
+    }
     res.json(byJob);
   } catch (err) {
     console.error('[getScreeningData]', err);
@@ -1645,24 +1737,29 @@ const getScreeningData = async (req, res) => {
 
 // Upsert screening data for one candidate + job (triggered after user stops typing)
 const saveScreeningData = async (req, res) => {
-  try {
-    const candidateId = req.params.id;
-    const {
-      jobId,
-      screeningAnswers,
-      telephoneImpression,
-      internalOpinion,
-      screeningStatus,
-      rejectionReason,
-      rejectionNotes,
-    } = req.body || {};
+  const candidateId = req.params.id;
+  const {
+    jobId,
+    screeningAnswers,
+    telephoneImpression,
+    internalOpinion,
+    screeningStatus,
+    rejectionReason,
+    rejectionNotes,
+  } = req.body || {};
+
+  const upsert = async (forceCoreOnly) => {
     if (!jobId) {
-      return res.status(400).json({ message: 'jobId is required' });
+      const e = new Error('jobId is required');
+      e.status = 400;
+      throw e;
     }
     const answers = Array.isArray(screeningAnswers) ? screeningAnswers : [];
     const impression = typeof telephoneImpression === 'string' ? telephoneImpression : '';
     const opinion = typeof internalOpinion === 'string' ? internalOpinion : null;
-    const hasReject = await jobCandidateScreeningHasRejectionColumns();
+    const hasReject = forceCoreOnly
+      ? false
+      : await jobCandidateScreeningHasRejectionColumns({ forceRefresh: true });
 
     const coreFields = ['candidateId', 'jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
 
@@ -1688,7 +1785,7 @@ const saveScreeningData = async (req, res) => {
           { fields: coreFields },
         );
       }
-      return res.json({
+      return {
         jobId,
         screeningAnswers: row.screeningAnswers,
         telephoneImpression: row.telephoneImpression,
@@ -1696,32 +1793,48 @@ const saveScreeningData = async (req, res) => {
         screeningStatus: 'open',
         rejectionReason: '',
         rejectionNotes: '',
-      });
+      };
     }
 
-    const [row] = await JobCandidateScreening.findOrCreate({
+    const rejectFields = ['screeningStatus', 'rejectionReason', 'rejectionNotes'];
+    const allAttrs = [...coreFields, ...rejectFields];
+    const st = typeof screeningStatus === 'string' ? screeningStatus : 'open';
+    const rr = typeof rejectionReason === 'string' ? rejectionReason : null;
+    const rn = typeof rejectionNotes === 'string' ? rejectionNotes : null;
+
+    let row = await JobCandidateScreening.findOne({
       where: { candidateId, jobId },
-      defaults: {
-        screeningAnswers: answers,
-        telephoneImpression: impression,
-        internalOpinion: opinion,
-        screeningStatus: typeof screeningStatus === 'string' ? screeningStatus : 'open',
-        rejectionReason: typeof rejectionReason === 'string' ? rejectionReason : null,
-        rejectionNotes: typeof rejectionNotes === 'string' ? rejectionNotes : null,
-      },
+      attributes: allAttrs,
     });
-    const updates = {};
-    if (Array.isArray(screeningAnswers)) updates.screeningAnswers = answers;
-    if (typeof telephoneImpression === 'string') updates.telephoneImpression = impression;
-    if (typeof internalOpinion === 'string') updates.internalOpinion = internalOpinion;
-    if (typeof screeningStatus === 'string') updates.screeningStatus = screeningStatus;
-    if (typeof rejectionReason === 'string') updates.rejectionReason = rejectionReason;
-    if (typeof rejectionNotes === 'string') updates.rejectionNotes = rejectionNotes;
-    if (Object.keys(updates).length > 0) {
-      await row.update(updates);
-      await row.reload();
+    if (row) {
+      const updates = {};
+      if (Array.isArray(screeningAnswers)) updates.screeningAnswers = answers;
+      if (typeof telephoneImpression === 'string') updates.telephoneImpression = impression;
+      if (typeof internalOpinion === 'string') updates.internalOpinion = internalOpinion;
+      if (typeof screeningStatus === 'string') updates.screeningStatus = screeningStatus;
+      if (typeof rejectionReason === 'string') updates.rejectionReason = rejectionReason;
+      if (typeof rejectionNotes === 'string') updates.rejectionNotes = rejectionNotes;
+      const fields = Object.keys(updates);
+      if (fields.length > 0) {
+        await row.update(updates, { fields });
+        await row.reload({ attributes: allAttrs });
+      }
+    } else {
+      row = await JobCandidateScreening.create(
+        {
+          candidateId,
+          jobId,
+          screeningAnswers: answers,
+          telephoneImpression: impression,
+          internalOpinion: opinion,
+          screeningStatus: st,
+          rejectionReason: rr,
+          rejectionNotes: rn,
+        },
+        { fields: allAttrs },
+      );
     }
-    res.json({
+    return {
       jobId,
       screeningAnswers: row.screeningAnswers,
       telephoneImpression: row.telephoneImpression,
@@ -1729,10 +1842,26 @@ const saveScreeningData = async (req, res) => {
       screeningStatus: row.screeningStatus || 'open',
       rejectionReason: row.rejectionReason || '',
       rejectionNotes: row.rejectionNotes || '',
-    });
+    };
+  };
+
+  try {
+    let payload;
+    try {
+      payload = await upsert(false);
+    } catch (err) {
+      if (!isMissingScreeningRejectionColumnError(err)) throw err;
+      screeningRejectionColumnsCache = false;
+      payload = await upsert(true);
+    }
+    res.json(payload);
   } catch (err) {
+    const status = err.status || 500;
+    if (status === 400) {
+      return res.status(400).json({ message: err.message });
+    }
     console.error('[saveScreeningData]', err);
-    res.status(err.status || 500).json({ message: err.message || 'Failed to save screening data' });
+    res.status(status).json({ message: err.message || 'Failed to save screening data' });
   }
 };
 
@@ -1757,6 +1886,7 @@ module.exports = {
   buildParsedUpdates,
   generateInternalOpinion,
   getRelevantJobs,
+  listLinkedJobs,
   getScreeningData,
   saveScreeningData,
 };
