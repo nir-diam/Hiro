@@ -25,48 +25,11 @@ export interface JobEvent {
 
 // --- MOCK DATA ---
 export const mockJobEvents: JobEvent[] = [
-    { 
-        id: 1, 
-        type: 'note', 
-        user: 'דנה', 
-        description: 'הלקוח ביקש להוסיף דגש על ניסיון בניהול צוותים גדולים. עדכנתי את התיאור בהתאם.', 
-        timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-        history: [
-            { updatedBy: 'דנה', updatedAt: new Date(Date.now() - 22 * 60 * 60 * 1000).toISOString(), change: 'עריכת תוכן ההערה' }
-        ]
-    },
-    { 
-        id: 2, 
-        type: 'job_edit', 
-        user: 'מערכת', 
-        description: 'דרישות המשרה עודכנו על ידי הלקוח. הדרישה לניסיון קודם ב-SAP הוסרה.', 
-        timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() 
-    },
-    { 
-        id: 3, 
-        type: 'note', 
-        user: 'אביב לוי', 
-        description: 'הוסיף הערה: "הלקוח מבקש להאיץ את תהליך הגיוס. נא לתעדף מועמדים עם זמינות מיידית."', 
-        timestamp: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString() 
-    },
-    { 
-        id: 4, 
-        type: 'candidate_add', 
-        user: 'מערכת', 
-        description: 'נוסף מועמד חדש "מאיה כהן" למשרה ממקור גיוס AllJobs.', 
-        timestamp: new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString() 
-    },
-    { 
-        id: 5, 
-        type: 'candidate_status', 
-        user: 'יעל שחר', 
-        description: 'שינוי סטטוס למועמד "גדעון שפירא" מ-ראיון ל-הצעת שכר.', 
-        timestamp: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() 
-    },
+    
 ];
 
 const eventTypeOptions = ['הכל', 'סטטוס מועמד', 'עריכת משרה', 'הערה', 'הוספת מועמד'];
-const coordinatorOptions = ['הכל', 'דנה כהן', 'אביב לוי', 'מערכת', 'אני', 'Hiro AI'];
+const coordinatorOptions = [];
 
 const getIconForEventType = (type: string, user: string) => {
     if (user === 'Hiro AI') return <SparklesIcon className="w-5 h-5" />;

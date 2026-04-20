@@ -12,7 +12,7 @@ const AccordionSection: React.FC<AccordionSectionProps> = ({ title, icon, childr
   const [isOpen, setIsOpen] = useState(defaultOpen);
 
   return (
-    <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default overflow-hidden transition-all hover:shadow-md">
+    <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default overflow-visible transition-all hover:shadow-md">
       <button
         type="button"
         onClick={() => setIsOpen(!isOpen)}

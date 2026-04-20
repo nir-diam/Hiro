@@ -28,11 +28,7 @@ const VARIABLES = [
 ];
 
 const MOCK_DATA = {
-    '{candidate_name}': 'ישראל ישראלי',
-    '{client_name}': 'גוגל ישראל בע"מ',
-    '{date}': new Date().toLocaleDateString('he-IL'),
-    '{job_title}': 'מנהל מוצר בכיר',
-    '{salary}': '35,000 ₪',
+ 
 };
 
 // --- SUB-COMPONENTS ---
@@ -128,8 +124,7 @@ const SmartDocumentEditor: React.FC<SmartDocumentEditorProps> = ({ isOpen, onClo
             name: templateName,
             category: 'General',
             lastModified: new Date().toISOString(),
-            htmlContent: currentContent,
-            blocks: [] // Legacy support cleared
+            htmlContent: currentContent
         });
     };
 

@@ -1,7 +1,11 @@
 const express = require('express');
 const candidateController = require('../controllers/candidateController');
+const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
+
+router.get('/screening-rejections', authMiddleware, candidateController.listScreeningRejections);
+router.patch('/linked-jobs/:jobCandidateId/status', authMiddleware, candidateController.patchJobLinkStatus);
 
 router.get('/', candidateController.list);
 router.get('/by-worked-at-company', candidateController.listByWorkedAtCompany);

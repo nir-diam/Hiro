@@ -47,6 +47,78 @@ const getWorkedAtOrgInfo = (experience, workExperience, orgName, aliases = []) =
   };
 };
 
+const trimStr = (x) => (x != null ? String(x).trim() : '');
+
+const splitFullNameToParts = (full) => {
+  const t = trimStr(full);
+  if (!t) return { firstName: '', lastName: '' };
+  const idx = t.indexOf(' ');
+  if (idx === -1) return { firstName: t, lastName: '' };
+  return { firstName: t.slice(0, idx).trim(), lastName: t.slice(idx + 1).trim() };
+};
+
+const buildFullNameFromParts = (first, last) =>
+  [trimStr(first), trimStr(last)].filter(Boolean).join(' ');
+
+const syncCandidateNameForCreate = (p) => {
+  let first = trimStr(p.firstName);
+  let last = trimStr(p.lastName);
+  const full = trimStr(p.fullName);
+  if (first || last) {
+    p.firstName = first || null;
+    p.lastName = last || null;
+    p.fullName = buildFullNameFromParts(first, last) || full || 'מועמד חדש';
+  } else if (full) {
+    const parts = splitFullNameToParts(full);
+    p.firstName = parts.firstName || null;
+    p.lastName = parts.lastName || null;
+    p.fullName = full;
+  } else {
+    p.fullName = 'מועמד חדש';
+    p.firstName = null;
+    p.lastName = null;
+  }
+};
+
+const syncCandidateNameForUpdate = (p, existing) => {
+  const hasFirst = Object.prototype.hasOwnProperty.call(p, 'firstName');
+  const hasLast = Object.prototype.hasOwnProperty.call(p, 'lastName');
+  const hasFull = Object.prototype.hasOwnProperty.call(p, 'fullName');
+  if (!hasFirst && !hasLast && !hasFull) return;
+
+  const exFirst = trimStr(existing.firstName);
+  const exLast = trimStr(existing.lastName);
+  const exFull = trimStr(existing.fullName);
+
+  const first = hasFirst ? trimStr(p.firstName) : exFirst;
+  const last = hasLast ? trimStr(p.lastName) : exLast;
+  const fullIn = hasFull ? trimStr(p.fullName) : '';
+
+  if (hasFirst || hasLast) {
+    p.firstName = first || null;
+    p.lastName = last || null;
+    p.fullName = buildFullNameFromParts(first, last) || fullIn || exFull || 'מועמד חדש';
+  } else if (hasFull && fullIn) {
+    p.fullName = fullIn;
+    const parts = splitFullNameToParts(fullIn);
+    p.firstName = parts.firstName || null;
+    p.lastName = parts.lastName || null;
+  }
+};
+
+const enrichCandidateNameForRead = (payload) => {
+  const fn = trimStr(payload.firstName);
+  const ln = trimStr(payload.lastName);
+  const full = trimStr(payload.fullName);
+  if (!fn && !ln && full) {
+    const parts = splitFullNameToParts(full);
+    payload.firstName = parts.firstName;
+    payload.lastName = parts.lastName;
+  } else if (!full && (fn || ln)) {
+    payload.fullName = buildFullNameFromParts(fn, ln);
+  }
+};
+
 const associateTagRelations = () => {
   if (!Candidate.associations?.candidateTags) {
     Candidate.hasMany(CandidateTag, { foreignKey: 'candidate_id', as: 'candidateTags' });
@@ -304,6 +376,16 @@ const mapCandidateWithTags = (candidate, options = {}) => {
   }
   payload.languages = langs;
   payload.jobScopes = Array.isArray(payload.jobScopes) ? payload.jobScopes : [];
+  payload.drivingLicenses = Array.isArray(payload.drivingLicenses) ? payload.drivingLicenses : [];
+  if (!payload.drivingLicenses.length && payload.drivingLicense) {
+    payload.drivingLicenses = [String(payload.drivingLicense).trim()].filter(Boolean);
+  }
+  payload.employmentTypes = Array.isArray(payload.employmentTypes) ? payload.employmentTypes : [];
+  if (!payload.employmentTypes.length && payload.employmentType) {
+    payload.employmentTypes = [String(payload.employmentType).trim()].filter(Boolean);
+  }
+
+  enrichCandidateNameForRead(payload);
 
   enrichGridCompanyFields(payload);
 
@@ -325,6 +407,8 @@ const list = async () =>
 const LIST_GRID_ATTRIBUTES = [
   'id',
   'fullName',
+  'firstName',
+  'lastName',
   'status',
   'phone',
   'email',
@@ -333,10 +417,13 @@ const LIST_GRID_ATTRIBUTES = [
   'maritalStatus',
   'gender',
   'drivingLicense',
+  'drivingLicenses',
   'mobility',
   'userId',
   'employmentType',
+  'employmentTypes',
   'jobScope',
+  'preferredWorkModels',
   'jobScopes',
   'availability',
   'physicalWork',
@@ -745,6 +832,7 @@ const create = async (payload) => {
   }
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;
+  syncCandidateNameForCreate(cleanPayload);
   return Candidate.create(cleanPayload);
 };
 
@@ -786,6 +874,32 @@ const update = async (id, payload) => {
   }
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;
+  delete cleanPayload.tagDetails;
+  delete cleanPayload.backendId;
+  delete cleanPayload.id;
+
+  const strArr = (a) =>
+    Array.isArray(a) ? a.map((x) => String(x || '').trim()).filter(Boolean) : undefined;
+
+  if ('drivingLicenses' in cleanPayload) {
+    cleanPayload.drivingLicenses = strArr(cleanPayload.drivingLicenses) || [];
+    if (cleanPayload.drivingLicenses.length) {
+      cleanPayload.drivingLicense = cleanPayload.drivingLicenses[0];
+    }
+  }
+  if ('employmentTypes' in cleanPayload) {
+    cleanPayload.employmentTypes = strArr(cleanPayload.employmentTypes) || [];
+    cleanPayload.employmentType = cleanPayload.employmentTypes[0] || '';
+  }
+  if ('jobScopes' in cleanPayload) {
+    cleanPayload.jobScopes = strArr(cleanPayload.jobScopes) || [];
+    if (cleanPayload.jobScopes.length) {
+      cleanPayload.jobScope = cleanPayload.jobScopes[0];
+    }
+  }
+
+  syncCandidateNameForUpdate(cleanPayload, candidate);
+
   await candidate.update(cleanPayload);
   return mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),

@@ -66,12 +66,7 @@ interface SourceCandidate {
 }
 
 const mockSourceCandidates: SourceCandidate[] = [
-    { id: 1, name: 'ישראל ישראלי', source: 'LinkedIn Post', date: '12/11/2025', status: 'חדש', matchScore: 92, city: 'תל אביב' },
-    { id: 2, name: 'מיכל כהן', source: 'Facebook Campaign', date: '11/11/2025', status: 'סינון טלפוני', matchScore: 85, city: 'רמת גן' },
-    { id: 3, name: 'דוד לוי', source: 'Website Career Page', date: '10/11/2025', status: 'ראיון', matchScore: 78, city: 'גבעתיים' },
-    { id: 4, name: 'שרה אהרוני', source: 'LinkedIn Post', date: '09/11/2025', status: 'חדש', matchScore: 65, city: 'הרצליה' },
-    { id: 5, name: 'גיל ססובר', source: 'Facebook Campaign', date: '09/11/2025', status: 'נדחה', matchScore: 45, city: 'חולון' },
-];
+    ];
 
 // Mock data
 const mockJob = {

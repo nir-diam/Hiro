@@ -24,6 +24,9 @@ const buildSearchDocument = (candidate, extraText = '') => {
     .join(', ');
 
   const langText = languages.map((l) => l?.name || l).filter(Boolean).join(', ');
+  const preferredWork = Array.isArray(candidate.preferredWorkModels)
+    ? candidate.preferredWorkModels.filter(Boolean).join(', ')
+    : '';
   const techText = tech.map((t) => t?.name || t).filter(Boolean).join(', ');
   const skillsText = [
     ...tags,
@@ -41,6 +44,7 @@ const buildSearchDocument = (candidate, extraText = '') => {
     `Industries: ${industries.join(', ')}.`,
     `Seniority: ${candidate.matchAnalysis?.seniority || ''}.`,
     `Languages: ${langText}.`,
+    preferredWork ? `Preferred work model: ${preferredWork}.` : '',
     extraText || '',
   ].join('\n');
 };

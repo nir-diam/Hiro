@@ -33,6 +33,9 @@ import EventTypesSettingsView from './components/EventTypesSettingsView';
 import RecruitmentSourcesSettingsView from './components/RecruitmentSourcesSettingsView';
 import QuestionnaireBuilderView from './components/QuestionnaireBuilderView'; 
 import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
+import { syncCandidateNameFields } from './utils/candidateName';
+import PipelineSettingsView from './components/PipelineSettingsView';
+import DocumentTemplatesView from './components/DocumentTemplatesView';
 import CandidatePoolView from './components/CandidatePoolView';
 import ReferralsReportView from './components/ReferralsReportView';
 import PublicationsReportView from './components/PublicationsReportView';
@@ -162,75 +165,105 @@ interface AppRoutesProps {
 
 const initialData = {
     id: 0,
-    fullName: "גדעון שפירא",
-    title: "מנהל שיווק דיגיטלי",
-    status: "עבר בדיקה ראשונית",
-    phone: "0544910468",
-    email: "gidon.shap@email.com",
-    address: "תל אביב - יפו",
+    fullName: "",
+    firstName: "",
+    lastName: "",
+    title: "",
+    status: "",
+    phone: "",
+    email: "",
+    address: "",
     idNumber: "",
     maritalStatus: "-",
-    gender: "זכר",
+    gender: "",
     drivingLicense: "-",
     mobility: "-",
-    birthYear: "1989",
-    birthMonth: "יוני",
-    birthDay: "15",
-    age: "35",
-    employmentType: 'שכיר',
-    jobScope: 'מלאה',
-    availability: 'מיידי (עד חודש)',
-    physicalWork: 'כן/לא/פיזית מתונה',
-    tags: ['חשמל', 'תואר ראשון', 'תואר שני', 'ניהול מערכות מידע', 'יזמות', 'ניהול פרויקט'],
-    internalTags: ['פוטנציאל ניהולי', 'מתאים גם למכירות'],
+    birthYear: "",
+    birthMonth: "",
+    birthDay: "",
+    age: "",
+    employmentType: '',
+    employmentTypes: ['שכיר'] as string[],
+    jobScope: '',
+    jobScopes: [] as string[],
+    availability: '',
+    physicalWork: '',
+    preferredWorkModels: [] as string[],
+    drivingLicenses: [] as string[],
+    tags: [],
+    internalTags: [],
     salaryMin: 18000,
     salaryMax: 20000,
-    recruiterNotes: 'נראה מועמד מבטיח, לתאם שיחה טלפונית בהקדם.',
-    candidateNotes: 'אני מאוד מתעניין בתפקידי ניהול מוצר ופתוח להצעות גם מתחום ה-Fintech.',
+    internalNotes: '',
+    candidateNotes: '',
     professionalSummary: '',
     workExperience: [
-        { id: 1, title: 'מנהל שיווק', company: 'בזק', companyField: 'תקשורת', startDate: '2020-01', endDate: '2023-05', description: 'ניהול צוות של 5 עובדים, אחריות על קמפיינים דיגיטליים ותקציב שנתי של 2 מיליון ש"ח.' },
-        { id: 2, title: 'מנהל קמפיינים PPC', company: 'Wix', companyField: 'הייטק', startDate: '2018-06', endDate: '2019-12', description: 'ניהול קמפיינים בגוגל ופייסבוק, אופטימיזציה והפקת דוחות.' },
-        { id: 3, title: 'מתמחה בשיווק', company: 'AllJobs', companyField: 'גיוס', startDate: '2017-09', endDate: '2018-05', description: 'סיוע לצוות השיווק במשימות השוטפות.' },
+        
     ],
     languages: [
-        { id: 1, name: 'עברית', level: 100, levelText: 'שפת אם / מעולה' },
-        { id: 2, name: 'אנגלית', level: 90, levelText: 'טוב מאוד' },
+       
     ],
     education: [
-        { id: 1, value: '2020-2024 - אוניברסיטת תל אביב, תואר ראשון בתקשורת' },
-        { id: 2, value: '2018 - קורס שיווק דיגיטלי, HackerU' },
+      
     ],
-    softSkills: ['עבודת צוות', 'ניהול זמן', 'פתרון בעיות'],
+    softSkills: [],
     techSkills: [
-        { id: 1, name: 'Google Ads', level: 85, levelText: 'טוב מאוד' },
-        { id: 2, name: 'פוטושופ', level: 75, levelText: 'טוב מאוד' },
+      
     ],
     industryAnalysis: {
         industries: [
-            { label: 'מסחר וקמעונאות', percentage: 60, color: 'bg-primary-500' },
-            { label: 'טכנולוגיה ושירותים', percentage: 40, color: 'bg-secondary-400' },
+           
         ],
         smartTags: {
-            domains: ['שיווק דיגיטלי', 'ניהול'],
-            orgDNA: { label: 'ארגוני Enterprise', subLabel: 'ניסיון בחברות גדולות' }
+            
         }
     }
 };
 
 const ensureArray = (value: any, fallback: any[]) => Array.isArray(value) ? value : fallback;
 
-const normalizeCandidatePayload = (payload: any) => ({
-    ...initialData,
-    ...payload,
-    tags: ensureArray(payload?.tags, initialData.tags),
-    internalTags: ensureArray(payload?.internalTags, initialData.internalTags),
-    workExperience: ensureArray(payload?.workExperience, initialData.workExperience),
-    languages: ensureArray(payload?.languages, initialData.languages),
-    education: ensureArray(payload?.education, initialData.education),
-    industryAnalysis: payload?.industryAnalysis || initialData.industryAnalysis,
-    backendId: payload?.id,
-});
+const normalizeCandidatePayload = (payload: any) => {
+    const drivingLicensesRaw = ensureArray(payload?.drivingLicenses, []);
+    const employmentTypesRaw = ensureArray(payload?.employmentTypes, []);
+    const jobScopesRaw = ensureArray(payload?.jobScopes, []);
+    const drivingLicenseSingle = payload?.drivingLicense != null ? String(payload.drivingLicense) : '';
+    const employmentSingle = payload?.employmentType != null ? String(payload.employmentType) : '';
+    const jobScopeSingle = payload?.jobScope != null ? String(payload.jobScope) : '';
+
+    const out = {
+        ...initialData,
+        ...payload,
+        tags: ensureArray(payload?.tags, initialData.tags),
+        internalTags: ensureArray(payload?.internalTags, initialData.internalTags),
+        workExperience: ensureArray(payload?.workExperience, initialData.workExperience),
+        languages: ensureArray(payload?.languages, initialData.languages),
+        education: ensureArray(payload?.education, initialData.education),
+        industryAnalysis: payload?.industryAnalysis || initialData.industryAnalysis,
+        backendId: payload?.id,
+        /** DB column is internalNotes; ignore legacy recruiterNotes if present */
+        internalNotes: payload?.internalNotes ?? payload?.recruiterNotes ?? '',
+        drivingLicenses:
+            drivingLicensesRaw.length > 0
+                ? drivingLicensesRaw.map((x: any) => String(x || '').trim()).filter(Boolean)
+                : drivingLicenseSingle && drivingLicenseSingle !== '-'
+                  ? [drivingLicenseSingle.trim()]
+                  : [],
+        employmentTypes:
+            employmentTypesRaw.length > 0
+                ? employmentTypesRaw.map((x: any) => String(x || '').trim()).filter(Boolean)
+                : employmentSingle
+                  ? [employmentSingle.trim()]
+                  : ['שכיר'],
+        jobScopes:
+            jobScopesRaw.length > 0
+                ? jobScopesRaw.map((x: any) => String(x || '').trim()).filter(Boolean)
+                : jobScopeSingle
+                  ? [jobScopeSingle.trim()]
+                  : [],
+    };
+    syncCandidateNameFields(out as Record<string, unknown>);
+    return out;
+};
 
 const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const params = useParams();
@@ -689,9 +722,6 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                                 formData={formData} 
                                 onFormChange={handleFormChange} 
                                 onInternalTagsChange={handleInternalTagsChange} 
-                                onGenerateExperienceSummary={handleGenerateExperienceSummary}
-                                isGeneratingSummary={isGeneratingSummary}
-                                generateSummaryError={generateSummaryError}
                             />
                             <ResumeViewer resumeData={mockResumeData} onOpenMessageModal={props.openMessageModal} />
                         </div>
@@ -743,6 +773,9 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     const search = location.search || '';
                     navigate(`/candidates/${id}${search}`);
                 }}
+                onGenerateExperienceSummary={handleGenerateExperienceSummary}
+                isGeneratingSummary={isGeneratingSummary}
+                generateSummaryError={generateSummaryError}
             />
             
             <div ref={props.contentAreaRef} className="scroll-mt-32"></div>
@@ -816,6 +849,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="company" replace /> },
                  { path: 'company', element: <CompanySettingsView /> },
+                 { path: 'pipelines', element: <PipelineSettingsView /> },
+                 { path: 'documents', element: <DocumentTemplatesView /> },
                  { path: 'coordinators', element: <CoordinatorsSettingsView /> },
                  { path: 'coordinators/:coordinatorId', element: <CoordinatorProfileView /> },
                  { path: 'agreements', element: <AgreementTypesSettingsView /> }, // New Route

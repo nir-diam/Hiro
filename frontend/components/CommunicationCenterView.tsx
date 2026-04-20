@@ -50,48 +50,7 @@ interface CommunicationCenterViewProps {
 
 // --- MOCK DATA ---
 const mockMessages: MessageLog[] = [
-    {
-        id: 4, channel: 'whatsapp', direction: 'inbound', recipientName: 'גדעון שפירא', recipientType: 'candidate', candidateId: 1, recipientPhone: '054-1234567',
-        content: 'היי דנה, תודה על הפנייה. אני זמין מחר ב-10 בבוקר לשיחה. האם זה מתאים לך?',
-        status: 'read', timestamp: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
-        agentName: 'דנה כהן', relatedJob: 'מנהל/ת שיווק דיגיטלי', hasAttachment: false, isRead: false, isArchived: false
-    },
-    {
-        id: 1, channel: 'whatsapp', direction: 'outbound', recipientName: 'גדעון שפירא', recipientType: 'candidate', candidateId: 1, recipientPhone: '054-1234567',
-        content: 'היי גדעון, ראיתי את קורות החיים שלך למשרת מנהל שיווק. אשמח לתאם שיחה קצרה.',
-        status: 'read', timestamp: new Date(Date.now() - 1000 * 60 * 60).toISOString(), 
-        agentName: 'דנה כהן', relatedJob: 'מנהל/ת שיווק דיגיטלי', hasAttachment: false, isRead: true, isArchived: false
-    },
-    {
-        id: 3, channel: 'sms', direction: 'outbound', recipientName: 'דוד כהן', recipientType: 'candidate', candidateId: 3, recipientPhone: '052-9999999',
-        content: 'דוד שלום, נסינו להשיגך בקשר למשרת נהג חלוקה. אנא חזור אלינו.',
-        status: 'failed', timestamp: new Date(Date.now() - 1000 * 60 * 60 * 5).toISOString(), 
-        agentName: 'מערכת', relatedJob: 'נהג חלוקה', hasAttachment: false, errorMessage: 'מספר שגוי או חסום', isRead: true, isArchived: false
-    },
-    {
-        id: 2, channel: 'email', direction: 'outbound', recipientName: 'נועה לוי', recipientType: 'candidate', candidateId: 13, recipientEmail: 'noa@gmail.com',
-        content: 'זימון לראיון עבודה - בזק. שלום נועה, בהמשך לשיחתנו אנו שמחים לזמן אותך לראיון פרונטלי במשרדי החברה.',
-        status: 'delivered', timestamp: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(), 
-        agentName: 'אביב לוי', relatedJob: 'מפתח/ת Fullstack', hasAttachment: true, isRead: true, isArchived: false
-    },
-    {
-        id: 8, channel: 'email', direction: 'outbound', recipientName: 'ישראל ישראלי', recipientType: 'client', recipientEmail: 'israel@getter.co.il',
-        content: 'סיכום שבועי - גיוסים פתוחים. היי ישראל, מצורף דוח סטטוס מועמדים לשבוע האחרון.',
-        status: 'read', timestamp: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
-        agentName: 'אביב לוי', relatedJob: 'כללי', hasAttachment: true, isRead: true, isArchived: true // Archived example
-    },
-    {
-        id: 9, channel: 'whatsapp', direction: 'outbound', recipientName: 'יעל שחר', recipientType: 'recruiter', recipientPhone: '050-0000000',
-        content: 'היי יעל, את יכולה לחזור למועמד דוד? הוא חיפש אותך.',
-        status: 'read', timestamp: new Date(Date.now() - 1000 * 60 * 60 * 50).toISOString(),
-        agentName: 'דנה כהן', relatedJob: '', hasAttachment: false, isRead: true, isArchived: false
-    },
-    {
-        id: 5, channel: 'email', direction: 'outbound', recipientName: 'רון שחר', recipientType: 'candidate', candidateId: 4, recipientEmail: 'ron@walla.co.il',
-        content: 'עדכון לגבי מועמדותך. לצערנו החלטנו להתקדם עם מועמדים אחרים.',
-        status: 'sent', timestamp: new Date(Date.now() - 1000 * 60 * 60 * 72).toISOString(), 
-        agentName: 'יעל שחר', relatedJob: 'אנליסט נתונים', hasAttachment: false, isRead: true, isArchived: false
-    },
+    
 ];
 
 const mockTemplates: MessageTemplate[] = [

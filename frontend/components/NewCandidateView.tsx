@@ -215,7 +215,7 @@ const NewCandidateView: React.FC<{ setActiveView: (view: string) => void; }> = (
                                         <option value="1">1 (טרקטור)</option>
                                     </FormSelect>
                                      <FormSelect label="ניידות" name="mobility" value={formData.mobility} onChange={handleChange}>
-                                        <option value="-">-</option>
+                                        <option value="-"></option>
                                         <option value="כן">כן</option>
                                         <option value="לא">לא</option>
                                         <option value="בעל/ת רכב">בעל/ת רכב</option>

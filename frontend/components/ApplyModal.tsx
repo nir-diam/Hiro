@@ -20,15 +20,7 @@ const loadingMessages = [
     'כמעט מסיימים...'
 ];
 
-const mockCVText = `גדעון שפירא
-מנהל שיווק דיגיטלי עם 5 שנות ניסיון.
-ניסיון:
-- מנהל שיווק בבזק (2020-2023): ניהול צוות, אחריות על קמפיינים דיגיטליים ותקציב שנתי.
-- מנהל קמפיינים PPC ב-Wix (2018-2019): ניהול קמפיינים בגוגל ופייסבוק.
-השכלה:
-- תואר ראשון בתקשורת, אוניברסיטת תל אביב.
-כישורים:
-- Google Ads, Facebook Ads, Google Analytics, ניהול צוות, אסטרטגיה.`;
+const mockCVText = ``;
 
 const ApplyModal: React.FC<ApplyModalProps> = ({ isOpen, onClose, onApply, job }) => {
     const [coverLetter, setCoverLetter] = useState('');

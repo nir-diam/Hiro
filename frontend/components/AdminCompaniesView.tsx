@@ -10,6 +10,13 @@ import {
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
+import {
+    fetchPicklistValuesByKey,
+    picklistRowLabel,
+    SECTOR_PICKLIST_FALLBACK,
+    SECTOR_PICKLIST_KEY,
+    type PicklistValueRow,
+} from '../services/picklistValuesApi';
 
 // --- Types ---
 type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'Mixed' | 'Unknown';
@@ -231,11 +238,7 @@ interface CompanyUser {
 }
 
 const mockCompanyUsers: CompanyUser[] = [
-    { id: 1, name: 'ישראל ישראלי', role: 'Full Stack Developer', yearsOfExperience: 3.5, isCurrent: true, yearsSinceLeft: null },
-    { id: 2, name: 'שירה כהן', role: 'Product Manager', yearsOfExperience: 5, isCurrent: false, yearsSinceLeft: 2 },
-    { id: 3, name: 'דוד לוי', role: 'Frontend Developer', yearsOfExperience: 1.5, isCurrent: true, yearsSinceLeft: null },
-    { id: 4, name: 'מיכל אברהם', role: 'UX/UI Designer', yearsOfExperience: 4, isCurrent: false, yearsSinceLeft: 1 },
-    { id: 5, name: 'רון גולן', role: 'Backend Developer', yearsOfExperience: 2, isCurrent: false, yearsSinceLeft: 5 },
+    
 ];
 
 const CompanyUsersTab: React.FC<{ companyName: string }> = ({ companyName }) => {
@@ -393,7 +396,8 @@ const CompanyModal: React.FC<{
     onClose: () => void;
     onSave: (company: Company) => void | Promise<void>;
     company: Company | null;
-}> = ({ isOpen, onClose, onSave, company }) => {
+    sectorOptions: PicklistValueRow[];
+}> = ({ isOpen, onClose, onSave, company, sectorOptions }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'users'>('details');
     const [formData, setFormData] = useState<Company>({
         id: 0,
@@ -448,6 +452,13 @@ const CompanyModal: React.FC<{
             }
         }
     }, [isOpen, company]);
+
+    const sectorSelectRows = useMemo(() => {
+        const v = (formData.type || '').trim();
+        if (!v) return sectorOptions;
+        if (sectorOptions.some((o) => o.value === v)) return sectorOptions;
+        return [...sectorOptions, { id: `_legacy_${v}`, label: v, value: v, displayName: null }];
+    }, [sectorOptions, formData.type]);
 
     if (!isOpen) return null;
 
@@ -601,11 +612,11 @@ const CompanyModal: React.FC<{
                             <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">מגזר</label>
                                 <select name="type" value={formData.type} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="הייטק">הייטק</option>
-                                    <option value="תעשייה">תעשייה</option>
-                                    <option value="פיננסים">פיננסים</option>
-                                    <option value="שירותים">שירותים</option>
-                                    <option value="אחר">אחר (אחזקות ועוד)</option>
+                                    {sectorSelectRows.map((row) => (
+                                        <option key={row.id} value={row.value}>
+                                            {picklistRowLabel(row)}
+                                        </option>
+                                    ))}
                                 </select>
                             </div>
                             <div>
@@ -820,6 +831,23 @@ const AdminCompaniesView: React.FC = () => {
     useEffect(() => {
         void loadOrganizations();
     }, [loadOrganizations]);
+
+    const [sectorPicklistRows, setSectorPicklistRows] = useState<PicklistValueRow[]>([]);
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            const rows = await fetchPicklistValuesByKey(apiBase, SECTOR_PICKLIST_KEY);
+            if (!cancelled) setSectorPicklistRows(rows);
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    const sectorOptions = useMemo(
+        () => (sectorPicklistRows.length > 0 ? sectorPicklistRows : SECTOR_PICKLIST_FALLBACK),
+        [sectorPicklistRows],
+    );
     
     // Chat State
     const [isChatOpen, setIsChatOpen] = useState(false);
@@ -1539,11 +1567,11 @@ const AdminCompaniesView: React.FC = () => {
                                  <div className="flex-1 min-w-[150px]">
                                      <select name="type" value={filters.type} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none">
                                          <option value="">סוג חברה (הכל)</option>
-                                         <option value="הייטק">הייטק</option>
-                                         <option value="תעשייה">תעשייה</option>
-                                         <option value="מסחר וקמעונאות">מסחר וקמעונאות</option>
-                                         <option value="שירותים">שירותים</option>
-                                         <option value="פיננסים">פיננסים</option>
+                                         {sectorOptions.map((row) => (
+                                             <option key={row.id} value={row.value}>
+                                                 {picklistRowLabel(row)}
+                                             </option>
+                                         ))}
                                      </select>
                                 </div>
                                  <div className="flex-1 min-w-[150px]">
@@ -1849,6 +1877,7 @@ const AdminCompaniesView: React.FC = () => {
                 onClose={() => setIsModalOpen(false)}
                 onSave={handleSaveCompany}
                 company={editingCompany}
+                sectorOptions={sectorOptions}
             />
 
             {/* AI Assistant Chat (Floating Button is in Header, Chat logic here) */}

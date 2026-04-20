@@ -107,6 +107,8 @@ export interface Candidate {
   salaryMax?: number | null;
   /** מיקום / כתובת לתצוגה בטבלה */
   location?: string;
+  /** תאריך קליטה — מסונכרן מ-createdAt ב-API */
+  createDate?: string;
 }
 
 export const candidatesData: Candidate[] = [
@@ -826,6 +828,12 @@ function languageRowSortText(x: NonNullable<Candidate['languages']>[number]): st
 
 function candidateSortComparable(candidate: Candidate, key: keyof Candidate): string | number {
     const v = candidate[key];
+    if (key === 'createDate') {
+        const s = v != null ? String(v).trim() : '';
+        if (!s) return 0;
+        const t = new Date(s).getTime();
+        return Number.isFinite(t) ? t : 0;
+    }
     if (key === 'matchScore' || key === 'salaryMin' || key === 'salaryMax') {
         const n = Number(v);
         return Number.isFinite(n) ? n : -1;
@@ -838,6 +846,14 @@ function candidateSortComparable(candidate: Candidate, key: keyof Candidate): st
     }
     if (v == null) return '';
     return typeof v === 'number' ? v : String(v);
+}
+
+function formatIntakeDateCell(raw: string | undefined): string {
+    const s = (raw || '').trim();
+    if (!s) return '';
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return s;
+    return d.toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
 function formatSalaryExpectationCell(c: Candidate): string {
@@ -1114,6 +1130,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         salaryMin: c.salaryMin != null && c.salaryMin !== '' ? Number(c.salaryMin) : null,
         salaryMax: c.salaryMax != null && c.salaryMax !== '' ? Number(c.salaryMax) : null,
         location: [c.location, c.address].map((x: unknown) => String(x || '').trim()).filter(Boolean).join(' · ') || '',
+        createDate: c.createdAt != null && c.createdAt !== '' ? String(c.createdAt) : '',
         };
     }, []);
 
@@ -1341,13 +1358,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         { id: 'title', header: t('col.role') },
         { id: 'status', header: t('col.status') },
         { id: 'lastActivity', header: t('col.last_activity') },
+        { id: 'createDate', header: t('col.intake_date') },
         { id: 'source', header: t('col.source') },
         { id: 'tags', header: t('col.tags') },
         { id: 'location', header: t('col.location') },
         { id: 'industry', header: t('col.industry') },
         { id: 'field', header: t('col.field') },
         { id: 'sector', header: t('col.sector') },
-        { id: 'companySize', header: t('col.company_size') },
         { id: 'jobScopes', header: t('col.job_scopes') },
         { id: 'gender', header: t('col.gender') },
         { id: 'age', header: t('col.age') },
@@ -1926,6 +1943,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     .filter(Boolean)
                     .join(', ');
             }
+            case 'createDate':
+                return formatIntakeDateCell(candidate.createDate);
             default:
                 return (candidate as any)[columnId];
         }

@@ -106,55 +106,7 @@ const pipelines: Pipeline[] = [
 
 // --- RICH MOCK DATA ---
 export const clientsData: Client[] = [
-  { 
-      id: '1', name: 'גטר גרופ', contactPerson: 'ישראל ישראלי', phone: '050-1112222', email: 'israel@getter.co.il', 
-      openJobs: 3, status: 'פעיל', accountManager: 'ישראל ישראלי', city: 'פתח תקווה', region: 'מרכז', industry: 'מסחר וקמעונאות', tier: 'VIP', 
-      pipelineStage: 'negotiation', pipelineValue: 45000, 
-      lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString(), // 2 days ago
-      daysSinceLastContact: 2,
-      nextScheduledActivity: new Date(Date.now() + 1000 * 60 * 60 * 24 * 3).toISOString(), // in 3 days
-      activePlacements: 5,
-      logo: 'https://logo.clearbit.com/getter.co.il'
-  },
-  { 
-      id: '2', name: 'נעמן גרופ', contactPerson: 'דנה כהן', phone: '052-3334444', email: 'dana@naaman.co.il', 
-      openJobs: 8, status: 'פעיל', accountManager: 'אביב לוי', city: 'ראש העין', region: 'מרכז', industry: 'מסחר וקמעונאות', tier: 'Gold', 
-      pipelineStage: 'proposal', pipelineValue: 120000, 
-      lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 5).toISOString(), // 5 days ago
-      daysSinceLastContact: 5,
-      nextScheduledActivity: null, // Risk factor: No future activity
-      activePlacements: 2,
-      logo: 'https://logo.clearbit.com/naaman-vardinon.co.il'
-  },
-  { 
-      id: '3', name: 'שטראוס מים', contactPerson: 'אביב לוי', phone: '053-5556666', email: 'aviv@strauss.com', 
-      openJobs: 1, status: 'בהקפאה', accountManager: 'ישראל ישראלי', city: 'פתח תקווה', region: 'מרכז', industry: 'תעשייה וייצור', tier: 'Silver', 
-      pipelineStage: 'risk', pipelineValue: 15000, 
-      lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 45).toISOString(), // 45 days ago
-      daysSinceLastContact: 45,
-      nextScheduledActivity: null,
-      activePlacements: 0,
-      logo: 'https://logo.clearbit.com/strauss-water.com'
-  },
-  { 
-      id: '4', name: 'FedEx', contactPerson: 'יעל שחר', phone: '054-7778888', email: 'yael@fedex.co.il', 
-      openJobs: 0, status: 'לא פעיל', accountManager: 'שרית בן חיים', city: 'נתב"ג', region: 'מרכז', industry: 'תחבורה ולוגיסטיקה', tier: 'Standard', 
-      pipelineStage: 'lead', pipelineValue: 0, 
-      lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 120).toISOString(), 
-      daysSinceLastContact: 120,
-      nextScheduledActivity: null,
-      activePlacements: 0,
-      logo: 'https://logo.clearbit.com/fedex.com'
-  },
-  { 
-      id: '5', name: 'צ\'יטה שליחויות', contactPerson: 'משה משה', phone: '058-9990000', email: 'moshe@chita.co.il', 
-      openJobs: 2, status: 'פעיל', accountManager: 'אביב לוי', city: 'חיפה', region: 'צפון', industry: 'תחבורה ולוגיסטיקה', tier: 'Gold', 
-      pipelineStage: 'won', pipelineValue: 80000, 
-      lastContactDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 14).toISOString(), // 14 days ago
-      daysSinceLastContact: 14,
-      nextScheduledActivity: new Date(Date.now() + 1000 * 60 * 60 * 24 * 1).toISOString(), // Tomorrow
-      activePlacements: 8
-  },
+  
 ];
 
 const normalizeClient = (raw: any): Client => {

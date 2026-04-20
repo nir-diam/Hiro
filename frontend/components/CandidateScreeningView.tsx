@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import {
     ChevronDownIcon,
@@ -19,6 +19,8 @@ import { InternalOpinionEditorModal, copyRichHtmlToClipboard } from './InternalO
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
 interface ScreeningJob {
   id: number | string;
   company: string;
@@ -30,13 +32,14 @@ interface ScreeningJob {
   requirements: string[];
   screeningQuestions: { question: string; answer: string }[];
   /** Job JSONB contacts from API when present */
-  contactsFromJob?: { id?: string; name: string; role?: string }[];
+  contactsFromJob?: { id?: string; name: string; role?: string; email?: string }[];
 }
 
 interface SendModalContact {
   id: string;
   name: string;
   role: string;
+  email?: string;
 }
 
 export const screeningJobsData: ScreeningJob[] = [
@@ -98,12 +101,11 @@ const AIMatchScore: React.FC<{ score: number }> = ({ score }) => {
 
 // Mock Resume Data for the split view
 const mockResumeData = {
-    name: 'גדעון שפירא',
-    contact: 'gidon.shap@email.com | 054-1234567',
-    summary: 'מנהל שיווק דיגיטלי עם ניסיון של 5 שנים. מומחה ב-PPC, SEO ואנליטיקה.',
+    name: '',
+    contact: '',
+    summary: '',
     experience: [
-        '<b>מנהל שיווק דיגיטלי, בזק</b><br/>ניהול קמפיינים ותקציבים גדולים.',
-        '<b>מנהל PPC, Wix</b><br/>אופטימיזציה לקמפיינים בגוגל ופייסבוק.'
+        ''
     ]
 };
 
@@ -171,6 +173,14 @@ function buildResumeDataFromCandidate(candidate?: {
   };
 }
 
+function jobContactStableId(x: any, index: number, jobId: string): string {
+  const kind = x.kind === 'user' ? 'user' : x.kind === 'contact' ? 'contact' : null;
+  const rid = x.id != null ? String(x.id).trim() : '';
+  if (kind && rid) return `${kind}:${rid}`;
+  if (rid) return rid;
+  return `job-${jobId}-contact-${index}`;
+}
+
 function mapApiJobToScreeningJob(raw: any): ScreeningJob {
   const req = raw.requirements ?? [];
   const reqList = Array.isArray(req) ? req : (typeof req === 'string' ? [req] : []);
@@ -179,18 +189,24 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
     ? screening.map((q: any) => ({ question: typeof q === 'string' ? q : (q?.question ?? q?.text ?? ''), answer: '' }))
     : [];
   const rawContacts = raw.contacts;
+  const jid = String(raw.id ?? '');
   let contactsFromJob: ScreeningJob['contactsFromJob'];
   if (Array.isArray(rawContacts) && rawContacts.length) {
     contactsFromJob = rawContacts
-      .map((x: any, i: number) => ({
-        id: x.id != null ? String(x.id) : undefined,
-        name:
-          typeof x.name === 'string'
-            ? x.name
-            : String(x.contactName || x.fullName || x.email || '').trim() || `איש קשר ${i + 1}`,
-        role: typeof x.role === 'string' ? x.role : String(x.title || ''),
-      }))
-      .filter((x) => x.name);
+      .map((x: any, i: number) => {
+        const emailRaw = x.email != null ? String(x.email).trim() : '';
+        const name =
+          typeof x.name === 'string' && x.name.trim()
+            ? x.name.trim()
+            : String(x.contactName || x.fullName || x.email || '').trim();
+        return {
+          id: jobContactStableId(x, i, jid),
+          name,
+          role: typeof x.role === 'string' ? x.role : String(x.title || ''),
+          email: emailRaw && EMAIL_RE.test(emailRaw) ? emailRaw : undefined,
+        };
+      })
+      .filter((x) => Boolean(x.name));
   }
   return {
     id: raw.id,
@@ -206,31 +222,18 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
   };
 }
 
-function getFallbackContactsForCompany(company: string): SendModalContact[] {
-  const c = company.trim();
-  if (c.includes('Wix'))
-    return [
-      { id: 'demo-wix-1', name: 'דנה כהן', role: 'HR Manager' },
-      { id: 'demo-wix-2', name: 'יוסי לוי', role: 'Engineering Manager' },
-      { id: 'demo-wix-3', name: 'מיכל ברק', role: 'Recruiter' },
-    ];
-  if (c.includes('בזק'))
-    return [
-      { id: 'demo-bzq-1', name: 'רונית אברהם', role: 'Marketing Director' },
-      { id: 'demo-bzq-2', name: 'אביב גל', role: 'Digital Lead' },
-      { id: 'demo-bzq-3', name: 'שרה פרידמן', role: 'Talent Acquisition' },
-      { id: 'demo-bzq-4', name: 'משה דיין', role: 'CEO' },
-      { id: 'demo-bzq-5', name: 'ליאת שקד', role: 'HRBP' },
-    ];
-  if (c.includes('אל-על') || c.includes('אלעל'))
-    return [
-      { id: 'demo-ly-1', name: 'איתי לוין', role: 'Head of Data' },
-      { id: 'demo-ly-2', name: 'קרן אור', role: 'BI Architect' },
-    ];
-  return [
-    { id: 'demo-gen-1', name: 'איש קשר לקוח', role: 'מגייס' },
-    { id: 'demo-gen-2', name: 'מנהל/ת גיוס', role: 'HR' },
-  ];
+/** Chips + send payload: always from current `job.contactsFromJob` (never a stale parallel cache). */
+function contactsListFromScreeningJob(job: ScreeningJob): SendModalContact[] {
+  const jid = String(job.id);
+  const list = job.contactsFromJob ?? [];
+  return list
+    .map((c, i) => ({
+      id: c.id ?? `job-embed-${jid}-${i}`,
+      name: (c.name || '').trim(),
+      role: (c.role || '').trim(),
+      email: c.email?.trim() || undefined,
+    }))
+    .filter((c) => c.name.length > 0);
 }
 
 function stripHtmlToText(html: string) {
@@ -281,8 +284,6 @@ const CandidateScreeningView: React.FC<{
     const [rejectSubmitting, setRejectSubmitting] = useState(false);
     const [sendCvModalOpen, setSendCvModalOpen] = useState(false);
     const [sendModalJobIds, setSendModalJobIds] = useState<(number | string)[]>([]);
-    const [contactsForSendModal, setContactsForSendModal] = useState<Record<string, SendModalContact[]>>({});
-    const [contactsForSendLoading, setContactsForSendLoading] = useState(false);
     const [selectedContactsByJob, setSelectedContactsByJob] = useState<Record<string, Record<string, boolean>>>({});
     const [sendCvSubmitting, setSendCvSubmitting] = useState(false);
     const resumeSendCvAfterOpinionRef = useRef(false);
@@ -313,6 +314,14 @@ const CandidateScreeningView: React.FC<{
         })
         .catch(() => setJobs([]))
         .finally(() => setJobsLoading(false));
+    }, [candidateId]);
+
+    useEffect(() => {
+      setSelectedJobs([]);
+      setExpandedJobId(null);
+      setSendCvModalOpen(false);
+      setSendModalJobIds([]);
+      setSelectedContactsByJob({});
     }, [candidateId]);
 
     useEffect(() => {
@@ -683,108 +692,30 @@ const CandidateScreeningView: React.FC<{
       closeRejectModal,
     ]);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (!sendCvModalOpen || sendModalJobIds.length === 0) return;
-      let cancelled = false;
-      setContactsForSendLoading(true);
-
-      (async () => {
-        const selectedJobObjs = jobs.filter((j) => sendModalJobIds.includes(j.id));
-        const result: Record<string, SendModalContact[]> = {};
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        const headers: Record<string, string> = {};
-        if (token) headers.Authorization = `Bearer ${token}`;
-
-        let clientsList: any[] = [];
-        if (apiBase && token) {
-          try {
-            const res = await fetch(`${apiBase}/api/clients`, { headers });
-            if (res.ok) {
-              const data = await res.json();
-              clientsList = Array.isArray(data) ? data : [];
-            }
-          } catch {
-            /* ignore */
-          }
-        }
-
-        const resolveClientId = (company: string): string | null => {
-          const c = company.trim();
-          if (!c || !clientsList.length) return null;
-          const norm = (s: string) => s.trim().toLowerCase();
-          const nc = norm(c);
-          for (const cl of clientsList) {
-            const name = norm(String(cl.displayName || cl.name || ''));
-            if (name === nc) return String(cl.id);
-          }
-          for (const cl of clientsList) {
-            const name = norm(String(cl.displayName || cl.name || ''));
-            if (name && (name.includes(nc) || nc.includes(name))) return String(cl.id);
-          }
-          return null;
-        };
-
-        const fetchedClientContacts = new Map<string, SendModalContact[]>();
-
+      const selectedJobObjs = jobs.filter((j) => sendModalJobIds.includes(j.id));
+      setSelectedContactsByJob((prev) => {
+        const next: Record<string, Record<string, boolean>> = {};
         for (const job of selectedJobObjs) {
           const jid = String(job.id);
-          if (job.contactsFromJob?.length) {
-            result[jid] = job.contactsFromJob.map((c, i) => ({
-              id: c.id ?? `job-embed-${jid}-${i}`,
-              name: c.name || 'ללא שם',
-              role: c.role || '',
-            }));
-            continue;
+          const contacts = contactsListFromScreeningJob(job);
+          const row: Record<string, boolean> = {};
+          for (const c of contacts) {
+            const was = prev[jid]?.[c.id];
+            row[c.id] = was !== undefined ? was : true;
           }
-          const clientId = resolveClientId(job.company);
-          if (clientId && apiBase) {
-            if (!fetchedClientContacts.has(clientId)) {
-              try {
-                const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts`, { headers });
-                const list = res.ok ? await res.json() : [];
-                const arr = (Array.isArray(list) ? list : [])
-                  .filter((x: { isActive?: boolean }) => x.isActive !== false)
-                  .map((x: { id: string; name?: string; role?: string }) => ({
-                    id: String(x.id),
-                    name: String(x.name || ''),
-                    role: String(x.role || ''),
-                  }))
-                  .filter((x) => x.name);
-                fetchedClientContacts.set(clientId, arr);
-              } catch {
-                fetchedClientContacts.set(clientId, []);
-              }
-            }
-            const fromApi = fetchedClientContacts.get(clientId) || [];
-            result[jid] = fromApi.length ? fromApi : getFallbackContactsForCompany(job.company);
-          } else {
-            result[jid] = getFallbackContactsForCompany(job.company);
-          }
+          next[jid] = row;
         }
-
-        if (cancelled) return;
-        setContactsForSendModal(result);
-        const sel: Record<string, Record<string, boolean>> = {};
-        for (const jid of Object.keys(result)) {
-          sel[jid] = {};
-          for (const c of result[jid]) sel[jid][c.id] = true;
-        }
-        setSelectedContactsByJob(sel);
-        setContactsForSendLoading(false);
-      })();
-
-      return () => {
-        cancelled = true;
-      };
+        return next;
+      });
     }, [sendCvModalOpen, sendModalJobIds.join(','), jobs]);
 
     const closeSendCvModal = useCallback(() => {
       setSendCvModalOpen(false);
       setSendModalJobIds([]);
-      setContactsForSendModal({});
       setSelectedContactsByJob({});
       setSendCvSubmitting(false);
-      setContactsForSendLoading(false);
     }, []);
 
     const openSendCvModal = useCallback(() => {
@@ -809,6 +740,12 @@ const CandidateScreeningView: React.FC<{
 
       for (const id of jobIds) {
         const jid = String(id);
+        const job = jobs.find((j) => j.id === id);
+        const list = job ? contactsListFromScreeningJob(job) : [];
+        if (list.length === 0) {
+          alert('למשרה אחת או יותר מהנבחרות לא הוגדרו אנשי קשר. הוסיפו אנשי קשר בכרטיס המשרה ואז נסו שוב.');
+          return;
+        }
         const map = selectedContactsByJob[jid];
         const n = map ? Object.entries(map).filter(([, v]) => v).length : 0;
         if (n === 0) {
@@ -823,27 +760,58 @@ const CandidateScreeningView: React.FC<{
         return;
       }
 
+      if (!apiBase) {
+        alert('חסרה הגדרת שרת (VITE_API_BASE).');
+        return;
+      }
+      if (!candidateId) {
+        alert('חסר מזהה מועמד.');
+        return;
+      }
+
       setSendCvSubmitting(true);
       try {
         const payload = jobIds.map((id) => {
           const job = jobs.find((j) => j.id === id);
-          const contacts = contactsForSendModal[String(id)] || [];
+          const contacts = job ? contactsListFromScreeningJob(job) : [];
           const sel = selectedContactsByJob[String(id)] || {};
           return {
             jobId: id,
             jobTitle: job?.title,
             company: job?.company,
-            contacts: contacts.filter((c) => sel[c.id]),
+            contacts: contacts
+              .filter((c) => sel[c.id])
+              .map((c) => ({
+                email: String(c.email || '').trim(),
+                name: c.name || '',
+              })),
             internalOpinionHtml: internalOpinionByJobId[String(id)] || '',
           };
         });
-        console.log('[sendCvToClient]', {
-          candidateId,
-          candidateName: candidateResumeData.name,
-          payload,
+
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+          alert('נדרשת התחברות כדי לשלוח מייל.');
+          return;
+        }
+
+        const res = await fetch(`${apiBase}/api/email-uploads/send-screening-cv`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ candidateId, sends: payload }),
         });
-        await new Promise((r) => setTimeout(r, 450));
-        alert('השליחה נרשמה בהצלחה (סימולציה — חיבור אימייל יתווסף בהמשך).');
+
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          alert(typeof data?.message === 'string' ? data.message : 'שליחת המייל נכשלה.');
+          return;
+        }
+
+        const n = typeof data?.count === 'number' ? data.count : payload.reduce((a, p) => a + p.contacts.length, 0);
+        alert(n > 0 ? `נשלחו ${n} מיילים בהצלחה.` : 'לא נשלחו מיילים.');
         setSelectedJobs((prev) => prev.filter((jid) => !jobIds.includes(jid)));
         closeSendCvModal();
       } finally {
@@ -852,18 +820,40 @@ const CandidateScreeningView: React.FC<{
     }, [
       sendModalJobIds,
       selectedContactsByJob,
-      contactsForSendModal,
       jobs,
       internalOpinionByJobId,
       candidateId,
       candidateResumeData.name,
       closeSendCvModal,
+      apiBase,
     ]);
 
     const sendModalJobs = useMemo(
       () => jobs.filter((j) => sendModalJobIds.includes(j.id)),
       [jobs, sendModalJobIds]
     );
+
+    const sendCvBlockedNoJobContacts = useMemo(
+      () => sendModalJobs.some((j) => contactsListFromScreeningJob(j).length === 0),
+      [sendModalJobs]
+    );
+
+    const sendCvBlockedMissingRecipientEmail = useMemo(() => {
+      for (const j of sendModalJobs) {
+        const jid = String(j.id);
+        const list = contactsListFromScreeningJob(j);
+        const sel = selectedContactsByJob[jid] || {};
+        for (const c of list) {
+          if (!sel[c.id]) continue;
+          const em = String(c.email || '').trim();
+          if (!EMAIL_RE.test(em)) return true;
+        }
+      }
+      return false;
+    }, [sendModalJobs, selectedContactsByJob]);
+
+    const sendCvSendDisabled =
+      sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail;
 
     const allSelected = useMemo(() => jobs.length > 0 && selectedJobs.length === jobs.length, [jobs, selectedJobs]);
 
@@ -1233,55 +1223,51 @@ const CandidateScreeningView: React.FC<{
                           המקוריים בצירוף חוות הדעת המקצועית שהופקה.
                         </p>
                       </div>
-                      {contactsForSendLoading ? (
-                        <div className="flex flex-col items-center justify-center py-12 gap-3 text-text-muted">
-                          <div className="w-10 h-10 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
-                          <p className="text-sm font-medium">טוען אנשי קשר...</p>
-                        </div>
-                      ) : (
+                      <div className="space-y-4">
+                        <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">
+                          משרות נבחרות ואנשי קשר:
+                        </h4>
                         <div className="space-y-4">
-                          <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">
-                            משרות נבחרות ואנשי קשר:
-                          </h4>
-                          <div className="space-y-4">
-                            {sendModalJobs.map((job) => {
-                              const jid = String(job.id);
-                              const contacts = contactsForSendModal[jid] || [];
-                              return (
-                                <div
-                                  key={jid}
-                                  className="p-4 bg-bg-subtle rounded-xl border border-border-default space-y-4"
-                                >
-                                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                                    <div className="flex-1 min-w-0">
-                                      <p className="font-bold text-base text-text-default">{job.title}</p>
-                                      <p className="text-sm text-text-muted">{job.company}</p>
-                                    </div>
-                                    <div className="flex items-center gap-3 flex-shrink-0">
-                                      <button
-                                        type="button"
-                                        onClick={() => openOpinionEditorFromSendModal(job)}
-                                        disabled={sendCvSubmitting}
-                                        className="p-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50"
-                                        title="ערוך חוות דעת"
-                                      >
-                                        <PencilIcon className="w-4 h-4" />
-                                        <span className="hidden sm:inline">ערוך חוות דעת</span>
-                                      </button>
-                                      <div className="flex items-center gap-2 border-r border-border-default pr-3 mr-1">
-                                        <span className="text-xs font-bold text-accent-600 bg-accent-50 px-2 py-0.5 rounded-full border border-accent-100">
-                                          {job.aiMatchScore}% התאמה
-                                        </span>
-                                      </div>
+                          {sendModalJobs.map((job) => {
+                            const jid = String(job.id);
+                            const contacts = contactsListFromScreeningJob(job);
+                            return (
+                              <div
+                                key={jid}
+                                className="p-4 bg-bg-subtle rounded-xl border border-border-default space-y-4"
+                              >
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <div className="flex-1 min-w-0">
+                                    <p className="font-bold text-base text-text-default">{job.title}</p>
+                                    <p className="text-sm text-text-muted">{job.company}</p>
+                                  </div>
+                                  <div className="flex items-center gap-3 flex-shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => openOpinionEditorFromSendModal(job)}
+                                      disabled={sendCvSubmitting}
+                                      className="p-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors flex items-center gap-1.5 text-xs font-bold disabled:opacity-50"
+                                      title="ערוך חוות דעת"
+                                    >
+                                      <PencilIcon className="w-4 h-4" />
+                                      <span className="hidden sm:inline">ערוך חוות דעת</span>
+                                    </button>
+                                    <div className="flex items-center gap-2 border-r border-border-default pr-3 mr-1">
+                                      <span className="text-xs font-bold text-accent-600 bg-accent-50 px-2 py-0.5 rounded-full border border-accent-100">
+                                        {job.aiMatchScore}% התאמה
+                                      </span>
                                     </div>
                                   </div>
+                                </div>
+                                {!jobsLoading && contacts.length > 0 ? (
                                   <div className="pt-3 border-t border-border-default/50">
                                     <p className="text-[10px] font-bold text-text-muted uppercase mb-2 tracking-wide">
-                                      אנשי קשר לקבלת קו&quot;ח:
+                                      אנשי קשר לקבלת קו&quot;ח (מהמשרה):
                                     </p>
                                     <div className="flex flex-wrap gap-2">
                                       {contacts.map((c) => {
                                         const selected = !!selectedContactsByJob[jid]?.[c.id];
+                                        const hasMail = EMAIL_RE.test(String(c.email || '').trim());
                                         return (
                                           <button
                                             key={c.id}
@@ -1292,7 +1278,7 @@ const CandidateScreeningView: React.FC<{
                                               selected
                                                 ? 'bg-primary-50 border-primary-200 text-primary-700 shadow-sm'
                                                 : 'bg-bg-card border-border-default text-text-muted hover:border-primary-200'
-                                            }`}
+                                            } ${selected && !hasMail ? 'ring-1 ring-red-200' : ''}`}
                                           >
                                             <div
                                               className="rounded-full flex items-center justify-center bg-primary-100 shrink-0"
@@ -1307,6 +1293,13 @@ const CandidateScreeningView: React.FC<{
                                               {c.role ? (
                                                 <p className="text-[9px] mt-0.5 text-primary-400">{c.role}</p>
                                               ) : null}
+                                              {hasMail ? (
+                                                <p className="text-[9px] mt-0.5 text-text-subtle truncate max-w-[140px]">
+                                                  {c.email}
+                                                </p>
+                                              ) : (
+                                                <p className="text-[9px] mt-0.5 text-red-500">חסר מייל במשרה</p>
+                                              )}
                                             </div>
                                             {selected ? (
                                               <CheckCircleIcon className="w-3.5 h-3.5 text-primary-500 ml-0.5 shrink-0" />
@@ -1316,12 +1309,12 @@ const CandidateScreeningView: React.FC<{
                                       })}
                                     </div>
                                   </div>
-                                </div>
-                              );
-                            })}
-                          </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
                         </div>
-                      )}
+                      </div>
                       <div className="flex items-start gap-3 p-3 bg-yellow-50 rounded-lg border border-yellow-100">
                         <div className="mt-0.5 shrink-0">
                           <ExclamationTriangleIcon className="w-4 h-4 text-yellow-600" />
@@ -1335,7 +1328,7 @@ const CandidateScreeningView: React.FC<{
                       <button
                         type="button"
                         onClick={closeSendCvModal}
-                        disabled={sendCvSubmitting || contactsForSendLoading}
+                        disabled={sendCvSubmitting}
                         className="px-6 py-2.5 font-bold text-text-muted hover:bg-bg-hover rounded-xl transition-colors disabled:opacity-50"
                       >
                         ביטול
@@ -1343,7 +1336,7 @@ const CandidateScreeningView: React.FC<{
                       <button
                         type="button"
                         onClick={() => void handleConfirmSendCv()}
-                        disabled={sendCvSubmitting || contactsForSendLoading}
+                        disabled={sendCvSubmitting || sendCvSendDisabled}
                         className="px-8 py-2.5 font-bold text-white bg-primary-600 hover:bg-primary-700 rounded-xl shadow-lg shadow-primary-200 transition-all transform active:scale-95 flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         <span>{sendCvSubmitting ? 'שולח...' : 'אשר ושלח'}</span>

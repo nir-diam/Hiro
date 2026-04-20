@@ -27,14 +27,16 @@ const initialCandidateState = {
     email: "",
     address: "",
     idNumber: "",
-    maritalStatus: "-",
     gender: "זכר",
-    drivingLicense: "-",
+    drivingLicense: '',
+    drivingLicenses: [] as string[],
     mobility: "-",
     employmentType: 'שכיר',
-    jobScope: 'מלאה',
+    employmentTypes: ['שכיר'] as string[],
+    jobScope: '',
+    jobScopes: ['מלאה'] as string[],
     availability: 'מיידי (עד חודש)',
-    physicalWork: 'לא רלוונטי',
+    preferredWorkModels: [] as string[],
     birthYear: "",
     birthMonth: "",
     birthDay: "",
@@ -681,15 +683,15 @@ const NewCandidateViewV2: React.FC = () => {
                 onFormChange={setFormData}
                 isFavorite={false}
                 onToggleFavorite={() => {}}
+                onGenerateExperienceSummary={handleGenerateExperienceSummary}
+                isGeneratingSummary={isGeneratingSummary}
+                generateSummaryError={generateSummaryError}
             />
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <MainContent 
                     formData={formData} 
                     onFormChange={setFormData} 
-                    onGenerateExperienceSummary={handleGenerateExperienceSummary}
-                    isGeneratingSummary={isGeneratingSummary}
-                    generateSummaryError={generateSummaryError}
                 />
                 <ResumeViewer
                     resumeData={resumeData}
@@ -723,15 +725,15 @@ const NewCandidateViewV2: React.FC = () => {
                 onFormChange={setFormData}
                 isFavorite={false}
                 onToggleFavorite={() => {}}
+                onGenerateExperienceSummary={handleGenerateExperienceSummary}
+                isGeneratingSummary={isGeneratingSummary}
+                generateSummaryError={generateSummaryError}
             />
             
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <MainContent 
                     formData={formData} 
                     onFormChange={setFormData} 
-                    onGenerateExperienceSummary={handleGenerateExperienceSummary}
-                    isGeneratingSummary={isGeneratingSummary}
-                    generateSummaryError={generateSummaryError}
                 />
                 <div className="bg-bg-subtle/50 rounded-3xl border-2 border-dashed border-border-default flex flex-col items-center justify-center p-12 text-center">
                     <DocumentTextIcon className="w-16 h-16 text-text-subtle mb-4" />

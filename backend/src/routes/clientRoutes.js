@@ -42,6 +42,8 @@ router.delete('/:id/documents/:docId', clientDocumentController.remove);
 router.get('/:id/finance', clientFinanceController.get);
 router.put('/:id/finance', clientFinanceController.update);
 
+router.get('/:id/staff-users', clientController.listStaffUsers);
+
 router.get(
   '/:id/usage-settings',
   authMiddleware,

@@ -33,11 +33,7 @@ export interface Event {
 
 // --- MOCK DATA ---
 export const initialEventsData: Event[] = [
-  { id: 1, type: 'ראיון', title: 'ראיון טכני עם גדעון שפירא', date: '2025-08-15T10:00:00', coordinator: 'דנה כהן', status: 'עתידי', linkedTo: { type: 'מועמד', name: 'גדעון שפירא' }, description: 'ראיון למשרת מפתח Fullstack ב-Wix. לבדוק ניסיון ב-React ו-Node.js.', history: [{ user: 'דנה כהן', timestamp: '2025-08-14T10:00:00', summary: 'יצר את האירוע' }] },
-  { id: 2, type: 'פגישה', title: 'פגישת סיכום שבוע עם צוות הגיוס', date: '2025-08-14T16:30:00', coordinator: 'אביב לוי', status: 'הושלם', linkedTo: { type: 'צוות', name: 'גיוס טכנולוגי' }, description: 'סקירת מועמדים פתוחים, תכנון משימות לשבוע הבא.', history: [{ user: 'אביב לוי', timestamp: '2025-08-14T16:00:00', summary: 'יצר את האירוע' }] },
-  { id: 3, type: 'תזכורת', title: 'Follow-up לגבי המועמד יאיר כהן', date: '2025-08-16T09:00:00', coordinator: 'יעל שחר', status: 'עתידי', linkedTo: { type: 'מועמד', name: 'יאיר כהן' }, description: 'לשלוח מייל ללקוח לקבלת משוב על הראיון.', history: [{ user: 'יעל שחר', timestamp: '2025-08-15T09:00:00', summary: 'יצר את האירוע' }] },
-  { id: 4, type: 'משימת מערכת', title: 'קו"ח חדשים התקבלו מ-AllJobs', date: '2025-08-14T11:22:00', coordinator: 'מערכת', status: 'הושלם', linkedTo: null, description: '3 קורות חיים חדשים למשרת "אנליסט נתונים" נוספו למערכת.', history: [{ user: 'מערכת', timestamp: '2025-08-14T11:22:00', summary: 'אירוע מערכת אוטומטי' }] },
-  { id: 5, type: 'ראיון', title: 'ראיון משאבי אנוש - שרית לוי', date: '2025-08-18T14:00:00', coordinator: 'דנה כהן', status: 'עתידי', linkedTo: { type: 'מועמד', name: 'שרית לוי' }, description: 'ראיון התאמה תרבותית למשרת מנהל/ת מוצר.', history: [{ user: 'דנה כהן', timestamp: '2025-08-17T14:00:00', summary: 'יצר את האירוע' }] },
+
 ];
 
 const eventTypeStyles: { [key in EventType]: { bg: string; text: string; border: string; } } = {
@@ -71,7 +67,7 @@ function formatRelativeTime(dateString: string) {
 }
 
 const eventTypeOptions = ['הכל', 'פגישה', 'ראיון', 'תזכורת', 'משימת מערכת'];
-const coordinatorOptions = ['הכל', 'דנה כהן', 'אביב לוי', 'יעל שחר', 'אני', 'מערכת'];
+const coordinatorOptions = [];
 
 interface EventsViewProps {
     events: Event[];

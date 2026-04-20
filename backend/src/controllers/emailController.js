@@ -9,7 +9,13 @@ const jobService = require('../services/jobService');
 const clientService = require('../services/clientService');
 const EmailUpload = require('../models/EmailUpload');
 const { createS3Client } = require('../services/s3Service');
-const { uploadResumeForCandidate, fetchResumeText, buildParsedUpdates } = require('./candidateController');
+const {
+  uploadResumeForCandidate,
+  fetchResumeText,
+  buildParsedUpdates,
+  fetchResumeBinaryForMail,
+} = require('./candidateController');
+const Candidate = require('../models/Candidate');
 const candidateTagService = require('../services/candidateTagService');
 const promptService = require('../services/promptService');
 const { sendChat } = require('../services/geminiService');
@@ -47,6 +53,14 @@ const htmlFromPlainTextForMail = (t) =>
     .replace(/\r\n/g, '\n')
     .split('\n')
     .join('<br/>');
+
+const stripHtmlMail = (s) =>
+  String(s ?? '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
 /**
  * Clickable links (HTML + plain text) for linked candidate / job / client in outgoing task & message mail.
@@ -646,7 +660,30 @@ const send = async (req, res) => {
       allocatedDays,
       taskPayload,
       skipSmtp,
+      attachments: rawAttachments,
     } = payload;
+
+    let smtpAttachments = null;
+    if (Array.isArray(rawAttachments) && rawAttachments.length) {
+      smtpAttachments = rawAttachments
+        .map((a) => {
+          const contentB64 = typeof a?.content === 'string' ? a.content.trim() : '';
+          if (!contentB64) return null;
+          try {
+            const buf = Buffer.from(contentB64, 'base64');
+            if (!buf.length) return null;
+            return {
+              filename: String(a.filename || 'attachment'),
+              content: buf,
+              contentType: typeof a.contentType === 'string' ? a.contentType : undefined,
+            };
+          } catch {
+            return null;
+          }
+        })
+        .filter(Boolean);
+      if (smtpAttachments.length === 0) smtpAttachments = null;
+    }
 
     const normalizedSkipSmtp = Boolean(skipSmtp);
 
@@ -783,6 +820,7 @@ const send = async (req, res) => {
           userRole: smtpUserRole,
           clientName: smtpClientName,
           senderEmail: smtpSenderEmail,
+          attachments: smtpAttachments || undefined,
         });
 
         await savedMessage.update({
@@ -829,10 +867,316 @@ const send = async (req, res) => {
   }
 };
 
+/** POST body: { candidateId, sends: [{ jobId, jobTitle?, company?, internalOpinionHtml?, contacts: [{ email, name? }] }] } */
+const sendScreeningCv = async (req, res) => {
+  try {
+    const { candidateId, sends } = req.body || {};
+    if (!candidateId || typeof candidateId !== 'string') {
+      return res.status(400).json({ message: 'candidateId is required' });
+    }
+    if (!Array.isArray(sends) || sends.length === 0) {
+      return res.status(400).json({ message: 'sends must be a non-empty array' });
+    }
+
+    const candidate = await Candidate.findByPk(candidateId, {
+      attributes: ['id', 'fullName', 'resumeUrl'],
+    });
+    if (!candidate) {
+      return res.status(404).json({ message: 'Candidate not found' });
+    }
+    if (!candidate.resumeUrl) {
+      return res.status(400).json({ message: 'למועמד אין קובץ קורות חיים מצורף' });
+    }
+
+    const bin = await fetchResumeBinaryForMail(candidate.resumeUrl, candidate.id);
+    if (!bin || !bin.buffer?.length) {
+      return res.status(400).json({ message: 'לא ניתן להוריד את קובץ קורות החיים לצורף למייל' });
+    }
+
+    const safeFileStem = String(candidate.fullName || 'candidate')
+      .replace(/[^\w\u0590-\u05FF\- ]+/g, '')
+      .trim()
+      .replace(/\s+/g, '-')
+      || 'resume';
+    const ext =
+      typeof bin.filename === 'string' && bin.filename.includes('.')
+        ? bin.filename.split('.').pop()
+        : 'pdf';
+    const attachFilename = `${safeFileStem}-resume.${ext}`;
+
+    const attachments = [
+      { filename: attachFilename, content: bin.buffer, contentType: bin.contentType },
+    ];
+
+    const emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    const {
+      userRole: smtpUserRole,
+      clientName: smtpClientName,
+      senderEmail: smtpSenderEmail,
+    } = await resolveEmailSenderSmtpContext(req);
+
+    const results = [];
+    const candLabel = candidate.fullName || 'המועמד';
+
+    for (const block of sends) {
+      const jobId = block.jobId != null ? block.jobId : null;
+      const jobTitle = typeof block.jobTitle === 'string' ? block.jobTitle.trim() : '';
+      const company = typeof block.company === 'string' ? block.company.trim() : '';
+      const internalOpinionHtml =
+        typeof block.internalOpinionHtml === 'string' ? block.internalOpinionHtml : '';
+      const contacts = Array.isArray(block.contacts) ? block.contacts : [];
+
+      for (const c of contacts) {
+        const email = typeof c.email === 'string' ? c.email.trim() : '';
+        const name = typeof c.name === 'string' ? c.name.trim() : '';
+        if (!emailRe.test(email)) {
+          return res.status(400).json({
+            message: `כתובת מייל לא תקינה או חסרה: ${email || '(ריק)'}`,
+          });
+        }
+
+        const subject = `קורות חיים — ${candLabel} | ${jobTitle || 'משרה'}${company ? ` — ${company}` : ''}`;
+
+        const greeting = name ? `שלום ${escapeHtmlMail(name)},` : 'שלום,';
+        const htmlParts = [
+          `<p dir="rtl">${greeting}</p>`,
+          `<p dir="rtl">מצורפות קורות החיים של <strong>${escapeHtmlMail(candLabel)}</strong>${
+            jobTitle ? ` עבור המשרה <strong>${escapeHtmlMail(jobTitle)}</strong>` : ''
+          }${company ? ` (${escapeHtmlMail(company)})` : ''}.</p>`,
+        ];
+        if (internalOpinionHtml && internalOpinionHtml.trim()) {
+          htmlParts.push('<hr/><h3 dir="rtl">חוות דעת פנימית</h3>');
+          htmlParts.push(`<div dir="rtl">${internalOpinionHtml}</div>`);
+        }
+        const htmlBody = htmlParts.join('\n');
+
+        const textBody = [
+          stripHtmlMail(name ? `שלום ${name},` : 'שלום,'),
+          stripHtmlMail(
+            `מצורפות קורות החיים של ${candLabel}${jobTitle ? ` עבור המשרה ${jobTitle}` : ''}${
+              company ? ` (${company})` : ''
+            }.`,
+          ),
+          internalOpinionHtml && internalOpinionHtml.trim()
+            ? `\n\nחוות דעת פנימית:\n${stripHtmlMail(internalOpinionHtml)}`
+            : '',
+        ].join('\n');
+
+        const savedMessage = await NotificationMessage.create({
+          toEmail: email,
+          subject,
+          text: textBody.trim() ? textBody : null,
+          html: htmlBody,
+          messageType: 'message',
+          status: 'unread',
+          isTask: false,
+          assignee: email,
+          category: 'screening_cv',
+          senderUserId: req?.user?.sub || req?.user?.id || null,
+          metadata: {
+            deliveryStatus: 'pending',
+            taskPayload: {
+              kind: 'screening_cv',
+              candidateId: candidate.id,
+              candidateName: candLabel,
+              jobId,
+              jobTitle: jobTitle || '',
+              clientName: company || '',
+              recipientName: name || '',
+              recipientEmail: email,
+            },
+          },
+        });
+
+        try {
+          const result = await emailService.sendEmail({
+            toEmail: email,
+            subject,
+            text: textBody || ' ',
+            html: htmlBody,
+            userRole: smtpUserRole,
+            clientName: smtpClientName,
+            senderEmail: smtpSenderEmail,
+            attachments,
+          });
+
+          await savedMessage.update({
+            metadata: {
+              ...(savedMessage.metadata || {}),
+              deliveryStatus: 'sent',
+              providerMessageId: result?.messageId || null,
+            },
+          });
+
+          results.push({
+            to: email,
+            jobId,
+            messageId: result?.messageId || null,
+            notificationMessageId: savedMessage.id,
+          });
+        } catch (sendErr) {
+          await savedMessage.update({
+            metadata: {
+              ...(savedMessage.metadata || {}),
+              deliveryStatus: 'failed',
+              deliveryError: sendErr?.message || String(sendErr),
+            },
+          });
+          throw sendErr;
+        }
+      }
+    }
+
+    return res.json({ ok: true, count: results.length, results });
+  } catch (err) {
+    console.error('[email][sendScreeningCv]', err);
+    return res.status(400).json({ message: err?.message || 'Failed to send screening CV' });
+  }
+};
+
+/** Persist workflow status / note / due fields on screening_cv notification rows. */
+const patchScreeningCvReferral = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const isUuid =
+      typeof id === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
+    if (!isUuid) {
+      return res.status(400).json({ message: 'id must be a valid UUID' });
+    }
+
+    const bodyRaw = req.body || {};
+    const { status, dueDate, dueTime } = bodyRaw;
+    const hasNoteKey = Object.prototype.hasOwnProperty.call(bodyRaw, 'note');
+    const hasStatus = status !== undefined && status !== null && String(status).trim() !== '';
+    const hasDueDate = dueDate !== undefined;
+    const hasDueTime = dueTime !== undefined;
+    if (!hasStatus && !hasNoteKey && !hasDueDate && !hasDueTime) {
+      return res.status(400).json({ message: 'Provide status, note, dueDate, and/or dueTime' });
+    }
+
+    const record = await NotificationMessage.findByPk(id);
+    if (!record) {
+      return res.status(404).json({ message: 'Not found' });
+    }
+    if (String(record.category || '') !== 'screening_cv') {
+      return res.status(400).json({ message: 'Not a screening CV referral' });
+    }
+
+    const role = String(req.user?.role || '').toLowerCase();
+    const isBroad = role === 'admin' || role === 'super_admin';
+    const ctx = await resolveNotificationViewerContext(req);
+    if (!isBroad && (!ctx || !notificationVisibleToViewer(record, ctx))) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const nextMeta = { ...(record.metadata || {}) };
+    if (hasStatus) {
+      nextMeta.referralWorkflowStatus = String(status).trim();
+    }
+    if (hasNoteKey) {
+      const raw = bodyRaw.note;
+      const n = raw === null || raw === '' ? null : String(raw).trim();
+      nextMeta.referralInternalNote = n || null;
+    }
+    nextMeta.referralWorkflowUpdatedAt = new Date().toISOString();
+
+    const patch = { metadata: nextMeta };
+
+    if (hasDueDate) {
+      if (dueDate === null || dueDate === '') {
+        patch.dueDate = null;
+      } else if (typeof dueDate === 'string') {
+        patch.dueDate = dueDate.trim() || null;
+      }
+    }
+    if (hasDueTime) {
+      if (dueTime === null || dueTime === '') {
+        patch.dueTime = null;
+      } else if (typeof dueTime === 'string') {
+        patch.dueTime = dueTime.trim() || null;
+      }
+    }
+
+    await record.update(patch);
+    await record.reload();
+    res.set('Cache-Control', 'private, no-store');
+    return res.json({ ok: true, record: record.get({ plain: true }) });
+  } catch (err) {
+    console.error('[email][patchScreeningCvReferral]', err);
+    return res.status(500).json({ message: err?.message || 'Failed to update referral' });
+  }
+};
+
+/** CV sends from candidate screening — one row per outbound email (notification_messages.category = screening_cv). */
+const listScreeningCvReferrals = async (req, res) => {
+  try {
+    const userId = req.user?.sub || req.user?.id;
+    const role = String(req.user?.role || '').toLowerCase();
+    const isBroad = role === 'admin' || role === 'super_admin';
+
+    const where = { category: 'screening_cv' };
+    if (!isBroad && userId) {
+      where.senderUserId = userId;
+    }
+
+    const rows = await NotificationMessage.findAll({
+      where,
+      include: [{ model: User, as: 'sender', attributes: ['name'], required: false }],
+      order: [['createdAt', 'DESC']],
+      limit: 500,
+    });
+
+    const out = rows.map((r) => {
+      const plain = r.get({ plain: true });
+      const tp = plain.metadata?.taskPayload || {};
+      const sender = plain.sender;
+      const recipientLine = [tp.recipientName, plain.toEmail].filter(Boolean).join(' · ');
+      const wf = plain.metadata?.referralWorkflowStatus;
+      const workflowStatus =
+        wf != null && String(wf).trim() !== '' ? String(wf).trim() : 'חדש';
+      const internal = plain.metadata?.referralInternalNote;
+      const notesParts = [recipientLine, internal].filter((x) => x != null && String(x).trim() !== '');
+      const internalStr =
+        internal != null && String(internal).trim() !== '' ? String(internal).trim() : '';
+      return {
+        id: plain.id,
+        candidateId: tp.candidateId || null,
+        jobId: tp.jobId || null,
+        candidateName: tp.candidateName || '',
+        jobTitle: tp.jobTitle || '',
+        clientName: tp.clientName || '',
+        clientId: null,
+        referralDate: plain.createdAt,
+        contactDate: '',
+        source: 'סינון — שליחת קו"ח',
+        coordinator: sender?.name ? String(sender.name).trim() : '',
+        status: workflowStatus,
+        recipientLine,
+        internalNote: internalStr,
+        dueDate: plain.dueDate != null && String(plain.dueDate).trim() !== '' ? String(plain.dueDate).trim() : '',
+        dueTime: plain.dueTime != null && String(plain.dueTime).trim() !== '' ? String(plain.dueTime).trim() : '',
+        notes: notesParts.length ? notesParts.join('\n\n') : recipientLine,
+        clientContacts: [],
+        deliveryStatus: plain.metadata?.deliveryStatus || null,
+      };
+    });
+
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(out);
+  } catch (err) {
+    console.error('[email][listScreeningCvReferrals]', err);
+    return res.status(500).json({ message: err?.message || 'Failed to list screening CV referrals' });
+  }
+};
+
 module.exports = {
   upload,
   getByCandidate,
   send,
+  sendScreeningCv,
+  listScreeningCvReferrals,
+  patchScreeningCvReferral,
   getNotificationMessages,
   updateNotificationMessageStatus,
   updateNotificationMessageAssignee,

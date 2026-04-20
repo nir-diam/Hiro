@@ -1,19 +1,33 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { 
-    MagnifyingGlassIcon, Cog6ToothIcon, Squares2X2Icon, TableCellsIcon, AvatarIcon, 
+    MagnifyingGlassIcon, Cog6ToothIcon, Squares2X2Icon, TableCellsIcon,
     PencilIcon, PaperAirplaneIcon, ChevronDownIcon, CheckCircleIcon,
-    ClockIcon, DocumentArrowDownIcon, ChartBarIcon, ExclamationTriangleIcon,
-    AdjustmentsHorizontalIcon, FunnelIcon, TrophyIcon, UserIcon, ArrowPathIcon, ChevronUpIcon
+    ClockIcon, DocumentArrowDownIcon, ExclamationTriangleIcon,
+    AdjustmentsHorizontalIcon, FunnelIcon, TrophyIcon, ArrowPathIcon
 } from './Icons';
 import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal from './ReReferModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { type Job } from './JobsView';
+import type { Candidate } from './CandidatesListView';
 
 // --- TYPES ---
-type ReferralStatus = 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'נדחה' | 'התקבל לעבודה' | 'פעיל';
+type ReferralStatus =
+  | 'חדש'
+  | 'בבדיקה'
+  | 'ראיון'
+  | 'הצעה'
+  | 'התקבל'
+  | 'נדחה'
+  | 'התקבל לעבודה'
+  | 'פעיל'
+  | 'הוזמן לראיון'
+  | 'לא רלוונטי'
+  | 'מועמד משך עניין'
+  | 'בארכיון'
+  | 'בהמתנה'
+  | 'נשלחו קו"ח';
 
 interface InterviewQA {
   question: string;
@@ -27,7 +41,9 @@ interface ClientContact {
 }
 
 interface Referral {
-  id: number;
+  id: string;
+  /** Backend candidate UUID — for opening summary drawer */
+  candidateId: string | null;
   candidateName: string;
   avatar: string;
   clientName: string;
@@ -39,77 +55,138 @@ interface Referral {
   source: string;
   interviewQA: InterviewQA[];
   feedbackSummary: string;
+  recipientLine: string;
+  internalNote: string;
+  referralDueDate: string;
+  referralDueTime: string;
+  deliveryStatus?: unknown;
   clientContacts: ClientContact[];
   daysInStage?: number;
 }
 
 interface ReferralsReportViewProps {
     onOpenNewTask: () => void;
-    onOpenCandidateSummary: (candidateId: number) => void;
+    onOpenCandidateSummary: (candidate: Candidate | number) => void;
 }
 
-// --- RICH MOCK DATA ---
-const longSummary = `מועמד בעל ניסיון עשיר של מעל 5 שנים בתחום, המציג יכולות טכניות וניהוליות מרשימות.
-במהלך הראיון הפגין ידע מעמיק בניהול מוצר מקצה לקצה, החל משלב האפיון ועד להשקה.
-עבד בחברות סטארטאפ וגם בארגונים גדולים, מה שמקנה לו ראייה רחבה וגמישות מחשבתית.
-בעל תואר ראשון במדעי המחשב ותואר שני במנהל עסקים.
-שולט בשפה האנגלית ברמה גבוהה מאוד (שפת אם).
-מחפש אתגר חדש ומעוניין להשתלב בחברה טכנולוגית צומחת.
-התרשמתי מאוד מהמוטיבציה שלו ומהיכולת שלו לפתור בעיות מורכבות בצורה יצירתית.
-הוא זמין לתחילת עבודה מיידית.
-ממליצים ציינו שהוא "שחקן נשמה" ובעל יחסי אנוש מעולים.
-לסיכום, מדובר במועמד חזק מאוד שמתאים לדרישות המשרה באופן מלא.`;
+const statusStyles: { [key: string]: string } = {
+  'חדש': 'bg-blue-100 text-blue-800 border-blue-200',
+  'בבדיקה': 'bg-purple-100 text-purple-800 border-purple-200',
+  'ראיון': 'bg-yellow-100 text-yellow-800 border-yellow-200',
+  'הצעה': 'bg-orange-100 text-orange-800 border-orange-200',
+  'התקבל': 'bg-green-100 text-green-800 border-green-200',
+  'התקבל לעבודה': 'bg-green-100 text-green-800 border-green-200',
+  'פעיל': 'bg-teal-100 text-teal-800 border-teal-200',
+  'נדחה': 'bg-gray-100 text-gray-700 border-gray-200',
+  'הוזמן לראיון': 'bg-indigo-100 text-indigo-800 border-indigo-200',
+  'לא רלוונטי': 'bg-gray-100 text-gray-600 border-gray-200',
+  'מועמד משך עניין': 'bg-sky-100 text-sky-800 border-sky-200',
+  'בארכיון': 'bg-gray-100 text-gray-600 border-gray-200',
+  'בהמתנה': 'bg-amber-100 text-amber-800 border-amber-200',
+  'נשלחו קו"ח': 'bg-cyan-100 text-cyan-800 border-cyan-200',
+};
 
-const detailedQA: InterviewQA[] = [
-    { question: 'מהן ציפיות השכר שלך?', answer: 'אני מכוון לטווח של 25,000 - 28,000 ש"ח ברוטו + רכב ותנאים סוציאליים מלאים.' },
-    { question: 'מהי זמינותך לתחילת עבודה?', answer: 'מיידית. סיימתי את תפקידי האחרון לפני כשבוע ואני פנוי לתהליכים.' },
-    { question: 'מדוע עזבת את מקום העבודה האחרון?', answer: 'החברה עברה רה-ארגון וקיצוצים נרחבים, והפרויקט שעליו עבדתי הוקפא.' },
-    { question: 'האם יש לך ניסיון בניהול צוות?', answer: 'כן, בתפקידי הקודם ניהלתי צוות של 5 מפתחים ואנשי QA במשך שנתיים.' },
-    { question: 'מהו המודל העבודה המועדף עליך?', answer: 'אני מעדיף מודל היברידי, שילוב של 3 ימים מהמשרד ויומיים מהבית.' }
-];
+const statusOptions: ReferralStatus[] = ['חדש', 'בבדיקה', 'ראיון', 'הצעה', 'התקבל', 'נדחה', 'התקבל לעבודה', 'בהמתנה', 'פעיל'];
 
-const referralsData: Referral[] = [
-    { 
-        id: 1, candidateName: 'שפירא גדעון', avatar: 'שג', clientName: 'בזק', jobTitle: 'מנהל/ת שיווק דיגיטלי', coordinator: 'דנה כהן', status: 'ראיון', referralDate: '2025-07-20', lastUpdatedBy: 'דנה כהן', source: 'AllJobs', daysInStage: 2,
-        interviewQA: detailedQA,
-        feedbackSummary: longSummary,
-        clientContacts: [{ id: 101, name: 'יוסי כהן', email: 'yossi@bezeq.co.il' }]
-    },
-    { 
-        id: 2, candidateName: 'כהן מאיה', avatar: 'כמ', clientName: 'Wix', jobTitle: 'מפתחת Fullstack', coordinator: 'אביב לוי', status: 'בבדיקה', referralDate: '2025-07-10', lastUpdatedBy: 'אביב לוי', source: 'LinkedIn', daysInStage: 12,
-        interviewQA: detailedQA, 
-        feedbackSummary: longSummary,
-        clientContacts: [{ id: 201, name: 'איתי לוי', email: 'itai@wix.com' }]
-    },
-    { 
-        id: 3, candidateName: 'לוי דוד', avatar: 'לד', clientName: 'Fiverr', jobTitle: 'מעצב UX/UI', coordinator: 'דנה כהן', status: 'חדש', referralDate: '2025-07-18', lastUpdatedBy: 'מערכת', source: 'חבר מביא חבר', daysInStage: 3,
-        interviewQA: detailedQA, 
-        feedbackSummary: longSummary,
-        clientContacts: [{ id: 301, name: 'נעמה ברק', email: 'naama@fiverr.com' }]
-    },
-    { 
-        id: 4, candidateName: 'ישראלי יעל', avatar: 'יי', clientName: 'אלביט מערכות', jobTitle: 'מהנדסת QA', coordinator: 'יעל שחר', status: 'נדחה', referralDate: '2025-07-17', lastUpdatedBy: 'יעל שחר', source: 'Ethosia', daysInStage: 1,
-        interviewQA: detailedQA, 
-        feedbackSummary: 'המועמדת נחמדה אך חסרת ניסיון מספק בבדיקות אוטומציה מורכבות כפי שנדרש למשרה זו.',
-        clientContacts: [{ id: 401, name: 'דניאל שוורץ', email: 'daniel@elbit.co.il' }]
-    },
-    { 
-        id: 5, candidateName: 'מזרחי אבי', avatar: 'מא', clientName: 'תנובה', jobTitle: 'מנהל מוצר', coordinator: 'אביב לוי', status: 'התקבל', referralDate: '2025-07-16', lastUpdatedBy: 'אביב לוי', source: 'GotFriends', daysInStage: 5,
-        interviewQA: detailedQA, 
-        feedbackSummary: longSummary,
-        clientContacts: [{ id: 501, name: 'רוני שקד', email: 'roni@tnuva.co.il' }]
-    },
-    { id: 6, candidateName: 'פרידמן שרה', avatar: 'פש', clientName: 'Nisha', jobTitle: 'מהנדסת QA | אוטומציה', coordinator: 'יעל שחר', status: 'חדש', referralDate: '2025-07-05', lastUpdatedBy: 'מערכת', source: 'Nisha', interviewQA: [], feedbackSummary: 'טרם נוצר קשר.', clientContacts: [], daysInStage: 15 },
-    { id: 7, candidateName: 'גולן איתי', avatar: 'גא', clientName: 'בזק', jobTitle: 'מנהל/ת שיווק דיגיטלי', coordinator: 'דנה כהן', status: 'התקבל', referralDate: '2025-06-20', lastUpdatedBy: 'דנה כהן', source: 'AllJobs', daysInStage: 4, interviewQA: [], feedbackSummary: 'התקבל לעבודה.', clientContacts: [] },
-    { id: 8, candidateName: 'רון שחר', avatar: 'רש', clientName: 'Wix', jobTitle: 'מפתחת Backend', coordinator: 'אביב לוי', status: 'ראיון', referralDate: '2025-07-21', lastUpdatedBy: 'אביב לוי', source: 'LinkedIn', daysInStage: 1, interviewQA: [], feedbackSummary: 'מתקדם לראיון טכני.', clientContacts: [] },
-    { id: 9, candidateName: 'דניאל קליין', avatar: 'דק', clientName: 'בזק', jobTitle: 'אנליסט נתונים', coordinator: 'דנה כהן', status: 'בבדיקה', referralDate: '2025-07-22', lastUpdatedBy: 'דנה כהן', source: 'AllJobs', daysInStage: 0, interviewQA: [], feedbackSummary: '', clientContacts: [] },
-    { id: 10, candidateName: 'מיכל לוי', avatar: 'מל', clientName: 'Fiverr', jobTitle: 'Data Analyst', coordinator: 'יעל שחר', status: 'הצעה', referralDate: '2025-07-15', lastUpdatedBy: 'יעל שחר', source: 'LinkedIn', daysInStage: 2, interviewQA: [], feedbackSummary: '', clientContacts: [] },
-    { id: 11, candidateName: 'אסף כהן', avatar: 'אכ', clientName: 'אלביט מערכות', jobTitle: 'System Admin', coordinator: 'יעל שחר', status: 'פעיל', referralDate: '2025-07-25', lastUpdatedBy: 'יעל שחר', source: 'חבר מביא חבר', interviewQA: [], feedbackSummary: '', clientContacts: [] },
-    { id: 12, candidateName: 'דנה רון', avatar: 'דר', clientName: 'Wix', jobTitle: 'Product Manager', coordinator: 'אביב לוי', status: 'חדש', referralDate: '2025-07-26', lastUpdatedBy: 'אביב לוי', source: 'LinkedIn', daysInStage: 0, interviewQA: [], feedbackSummary: '', clientContacts: [] },
-    { id: 13, candidateName: 'עמית גל', avatar: 'עג', clientName: 'בזק', jobTitle: 'מנהל/ת שיווק', coordinator: 'דנה כהן', status: 'ראיון', referralDate: '2025-07-24', lastUpdatedBy: 'דנה כהן', source: 'AllJobs', daysInStage: 3, interviewQA: [], feedbackSummary: '', clientContacts: [] },
-    { id: 14, candidateName: 'שירן מלכה', avatar: 'שמ', clientName: 'תנובה', jobTitle: 'נהג חלוקה', coordinator: 'יעל שחר', status: 'חדש', referralDate: '2025-07-27', lastUpdatedBy: 'יעל שחר', source: 'Facebook', daysInStage: 1, interviewQA: [], feedbackSummary: '', clientContacts: [] },
-    { id: 15, candidateName: 'רועי כהן', avatar: 'רכ', clientName: 'אלביט', jobTitle: 'מהנדס תוכנה', coordinator: 'אביב לוי', status: 'בבדיקה', referralDate: '2025-07-25', lastUpdatedBy: 'אביב לוי', source: 'חבר מביא חבר', daysInStage: 2, interviewQA: [], feedbackSummary: '', clientContacts: [] },
-];
+/** Row from GET /api/email-uploads/screening-cv-referrals */
+interface ScreeningCvReferralApiRow {
+  id: string;
+  candidateId?: string | null;
+  jobId?: string | null;
+  candidateName?: string;
+  jobTitle?: string;
+  clientName?: string;
+  clientId?: number | null;
+  referralDate?: string;
+  contactDate?: string;
+  source?: string;
+  coordinator?: string;
+  status?: string;
+  notes?: string;
+  recipientLine?: string;
+  internalNote?: string;
+  dueDate?: string;
+  dueTime?: string;
+  clientContacts?: ClientContact[];
+  deliveryStatus?: unknown;
+}
+
+function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    const a = parts[0][0] || '';
+    const b = parts[parts.length - 1][0] || '';
+    return (a + b).slice(0, 2) || '?';
+  }
+  const w = parts[0] || '?';
+  return w.slice(0, 2);
+}
+
+function formatDeliveryForSummary(delivery: unknown): string {
+  if (delivery == null) return '';
+  if (typeof delivery === 'string') return delivery;
+  try {
+    return JSON.stringify(delivery);
+  } catch {
+    return String(delivery);
+  }
+}
+
+function mapApiRowToReferral(row: ScreeningCvReferralApiRow): Referral {
+  const referralDate = row.referralDate ? String(row.referralDate) : new Date().toISOString();
+  const rd = new Date(referralDate);
+  const daysInStage = Number.isFinite(rd.getTime())
+    ? Math.max(0, Math.floor((Date.now() - rd.getTime()) / 86400000))
+    : 0;
+  const rawStatus = String(row.status || 'חדש').trim();
+  const status = (rawStatus in statusStyles ? rawStatus : 'חדש') as ReferralStatus;
+  const notes = String(row.notes || '');
+  const recipientLine = String(row.recipientLine || '').trim() || (notes.includes('\n\n') ? notes.split('\n\n')[0] : notes);
+  const internalNote = String(row.internalNote || '').trim();
+  const deliveryLine = formatDeliveryForSummary(row.deliveryStatus);
+  const feedbackSummary = [notes, deliveryLine ? `מצב משלוח: ${deliveryLine}` : ''].filter(Boolean).join('\n\n') || '—';
+  const cid = row.candidateId != null && String(row.candidateId).trim() !== '' ? String(row.candidateId) : null;
+
+  return {
+    id: String(row.id),
+    candidateId: cid,
+    candidateName: String(row.candidateName || ''),
+    avatar: initialsFromName(String(row.candidateName || '?')),
+    clientName: String(row.clientName || ''),
+    jobTitle: String(row.jobTitle || ''),
+    coordinator: String(row.coordinator || ''),
+    status,
+    referralDate,
+    lastUpdatedBy: String(row.coordinator || '—'),
+    source: String(row.source || ''),
+    interviewQA: [],
+    feedbackSummary,
+    recipientLine,
+    internalNote,
+    referralDueDate: row.dueDate != null ? String(row.dueDate).trim() : '',
+    referralDueTime: row.dueTime != null ? String(row.dueTime).trim() : '',
+    deliveryStatus: row.deliveryStatus,
+    clientContacts: Array.isArray(row.clientContacts) ? row.clientContacts : [],
+    daysInStage,
+  };
+}
+
+function referralToSummaryCandidate(r: Referral): Candidate {
+  return {
+    id: 0,
+    backendId: r.candidateId || undefined,
+    name: r.candidateName,
+    avatar: r.avatar,
+    title: r.jobTitle,
+    status: r.status,
+    lastActivity: '',
+    source: r.source,
+    tags: [],
+    internalTags: [],
+    matchScore: 0,
+    phone: '',
+  };
+}
 
 const allColumns: { id: keyof Referral | 'actions'; header: string }[] = [
   { id: 'candidateName', header: 'שם המועמד' },
@@ -122,71 +199,104 @@ const allColumns: { id: keyof Referral | 'actions'; header: string }[] = [
   { id: 'source', header: 'מקור' },
 ];
 
-const statusStyles: { [key: string]: string } = {
-  'חדש': 'bg-blue-100 text-blue-800 border-blue-200',
-  'בבדיקה': 'bg-purple-100 text-purple-800 border-purple-200',
-  'ראיון': 'bg-yellow-100 text-yellow-800 border-yellow-200',
-  'הצעה': 'bg-orange-100 text-orange-800 border-orange-200',
-  'התקבל': 'bg-green-100 text-green-800 border-green-200',
-  'התקבל לעבודה': 'bg-green-100 text-green-800 border-green-200',
-  'פעיל': 'bg-teal-100 text-teal-800 border-teal-200',
-  'נדחה': 'bg-gray-100 text-gray-700 border-gray-200',
-};
-
-const statusOptions: ReferralStatus[] = ['חדש', 'בבדיקה', 'ראיון', 'הצעה', 'התקבל', 'נדחה'];
-
 // --- WIDGET COMPONENTS ---
 
-const FunnelWidget: React.FC<{ stages: Record<string, number> }> = ({ stages }) => (
-    <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm p-4">
-        <h3 className="font-bold text-text-default text-sm mb-4 flex items-center gap-2">
-            <FunnelIcon className="w-4 h-4 text-primary-500" />
-            משפך גיוס (Funnel)
-        </h3>
-        <div className="space-y-3">
-             <div className="flex items-center justify-between text-xs">
-                <span className="font-medium text-text-default w-12">חדש</span>
-                <div className="flex items-center gap-2 flex-1 mx-2">
-                     <div className="h-2 rounded-full bg-blue-100 flex-1 relative overflow-hidden">
-                        <div className="absolute top-0 right-0 h-full bg-blue-500 w-full"></div>
-                     </div>
+/** Pipeline bar width: relative to largest stage (classic funnel strip). */
+const funnelBarWidthPct = (count: number, pipelineMax: number) => {
+    if (count <= 0 || pipelineMax <= 0) return 0;
+    const raw = (count / pipelineMax) * 100;
+    return Math.min(100, Math.max(6, Math.round(raw * 10) / 10));
+};
+
+interface FunnelStages {
+    new: number;
+    review: number;
+    interview: number;
+    offer: number;
+    hired: number;
+    rejected: number;
+}
+
+const FUNNEL_PIPELINE_ROWS: {
+    stageKey: keyof Pick<FunnelStages, 'new' | 'review' | 'interview' | 'offer'>;
+    label: string;
+    track: string;
+    fill: string;
+}[] = [
+    { stageKey: 'new', label: 'חדש', track: 'bg-blue-100', fill: 'bg-blue-500' },
+    { stageKey: 'review', label: 'בבדיקה', track: 'bg-purple-100', fill: 'bg-purple-500' },
+    { stageKey: 'interview', label: 'ראיון', track: 'bg-yellow-100', fill: 'bg-yellow-500' },
+    { stageKey: 'offer', label: 'הצעה', track: 'bg-orange-100', fill: 'bg-orange-500' },
+];
+
+const FunnelWidget: React.FC<{ stages: FunnelStages; totalFiltered: number }> = ({ stages, totalFiltered }) => {
+    const pipelineMax = Math.max(stages.new, stages.review, stages.interview, stages.offer, 1);
+    const hireRatePct =
+        totalFiltered > 0 ? Math.round((stages.hired / totalFiltered) * 1000) / 10 : 0;
+    const rejectRatePct =
+        totalFiltered > 0 ? Math.round((stages.rejected / totalFiltered) * 1000) / 10 : 0;
+
+    return (
+        <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm p-4">
+            <h3 className="font-bold text-text-default text-sm mb-1 flex items-center gap-2">
+                <FunnelIcon className="w-4 h-4 text-primary-500 shrink-0" />
+                משפך גיוס
+            </h3>
+            <p className="text-[10px] text-text-muted mb-3 leading-snug">
+                רוחב הפסים — יחס לשלב הגבוה ביותר במשפך (לפי המסננים הנוכחיים)
+            </p>
+            <div className="space-y-3">
+                {FUNNEL_PIPELINE_ROWS.map(({ stageKey, label, track, fill }) => {
+                    const count = stages[stageKey];
+                    const w = funnelBarWidthPct(count, pipelineMax);
+                    return (
+                        <div
+                            key={stageKey}
+                            className="flex items-center justify-between gap-2 text-xs"
+                            title={`${label}: ${count}`}
+                        >
+                            <span className="font-medium text-text-default w-14 shrink-0">{label}</span>
+                            <div className={`flex items-center gap-2 flex-1 min-w-0 mx-1 ${track} rounded-full h-2.5 relative overflow-hidden`}>
+                                <div
+                                    className={`absolute top-0 right-0 h-full ${fill} rounded-full transition-[width] duration-300 ease-out`}
+                                    style={{ width: `${w}%` }}
+                                />
+                            </div>
+                            <span className="font-bold tabular-nums min-w-[1.75rem] text-left text-text-default shrink-0">
+                                {count}
+                            </span>
+                        </div>
+                    );
+                })}
+                <div className="pt-2 border-t border-border-subtle mt-1 space-y-2">
+                    <div className="flex justify-between items-center text-sm font-bold text-green-700 bg-green-50 p-2 rounded-lg gap-2">
+                        <span className="flex items-center gap-1 min-w-0">
+                            <TrophyIcon className="w-3.5 h-3.5 shrink-0" />
+                            התקבלו
+                        </span>
+                        <span className="tabular-nums shrink-0">
+                            {stages.hired}
+                            {totalFiltered > 0 ? (
+                                <span className="text-[10px] font-semibold text-green-600/90 mr-1">({hireRatePct}%)</span>
+                            ) : null}
+                        </span>
+                    </div>
+                    {stages.rejected > 0 ? (
+                        <div className="flex justify-between items-center text-xs font-semibold text-gray-700 bg-gray-50 px-2 py-1.5 rounded-lg border border-gray-100">
+                            <span>נדחו</span>
+                            <span className="tabular-nums">
+                                {stages.rejected}
+                                {totalFiltered > 0 ? (
+                                    <span className="text-[10px] font-medium text-gray-500 mr-1">({rejectRatePct}%)</span>
+                                ) : null}
+                            </span>
+                        </div>
+                    ) : null}
                 </div>
-                <span className="font-bold w-6 text-left">{stages.new}</span>
-            </div>
-            <div className="flex items-center justify-between text-xs">
-                <span className="font-medium text-text-default w-12">בבדיקה</span>
-                <div className="flex items-center gap-2 flex-1 mx-2">
-                     <div className="h-2 rounded-full bg-purple-100 flex-1 relative overflow-hidden">
-                        <div className="absolute top-0 right-0 h-full bg-purple-500 w-4/5"></div>
-                     </div>
-                </div>
-                <span className="font-bold w-6 text-left">{stages.review}</span>
-            </div>
-             <div className="flex items-center justify-between text-xs">
-                <span className="font-medium text-text-default w-12">ראיון</span>
-                <div className="flex items-center gap-2 flex-1 mx-2">
-                     <div className="h-2 rounded-full bg-yellow-100 flex-1 relative overflow-hidden">
-                        <div className="absolute top-0 right-0 h-full bg-yellow-500 w-3/5"></div>
-                     </div>
-                </div>
-                <span className="font-bold w-6 text-left">{stages.interview}</span>
-            </div>
-             <div className="flex items-center justify-between text-xs">
-                <span className="font-medium text-text-default w-12">הצעה</span>
-                <div className="flex items-center gap-2 flex-1 mx-2">
-                     <div className="h-2 rounded-full bg-orange-100 flex-1 relative overflow-hidden">
-                        <div className="absolute top-0 right-0 h-full bg-orange-500 w-2/5"></div>
-                     </div>
-                </div>
-                <span className="font-bold w-6 text-left">{stages.offer}</span>
-            </div>
-            <div className="pt-2 border-t border-border-subtle mt-2 flex justify-between items-center text-sm font-bold text-green-700 bg-green-50 p-2 rounded-lg">
-                <span className="flex items-center gap-1"><TrophyIcon className="w-3.5 h-3.5"/> התקבלו</span>
-                <span>{stages.hired}</span>
             </div>
         </div>
-    </div>
-);
+    );
+};
 
 const AttentionItem: React.FC<{ name: string; job: string; days: number; onClick: () => void }> = ({ name, job, days, onClick }) => (
     <div 
@@ -298,19 +408,17 @@ const ReferralGridCard: React.FC<{
 // --- MAIN VIEW ---
 
 const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask, onOpenCandidateSummary }) => {
-    const navigate = useNavigate();
     const today = new Date();
     const thirtyDaysAgo = new Date(new Date().setDate(today.getDate() - 30));
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
     // Data State
-    const [referrals, setReferrals] = useState<Referral[]>(referralsData);
+    const [referrals, setReferrals] = useState<Referral[]>([]);
+    const [referralsLoading, setReferralsLoading] = useState(false);
     const [jobs, setJobs] = useState<Job[]>([]);
-    const [loadingJobs, setLoadingJobs] = useState(false);
     useEffect(() => {
         if (!apiBase) return;
         let active = true;
-        setLoadingJobs(true);
         (async () => {
             try {
                 const res = await fetch(`${apiBase}/api/jobs`);
@@ -321,10 +429,41 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                 }
             } catch (err) {
                 console.error('[ReferralsReportView] failed to load jobs', err);
-            } finally {
-                if (active) setLoadingJobs(false);
             }
         })();
+        return () => {
+            active = false;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
+        if (!apiBase) {
+            setReferrals([]);
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setReferrals([]);
+            return;
+        }
+        let active = true;
+        setReferralsLoading(true);
+        fetch(`${apiBase}/api/email-uploads/screening-cv-referrals`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((data: ScreeningCvReferralApiRow[]) => {
+                if (active && Array.isArray(data)) {
+                    setReferrals(data.map(mapApiRowToReferral));
+                }
+            })
+            .catch(() => {
+                if (active) setReferrals([]);
+            })
+            .finally(() => {
+                if (active) setReferralsLoading(false);
+            });
         return () => {
             active = false;
         };
@@ -351,7 +490,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [visibleColumns, setVisibleColumns] = useState<string[]>(['status', 'candidateName', 'jobTitle', 'clientName', 'referralDate', 'coordinator']);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [expandedRowId, setExpandedRowId] = useState<number | null>(null);
+    const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Referral; direction: 'asc' | 'desc' } | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const dragItemIndex = useRef<number | null>(null);
@@ -426,12 +565,19 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
             const matchesCoordinator = !filters.coordinator || referral.coordinator.toLowerCase().includes(filters.coordinator.toLowerCase());
             const matchesSource = !filters.source || referral.source.toLowerCase().includes(filters.source.toLowerCase());
             const matchesUpdater = !filters.lastUpdatedBy || referral.lastUpdatedBy.toLowerCase().includes(filters.lastUpdatedBy.toLowerCase());
+            const matchesCandidate = !filters.candidateName || referral.candidateName.toLowerCase().includes(filters.candidateName.toLowerCase());
+            const matchesJobTitleAdv = !filters.jobTitle || referral.jobTitle.toLowerCase().includes(filters.jobTitle.toLowerCase());
             
-            return matchesDate && matchesSearch && matchesStatus && matchesClient && matchesCoordinator && matchesSource && matchesUpdater;
+            return matchesDate && matchesSearch && matchesStatus && matchesClient && matchesCoordinator && matchesSource && matchesUpdater && matchesCandidate && matchesJobTitleAdv;
         }).sort((a, b) => {
             if (!sortConfig) return 0;
             const aVal = a[sortConfig.key];
             const bVal = b[sortConfig.key];
+            if (sortConfig.key === 'referralDate') {
+                const at = new Date(String(aVal)).getTime();
+                const bt = new Date(String(bVal)).getTime();
+                return sortConfig.direction === 'asc' ? at - bt : bt - at;
+            }
             if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
             if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
             return 0;
@@ -466,14 +612,53 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         return <span className="text-primary-500 font-bold text-xs ml-1">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
     };
 
-    const handleOpenJobDrawer = (jobTitle: string) => {
+    const buildFallbackJob = (jobTitle: string, clientName: string): Job => ({
+        id: Date.now(),
+        title: jobTitle,
+        client: clientName,
+        field: 'לא צויין',
+        role: 'לא צויין',
+        priority: 'רגילה',
+        clientType: 'כללי',
+        city: 'לא צויין',
+        region: 'לא צויין',
+        gender: 'לא משנה',
+        mobility: false,
+        licenseType: 'לא צויין',
+        postingCode: '',
+        validityDays: 30,
+        recruitingCoordinator: 'מערכת',
+        accountManager: 'מערכת',
+        salaryMin: 0,
+        salaryMax: 0,
+        ageMin: 18,
+        ageMax: 65,
+        openPositions: 1,
+        status: 'טיוטה',
+        associatedCandidates: 0,
+        waitingForScreening: 0,
+        activeProcess: 0,
+        openDate: new Date().toISOString(),
+        recruiter: 'מערכת',
+        location: 'לא צויין',
+        jobType: 'לא צויין',
+        description: 'פרטי משרה לא זמינים',
+        requirements: [],
+        rating: 0,
+        healthProfile: 'standard',
+    });
+
+    const handleOpenJobDrawer = (jobTitle: string, clientName: string) => {
          const job = jobs.find(j => j.title === jobTitle);
          const jobMap: {[key: string]: number} = { 'מפתח/ת Fullstack בכיר/ה': 2, 'מנהל/ת מוצר לחטיבת הפינטק': 7, 'מעצב/ת UX/UI': 3 };
          const fallbackJob = jobs.find(j => j.id === (jobMap[jobTitle] || 1));
          if (job || fallbackJob) {
             setSelectedJob(job || fallbackJob || null);
             setIsDrawerOpen(true);
+            return;
          }
+         setSelectedJob(buildFallbackJob(jobTitle, clientName));
+         setIsDrawerOpen(true);
     };
     
     const handleColumnToggle = (columnId: string) => {
@@ -505,10 +690,53 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         setIsStatusModalOpen(true);
     };
 
-    const handleSaveStatusUpdate = (data: any) => {
-        if (editingReferral) {
-            setReferrals(prev => prev.map(r => r.id === editingReferral.id ? { ...r, status: data.status } : r));
+    const handleSaveStatusUpdate = async (data: any) => {
+        if (!editingReferral) return;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!apiBase || !token) {
+            setReferrals(prev => prev.map(r => (r.id === editingReferral.id ? { ...r, status: data.status } : r)));
+            setIsStatusModalOpen(false);
+            setEditingReferral(null);
+            return;
         }
+        const payload: Record<string, unknown> = {
+            status: data.status,
+            dueDate: data.dueDate || null,
+            dueTime: data.dueTime || null,
+        };
+        const noteLine = data.note != null && String(data.note).trim() !== '' ? String(data.note).trim() : '';
+        if (noteLine) payload.note = noteLine;
+
+        const res = await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals/${editingReferral.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || 'שמירה נכשלה');
+        }
+        const recipientLine = editingReferral.recipientLine || (editingReferral.feedbackSummary.split('\n\n')[0] || '');
+        const nextInternal = noteLine ? noteLine : editingReferral.internalNote;
+        const notesCombined = nextInternal ? `${recipientLine}\n\n${nextInternal}` : recipientLine;
+        const deliveryLine = formatDeliveryForSummary(editingReferral.deliveryStatus);
+        const feedbackSummary = [notesCombined, deliveryLine ? `מצב משלוח: ${deliveryLine}` : ''].filter(Boolean).join('\n\n') || '—';
+
+        setReferrals(prev =>
+            prev.map(r =>
+                r.id !== editingReferral.id
+                    ? r
+                    : {
+                          ...r,
+                          status: data.status as ReferralStatus,
+                          internalNote: nextInternal,
+                          recipientLine,
+                          feedbackSummary,
+                          referralDueDate: String(data.dueDate || ''),
+                          referralDueTime: String(data.dueTime || ''),
+                      },
+            ),
+        );
         setIsStatusModalOpen(false);
         setEditingReferral(null);
     };
@@ -543,7 +771,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                     </div>
                 );
             case 'jobTitle':
-                return <button onClick={() => handleOpenJobDrawer(referral.jobTitle)} className="text-primary-600 hover:underline font-medium">{referral.jobTitle}</button>;
+                return <button type="button" onClick={() => handleOpenJobDrawer(referral.jobTitle, referral.clientName)} className="text-primary-600 hover:underline font-medium">{referral.jobTitle}</button>;
             case 'clientName':
                  return <span className="font-medium text-text-default">{referral.clientName}</span>;
             case 'referralDate':
@@ -577,7 +805,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                      </div>
                      <div className="bg-white border border-border-default rounded-xl px-2 py-2 flex flex-col sm:flex-row items-center justify-center sm:justify-start text-center sm:text-right gap-1 sm:gap-3 shadow-sm">
                          <div className="p-1.5 sm:p-2 bg-purple-100 text-purple-600 rounded-lg"><ClockIcon className="w-4 h-4 sm:w-5 sm:h-5"/></div>
-                         <div><p className="text-[10px] sm:text-xs text-text-muted font-bold whitespace-nowrap">בתהליך</p><p className="text-lg sm:text-xl font-black text-text-default">{insights.stages.review + insights.stages.interview + insights.stages.offer}</p></div>
+                         <div><p className="text-[10px] sm:text-xs text-text-muted font-bold whitespace-nowrap">בתהליך</p><p className="text-lg sm:text-xl font-black text-text-default">{insights.stages.new + insights.stages.review + insights.stages.interview + insights.stages.offer}</p></div>
                      </div>
                      <div className="bg-white border border-border-default rounded-xl px-2 py-2 flex flex-col sm:flex-row items-center justify-center sm:justify-start text-center sm:text-right gap-1 sm:gap-3 shadow-sm">
                          <div className="p-1.5 sm:p-2 bg-green-100 text-green-600 rounded-lg"><CheckCircleIcon className="w-4 h-4 sm:w-5 sm:h-5"/></div>
@@ -619,6 +847,8 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                         <div><label className="block text-xs font-bold text-text-muted mb-1">תאריך עד-</label><input type="date" name="referralDateEnd" value={filters.referralDateEnd} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">סטטוס / שלב</label><select name="status" value={filters.status} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm"><option value="">הכל</option>{statusOptions.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">לקוח</label><input type="text" name="clientName" value={filters.clientName} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם לקוח..." /></div>
+                        <div><label className="block text-xs font-bold text-text-muted mb-1">מועמד</label><input type="text" name="candidateName" value={filters.candidateName} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם מועמד..." /></div>
+                        <div><label className="block text-xs font-bold text-text-muted mb-1">משרה</label><input type="text" name="jobTitle" value={filters.jobTitle} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="כותרת משרה..." /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">רכז</label><input type="text" name="coordinator" value={filters.coordinator} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם רכז..." /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">משתמש מעדכן</label><input type="text" name="lastUpdatedBy" value={filters.lastUpdatedBy} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם משתמש..." /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">מקור גיוס</label><input type="text" name="source" value={filters.source} onChange={handleFilterChange} className="w-full bg-bg-input border-border-default rounded-lg py-2 px-3 text-sm" placeholder="מקור..." /></div>
@@ -647,7 +877,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                 
                 {/* Sidebar (Widgets) - Conditional on Mobile */}
                 <div className={`w-full lg:w-1/4 flex flex-col gap-4 overflow-y-auto pr-1 pb-4 flex-shrink-0 transition-all sticky top-4 self-start max-h-[calc(100vh-20px)] ${showMobileStats ? 'block' : 'hidden lg:flex'}`}>
-                    <FunnelWidget stages={insights.stages} />
+                    <FunnelWidget stages={insights.stages} totalFiltered={insights.total} />
                     
                     <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm p-4 flex-1 flex flex-col min-h-[250px]">
                         <h3 className="font-bold text-text-default text-sm mb-3 flex items-center gap-2">
@@ -657,7 +887,15 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                          <div className="flex-1 overflow-y-auto space-y-1 pr-1 custom-scrollbar">
                             {insights.needsAttention.length > 0 ? (
                                 insights.needsAttention.map(r => (
-                                    <AttentionItem key={r.id} name={r.candidateName} job={r.jobTitle} days={r.daysInStage || 0} onClick={() => onOpenCandidateSummary(r.id)} />
+                                    <AttentionItem
+                                        key={r.id}
+                                        name={r.candidateName}
+                                        job={r.jobTitle}
+                                        days={r.daysInStage || 0}
+                                        onClick={() => {
+                                            if (r.candidateId) onOpenCandidateSummary(referralToSummaryCandidate(r));
+                                        }}
+                                    />
                                 ))
                             ) : (
                                 <div className="text-center py-8 text-text-muted text-xs bg-bg-subtle/30 rounded-lg border border-dashed border-border-default h-full flex flex-col items-center justify-center">
@@ -726,7 +964,20 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">
-                                    {sortedAndFilteredReferrals.map(referral => (
+                                    {referralsLoading ? (
+                                        <tr>
+                                            <td colSpan={visibleColumns.length + 2} className="p-16 text-center text-text-muted text-sm">טוען נתוני דוח…</td>
+                                        </tr>
+                                    ) : sortedAndFilteredReferrals.length === 0 ? (
+                                        <tr>
+                                            <td colSpan={visibleColumns.length + 2} className="p-16 text-center text-text-muted text-sm">
+                                                {referrals.length === 0
+                                                    ? 'אין הפניות. שליחות קו״ח ממסך סינון יופיעו כאן לאחר התחברות.'
+                                                    : 'אין רשומות התואמות למסננים.'}
+                                            </td>
+                                        </tr>
+                                    ) : (
+                                    sortedAndFilteredReferrals.map(referral => (
                                         <React.Fragment key={referral.id}>
                                             <tr onClick={() => setExpandedRowId(prevId => prevId === referral.id ? null : referral.id)} className="hover:bg-primary-50/30 cursor-pointer group transition-colors">
                                                 <td className="p-4 text-center">
@@ -748,12 +999,21 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                                                 </tr>
                                             )}
                                         </React.Fragment>
-                                    ))}
+                                    )))}
                                 </tbody>
                             </table>
                         ) : (
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
-                                {sortedAndFilteredReferrals.map(referral => (
+                                {referralsLoading ? (
+                                    <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm">טוען…</div>
+                                ) : sortedAndFilteredReferrals.length === 0 ? (
+                                    <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm">
+                                        {referrals.length === 0
+                                            ? 'אין הפניות להצגה.'
+                                            : 'אין רשומות התואמות למסננים.'}
+                                    </div>
+                                ) : (
+                                sortedAndFilteredReferrals.map(referral => (
                                     <div key={referral.id} className="group h-full">
                                         <ReferralGridCard 
                                             referral={referral} 
@@ -763,7 +1023,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                                             onReRefer={(e) => handleOpenReReferModal(e, referral)}
                                         />
                                     </div>
-                                ))}
+                                )))}
                             </div>
                         )}
                     </div>
@@ -773,7 +1033,18 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
             {/* Modals */}
             <ReReferModal isOpen={reReferModal.isOpen} onClose={() => setReReferModal({ isOpen: false, referral: null })} onSend={handleSendReReferral} referral={reReferModal.referral} />
             {editingReferral && (
-                <UpdateStatusModal isOpen={isStatusModalOpen} onClose={() => setIsStatusModalOpen(false)} onSave={handleSaveStatusUpdate} initialStatus={editingReferral.status} onOpenNewTask={onOpenNewTask} />
+                <UpdateStatusModal
+                    isOpen={isStatusModalOpen}
+                    onClose={() => setIsStatusModalOpen(false)}
+                    onSave={handleSaveStatusUpdate}
+                    initialStatus={editingReferral.status}
+                    onOpenNewTask={onOpenNewTask}
+                    contextPrimary={editingReferral.candidateName}
+                    contextSecondary={[editingReferral.jobTitle, editingReferral.clientName].filter(Boolean).join(' · ')}
+                    initialNote={editingReferral.internalNote}
+                    initialDueDate={editingReferral.referralDueDate}
+                    initialDueTime={editingReferral.referralDueTime}
+                />
             )}
              <JobDetailsDrawer job={selectedJob} isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)} />
         </div>

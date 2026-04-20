@@ -47,10 +47,10 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
         time: eventDate.toTimeString().substring(0, 5),
         description: event.description,
         coordinator: event.coordinator,
-        participants: 'גדעון שפירא', // Mock data
+        participants: ' ', // Mock data
         linkedTo: event.linkedTo ? `${event.linkedTo.type}: ${event.linkedTo.name}` : '',
         reminder: true,
-        reminderTime: '30',
+        reminderTime: '',
       });
     } else {
       // Reset form for new event

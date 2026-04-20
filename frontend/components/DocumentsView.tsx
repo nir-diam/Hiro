@@ -226,7 +226,7 @@ const DocumentsView: React.FC = () => {
                 onSave={handleSaveDoc}
                 document={editingDoc}
                 context="candidate"
-                contextName="גדעון שפירא"
+                contextName=" "
             />
         </div>
     );

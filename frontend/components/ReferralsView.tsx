@@ -17,8 +17,8 @@ interface ClientContact {
 }
 
 interface ActiveReferral {
-  id: number;
-  clientId: number;
+  id: string;
+  clientId: number | null;
   status: Status;
   source: string;
   coordinator: string;
@@ -26,32 +26,76 @@ interface ActiveReferral {
   clientName: string;
   referralDate: string;
   contactDate: string;
+  /** נמען · אימייל (ללא הערה פנימית) */
+  recipientLine: string;
+  internalNote: string;
+  referralDueDate: string;
+  referralDueTime: string;
   notes: string;
   clientContacts: ClientContact[];
   candidateName: string;
 }
 
+/** Row from GET /api/email-uploads/screening-cv-referrals */
+interface ScreeningCvReferralApiRow {
+  id: string;
+  candidateId?: string | null;
+  jobId?: string | null;
+  candidateName?: string;
+  jobTitle?: string;
+  clientName?: string;
+  clientId?: number | null;
+  referralDate?: string;
+  contactDate?: string;
+  source?: string;
+  coordinator?: string;
+  status?: string;
+  notes?: string;
+  recipientLine?: string;
+  internalNote?: string;
+  dueDate?: string;
+  dueTime?: string;
+  clientContacts?: ClientContact[];
+}
+
+function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): ActiveReferral {
+  const rawStatus = String(row.status || 'חדש').trim();
+  const status = (rawStatus in statusStyles ? rawStatus : 'חדש') as Status;
+  const notes = String(row.notes || '');
+  const recipientLine = String(row.recipientLine || '').trim() || (notes.includes('\n\n') ? notes.split('\n\n')[0] : notes);
+  const internalNote = String(row.internalNote || '').trim();
+  return {
+    id: String(row.id),
+    clientId: row.clientId != null && row.clientId !== undefined ? Number(row.clientId) : null,
+    status,
+    source: String(row.source || ''),
+    coordinator: String(row.coordinator || ''),
+    jobTitle: String(row.jobTitle || ''),
+    clientName: String(row.clientName || ''),
+    referralDate: row.referralDate ? String(row.referralDate) : new Date().toISOString(),
+    contactDate: String(row.contactDate || ''),
+    recipientLine,
+    internalNote,
+    referralDueDate: row.dueDate != null ? String(row.dueDate).trim() : '',
+    referralDueTime: row.dueTime != null ? String(row.dueTime).trim() : '',
+    notes,
+    clientContacts: Array.isArray(row.clientContacts) ? row.clientContacts : [],
+    candidateName: String(row.candidateName || ''),
+  };
+}
+
 interface DisqualifiedReferral {
-  id: number;
+  id: string;
+  candidateId?: string;
+  candidateName: string;
+  jobId?: string;
   jobTitle: string;
+  clientName: string;
   eventDate: string;
   coordinator: string;
   screeningLevel: string;
   reason: string;
 }
-
-const activeReferralsData: ActiveReferral[] = [
-    { id: 1, clientId: 1, candidateName: 'שפירא גדעון', status: 'התקבל לעבודה', source: 'AllJobs', coordinator: 'דנה כהן', jobTitle: 'מפתח/ת Fullstack בכיר/ה', clientName: 'Wix', referralDate: '2025-05-28', contactDate: '2025-05-20', notes: 'מועמד מצוין, עבר ראיון טכני בהצלחה. ממתינים להצעה.', clientContacts: [{id: 1, name: 'איתי לוי (ראש צוות)', email: 'itai@wix.com'}] },
-    { id: 2, clientId: 2, candidateName: 'כהן מאיה', status: 'בהמתנה', source: 'חבר מביא חבר', coordinator: 'אביב לוי', jobTitle: 'מנהל/ת מוצר לחטיבת הפינטק', clientName: 'Rapyd', referralDate: '2025-05-27', contactDate: '2025-05-27', notes: 'נשלחו קו"ח ללקוח. ממתינים לתשובה.', clientContacts: [{id: 2, name: 'שרית לוי (מנהלת מוצר)', email: 'sarit@rapyd.com'}] },
-    { id: 3, clientId: 3, candidateName: 'לוי דוד', status: 'נדחה', source: 'LinkedIn', coordinator: 'דנה כהן', jobTitle: 'מעצב/ת UX/UI', clientName: 'Fiverr', referralDate: '2025-05-25', contactDate: '2025-05-24', notes: 'המועמד לא עבר את שלב תיק העבודות. חוסר ניסיון רלוונטי.', clientContacts: [{id: 3, name: 'נעמה ברק (מנהלת עיצוב)', email: 'naama@fiverr.com'}] },
-    { id: 4, clientId: 1, candidateName: 'רון שחר', status: 'ראיון', source: 'AllJobs', coordinator: 'יעל שחר', jobTitle: 'אנליסט נתונים', clientName: 'Playtika', referralDate: '2025-05-29', contactDate: '2025-05-29', notes: 'נקבע ראיון ראשון ליום ראשון', clientContacts: [] },
-    { id: 5, clientId: 4, candidateName: 'שרה כץ', status: 'חדש', source: 'Facebook', coordinator: 'אביב לוי', jobTitle: 'מנהלת משרד', clientName: 'Microsoft', referralDate: '2025-05-30', contactDate: '2025-05-30', notes: 'טרם נוצר קשר', clientContacts: [] },
-];
-
-const disqualifiedReferralsData: DisqualifiedReferral[] = [
-    { id: 1, jobTitle: 'מנהל/ת שיווק דיגיטלי', eventDate: '18:00 23/05/2025', coordinator: 'יעל שחר', screeningLevel: 'סינון קו"ח', reason: 'חוסר התאמה לדרישות התפקיד' },
-    { id: 2, jobTitle: 'אנליסט/ית נתונים', eventDate: '12:45 22/05/2025', coordinator: 'יעל שחר', screeningLevel: 'שיחה טלפונית', reason: 'ציפיות שכר גבוהות מדי' },
-];
 
 const statusStyles: Partial<Record<Status, { text: string; bg: string; border: string; icon: any }>> = {
     'התקבל לעבודה': { text: 'text-green-700', bg: 'bg-green-50', border: 'border-green-200', icon: CheckCircleIcon },
@@ -92,7 +136,11 @@ const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => 
                 <div>
                      <h3 className="font-bold text-text-default text-lg mb-1">{referral.candidateName}</h3>
                      <button onClick={onJobTitleClick} className="text-sm font-medium text-primary-600 hover:underline block">{referral.jobTitle}</button>
-                     <button onClick={onClientClick} className="text-xs text-text-muted hover:text-text-default block mt-1">{referral.clientName}</button>
+                     {referral.clientId != null ? (
+                        <button type="button" onClick={onClientClick} className="text-xs text-text-muted hover:text-text-default block mt-1">{referral.clientName}</button>
+                     ) : (
+                        <span className="text-xs text-text-muted block mt-1">{referral.clientName || '—'}</span>
+                     )}
                 </div>
                 <button 
                     onClick={(e) => onStatusClick(e, referral)} 
@@ -125,8 +173,9 @@ const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => 
 const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask }) => {
     const { t } = useLanguage();
     const navigate = useNavigate();
-    const [activeReferrals, setActiveReferrals] = useState<ActiveReferral[]>(activeReferralsData);
-    const [expandedRowId, setExpandedRowId] = useState<number | null>(null);
+    const [activeReferrals, setActiveReferrals] = useState<ActiveReferral[]>([]);
+    const [activeReferralsLoading, setActiveReferralsLoading] = useState(false);
+    const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     
     // Columns definitions using useMemo to react to language changes
@@ -152,6 +201,8 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
     const [jobCatalogLoading, setJobCatalogLoading] = useState(false);
+    const [disqualifiedReferrals, setDisqualifiedReferrals] = useState<DisqualifiedReferral[]>([]);
+    const [disqualifiedLoading, setDisqualifiedLoading] = useState(false);
     
     // Filters & Sorting
     const [startDate, setStartDate] = useState('');
@@ -190,6 +241,68 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
         })();
         return () => { isActive = false; };
     }, [apiBase]);
+
+    useEffect(() => {
+        if (!apiBase) {
+            setDisqualifiedReferrals([]);
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setDisqualifiedReferrals([]);
+            return;
+        }
+        let isActive = true;
+        setDisqualifiedLoading(true);
+        fetch(`${apiBase}/api/candidates/screening-rejections`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((data: DisqualifiedReferral[]) => {
+                if (isActive && Array.isArray(data)) {
+                    setDisqualifiedReferrals(data);
+                }
+            })
+            .catch(() => {
+                if (isActive) setDisqualifiedReferrals([]);
+            })
+            .finally(() => {
+                if (isActive) setDisqualifiedLoading(false);
+            });
+        return () => { isActive = false; };
+    }, [apiBase]);
+
+    useEffect(() => {
+        if (!apiBase) {
+            setActiveReferrals([]);
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setActiveReferrals([]);
+            return;
+        }
+        let isActive = true;
+        setActiveReferralsLoading(true);
+        fetch(`${apiBase}/api/email-uploads/screening-cv-referrals`, {
+            headers: { Authorization: `Bearer ${token}` },
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((data: ScreeningCvReferralApiRow[]) => {
+                if (isActive && Array.isArray(data)) {
+                    setActiveReferrals(data.map(mapScreeningCvRowToActiveReferral));
+                }
+            })
+            .catch(() => {
+                if (isActive) setActiveReferrals([]);
+            })
+            .finally(() => {
+                if (isActive) setActiveReferralsLoading(false);
+            });
+        return () => { isActive = false; };
+    }, [apiBase]);
     
     // Update visible columns if language changes
     useEffect(() => {
@@ -213,8 +326,9 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
         setActivePreset(preset);
     };
 
-    const handleClientClick = (e: React.MouseEvent, clientId: number) => {
+    const handleClientClick = (e: React.MouseEvent, clientId: number | null) => {
         e.stopPropagation();
+        if (clientId == null) return;
         navigate(`/clients/${clientId}`);
     };
 
@@ -247,16 +361,23 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
     }, [activeReferrals, activeSortConfig, startDate, endDate, searchTerm]);
 
     const sortedDisqualifiedReferrals = useMemo(() => {
-        let sortableItems = [...disqualifiedReferralsData];
+        let sortableItems = [...disqualifiedReferrals];
         if (disqualifiedSortConfig !== null) {
             sortableItems.sort((a, b) => {
-                if (a[disqualifiedSortConfig.key] < b[disqualifiedSortConfig.key]) return disqualifiedSortConfig.direction === 'asc' ? -1 : 1;
-                if (a[disqualifiedSortConfig.key] > b[disqualifiedSortConfig.key]) return disqualifiedSortConfig.direction === 'asc' ? 1 : -1;
+                const av = a[disqualifiedSortConfig.key];
+                const bv = b[disqualifiedSortConfig.key];
+                if (disqualifiedSortConfig.key === 'eventDate') {
+                    const at = new Date(String(av)).getTime();
+                    const bt = new Date(String(bv)).getTime();
+                    return disqualifiedSortConfig.direction === 'asc' ? at - bt : bt - at;
+                }
+                if (av < bv) return disqualifiedSortConfig.direction === 'asc' ? -1 : 1;
+                if (av > bv) return disqualifiedSortConfig.direction === 'asc' ? 1 : -1;
                 return 0;
             });
         }
         return sortableItems;
-    }, [disqualifiedSortConfig]);
+    }, [disqualifiedReferrals, disqualifiedSortConfig]);
 
     const requestSort = (list: 'active' | 'disqualified', key: any) => {
         const config = list === 'active' ? activeSortConfig : disqualifiedSortConfig;
@@ -273,7 +394,7 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
         return <span className="text-primary-500 font-bold">{config.direction === 'asc' ? ' ▲' : ' ▼'}</span>;
     };
 
-    const toggleRow = (id: number) => setExpandedRowId(prevId => (prevId === id ? null : id));
+    const toggleRow = (id: string) => setExpandedRowId(prevId => (prevId === id ? null : id));
 
     const handleColumnToggle = (columnId: string) => {
         setVisibleColumns(prev => {
@@ -305,9 +426,50 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
         setIsStatusModalOpen(true);
     };
 
-    const handleSaveStatusUpdate = (data: any) => {
+    const handleSaveStatusUpdate = async (data: any) => {
         if (!editingReferral) return;
-        setActiveReferrals(prev => prev.map(r => r.id === editingReferral.id ? { ...r, status: data.status } : r));
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!apiBase || !token) {
+            setActiveReferrals(prev => prev.map(r => (r.id === editingReferral.id ? { ...r, status: data.status } : r)));
+            setIsStatusModalOpen(false);
+            setEditingReferral(null);
+            return;
+        }
+        const payload: Record<string, unknown> = {
+            status: data.status,
+            dueDate: data.dueDate || null,
+            dueTime: data.dueTime || null,
+        };
+        const noteLine = data.note != null && String(data.note).trim() !== '' ? String(data.note).trim() : '';
+        if (noteLine) payload.note = noteLine;
+
+        const res = await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals/${editingReferral.id}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || 'שמירה נכשלה');
+        }
+        const recipientLine = editingReferral.recipientLine || (editingReferral.notes.includes('\n\n') ? editingReferral.notes.split('\n\n')[0] : editingReferral.notes);
+        const nextInternal = noteLine ? noteLine : editingReferral.internalNote;
+        const combinedNotes = nextInternal ? `${recipientLine}\n\n${nextInternal}` : recipientLine;
+        setActiveReferrals(prev =>
+            prev.map(r =>
+                r.id !== editingReferral.id
+                    ? r
+                    : {
+                          ...r,
+                          status: data.status,
+                          internalNote: nextInternal,
+                          recipientLine,
+                          notes: combinedNotes,
+                          referralDueDate: String(data.dueDate || ''),
+                          referralDueTime: String(data.dueTime || ''),
+                      },
+            ),
+        );
         setIsStatusModalOpen(false);
         setEditingReferral(null);
     };
@@ -394,7 +556,12 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                 </button>
             );
             case 'jobTitle': return <button onClick={(e) => { e.stopPropagation(); handleOpenJobDrawer(referral.jobTitle, referral.clientName) }} className="font-semibold text-primary-700 hover:underline text-right">{referral.jobTitle}</button>;
-            case 'clientName': return <button onClick={(e) => handleClientClick(e, referral.clientId)} className="font-semibold text-text-default hover:text-primary-700 hover:underline">{referral.clientName}</button>;
+            case 'clientName':
+                return referral.clientId != null ? (
+                    <button type="button" onClick={(e) => handleClientClick(e, referral.clientId)} className="font-semibold text-text-default hover:text-primary-700 hover:underline">{referral.clientName}</button>
+                ) : (
+                    <span className="font-semibold text-text-default">{referral.clientName || '—'}</span>
+                );
             case 'candidateName': return <span className="font-bold text-text-default">{referral.candidateName}</span>;
             case 'referralDate': return <span className="text-text-muted text-sm">{new Date(referral.referralDate).toLocaleDateString('he-IL')}</span>;
             default: return (referral as any)[columnId];
@@ -502,7 +669,20 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
-                                {sortedActiveReferrals.map(referral => (
+                                {activeReferralsLoading ? (
+                                    <tr>
+                                        <td colSpan={visibleColumns.length + 1} className="p-16 text-center text-text-muted text-sm">טוען הפניות משליחת קו״ח מסינון…</td>
+                                    </tr>
+                                ) : sortedActiveReferrals.length === 0 ? (
+                                    <tr>
+                                        <td colSpan={visibleColumns.length + 1} className="p-16 text-center text-text-muted text-sm">
+                                            {activeReferrals.length === 0
+                                                ? 'אין רשומות. שליחות קו״ח ממסך סינון יופיעו כאן לאחר התחברות.'
+                                                : 'אין רשומות בטווח התאריכים או בחיפוש הנוכחי.'}
+                                        </td>
+                                    </tr>
+                                ) : (
+                                sortedActiveReferrals.map(referral => (
                                     <React.Fragment key={referral.id}>
                                         <tr onClick={() => toggleRow(referral.id)} className="hover:bg-primary-50/30 cursor-pointer group transition-colors">
                                             {visibleColumns.map(colId => (
@@ -531,13 +711,22 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                                             </tr>
                                         )}
                                     </React.Fragment>
-                                ))}
+                                )))}
                             </tbody>
                         </table>
                     </div>
                 ) : (
                     <div className="p-6 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6 bg-bg-subtle/30">
-                        {sortedActiveReferrals.map(referral => (
+                        {activeReferralsLoading ? (
+                            <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm">טוען הפניות…</div>
+                        ) : sortedActiveReferrals.length === 0 ? (
+                            <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm">
+                                {activeReferrals.length === 0
+                                    ? 'אין רשומות. שליחות קו״ח ממסך סינון יופיעו כאן לאחר התחברות.'
+                                    : 'אין רשומות בטווח התאריכים או בחיפוש הנוכחי.'}
+                            </div>
+                        ) : (
+                        sortedActiveReferrals.map(referral => (
                             <ReferralCard 
                                 key={referral.id} 
                                 referral={referral} 
@@ -547,38 +736,53 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                                 onJobTitleClick={() => handleOpenJobDrawer(referral.jobTitle, referral.clientName)}
                                 onClientClick={(e) => handleClientClick(e, referral.clientId)}
                             />
-                        ))}
+                        )))}
                     </div>
                 )}
             </div>
 
-            {/* Disqualified Table - Compact */}
+            {/* Disqualified — job_candidate_screening.rejected from API */}
             <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm p-6 opacity-80 hover:opacity-100 transition-opacity">
                 <h3 className="text-lg font-bold text-text-default mb-4 flex items-center gap-2">
                     <XMarkIcon className="w-5 h-5 text-red-500" />
                     פסילות בסינון ראשוני
+                    <span className="text-sm font-normal text-text-muted mr-2">
+                        ({disqualifiedLoading ? '…' : sortedDisqualifiedReferrals.length})
+                    </span>
                 </h3>
                 <div className="overflow-x-auto border border-border-default rounded-xl">
-                    <table className="w-full text-sm text-right">
+                    {disqualifiedLoading ? (
+                        <div className="flex items-center justify-center py-16 text-text-muted text-sm">טוען פסילות…</div>
+                    ) : sortedDisqualifiedReferrals.length === 0 ? (
+                        <div className="flex items-center justify-center py-16 text-text-muted text-sm">אין פסילות רשומות (מסך סינון).</div>
+                    ) : (
+                    <table className="w-full text-sm text-right min-w-[800px]">
                         <thead className="text-xs text-text-muted uppercase bg-bg-subtle font-bold">
                             <tr>
+                                <th className="p-3 cursor-pointer" onClick={() => requestSort('disqualified', 'candidateName')}>מועמד {getSortIndicator('disqualified', 'candidateName')}</th>
                                 <th className="p-3 cursor-pointer" onClick={() => requestSort('disqualified', 'jobTitle')}>משרה {getSortIndicator('disqualified', 'jobTitle')}</th>
+                                <th className="p-3 cursor-pointer" onClick={() => requestSort('disqualified', 'clientName')}>לקוח {getSortIndicator('disqualified', 'clientName')}</th>
                                 <th className="p-3 cursor-pointer" onClick={() => requestSort('disqualified', 'eventDate')}>תאריך {getSortIndicator('disqualified', 'eventDate')}</th>
                                 <th className="p-3 cursor-pointer" onClick={() => requestSort('disqualified', 'reason')}>סיבה {getSortIndicator('disqualified', 'reason')}</th>
                                 <th className="p-3">שלב</th>
+                                <th className="p-3 cursor-pointer" onClick={() => requestSort('disqualified', 'coordinator')}>רכז גיוס {getSortIndicator('disqualified', 'coordinator')}</th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
-                            {sortedDisqualifiedReferrals.map(item => (
+                            {sortedDisqualifiedReferrals.map((item) => (
                                 <tr key={item.id} className="hover:bg-bg-hover">
-                                    <td className="p-3 font-semibold text-text-default">{item.jobTitle}</td>
-                                    <td className="p-3 text-text-muted">{new Date(item.eventDate).toLocaleString('he-IL')}</td>
-                                    <td className="p-3 text-red-600">{item.reason}</td>
+                                    <td className="p-3 font-semibold text-text-default">{item.candidateName || '—'}</td>
+                                    <td className="p-3 font-medium text-text-default">{item.jobTitle}</td>
+                                    <td className="p-3 text-text-muted">{item.clientName || '—'}</td>
+                                    <td className="p-3 text-text-muted whitespace-nowrap">{new Date(item.eventDate).toLocaleString('he-IL')}</td>
+                                    <td className="p-3 text-red-600 max-w-xs">{item.reason}</td>
                                     <td className="p-3"><span className="bg-bg-subtle px-2 py-0.5 rounded text-xs border border-border-default">{item.screeningLevel}</span></td>
+                                    <td className="p-3 text-text-muted">{item.coordinator || '—'}</td>
                                 </tr>
                             ))}
                         </tbody>
                     </table>
+                    )}
                 </div>
             </div>
 
@@ -590,6 +794,11 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                     onSave={handleSaveStatusUpdate}
                     initialStatus={editingReferral.status}
                     onOpenNewTask={onOpenNewTask}
+                    contextPrimary={editingReferral.candidateName}
+                    contextSecondary={[editingReferral.jobTitle, editingReferral.clientName].filter(Boolean).join(' · ')}
+                    initialNote={editingReferral.internalNote}
+                    initialDueDate={editingReferral.referralDueDate}
+                    initialDueTime={editingReferral.referralDueTime}
                 />
             )}
             <ReReferModal

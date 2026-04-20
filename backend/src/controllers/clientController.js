@@ -1,4 +1,5 @@
 const clientService = require('../services/clientService');
+const User = require('../models/User');
 
 const list = async (req, res) => {
   const raw = req.query?.activeOnly;
@@ -43,5 +44,20 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { list, get, create, update, remove };
+/** Staff users (User.clientId) for job distribution / notifications — no passwords. */
+const listStaffUsers = async (req, res) => {
+  try {
+    const clientId = req.params.id;
+    const rows = await User.findAll({
+      where: { clientId },
+      attributes: ['id', 'name', 'email', 'role', 'phone', 'isActive'],
+      order: [['name', 'ASC']],
+    });
+    res.json(rows.map((u) => u.toJSON()));
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Failed to list staff users' });
+  }
+};
+
+module.exports = { list, get, create, update, remove, listStaffUsers };
 

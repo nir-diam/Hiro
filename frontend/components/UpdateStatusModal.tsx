@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { XMarkIcon, PaperAirplaneIcon, CalendarIcon, ClockIcon, PhoneIcon, EnvelopeIcon, SmsSlashIcon, WhatsappIcon, Microsoft365Icon, OutlookTaskIcon, GoogleCalendarIcon } from './Icons';
+import { XMarkIcon, PaperAirplaneIcon, CalendarIcon, ClockIcon, PhoneIcon, EnvelopeIcon, WhatsappIcon, Microsoft365Icon, OutlookTaskIcon, GoogleCalendarIcon } from './Icons';
 
 type Status = 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'נדחה' | 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'התקבל לעבודה' | 'בהמתנה';
 
@@ -9,12 +9,32 @@ const statusOptions: Status[] = ['חדש', 'בבדיקה', 'ראיון', 'הצע
 interface UpdateStatusModalProps {
     isOpen: boolean;
     onClose: () => void;
-    onSave: (data: any) => void;
+    /** May return a Promise; reject with Error to show message in modal */
+    onSave: (data: any) => void | Promise<void>;
     initialStatus: Status;
     onOpenNewTask: () => void;
+    /** Bold line under title (e.g. candidate name) */
+    contextPrimary?: string;
+    /** Muted second line (e.g. job · client) */
+    contextSecondary?: string;
+    /** Pre-fill from server (screening CV referral / notification row) */
+    initialNote?: string;
+    initialDueDate?: string;
+    initialDueTime?: string;
 }
 
-const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({ isOpen, onClose, onSave, initialStatus, onOpenNewTask }) => {
+const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({
+    isOpen,
+    onClose,
+    onSave,
+    initialStatus,
+    onOpenNewTask,
+    contextPrimary,
+    contextSecondary,
+    initialNote = '',
+    initialDueDate,
+    initialDueTime,
+}) => {
     const [formData, setFormData] = useState({
         status: initialStatus,
         note: '',
@@ -23,20 +43,25 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({ isOpen, onClose, 
         inviteCandidate: false,
         inviteClient: false
     });
+    const [saving, setSaving] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
     
     useEffect(() => {
         if (isOpen) {
             const now = new Date();
+            const defaultDate = now.toISOString().split('T')[0];
+            const defaultTime = now.toTimeString().substring(0, 5);
+            setSaveError(null);
             setFormData({
                 status: initialStatus,
-                note: '',
-                dueDate: now.toISOString().split('T')[0],
-                dueTime: now.toTimeString().substring(0,5),
+                note: initialNote != null ? String(initialNote) : '',
+                dueDate: initialDueDate != null && String(initialDueDate).trim() !== '' ? String(initialDueDate).trim() : defaultDate,
+                dueTime: initialDueTime != null && String(initialDueTime).trim() !== '' ? String(initialDueTime).trim() : defaultTime,
                 inviteCandidate: false,
                 inviteClient: false
             });
         }
-    }, [isOpen, initialStatus]);
+    }, [isOpen, initialStatus, initialNote, initialDueDate, initialDueTime]);
 
     if (!isOpen) return null;
 
@@ -46,24 +71,57 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({ isOpen, onClose, 
         setFormData(prev => ({ ...prev, [name]: checked !== undefined ? checked : value }));
     };
     
-    const handleSave = () => {
-        onSave(formData);
+    const handleSave = async () => {
+        setSaveError(null);
+        setSaving(true);
+        try {
+            await Promise.resolve(onSave(formData));
+        } catch (e) {
+            setSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+        } finally {
+            setSaving(false);
+        }
     };
 
     const handleCreateReminder = () => {
+        if (saving) return;
         onClose();
         onOpenNewTask();
     };
 
     return (
-        <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={onClose}>
+        <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4" onClick={() => !saving && onClose()}>
             <div 
                 className="bg-bg-card w-full h-full sm:h-auto sm:max-h-[90vh] sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden text-text-default transform transition-transform" 
                 onClick={e => e.stopPropagation()}
             >
-                <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0">
-                    <h2 className="text-xl font-bold text-text-default">עדכון סטטוס</h2>
-                    <button type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור"><XMarkIcon className="w-6 h-6" /></button>
+                <header className="flex items-start justify-between gap-3 p-4 border-b border-border-default bg-bg-subtle/30 flex-shrink-0">
+                    <div className="min-w-0 flex-1 text-right">
+                        <h2 className="text-lg sm:text-xl font-bold text-text-default leading-tight">עדכון סטטוס</h2>
+                        {(contextPrimary || contextSecondary) && (
+                            <div className="mt-2 space-y-0.5">
+                                {contextPrimary ? (
+                                    <p className="text-sm font-semibold text-text-default truncate" title={contextPrimary}>
+                                        {contextPrimary}
+                                    </p>
+                                ) : null}
+                                {contextSecondary ? (
+                                    <p className="text-xs text-text-muted leading-snug line-clamp-2" title={contextSecondary}>
+                                        {contextSecondary}
+                                    </p>
+                                ) : null}
+                            </div>
+                        )}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => !saving && onClose()}
+                        disabled={saving}
+                        className="p-2 rounded-full text-text-muted hover:bg-bg-hover shrink-0 disabled:opacity-50"
+                        aria-label="סגור"
+                    >
+                        <XMarkIcon className="w-6 h-6" />
+                    </button>
                 </header>
 
                 <main className="p-4 sm:p-6 space-y-6 flex-1 overflow-y-auto">
@@ -120,14 +178,31 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({ isOpen, onClose, 
                         </div>
                     </div>
                 </main>
-                <footer className="flex justify-between items-center p-4 bg-bg-subtle border-t border-border-default flex-shrink-0 sticky bottom-0 z-10">
-                    <button onClick={handleCreateReminder} type="button" className="flex items-center gap-2 bg-white border border-border-default text-text-default font-semibold py-2.5 px-4 rounded-xl hover:bg-bg-hover transition shadow-sm text-sm">
-                        <PaperAirplaneIcon className="w-5 h-5" />
-                        <span>תזכורת</span>
-                    </button>
-                    <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 text-sm">
-                        שמירה
-                    </button>
+                <footer className="p-4 bg-bg-subtle border-t border-border-default flex-shrink-0 sticky bottom-0 z-10 space-y-3">
+                    {saveError ? (
+                        <p className="text-sm text-red-600 text-center" role="alert">
+                            {saveError}
+                        </p>
+                    ) : null}
+                    <div className="flex justify-between items-center gap-2">
+                        <button
+                            onClick={handleCreateReminder}
+                            type="button"
+                            disabled={saving}
+                            className="flex items-center gap-2 bg-white border border-border-default text-text-default font-semibold py-2.5 px-4 rounded-xl hover:bg-bg-hover transition shadow-sm text-sm disabled:opacity-50"
+                        >
+                            <PaperAirplaneIcon className="w-5 h-5" />
+                            <span>תזכורת</span>
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleSave()}
+                            disabled={saving}
+                            className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 text-sm disabled:opacity-60"
+                        >
+                            {saving ? 'שומר…' : 'שמירה'}
+                        </button>
+                    </div>
                 </footer>
             </div>
         </div>

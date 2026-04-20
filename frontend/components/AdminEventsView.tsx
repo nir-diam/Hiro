@@ -50,9 +50,7 @@ const generateLogs = (count: number): LogEntry[] => {
     const actions: ActionType[] = ['create', 'update', 'delete', 'login', 'export', 'system'];
     const levels: LogLevel[] = ['info', 'info', 'info', 'warning', 'error'];
     const users = [
-        { name: 'ישראל ישראלי', email: 'israel@admin.com', role: 'Super Admin', avatar: 'יי' },
-        { name: 'דנה כהן', email: 'dana@hr.com', role: 'Recruiter', avatar: 'דכ' },
-        { name: 'מערכת', email: 'system@bot.com', role: 'System', avatar: '🤖' },
+       
     ];
     
     return Array.from({ length: count }).map((_, i) => {

@@ -69,7 +69,7 @@ const allColumns = [
 const defaultVisibleColumns = allColumns.map(c => c.id);
 
 const eventTypeOptions = ['הכל', 'פגישה', 'ראיון', 'תזכורת', 'משימת מערכת'];
-const coordinatorOptions = ['הכל', 'דנה כהן', 'אביב לוי', 'יעל שחר', 'אני', 'מערכת'];
+const coordinatorOptions = [];
 
 
 const normalizeEvent = (row: any): Event => ({

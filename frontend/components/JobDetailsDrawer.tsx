@@ -30,10 +30,8 @@ interface Job {
 
 // --- MOCK DATA ---
 const mockJobEvents = [
-    { id: 1, type: 'status', user: 'דנה כהן', description: 'שינתה סטטוס מועמד "שפירא גדעון" ל-"ראיון מקצועי".', timestamp: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString() },
-    { id: 2, type: 'note', user: 'אביב לוי', description: 'הוסיף הערה: "הלקוח ביקש להתמקד במועמדים עם ניסיון ב-HubSpot".', timestamp: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() },
-    { id: 3, type: 'system', user: 'מערכת', description: 'קלטה 5 קורות חיים חדשים ממקור AllJobs.', timestamp: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString() },
-    { id: 4, type: 'job_update', user: 'דנה כהן', description: 'עדכנה את דרישות המשרה (הוספת שנות ניסיון).', timestamp: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString() },
+
+    
 ];
 
 const mockCandidatesEnhanced = mockCandidates.map((c, i) => ({

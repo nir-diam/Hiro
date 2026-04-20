@@ -10,15 +10,9 @@ import { useLanguage } from '../context/LanguageContext';
 
 // --- MOCK DATA ---
 const mockClientTasks = [
-    { id: 1, title: 'שליחת הצעת מחיר מעודכנת', dueDate: new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString(), status: 'pending', assignee: 'ישראל ישראלי' },
-    { id: 2, title: 'פגישת סטטוס רבעונית', dueDate: new Date(Date.now() + 1000 * 60 * 60 * 24 * 3).toISOString(), status: 'pending', assignee: 'אביב לוי' },
-    { id: 3, title: 'עדכון חוזה התקשרות', dueDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 2).toISOString(), status: 'overdue', assignee: 'דנה כהן' },
-    { id: 4, title: 'שיחת היכרות עם מנהל מגייס חדש', dueDate: new Date(Date.now() - 1000 * 60 * 60 * 24 * 5).toISOString(), status: 'completed', assignee: 'ישראל ישראלי' },
 ];
 
 const mockClientContacts = [
-    { id: 1, name: 'ישראל ישראלי', role: 'סמנכ"ל משאבי אנוש', phone: '050-1112222', email: 'israel@example.com' },
-    { id: 2, name: 'דנה כהן', role: 'מנהלת גיוס', phone: '052-3334444', email: 'dana@example.com' },
 ];
 
 // --- COMPONENTS ---

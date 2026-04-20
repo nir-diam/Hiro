@@ -167,7 +167,7 @@ const resolveSendPlan = (ctx = {}) => {
   return { type: 'smtp', ...pickLegacyThenHiroFallback() };
 };
 
-async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail }) {
+async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail, attachments }) {
   const resolvedFrom = fromEmail || plan.defaultFrom;
   if (!isValidEmail(resolvedFrom)) {
     throw new Error('From address must be set to a valid email (verified domain in Resend)');
@@ -178,6 +178,17 @@ async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail })
   if (text) body.text = text;
   if (!body.html && !body.text) body.text = '';
   if (body.html && !body.text) body.text = stripHtml(html) || ' ';
+
+  if (Array.isArray(attachments) && attachments.length) {
+    body.attachments = attachments.map((a) => {
+      const raw = a?.content;
+      const b64 = Buffer.isBuffer(raw) ? raw.toString('base64') : String(raw || '');
+      return {
+        filename: String(a?.filename || 'attachment'),
+        content: b64,
+      };
+    });
+  }
 
   const resend = new Resend(plan.apiKey);
   const { data, error } = await resend.emails.send({
@@ -203,6 +214,7 @@ const sendEmail = async ({
   userRole = null,
   clientName = null,
   senderEmail = null,
+  attachments = null,
 }) => {
   if (!toEmail) throw new Error('Missing toEmail');
   if (!subject) throw new Error('Missing subject');
@@ -218,6 +230,7 @@ const sendEmail = async ({
       text,
       html,
       fromEmail: humandFrom || fromEmail,
+      attachments,
     });
   }
 
@@ -238,13 +251,27 @@ const sendEmail = async ({
     auth: { user, pass },
   });
 
-  return transporter.sendMail({
+  const mail = {
     from: resolvedFrom,
     to: toEmail,
     subject,
     text,
     html,
-  });
+  };
+
+  if (Array.isArray(attachments) && attachments.length) {
+    mail.attachments = attachments.map((a) => {
+      const c = a?.content;
+      const buf = Buffer.isBuffer(c) ? c : Buffer.from(String(c || ''), 'base64');
+      return {
+        filename: String(a?.filename || 'attachment'),
+        content: buf,
+        contentType: typeof a?.contentType === 'string' ? a.contentType : undefined,
+      };
+    });
+  }
+
+  return transporter.sendMail(mail);
 };
 
 module.exports = { create, sendEmail, resolveSmtpConfig, resolveSendPlan };

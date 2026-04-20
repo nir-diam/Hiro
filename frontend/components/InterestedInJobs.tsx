@@ -448,8 +448,11 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
         setIsStatusModalOpen(true);
     };
 
-    const handleSaveStatus = (data: any) => {
-        if (editingInterest) {
+    const handleSaveStatus = async (data: any) => {
+        if (!editingInterest) return;
+        const apiBase = import.meta.env.VITE_API_BASE || '';
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!apiBase || !token) {
             setJobs((prev) =>
                 prev.map((job) =>
                     job.linkId === editingInterest.linkId
@@ -457,7 +460,26 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
                         : job,
                 ),
             );
+            setIsStatusModalOpen(false);
+            setEditingInterest(null);
+            return;
         }
+        const res = await fetch(`${apiBase}/api/candidates/linked-jobs/${editingInterest.linkId}/status`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ status: data.status }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || 'שמירה נכשלה');
+        }
+        setJobs((prev) =>
+            prev.map((job) =>
+                job.linkId === editingInterest.linkId
+                    ? { ...job, status: data.status, lastUpdated: new Date().toLocaleDateString('he-IL') }
+                    : job,
+            ),
+        );
         setIsStatusModalOpen(false);
         setEditingInterest(null);
     };
@@ -660,6 +682,8 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
                     onSave={handleSaveStatus}
                     initialStatus={editingInterest.status}
                     onOpenNewTask={onOpenNewTask}
+                    contextPrimary={editingInterest.jobTitle}
+                    contextSecondary={[editingInterest.company, editingInterest.location].filter(Boolean).join(' · ')}
                 />
             )}
             

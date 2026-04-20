@@ -27,6 +27,7 @@ import { useLanguage } from '../context/LanguageContext';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { SmartTagType, SmartTagData } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
+import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -187,12 +188,52 @@ const normalizeCandidateData = (data: any) => {
     copy.skills = { soft, technical: tech };
     copy.candidateNotes = copy.candidateNotes ?? copy.internalNotes ?? '';
     copy.languages = ensureArray(copy.languages);
+    copy.preferredWorkModels = ensureArray(copy.preferredWorkModels)
+        .map((x: any) => String(x || '').trim())
+        .filter(Boolean);
+    const drivingLicensesNorm = ensureArray(copy.drivingLicenses)
+        .map((x: any) => String(x || '').trim())
+        .filter(Boolean);
+    copy.drivingLicenses =
+        drivingLicensesNorm.length > 0
+            ? drivingLicensesNorm
+            : copy.drivingLicense && String(copy.drivingLicense).trim() !== '' && String(copy.drivingLicense) !== '-'
+              ? [String(copy.drivingLicense).trim()]
+              : [];
+    const employmentTypesNorm = ensureArray(copy.employmentTypes)
+        .map((x: any) => String(x || '').trim())
+        .filter(Boolean);
+    copy.employmentTypes =
+        employmentTypesNorm.length > 0
+            ? employmentTypesNorm
+            : copy.employmentType
+              ? [String(copy.employmentType).trim()]
+              : ['שכיר'];
+    const jobScopesNorm = ensureArray(copy.jobScopes)
+        .map((x: any) => String(x || '').trim())
+        .filter(Boolean);
+    copy.jobScopes =
+        jobScopesNorm.length > 0
+            ? jobScopesNorm
+            : copy.jobScope
+              ? [String(copy.jobScope).trim()]
+              : [];
+    if (copy.drivingLicenses?.length) {
+        copy.drivingLicense = copy.drivingLicenses[0];
+    }
+    if (copy.employmentTypes?.length) {
+        copy.employmentType = copy.employmentTypes[0];
+    }
+    if (copy.jobScopes?.length) {
+        copy.jobScope = copy.jobScopes[0];
+    }
     copy.preferences = ensureArray(copy.preferences);
     copy.interests = ensureArray(copy.interests);
     copy.candidateNotes = copy.candidateNotes || '';
     if (copy.salaryMin !== undefined && copy.salaryMin !== null) copy.salaryMin = Number(copy.salaryMin) || 0;
     if (copy.salaryMax !== undefined && copy.salaryMax !== null) copy.salaryMax = Number(copy.salaryMax) || 0;
     if (!copy.profileName) copy.profileName = copy.title || 'פרופיל';
+    syncCandidateNameFields(copy);
     return copy;
 };
 
@@ -255,16 +296,19 @@ const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     return 'skill';
 };
 
-const initialData = {
-    id: 0,
-    profileName: "פרופיל חדש",
-    fullName: "",
-    title: "",
-    location: "",
-    professionalSummary: "",
-    phone: "",
-    email: "",
-    profilePicture: "https://via.placeholder.com/150",
+/** Empty shell only — no placeholder labels/images until API data arrives */
+const EMPTY_CANDIDATE_FORM: Record<string, any> = {
+    id: null,
+    profileName: '',
+    fullName: '',
+    firstName: '',
+    lastName: '',
+    title: '',
+    location: '',
+    professionalSummary: '',
+    phone: '',
+    email: '',
+    profilePicture: '',
     tags: [],
     desiredRoles: [],
     workExperience: [],
@@ -272,9 +316,32 @@ const initialData = {
     languages: [],
     softSkills: [],
     techSkills: [],
-    salaryMin: 0, salaryMax: 0,
-    status: "מחפש עבודה", address: "", idNumber: "", maritalStatus: "-", gender: "-", drivingLicense: "-", mobility: "-", birthYear: "", birthMonth: "", birthDay: "", age: "", employmentType: 'מלאה', jobScope: 'מלאה', availability: '', physicalWork: '', recruiterNotes: '', candidateNotes: ''
+    salaryMin: 0,
+    salaryMax: 0,
+    status: '',
+    address: '',
+    idNumber: '',
+    maritalStatus: '',
+    gender: '',
+    drivingLicense: '',
+    drivingLicenses: [] as string[],
+    mobility: '',
+    birthYear: '',
+    birthMonth: '',
+    birthDay: '',
+    age: '',
+    employmentType: '',
+    employmentTypes: ['שכיר'] as string[],
+    jobScope: '',
+    jobScopes: [] as string[],
+    availability: '',
+    physicalWork: '',
+    preferredWorkModels: [] as string[],
+    internalNotes: '',
+    candidateNotes: '',
 };
+
+const cloneEmptyCandidateForm = () => JSON.parse(JSON.stringify(EMPTY_CANDIDATE_FORM));
 
 interface Message {
     role: 'user' | 'model';
@@ -288,8 +355,9 @@ const CandidateSidebar: React.FC<{
     activeView: string;
     onViewChange: (view: string) => void;
     activeProfile: any;
+    activeProfileId: string | number | null;
     profiles: any[];
-    onSwitchProfile: (id: number) => void;
+    onSwitchProfile: (id: string | number) => void;
     onAddProfile: () => void;
     isOpenMobile: boolean;
     setIsOpenMobile: (val: boolean) => void;
@@ -299,7 +367,7 @@ const CandidateSidebar: React.FC<{
     pendingTasksCount: number;
     onDeleteProfile: (id: string) => void;
     deletingProfileId: string | null;
-}> = ({ activeView, onViewChange, activeProfile, profiles, onSwitchProfile, onAddProfile, isOpenMobile, setIsOpenMobile, favoriteCount, pendingTasks, onTaskClick, onDeleteProfile, deletingProfileId }) => {
+}> = ({ activeView, onViewChange, activeProfile, activeProfileId, profiles, onSwitchProfile, onAddProfile, isOpenMobile, setIsOpenMobile, favoriteCount, pendingTasks, onTaskClick, onDeleteProfile, deletingProfileId }) => {
     const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
 
     const menuItems = [
@@ -347,10 +415,16 @@ const CandidateSidebar: React.FC<{
                             onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
                             className="w-full flex items-center gap-3 p-3 bg-bg-subtle rounded-xl border border-border-default hover:border-primary-300 transition-all text-right group"
                         >
-                            <img src={activeProfile.profilePicture} alt="Profile" className="w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm" />
+                            {activeProfile?.profilePicture ? (
+                                <img src={activeProfile.profilePicture} alt="" className="w-10 h-10 rounded-full object-cover border-2 border-white shadow-sm" />
+                            ) : (
+                                <div className="w-10 h-10 rounded-full border-2 border-white shadow-sm bg-bg-subtle flex items-center justify-center text-text-subtle">
+                                    <UserCircleIcon className="w-6 h-6" />
+                                </div>
+                            )}
                             <div className="flex-1 min-w-0">
                                 <p className="text-xs text-text-muted">פרופיל פעיל:</p>
-                                <p className="font-bold text-text-default truncate text-sm">{activeProfile.profileName}</p>
+                                <p className="font-bold text-text-default truncate text-sm">{activeProfile?.profileName?.trim() || '—'}</p>
                             </div>
                             <ChevronDownIcon className={`w-4 h-4 text-text-subtle transition-transform ${isProfileMenuOpen ? 'rotate-180' : ''}`} />
                         </button>
@@ -361,7 +435,7 @@ const CandidateSidebar: React.FC<{
                                     <p className="px-3 py-2 text-xs font-bold text-text-muted uppercase tracking-wider">הפרופילים שלי</p>
                                     {profiles.map(p => {
                                         const isDeleted = Boolean(p.isDeleted);
-                                        const isActive = p.id === activeProfile.id;
+                                        const isActive = p.id === activeProfileId;
                                         return (
                                         <button 
                                             key={p.id}
@@ -666,7 +740,9 @@ const PrintableResume: React.FC<{ data: any; className?: string }> = ({ data, cl
             
             {/* Header */}
             <div className="border-b-2 border-gray-800 pb-4 mb-6">
-                <h1 className="text-4xl font-extrabold text-gray-900 mb-1">{data.fullName}</h1>
+                <h1 className="text-4xl font-extrabold text-gray-900 mb-1">
+                    {buildCandidateFullName(data.firstName, data.lastName) || data.fullName}
+                </h1>
                 <h2 className="text-xl text-primary-600 font-semibold">{data.title}</h2>
             </div>
 
@@ -803,8 +879,8 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const { t } = useLanguage();
     
     // State
-    const [profiles, setProfiles] = useState([initialData]);
-    const [activeProfileId, setActiveProfileId] = useState(initialData.id);
+    const [profiles, setProfiles] = useState<any[]>([]);
+    const [activeProfileId, setActiveProfileId] = useState<string | number | null>(null);
     const [candidateId, setCandidateId] = useState<string | null>(null);
     const [activeView, setActiveView] = useState('profile');
     const [isSwitching, setIsSwitching] = useState(false);
@@ -826,16 +902,17 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [pendingTasks, setPendingTasks] = useState<any[]>([]);
 
     // Derived Active Profile
-    const activeProfile = useMemo(() => 
-        profiles.find(p => p.id === activeProfileId) || profiles[0]
-    , [activeProfileId, profiles]);
+    const activeProfile = useMemo(() => {
+        if (!profiles.length) return undefined;
+        return profiles.find((p) => p.id === activeProfileId) || profiles[0];
+    }, [activeProfileId, profiles]);
     const currentProfileIndex = useMemo(
         () => candidateList.findIndex((p) => p.id === candidateId),
         [candidateList, candidateId],
     );
 
     // Data for forms (synced with active profile)
-    const [formData, setFormData] = useState(activeProfile);
+    const [formData, setFormData] = useState<any>(() => cloneEmptyCandidateForm());
     
     // UI State for Header Interactions
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
@@ -1288,12 +1365,12 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                     const display = primary || sorted[0];
                     setCandidateId(display?.id || null);
                     setProfiles(sorted);
-                    setActiveProfileId(display?.id || initialData.id);
-                    setFormData(display || initialData);
+                    setActiveProfileId(display?.id ?? null);
+                    setFormData(display || cloneEmptyCandidateForm());
                 } else {
                     setProfiles([]);
-                    setActiveProfileId(initialData.id);
-                    setFormData(initialData);
+                    setActiveProfileId(null);
+                    setFormData(cloneEmptyCandidateForm());
                     setCandidateId(null);
                 }
                 return;
@@ -1312,12 +1389,12 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 }
             }
             if (res.status === 404 || (Array.isArray(payload) && payload.length === 0)) {
-                // IMPORTANT: do not send `id` from `initialData` (it's 0) - backend expects UUID and will 400.
+                // IMPORTANT: do not send a numeric placeholder id — backend expects UUID.
                 const payload = sanitizePayload({
-                    ...initialData,
+                    ...cloneEmptyCandidateForm(),
                     fullName: user.email?.split('@')[0] || '',
                     email: user.email || '',
-                    profileName: initialData.profileName,
+                    profileName: '',
                     userId: idFromUser,
                 });
                 const base = apiBase || '';
@@ -1494,7 +1571,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     }, [fetchCandidateList]);
 
     // Handlers
-    const handleSwitchProfile = (id: number) => {
+    const handleSwitchProfile = (id: string | number) => {
         if (id === activeProfileId) return;
         setIsSwitching(true);
         setTimeout(() => {
@@ -1565,11 +1642,15 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 ));
                 if (activeProfileId === id) {
                     const remaining = filterVisibleProfiles(updated);
-                    const next = remaining[0] || updated[0] || initialData;
+                    const next = remaining[0];
                     if (next) {
                         setActiveProfileId(next.id);
                         setFormData(next);
                         setCandidateId(next.id);
+                    } else {
+                        setActiveProfileId(null);
+                        setFormData(cloneEmptyCandidateForm());
+                        setCandidateId(null);
                     }
                 }
                 return updated;
@@ -1797,7 +1878,13 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6 mb-6">
             <div className="flex flex-col sm:flex-row items-center gap-6">
                 <div className="relative">
-                        <img src={formData.profilePicture} alt="Profile" className="w-28 h-28 rounded-full object-cover ring-4 ring-bg-subtle" />
+                        {formData.profilePicture ? (
+                            <img src={formData.profilePicture} alt="" className="w-28 h-28 rounded-full object-cover ring-4 ring-bg-subtle" />
+                        ) : (
+                            <div className="w-28 h-28 rounded-full ring-4 ring-bg-subtle bg-bg-subtle flex items-center justify-center text-text-subtle">
+                                <UserCircleIcon className="w-16 h-16" />
+                            </div>
+                        )}
                         <button
                             className="absolute bottom-0 left-0 bg-bg-card p-2 rounded-full shadow-md border border-border-default hover:bg-bg-hover"
                             onClick={() => avatarInputRef.current?.click()}
@@ -1815,11 +1902,17 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 <div className="flex-1 text-center sm:text-right w-full">
                     <div className="flex justify-between items-start mb-2">
                             <div className="flex items-center gap-3 flex-wrap">
-                        <EditableField 
-                            value={formData.fullName} 
-                            onSave={(val) => handleUpdateProfileData({ fullName: val })}
+                        <EditableField
+                            value={formData.firstName || ''}
+                            onSave={(val) => handleUpdateProfileData({ firstName: val })}
                             className="text-3xl font-extrabold text-text-default inline-block"
-                            placeholder="שם מלא"
+                            placeholder="שם פרטי"
+                        />
+                        <EditableField
+                            value={formData.lastName || ''}
+                            onSave={(val) => handleUpdateProfileData({ lastName: val })}
+                            className="text-3xl font-extrabold text-text-default inline-block"
+                            placeholder="שם משפחה"
                         />
                                 {availabilityMeta && (
                                     <span
@@ -1838,7 +1931,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                             title="הורד קורות חיים"
                         >
                             <ArrowDownTrayIcon className="w-5 h-5" />
-                            <span className="text-xs font-semibold hidden sm:inline">הורד קו"ח ({activeProfile.profileName})</span>
+                            <span className="text-xs font-semibold hidden sm:inline">הורד קו&quot;ח{activeProfile?.profileName ? ` (${activeProfile.profileName})` : ''}</span>
                         </button>
                             </div>
                     </div>
@@ -2100,9 +2193,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 onFormChange={handleUpdateProfileData}
                 onImmediateSave={(patch) => saveNow(patch)}
                 viewMode="candidate"
-                onGenerateExperienceSummary={handleGenerateExperienceSummary}
-                isGeneratingSummary={isGeneratingSummary}
-                generateSummaryError={generateSummaryError}
             />
          </>
     );
@@ -2179,48 +2269,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 <h1 className="text-3xl font-black text-text-default tracking-tight">הצעות ממעסיקים</h1>
                 <p className="text-text-muted text-lg">מעסיקים שצפו בפרופיל שלך ורוצים ליצור איתך קשר.</p>
             </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                 {/* Mock Offer 1 */}
-                 <div className="bg-white border border-border-default rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
-                    <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                            <div className="w-12 h-12 bg-primary-50 text-primary-600 rounded-lg flex items-center justify-center font-bold text-lg">B</div>
-                             <div>
-                                 <h3 className="font-bold text-lg text-text-default">מנהל/ת שיווק</h3>
-                                 <p className="text-sm text-text-muted">בזק בינלאומי</p>
-                             </div>
-                        </div>
-                        <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-bold">חדש</span>
-                    </div>
-                    <p className="text-sm text-text-default mb-4">
-                        שלום גדעון, ראינו את הפרופיל שלך במאגר והתרשמנו מאוד מהניסיון ב-PPC. נשמח לבדוק התאמה למשרה פתוחה אצלנו.
-                    </p>
-                    <div className="flex gap-3">
-                        <button className="flex-1 bg-primary-600 text-white font-bold py-2 rounded-lg hover:bg-primary-700 transition">אני מעוניין/ת</button>
-                        <button className="flex-1 bg-bg-subtle text-text-muted font-bold py-2 rounded-lg hover:bg-bg-hover transition">לא תודה</button>
-                    </div>
-                 </div>
-
-                  {/* Mock Offer 2 */}
-                 <div className="bg-white border border-border-default rounded-xl p-5 shadow-sm hover:shadow-md transition-shadow">
-                    <div className="flex items-start justify-between mb-4">
-                        <div className="flex items-center gap-3">
-                            <div className="w-12 h-12 bg-purple-50 text-purple-600 rounded-lg flex items-center justify-center font-bold text-lg">W</div>
-                             <div>
-                                 <h3 className="font-bold text-lg text-text-default">PPC Specialist</h3>
-                                 <p className="text-sm text-text-muted">Wix</p>
-                             </div>
-                        </div>
-                        <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded-full font-bold">לפני יומיים</span>
-                    </div>
-                    <p className="text-sm text-text-default mb-4">
-                        היי, אנחנו מגייסים לצוות ה-Growth ומחפשים אנשים עם רקע כמו שלך. האם רלוונטי?
-                    </p>
-                    <div className="flex gap-3">
-                        <button className="flex-1 bg-green-100 text-green-700 border border-green-200 font-bold py-2 rounded-lg cursor-default">אישרת התעניינות</button>
-                    </div>
-                 </div>
+            <div className="text-center py-16 text-text-muted border border-dashed border-border-default rounded-2xl bg-bg-subtle/30">
+                <InboxIcon className="w-14 h-14 mx-auto mb-4 opacity-40" />
+                <p className="font-semibold text-text-default">אין הצעות להצגה כרגע</p>
+                <p className="text-sm mt-1 max-w-md mx-auto">כשיתקבלו פניות ממעסיקים, הן יופיעו כאן.</p>
             </div>
         </div>
     );
@@ -2237,7 +2289,8 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             <CandidateSidebar 
                 activeView={activeView} 
                 onViewChange={handleViewChange}
-                activeProfile={activeProfile}
+                activeProfile={activeProfile ?? formData}
+                activeProfileId={activeProfileId}
                 profiles={profiles}
                 onSwitchProfile={handleSwitchProfile}
                 onAddProfile={handleAddProfile}
@@ -2297,7 +2350,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             </div>
 
             {/* Hidden Print Component */}
-            <PrintableResume data={formData || initialData} className="hidden print:block" />
+            <PrintableResume data={formData} className="hidden print:block" />
             
              {/* PDF Preview Modal */}
             <ResumePreviewModal isOpen={isResumePreviewOpen} onClose={() => setIsResumePreviewOpen(false)} data={formData} />

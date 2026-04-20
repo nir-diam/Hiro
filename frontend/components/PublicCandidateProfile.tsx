@@ -8,40 +8,21 @@ import {
 
 // Mock Data for Public View
 const candidateData = {
-    name: "גדעון שפירא",
-    title: "מנהל שיווק דיגיטלי",
-    location: "תל אביב",
-    summary: "מנהל שיווק דיגיטלי מנוסה עם למעלה מ-5 שנות ניסיון בהובלת אסטרטגיות צמיחה וקמפיינים מרובי ערוצים. בעל מומחיות עמוקה ב-PPC, SEO, ואנליטיקה. מחפש את האתגר הבא בעולמות ה-B2B Tech.",
-    email: "gidon.shap@email.com",
-    phone: "054-1234567",
-    avatar: "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?ixlib=rb-4.0.3&ixid=M3wxMjA3fDB8MHxwaG90by1wYWdlfHx8fGVufDB8fHx8fA%3D%3D&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80",
-    tags: ['שיווק דיגיטלי', 'ניהול צוות', 'PPC', 'SEO', 'Data Analysis', 'B2B Marketing', 'HubSpot'],
+    name: " ",
+    title: "  ",
+    location: " ",
+    summary: "",
+    email: "",
+    phone: "",
+    avatar: "",
+    tags: [],
     experience: [
-        { 
-            role: 'מנהל שיווק', 
-            company: 'בזק', 
-            period: '2020 - 2023', 
-            description: 'ניהול צוות של 5 עובדים, אחריות על קמפיינים דיגיטליים ותקציב שנתי של 2 מיליון ש"ח. הובלת מהלכי מיתוג מחדש והטמעת מערכות אוטומציה.' 
-        },
-        { 
-            role: 'מנהל קמפיינים PPC', 
-            company: 'Wix', 
-            period: '2018 - 2019', 
-            description: 'ניהול קמפיינים בגוגל ופייסבוק בשווקים בינלאומיים. אופטימיזציה יומיומית והפקת דוחות ביצועים להנהלה.' 
-        },
-        { 
-            role: 'מתמחה בשיווק', 
-            company: 'AllJobs', 
-            period: '2017 - 2018', 
-            description: 'סיוע לצוות השיווק במשימות השוטפות, כתיבת תכנים לרשתות חברתיות וניהול קהילות.' 
-        }
+        
     ],
     education: [
-        { degree: 'תואר ראשון בתקשורת', institution: 'אוניברסיטת תל אביב', year: '2017' }
     ],
     languages: [
-        { lang: 'עברית', level: 'שפת אם' },
-        { lang: 'אנגלית', level: 'רמה גבוהה מאוד' }
+       
     ],
     verified: true
 };

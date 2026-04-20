@@ -1,12 +1,13 @@
 
-import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useId } from 'react';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
 import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
+import { buildCandidateFullName } from '../utils/candidateName';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
   <button onClick={onClick} title={title} className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors relative z-20 ${className || 'bg-primary-100/70 text-primary-600 hover:bg-primary-200'}`}>
@@ -172,13 +173,6 @@ const EditableField: React.FC<{
 
 type ExperienceSlice = { label: string; color: string; percentage?: number; years?: number };
 
-// Mock data for the experience visualization if not present in candidateData
-// Updated with theme-aware color variables
-const mockExperienceDistribution: ExperienceSlice[] = [
-    { label: 'מסחר וקמעונאות', percentage: 65, color: 'bg-primary-500' },
-    { label: 'טכנולוגיה ושירותים', percentage: 35, color: 'bg-secondary-400' },
-];
-
 const EXPERIENCE_COLORS = ['bg-primary-500', 'bg-secondary-400', 'bg-emerald-500', 'bg-amber-400', 'bg-sky-500', 'bg-rose-500', 'bg-indigo-500'];
 
 const parseYearFromValue = (value?: string | number | null): number | null => {
@@ -229,26 +223,22 @@ const buildExperienceDistributionFromWork = (workExperience?: any[]): Experience
     }));
 };
 
-const mockSmartTags = {
-    domains: ['יבוא וסחר סיטונאי', 'הפצה טכנולוגית'],
-    orgDNA: {
-        label: 'ניסיון בארגוני Enterprise',
-        subLabel: '500+ עובדים',
-        icon: <BuildingOffice2Icon className="w-3.5 h-3.5" />
-    }
-};
-
 const ExperienceBar: React.FC<{ 
     data?: ExperienceSlice[];
     smartTags?: { domains: string[], orgDNA?: { label: string, subLabel: string, icon?: any } }
-}> = ({ data = mockExperienceDistribution, smartTags = mockSmartTags }) => {
+}> = ({ data = [], smartTags }) => {
     const { t } = useLanguage();
     const yearsLabel =  'שנים';
-    const computedData = data.map(item => ({ ...item }));
+    const computedData = (data || []).map((item) => ({ ...item }));
     const totalYears = computedData.reduce((sum, item) => sum + (item.years ?? 0), 0);
     const hasYears = totalYears > 0;
     const totalPercentage = computedData.reduce((sum, item) => sum + (item.percentage ?? 0), 0);
     const effectiveTotal = hasYears ? totalYears : (totalPercentage || 100);
+    const hasBar = computedData.length > 0;
+    const domainList = smartTags?.domains?.length ? smartTags.domains : [];
+    const hasInsights = Boolean(smartTags?.orgDNA) || domainList.length > 0;
+
+    if (!hasBar && !hasInsights) return null;
 
     return (
         <div className="w-full mt-2 mb-4">
@@ -259,7 +249,8 @@ const ExperienceBar: React.FC<{
                 </h4>
             </div>
             
-            {/* Visual Bar */}
+            {hasBar && (
+                <>
             <div className="flex h-2 w-full rounded-full overflow-hidden bg-bg-subtle mb-2">
                 {computedData.map((item, index) => {
                     const value = hasYears ? (item.years ?? 0) : (item.percentage ?? 0);
@@ -276,7 +267,6 @@ const ExperienceBar: React.FC<{
                 })}
             </div>
 
-            {/* Legend - Inline */}
             <div className="flex flex-wrap gap-3 mb-3 items-center">
                 {computedData.map((item, index) => {
                     const labelValue = `${item.years ?? 0} ${yearsLabel}`;
@@ -289,10 +279,11 @@ const ExperienceBar: React.FC<{
                     );
                 })}
             </div>
+                </>
+            )}
 
-            {/* Insights Strip - Horizontal Row */}
+            {hasInsights && (
             <div className="flex flex-col sm:flex-row gap-3 text-xs bg-bg-subtle/30 p-2 rounded-lg border border-border-default/40 items-start sm:items-center">
-                {/* Org DNA */}
                 {smartTags?.orgDNA && (
                     <div className="flex items-center gap-2 min-w-0 sm:border-l sm:border-border-default sm:pl-3 sm:max-w-[40%]">
                         <div className="text-text-muted flex-shrink-0">
@@ -311,15 +302,15 @@ const ExperienceBar: React.FC<{
                     </div>
                 )}
 
-                {/* Domains */}
                 <div className="flex flex-wrap gap-1.5 items-center flex-1 min-w-0">
-                    {smartTags?.domains.map((tag, i) => (
+                    {domainList.map((tag, i) => (
                         <span key={i} className="text-[11px] text-text-default bg-white border border-border-default px-2 py-0.5 rounded-md shadow-sm whitespace-nowrap">
                             {tag}
                         </span>
                     ))}
                 </div>
             </div>
+            )}
         </div>
     );
 };
@@ -360,6 +351,9 @@ interface CandidateProfileProps {
     onAddProfile?: () => void;
     candidateList?: CandidateListItem[];
     onNavigateCandidate?: (candidateId: string) => void;
+    onGenerateExperienceSummary?: () => void;
+    isGeneratingSummary?: boolean;
+    generateSummaryError?: string | null;
 }
 
 const CONTEXT_LABELS: Record<string, string> = {
@@ -594,10 +588,6 @@ const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     return 'skill';
 };
 
-interface CandidateListItem {
-  id: string;
-}
-
 const CandidateProfile: React.FC<CandidateProfileProps> = ({
   candidateData,
   onMatchJobsClick,
@@ -618,11 +608,22 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   onAddProfile,
   candidateList = [],
   onNavigateCandidate,
+  onGenerateExperienceSummary,
+  isGeneratingSummary = false,
+  generateSummaryError,
 }) => {
   const { t } = useLanguage();
-  const jobMatchesCount = 8; 
+  const summaryId = useId();
+  const jobMatchesCount =
+    typeof candidateData.jobMatchesCount === 'number'
+      ? candidateData.jobMatchesCount
+      : Array.isArray(candidateData.matchedJobs)
+        ? candidateData.matchedJobs.length
+        : 0; 
   const getInitials = (name: string) => (name || '').split(' ').map(n => n[0]).join('');
-  const candidateInitials = getInitials(candidateData.fullName);
+  const displayFullName =
+    buildCandidateFullName(candidateData.firstName, candidateData.lastName) || candidateData.fullName || '';
+  const candidateInitials = getInitials(displayFullName);
 
   const currentProfileId = activeProfileId ?? candidateData.id;
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
@@ -681,6 +682,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     onNavigateCandidate?.(target.id);
   };
   const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
+  const [summaryExpanded, setSummaryExpanded] = useState(false);
+  const [summaryEditing, setSummaryEditing] = useState(false);
+  const [summaryDraft, setSummaryDraft] = useState('');
   const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
   const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
   const ROW_CATEGORY_MAP: Record<string, TagCategory> = {
@@ -891,7 +895,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     });
   }, []);
 
-  const experienceDistribution = useMemo(() => {
+    const experienceDistribution = useMemo(() => {
     const aggregated = buildExperienceDistributionFromWork(candidateData.workExperience);
     if (aggregated.length) {
       return aggregated;
@@ -903,7 +907,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         color: item.color || EXPERIENCE_COLORS[index % EXPERIENCE_COLORS.length],
       }));
     }
-    return mockExperienceDistribution;
+    return [];
   }, [candidateData.workExperience, candidateData.industryAnalysis]);
 
   const crc32base64 = async (file: File) => {
@@ -1009,7 +1013,12 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         const options = list
           .map((item: any) => ({
             id: item.id,
-            profileName: item.profileName || item.title || item.fullName || 'פרופיל',
+            profileName:
+              item.profileName ||
+              item.title ||
+              buildCandidateFullName(item.firstName, item.lastName) ||
+              item.fullName ||
+              'פרופיל',
             profilePicture: item.profilePicture,
             isDeleted: Boolean(item.isDeleted),
           }))
@@ -1025,13 +1034,17 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     return () => controller.abort();
   }, [apiBase, candidateData.backendId, candidateData.id]);
 
-  const companyName = "AllJobs";
-  const companyInitials = getInitials(companyName);
+  const sourceClientLabel =
+    (candidateData as any).source ||
+    (candidateData as any).sourceClientName ||
+    (candidateData as any).clientName ||
+    '';
+  const companyInitials = sourceClientLabel ? getInitials(sourceClientLabel) : '';
   
   const openModal = (mode: MessageMode) => {
     onOpenMessageModal({
         mode,
-        candidateName: candidateData.fullName,
+        candidateName: displayFullName,
         candidatePhone: candidateData.phone,
         candidateEmail: candidateData.email || candidateData.contactEmail || undefined,
     });
@@ -1057,6 +1070,11 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     document.addEventListener('mousedown', handleDocumentClick);
     return () => document.removeEventListener('mousedown', handleDocumentClick);
   }, []);
+
+  useEffect(() => {
+    setSummaryExpanded(false);
+    setSummaryEditing(false);
+  }, [candidateData.id, candidateData.backendId]);
 
   const handleProfileSelect = (profile: MultiProfileOption) => {
     setSwitcherOpen(false);
@@ -1105,7 +1123,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
               {normalizedProfileList.map((profile, index) => {
                 const isActive = profile.id === activeProfileOption?.id;
                 const profileYear = getProfileYear(profile);
-                const sourceLabel = (profile as any).source || companyName;
+                const sourceLabel = (profile as any).source || (profile as any).sourceClientName || '';
                 const baseRowClasses = [
                     'px-3 py-2.5 border-b border-border-subtle last:border-0 hover:bg-primary-50 transition-colors cursor-pointer group flex items-start gap-3',
                     isActive ? 'bg-primary-50/60' : '',
@@ -1214,16 +1232,36 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                       <div className="w-24 h-24 rounded-full border-4 border-bg-card shadow-md overflow-hidden ring-2 ring-primary-100">
                         <AvatarIcon initials={candidateInitials} size={96} fontSize={42} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
                       </div>
-                      <div className="absolute top-0 -right-2 w-8 h-8 bg-bg-card rounded-full flex items-center justify-center shadow-sm border border-border-subtle" title={`מקור: ${companyName}`}>
+                      {sourceClientLabel ? (
+                      <div className="absolute top-0 -right-2 w-8 h-8 bg-bg-card rounded-full flex items-center justify-center shadow-sm border border-border-subtle" title={`מקור: ${sourceClientLabel}`}>
                         <AvatarIcon initials={companyInitials} size={24} fontSize={10} bgClassName="fill-gray-100" textClassName="fill-gray-600 font-bold" />
                       </div>
+                      ) : null}
                   </div>
                   <div className="w-full sm:mr-6 flex-1">
                       <div className="flex items-center justify-center sm:justify-start flex-wrap mb-1 gap-3">
                           <EditableField
-                              value={candidateData.fullName || ''}
-                              placeholder="שם מועמד"
-                              onSave={(val) => onFormChange({ ...candidateData, fullName: val })}
+                              value={candidateData.firstName || ''}
+                              placeholder="שם פרטי"
+                              onSave={(val) =>
+                                  onFormChange({
+                                      ...candidateData,
+                                      firstName: val,
+                                      fullName: buildCandidateFullName(val, candidateData.lastName),
+                                  })
+                              }
+                              className="text-3xl font-extrabold text-text-default tracking-tight"
+                          />
+                          <EditableField
+                              value={candidateData.lastName || ''}
+                              placeholder="שם משפחה"
+                              onSave={(val) =>
+                                  onFormChange({
+                                      ...candidateData,
+                                      lastName: val,
+                                      fullName: buildCandidateFullName(candidateData.firstName, val),
+                                  })
+                              }
                               className="text-3xl font-extrabold text-text-default tracking-tight"
                           />
                           <div className="flex items-center text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1">
@@ -1243,6 +1281,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                 />
                           </div>
                       </div>
+
+               
                       
                       <div className="mb-3">
                           <EditableField 
@@ -1253,19 +1293,122 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                           />
                       </div>
 
-                      <div className="mb-4 bg-bg-subtle/30 p-3 rounded-lg border border-border-subtle/50">
-                         <EditableField 
-                              value={candidateData.professionalSummary || ''} 
-                              placeholder={t('profile.summary_placeholder')} 
-                              onSave={(val) => onFormChange({ ...candidateData, professionalSummary: val })}
-                              className="text-text-default text-sm leading-relaxed"
-                              multiline
-                              collapsible={true}
-                          />
-                      </div>
-
-                 
+                      <div className="mb-4" id="summary">
                         
+                          <div className="relative group">
+                              <div className="flex-grow min-w-0">
+                                  {summaryEditing ? (
+                                      <textarea
+                                          id={summaryId}
+                                          aria-label={t('section.summary')}
+                                          value={summaryDraft}
+                                          onChange={(e) => setSummaryDraft(e.target.value)}
+                                          onBlur={() => {
+                                              const next = summaryDraft.trim();
+                                              const prev = String(candidateData.professionalSummary || '').trim();
+                                              if (next !== prev) {
+                                                  onFormChange({ ...candidateData, professionalSummary: next });
+                                              }
+                                              setSummaryEditing(false);
+                                          }}
+                                          onKeyDown={(e) => {
+                                              if (e.key === 'Escape') {
+                                                  setSummaryDraft(candidateData.professionalSummary || '');
+                                                  setSummaryEditing(false);
+                                              }
+                                          }}
+                                          rows={6}
+                                          autoFocus
+                                          className="w-full bg-bg-input border border-primary-500 rounded-lg text-text-default text-sm p-2.5 focus:ring-2 focus:ring-primary-200 outline-none resize-y min-h-[8rem] shadow-sm"
+                                          placeholder={t('section.summary_placeholder')}
+                                      />
+                                  ) : (
+                                      <div className="relative pr-6">
+                                          <div
+                                              role="button"
+                                              tabIndex={0}
+                                              onClick={() => {
+                                                  setSummaryDraft(candidateData.professionalSummary || '');
+                                                  setSummaryEditing(true);
+                                              }}
+                                              onKeyDown={(e) => {
+                                                  if (e.key === 'Enter' || e.key === ' ') {
+                                                      e.preventDefault();
+                                                      setSummaryDraft(candidateData.professionalSummary || '');
+                                                      setSummaryEditing(true);
+                                                  }
+                                              }}
+                                              className="cursor-pointer hover:bg-bg-hover/50 rounded-md py-0.5 px-1 min-h-[1.5em]"
+                                          >
+                                              <p
+                                                  className={`whitespace-pre-line break-words leading-relaxed text-sm text-text-default ${
+                                                      !summaryExpanded &&
+                                                      (candidateData.professionalSummary || '').trim().length > 180
+                                                          ? 'line-clamp-3'
+                                                          : ''
+                                                  }`}
+                                              >
+                                                  {(candidateData.professionalSummary || '').trim() ? (
+                                                      candidateData.professionalSummary
+                                                  ) : (
+                                                      <span className="text-text-subtle opacity-60 italic">
+                                                          {t('section.summary_placeholder')}
+                                                      </span>
+                                                  )}
+                                              </p>
+                                          </div>
+                                          {(candidateData.professionalSummary || '').trim().length > 180 && (
+                                              <button
+                                                  type="button"
+                                                  onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      setSummaryExpanded((v) => !v);
+                                                  }}
+                                                  className="text-xs font-bold text-primary-600 hover:text-primary-800 mt-1 flex items-center gap-1 select-none bg-primary-50 px-2 py-0.5 rounded-full w-fit"
+                                              >
+                                                  {summaryExpanded ? t('section.summary_collapse') : t('section.summary_read_more')}
+                                                  <ChevronDownIcon
+                                                      className={`w-3 h-3 shrink-0 transition-transform ${summaryExpanded ? 'rotate-180' : ''}`}
+                                                  />
+                                              </button>
+                                          )}
+                                          <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  setSummaryDraft(candidateData.professionalSummary || '');
+                                                  setSummaryEditing(true);
+                                              }}
+                                              className="absolute top-0 right-0 p-1 opacity-0 group-hover:opacity-100 transition-opacity text-text-subtle hover:text-primary-600 z-20"
+                                              aria-label="ערוך"
+                                          >
+                                              <PencilIcon className="w-3.5 h-3.5" />
+                                          </button>
+                                      </div>
+                                  )}
+                              </div>
+                          </div>
+                          {onGenerateExperienceSummary && (
+                              <div className="mt-2 flex flex-col gap-1">
+                                  <button
+                                      type="button"
+                                      aria-live="polite"
+                                      onClick={() => onGenerateExperienceSummary()}
+                                      disabled={isGeneratingSummary}
+                                      className={`text-xs font-bold px-3 py-1.5 rounded-full border w-fit ${
+                                          isGeneratingSummary
+                                              ? 'border-border-default text-text-muted bg-bg-subtle cursor-not-allowed'
+                                              : 'border-primary-500 text-primary-700 hover:bg-primary-50'
+                                      } transition`}
+                                  >
+                                      {isGeneratingSummary ? 'מייצר/ת...' : 'כתוב/שכתב ניסיון עם AI'}
+                                  </button>
+                                  {generateSummaryError && (
+                                      <p className="text-xs text-red-500">{generateSummaryError}</p>
+                                  )}
+                              </div>
+                          )}
+                      </div>
 
                       <div className="w-full mt-auto relative z-[1000]">
                       <TagRowGroup
@@ -1288,11 +1431,42 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                               onFormChange({ ...candidateData, tags: filtered });
                           }}
                       />
-              </div>
+                      </div>
                       
+                      <div className="flex flex-wrap items-center justify-between gap-3 mt-6 pt-4 border-t border-border-default/50">
+                          {candidateData.phone && (
+                              <a
+                                  href={`tel:${candidateData.phone}`}
+                                  title={candidateData.phone}
+                                  className="w-10 h-10 flex items-center justify-center bg-white border border-border-default text-text-muted rounded-xl hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm"
+                              >
+                                  <PhoneIcon className="w-5 h-5" />
+                              </a>
+                          )}
+                          <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}>
+                              <EnvelopeIcon className="w-5 h-5" />
+                          </SocialButton>
+                          <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}>
+                              <WhatsappIcon className="w-5 h-5" />
+                          </SocialButton>
+                          <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}>
+                              <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
+                          </SocialButton>
+                          <div className="h-6 w-px bg-border-default shrink-0" />
+                          <a
+                              href={candidateData.linkedInUrl || candidateData.linkedIn || '#'}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              title="LinkedIn Profile"
+                              className="w-10 h-10 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-xl hover:bg-[#0077b5]/20 transition-all shrink-0"
+                          >
+                              <LinkedInIcon className="w-5 h-5" />
+                          </a>
+                      </div>
+
                       {!hideActions && (
                           <>
-                              <div className="flex flex-wrap items-center justify-start gap-3 mt-6 pt-4 border-t border-border-default/50">
+                              <div className="flex flex-wrap items-center justify-start gap-3 mt-4">
                               <DevAnnotation
                                   title="AI Matching"
                                   description="Calculates relevance score based on candidate skills vs job requirements."
@@ -1336,15 +1510,25 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           {/* Left Side - Timeline & Analysis - Hidden on mobile */}
           <div className="w-full lg:w-5/12 flex flex-col justify-between hidden lg:flex relative z-0 h-full border-r border-border-default/50 pr-6">
               
-               {/* Timeline Section */}
+               {/* Recent activity — show only when backend supplies timeline entries */}
+              {Array.isArray((candidateData as any).activityTimeline) && (candidateData as any).activityTimeline.length > 0 ? (
               <div className="mb-2">
                   <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider mb-2">{t('profile.recent_activity')}</h4>
                   <div className="flex justify-between items-stretch gap-2">
-                      <TimelineEvent day="14" month="יולי" time="13:00" title="קו''ח" company="בזק" color="primary" />
-                      <TimelineEvent day="10" month="יולי" time="09:00" title="שיחה" company="Wix" color="accent" />
-                      <TimelineEvent day="06" month="יולי" time="10:00" title="ראיון" company="Fiverr" color="secondary" />
+                      {(candidateData as any).activityTimeline.map((ev: any, idx: number) => (
+                          <TimelineEvent
+                              key={ev.id || idx}
+                              day={String(ev.day ?? '')}
+                              month={String(ev.month ?? '')}
+                              time={String(ev.time ?? '')}
+                              title={String(ev.title ?? '')}
+                              company={String(ev.company ?? '')}
+                              color={String(ev.color ?? 'primary')}
+                          />
+                      ))}
                   </div>
               </div>
+              ) : null}
 
               {/* Visual Experience Distribution Bar - Horizontal Compact */}
               <ExperienceBar 

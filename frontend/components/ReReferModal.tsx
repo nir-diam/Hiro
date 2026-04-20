@@ -9,7 +9,7 @@ interface ClientContact {
 }
 
 interface Referral {
-    id: number;
+    id: number | string;
     candidateName: string;
     jobTitle: string;
     clientName: string;

@@ -41,6 +41,7 @@ const candidateSchemaLines = [
   'idNumber, maritalStatus, gender, drivingLicense, mobility (STRING)',
   'userId (UUID, nullable)',
   'employmentType, jobScope, availability, physicalWork (STRING)',
+  'preferredWorkModels (ARRAY of STRING: בית, היברידי, משרד)',
   'birthYear, birthMonth, birthDay, age (STRING)',
   'title (STRING), professionalSummary (TEXT)',
   'profilePicture, resumeUrl (STRING)',

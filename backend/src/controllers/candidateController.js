@@ -1145,6 +1145,56 @@ const fetchResumeText = async (resumeUrl, candidateIdForLog = '') => {
   return extraText;
 };
 
+const extFromContentType = (ct) => {
+  const c = (ct || '').toLowerCase();
+  if (c.includes('pdf')) return 'pdf';
+  if (c.includes('wordprocessingml')) return 'docx';
+  if (c.includes('msword')) return 'doc';
+  if (c.includes('rtf')) return 'rtf';
+  if (c.includes('plain')) return 'txt';
+  return 'bin';
+};
+
+/** Download candidate resume bytes for email attachment (S3/public URL). */
+const fetchResumeBinaryForMail = async (resumeUrl, candidateIdForLog = '') => {
+  if (!resumeUrl || typeof resumeUrl !== 'string') return null;
+  try {
+    let fetchUrl = resumeUrl;
+    if (fetchUrl.includes('docs.google.com/document/d/')) {
+      fetchUrl = rewriteDocsExportTxt(fetchUrl);
+    } else if (fetchUrl.includes('docs.google.com/spreadsheets/d/')) {
+      fetchUrl = rewriteSheetsExportCsv(fetchUrl);
+    } else if (fetchUrl.includes('drive.google.com/file/d/')) {
+      fetchUrl = rewriteDriveUrl(fetchUrl);
+    }
+
+    const resp = await fetch(fetchUrl);
+    const ct = (resp.headers.get('content-type') || '').split(';')[0].trim();
+    if (!resp.ok) {
+      console.log('[resume-binary-fetch]', candidateIdForLog, 'status', resp.status);
+      return null;
+    }
+    if (ct.includes('text/html') && /google|docs\.google/.test(fetchUrl)) {
+      console.warn('[resume-binary-fetch]', candidateIdForLog, 'unexpected html from docs url');
+      return null;
+    }
+
+    const arrayBuf = await resp.arrayBuffer();
+    const buffer = Buffer.from(arrayBuf);
+    if (!buffer.length) return null;
+
+    const ext = extFromContentType(ct);
+    return {
+      buffer,
+      contentType: ct || 'application/octet-stream',
+      filename: `resume.${ext}`,
+    };
+  } catch (e) {
+    console.log('[resume-binary-fetch-error]', candidateIdForLog, e.message || e);
+    return null;
+  }
+};
+
 const extractStructuredFields = (text) => {
   if (!text) return {};
   const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
@@ -1574,6 +1624,27 @@ const listLinkedJobs = async (req, res) => {
   }
 };
 
+/** Update status on a job_candidates row (e.g. from InterestedInJobs modal). */
+const patchJobLinkStatus = async (req, res) => {
+  try {
+    const { jobCandidateId } = req.params;
+    const { status } = req.body || {};
+    if (status === undefined || status === null || String(status).trim() === '') {
+      return res.status(400).json({ message: 'status is required' });
+    }
+    const jc = await JobCandidate.findByPk(jobCandidateId);
+    if (!jc) {
+      return res.status(404).json({ message: 'Job link not found' });
+    }
+    await jc.update({ status: String(status).trim() });
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(jc.get({ plain: true }));
+  } catch (err) {
+    console.error('[patchJobLinkStatus]', err.message || err);
+    return res.status(500).json({ message: err.message || 'Failed to update job link status' });
+  }
+};
+
 // Get 1–5 most relevant jobs for this candidate (from JobCandidate + Job by fit), with match percentage.
 // Uses this candidate's embedding only so each candidate gets their own ranked list. No caching.
 const getRelevantJobs = async (req, res) => {
@@ -1865,6 +1936,52 @@ const saveScreeningData = async (req, res) => {
   }
 };
 
+/** Report: all candidate+job screening rows marked rejected (for referrals / disqualified list). */
+const listScreeningRejections = async (req, res) => {
+  try {
+    const hasReject = await jobCandidateScreeningHasRejectionColumns();
+    if (!hasReject) {
+      res.set('Cache-Control', 'private, no-store');
+      return res.json([]);
+    }
+
+    const rows = await JobCandidateScreening.findAll({
+      where: { screeningStatus: 'rejected' },
+      include: [
+        { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'], required: false },
+        { model: Job, as: 'job', attributes: ['id', 'title', 'client', 'recruitingCoordinator'], required: false },
+      ],
+      order: [['updatedAt', 'DESC']],
+      limit: 500,
+    });
+
+    const out = rows.map((r) => {
+      const row = r.get({ plain: true });
+      const cand = row.candidate || {};
+      const job = row.job || {};
+      const reasonParts = [row.rejectionReason, row.rejectionNotes].filter((x) => x && String(x).trim());
+      return {
+        id: row.id,
+        candidateId: cand.id || row.candidateId,
+        candidateName: cand.fullName ? String(cand.fullName).trim() : '',
+        jobId: job.id || row.jobId,
+        jobTitle: job.title ? String(job.title).trim() : '—',
+        clientName: job.client ? String(job.client).trim() : '',
+        eventDate: row.updatedAt,
+        coordinator: job.recruitingCoordinator ? String(job.recruitingCoordinator).trim() : '',
+        screeningLevel: 'סינון מועמד',
+        reason: reasonParts.length ? reasonParts.map((x) => String(x).trim()).join(' — ') : '—',
+      };
+    });
+
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(out);
+  } catch (err) {
+    console.error('[listScreeningRejections]', err);
+    return res.status(500).json({ message: err.message || 'Failed to list screening rejections' });
+  }
+};
+
 module.exports = {
   list,
   listByWorkedAtCompany,
@@ -1883,12 +2000,15 @@ module.exports = {
   uploadResumeForCandidate,
   generateExperienceSummary,
   fetchResumeText,
+  fetchResumeBinaryForMail,
   buildParsedUpdates,
   generateInternalOpinion,
   getRelevantJobs,
   listLinkedJobs,
+  patchJobLinkStatus,
   getScreeningData,
   saveScreeningData,
+  listScreeningRejections,
 };
 
 

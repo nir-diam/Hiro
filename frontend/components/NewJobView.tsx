@@ -156,18 +156,36 @@ const companyTagsList = [
     { id: 'comp_4', name: 'זמינות מיידית', synonyms: ['מיידי', 'מתחיל מחר'] },
 ];
 
-const mockContacts = [
-    { id: 1, name: 'ישראל ישראלי', role: 'מנהל גיוס' },
-    { id: 2, name: 'דנה כהן', role: 'רכזת גיוס בכירה' },
-    { id: 3, name: 'אביב לוי', role: 'מנהל לקוחות' },
-    { id: 4, name: 'יעל שחר', role: 'מנהלת HR' },
-];
+/** Job distribution: אנשי קשר (ClientContact) + משתמשי פורטל (User) של הלקוח הנבחר */
+type JobDistributionOption = {
+    key: string;
+    kind: 'contact' | 'user';
+    id: string;
+    name: string;
+    subtitle: string;
+    email?: string;
+};
+
+function jobDistributionKey(kind: 'contact' | 'user', id: string): string {
+    return `${kind}:${id}`;
+}
+
+/** Extract persisted job.contacts (kind + id) before distribution list is loaded. */
+function jobContactsToKeys(raw: unknown): string[] | null {
+    if (!Array.isArray(raw) || raw.length === 0) return null;
+    const keys: string[] = [];
+    for (const item of raw) {
+        if (!item || typeof item !== 'object') continue;
+        const o = item as Record<string, unknown>;
+        const kind = o.kind === 'user' ? 'user' : o.kind === 'contact' ? 'contact' : null;
+        const id = o.id != null ? String(o.id).trim() : '';
+        if (kind && id) keys.push(jobDistributionKey(kind, id));
+    }
+    return keys.length > 0 ? keys : null;
+}
 
 const mockInternalRecruiters = [
-    { id: 'r1', name: 'דנה כהן' },
-    { id: 'r2', name: 'אביב לוי' },
-    { id: 'r3', name: 'יעל שחר' },
-    { id: 'r4', name: 'מיכל אלקבץ' },
+  
 ];
 
 const mockAccountManagers = [
@@ -1231,7 +1249,7 @@ const initialJobState = {
     healthProfile: 'standard', 
     jobType: ['משרה מלאה'], 
     jobField: null as SelectedJobField | null,
-    contacts: mockContacts.map(c => c.id), 
+    contacts: [] as string[],
     jobTitle: '', 
     jobDescription: '', 
     internalNotes: '', 
@@ -1302,6 +1320,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const navRef = useRef<HTMLDivElement>(null);
     const formDataRef = useRef(formData);
     formDataRef.current = formData;
+    const [distributionPeople, setDistributionPeople] = useState<JobDistributionOption[]>([]);
+    const [distributionLoading, setDistributionLoading] = useState(false);
+    const [distributionFetchError, setDistributionFetchError] = useState<string | null>(null);
+    const distributionPeopleRef = useRef<JobDistributionOption[]>([]);
+    distributionPeopleRef.current = distributionPeople;
 
     useEffect(() => {
         if (isJobFieldComplete(formData.jobField)) setJobFieldError(false);
@@ -1310,6 +1333,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     useEffect(() => {
         if (isEditing && jobData) {
              const candidateLocations = deriveLocationsFromJob(jobData);
+             const contactsFromJob = jobContactsToKeys(jobData.contacts);
             const hydratedSkills: JobSkill[] = Array.isArray(jobData.skills)
                 ? jobData.skills.map((s: any, i: number) => ({
                       id: String(s.id ?? `loaded-${i}`),
@@ -1387,6 +1411,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 postingCode: jobData.postingCode || prev.postingCode,
                 uniqueEmail: jobData.postingCode ? `humand+${jobData.postingCode}@app.hiro.co.il` : (jobData.uniqueEmail || prev.uniqueEmail),
                 creationDate: jobData.openDate ? new Date(jobData.openDate).toLocaleDateString('he-IL') : prev.creationDate,
+                ...(contactsFromJob !== null ? { contacts: contactsFromJob } : {}),
              }));
              if (jobData.aiRawDescription) {
                  setPastedJobText(jobData.aiRawDescription);
@@ -1441,6 +1466,114 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         if (activeClients.some((c) => c.label === current)) return activeClients;
         return [{ id: `legacy:${current}`, label: current }, ...activeClients];
     }, [activeClients, formData.clientName]);
+
+    /** UUID of Client row — whenever שם הלקוח matches a client from /api/clients (no need to click "אשר"). */
+    const resolvedClientId = useMemo(() => {
+        const name = formData.clientName.trim();
+        if (!name) return null;
+        const match = activeClients.find((c) => c.label === name);
+        if (!match || match.id.startsWith('legacy:')) return null;
+        return match.id;
+    }, [formData.clientName, activeClients]);
+
+    const distributionListBlockedReason = useMemo(() => {
+        if (!apiBase) return 'אין כתובת API (VITE_API_BASE) — לא ניתן לטעון לקוחות.';
+        const name = formData.clientName.trim();
+        if (!name) return 'בחר לקוח בשדה "שם הלקוח" בפרטים כלליים.';
+        const match = activeClients.find((c) => c.label === name);
+        if (!match || match.id.startsWith('legacy:')) {
+            return ' טקסט חופשי לא מקושר  ולכן אין רשימת אנשי קשר.';
+        }
+        return null;
+    }, [apiBase, formData.clientName, activeClients]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!apiBase || !resolvedClientId) {
+            setDistributionPeople([]);
+            setDistributionLoading(false);
+            setDistributionFetchError(null);
+            return;
+        }
+        setDistributionLoading(true);
+        setDistributionFetchError(null);
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = {
+            Accept: 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        };
+        void (async () => {
+            try {
+                const [cRes, uRes] = await Promise.all([
+                    fetch(`${apiBase}/api/clients/${encodeURIComponent(resolvedClientId)}/contacts`, {
+                        credentials: 'include',
+                        headers,
+                    }),
+                    fetch(`${apiBase}/api/clients/${encodeURIComponent(resolvedClientId)}/staff-users`, {
+                        credentials: 'include',
+                        headers,
+                    }),
+                ]);
+                if (!cRes.ok && !uRes.ok) {
+                    const msg = `שגיאת שרת (${cRes.status} / ${uRes.status}) — בדוק התחברות והרשאות.`;
+                    if (!cancelled) setDistributionFetchError(msg);
+                    if (!cancelled) setDistributionPeople([]);
+                    return;
+                }
+                const rawContacts = cRes.ok ? ((await cRes.json()) as Record<string, unknown>[]) : [];
+                const rawUsers = uRes.ok ? ((await uRes.json()) as Record<string, unknown>[]) : [];
+                const people: JobDistributionOption[] = [];
+                for (const row of Array.isArray(rawContacts) ? rawContacts : []) {
+                    const id = row?.id != null ? String(row.id) : '';
+                    if (!id) continue;
+                    const name = String(row.name || '').trim() || 'ללא שם';
+                    const role = String(row.role || '').trim();
+                    people.push({
+                        key: jobDistributionKey('contact', id),
+                        kind: 'contact',
+                        id,
+                        name,
+                        subtitle: role || 'איש קשר',
+                        email: String(row.email || '').trim() || undefined,
+                    });
+                }
+                for (const row of Array.isArray(rawUsers) ? rawUsers : []) {
+                    const id = row?.id != null ? String(row.id) : '';
+                    if (!id) continue;
+                    const name = String(row.name || '').trim() || String(row.email || '').trim() || 'משתמש';
+                    const role = String(row.role || '').trim();
+                    const active = row.isActive !== false;
+                    people.push({
+                        key: jobDistributionKey('user', id),
+                        kind: 'user',
+                        id,
+                        name,
+                        subtitle: active ? (role || 'משתמש פורטל') : `${role || 'משתמש'} (לא פעיל)`,
+                        email: String(row.email || '').trim() || undefined,
+                    });
+                }
+                if (cancelled) return;
+                setDistributionPeople(people);
+                const allKeys = people.map((p) => p.key);
+                setFormData((prev) => {
+                    const valid = (prev.contacts || []).filter((k) => allKeys.includes(k));
+                    const nextContacts = valid.length > 0 ? valid : allKeys;
+                    return { ...prev, contacts: nextContacts };
+                });
+            } catch {
+                if (!cancelled) {
+                    setDistributionPeople([]);
+                    setFormData((prev) => ({ ...prev, contacts: [] }));
+                    setDistributionFetchError('שגיאת רשת או תגובה לא תקינה.');
+                }
+            } finally {
+                if (!cancelled) setDistributionLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, resolvedClientId]);
 
     useEffect(() => {
         const scrollContainer = document.getElementById('main-scroll-container');
@@ -2003,12 +2136,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     };
 
 
-    const toggleContact = (contactId: number) => {
-        setFormData(prev => ({
+    const toggleContact = (contactKey: string) => {
+        setFormData((prev) => ({
             ...prev,
-            contacts: prev.contacts.includes(contactId) 
-                ? prev.contacts.filter(id => id !== contactId) 
-                : [...prev.contacts, contactId]
+            contacts: prev.contacts.includes(contactKey)
+                ? prev.contacts.filter((k) => k !== contactKey)
+                : [...prev.contacts, contactKey],
         }));
     };
 
@@ -2053,7 +2186,29 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         const requirements = Array.isArray(data.requirements)
             ? data.requirements.map((r: string) => String(r).trim()).filter(Boolean)
             : (data.requirements || '').split(/\r?\n/).map((line: string) => line.trim()).filter(Boolean);
-        const contactObjects = mockContacts.filter(contact => data.contacts.includes(contact.id));
+        const people = distributionPeopleRef.current;
+        const contactObjects = (Array.isArray(data.contacts) ? data.contacts : [])
+            .map((key: string) => people.find((p) => p.key === key))
+            .filter(Boolean)
+            .map((p) => {
+                const row = p as JobDistributionOption;
+                if (row.kind === 'contact') {
+                    return {
+                        kind: 'contact' as const,
+                        id: row.id,
+                        name: row.name,
+                        role: row.subtitle,
+                        email: row.email || null,
+                    };
+                }
+                return {
+                    kind: 'user' as const,
+                    id: row.id,
+                    name: row.name,
+                    role: row.subtitle,
+                    email: row.email || null,
+                };
+            });
         const recruiterName = mockInternalRecruiters.find(r => data.assignedRecruiters.includes(r.id))?.name || 'מערכת';
         const accountManagerName = mockAccountManagers.find(m => data.assignedAccountManagers.includes(m.id))?.name || 'מערכת';
 
@@ -2730,20 +2885,59 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                          <div>
                              <h4 className="font-bold text-text-default mb-3 flex items-center justify-between">
                                  <span>{t('new_job.contacts')}</span>
-                                 <span className="text-xs font-normal text-text-muted">ברירת מחדל: כולם</span>
+                                 <span className="text-xs font-normal text-text-muted">
+                                     {resolvedClientId
+                                         ? distributionLoading
+                                             ? 'טוען…'
+                                             : `${distributionPeople.length} אנשי קשר / משתמשים`
+                                         : 'נדרש לקוח מהרשימה'}
+                                 </span>
                              </h4>
                              <div className="space-y-2 max-h-60 overflow-y-auto border border-border-default rounded-lg p-2 bg-bg-subtle/30">
-                                 {mockContacts.map(contact => (
-                                     <label key={contact.id} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded cursor-pointer">
-                                         <input 
-                                            type="checkbox" 
-                                            checked={formData.contacts.includes(contact.id)} 
-                                            onChange={() => toggleContact(contact.id)}
-                                            className="w-4 h-4 text-primary-600 rounded"
+                                 {distributionFetchError && (
+                                     <p className="text-sm text-red-600 p-2">{distributionFetchError}</p>
+                                 )}
+                                 {!resolvedClientId && distributionListBlockedReason && (
+                                     <p className="text-sm text-text-muted p-2">{distributionListBlockedReason}</p>
+                                 )}
+                                 {resolvedClientId && !distributionLoading && !distributionFetchError && distributionPeople.length === 0 && (
+                                     <p className="text-sm text-text-muted p-2">אין אנשי קשר או משתמשי פורטל משויכים ללקוח זה.</p>
+                                 )}
+                                 {distributionPeople.map((person) => (
+                                     <label
+                                         key={person.key}
+                                         className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded cursor-pointer"
+                                     >
+                                         <input
+                                             type="checkbox"
+                                             checked={formData.contacts.includes(person.key)}
+                                             onChange={() => toggleContact(person.key)}
+                                             className="w-4 h-4 text-primary-600 rounded"
                                          />
-                                         <div className="flex-grow">
-                                             <div className="font-semibold text-sm">{contact.name}</div>
-                                             <div className="text-xs text-text-muted">{contact.role}</div>
+                                         <div className="flex-grow min-w-0">
+                                             <div className="font-semibold text-sm flex items-center gap-2 flex-wrap">
+                                                 <span className="min-w-0 inline-flex items-baseline gap-1.5 flex-wrap">
+                                                     <span>{person.name}</span>
+                                                     {person.email ? (
+                                                         <span
+                                                             className="text-[11px] font-normal text-text-muted truncate max-w-[min(100%,14rem)]"
+                                                             title={person.email}
+                                                         >
+                                                             {person.email}
+                                                         </span>
+                                                     ) : null}
+                                                 </span>
+                                                 <span
+                                                     className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                                         person.kind === 'user'
+                                                             ? 'bg-blue-100 text-blue-800'
+                                                             : 'bg-bg-subtle text-text-muted'
+                                                     }`}
+                                                 >
+                                                     {person.kind === 'user' ? 'משתמש' : 'איש קשר'}
+                                                 </span>
+                                             </div>
+                                             <div className="text-xs text-text-muted truncate">{person.subtitle}</div>
                                          </div>
                                      </label>
                                  ))}
