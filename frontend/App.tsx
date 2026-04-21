@@ -11,7 +11,7 @@ import CandidateSummaryDrawer from './components/CandidateSummaryDrawer';
 import { useUIState } from './hooks/useUIState';
 import { useCandidateProfile } from './hooks/useCandidateProfile';
 import { AppRoutes } from './routes';
-import { type Event, initialEventsData } from './components/EventsView';
+import { type Event } from './components/EventsView';
 import { useSavedSearches } from './context/SavedSearchesContext';
 import SendMessageModal from './components/SendMessageModal';
 import CreateJobAlertModal from './components/CreateJobAlertModal';
@@ -46,7 +46,7 @@ const AppContent: React.FC = () => {
         isJobAlertModalOpen, jobAlertModalConfig, openJobAlertModal, closeJobAlertModal,
     } = useUIState();
 
-    const [events, setEvents] = useState<Event[]>(initialEventsData);
+    const [events, setEvents] = useState<Event[]>([]);
     const [favorites, setFavorites] = useState<Set<number>>(new Set());
 
     const toggleFavorite = (id: number) => {
@@ -177,17 +177,16 @@ const AppContent: React.FC = () => {
             taskData.isTask && Number.isFinite(Number(taskData.allocatedDays))
                 ? Number(taskData.allocatedDays)
                 : undefined;
-        const newEvent: Event = {
+        const newEvent = {
             id: Date.now(),
             type: taskData.isTask ? 'משימת מערכת' : 'תזכורת',
-            title: taskData.messageText.substring(0, 50) + (taskData.messageText.length > 50 ? '...' : ''),
             description: taskData.messageText,
             date: dateIso,
             coordinator: primaryAssignee,
-            status: 'עתידי',
-            linkedTo: { type: 'מועמד', name: 'שפירא גדעון' },
+            status: 'עתידי' as const,
+            linkedTo: [{ type: 'מועמד', name: 'שפירא גדעון' }],
             ...(allocatedDays != null ? { allocatedDays } : {}),
-        };
+        } as Event;
         setEvents(prevEvents => [newEvent, ...prevEvents].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
         closeNewTask();
     };

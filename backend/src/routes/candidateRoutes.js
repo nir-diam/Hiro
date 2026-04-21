@@ -1,5 +1,7 @@
 const express = require('express');
 const candidateController = require('../controllers/candidateController');
+const candidateDocumentController = require('../controllers/candidateDocumentController');
+const candidateEventController = require('../controllers/candidateEventController');
 const authMiddleware = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -21,6 +23,17 @@ router.get('/:id/relevant-jobs', candidateController.getRelevantJobs);
 router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.get('/:id/screening-data', candidateController.getScreeningData);
 router.put('/:id/screening-data', candidateController.saveScreeningData);
+
+router.get('/:id/documents', candidateDocumentController.list);
+router.post('/:id/documents/upload-url', candidateDocumentController.createUploadUrl);
+router.post('/:id/documents/attach', candidateDocumentController.attach);
+router.put('/:id/documents/:docId', candidateDocumentController.update);
+router.delete('/:id/documents/:docId', candidateDocumentController.remove);
+
+router.get('/:id/events', candidateEventController.list);
+router.post('/:id/events', candidateEventController.create);
+router.put('/:id/events/:eventId', candidateEventController.update);
+router.delete('/:id/events/:eventId', candidateEventController.remove);
 
 router.get('/:id', candidateController.get);
 router.post('/', candidateController.create);

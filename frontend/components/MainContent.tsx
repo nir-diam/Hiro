@@ -3,7 +3,7 @@ import React, { useId, useState, useEffect, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import AccordionSection from './AccordionSection';
 import ContentNavBar from './ContentNavBar';
-import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, SparklesIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon } from './Icons';
+import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon } from './Icons';
 import WorkExperienceSection from './WorkExperienceSection';
 import { TagInput } from './TagInput';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -125,6 +125,80 @@ const getLevelText = (level: number): string => {
     return "חלש";
 };
 
+const HEBREW_MONTH_TO_NUM: Record<string, number> = {
+    ינואר: 1,
+    פברואר: 2,
+    מרץ: 3,
+    אפריל: 4,
+    מאי: 5,
+    יוני: 6,
+    יולי: 7,
+    אוגוסט: 8,
+    ספטמבר: 9,
+    אוקטובר: 10,
+    נובמבר: 11,
+    דצמבר: 12,
+};
+
+const HEBREW_MONTH_LABELS = [
+    'ינואר',
+    'פברואר',
+    'מרץ',
+    'אפריל',
+    'מאי',
+    'יוני',
+    'יולי',
+    'אוגוסט',
+    'ספטמבר',
+    'אוקטובר',
+    'נובמבר',
+    'דצמבר',
+];
+
+const normalizeBirthYear = (raw: unknown): number | null => {
+    if (raw == null || raw === '') return null;
+    const n = parseInt(String(raw).trim(), 10);
+    return Number.isFinite(n) && n >= 1900 && n <= 2100 ? n : null;
+};
+
+const normalizeBirthMonthNum = (raw: unknown): number | null => {
+    if (raw == null || raw === '') return null;
+    const s = String(raw).trim();
+    const n = parseInt(s, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 12) return n;
+    const he = HEBREW_MONTH_TO_NUM[s];
+    if (he != null) return he;
+    return null;
+};
+
+const normalizeBirthDayNum = (raw: unknown): number | null => {
+    if (raw == null || raw === '') return null;
+    const n = parseInt(String(raw).trim(), 10);
+    return Number.isFinite(n) && n >= 1 && n <= 31 ? n : null;
+};
+
+/** Age from birth fields: uses full date when month (and ideally day) exist; otherwise year difference only. */
+const computeAgeFromBirth = (birthYear: unknown, birthMonth: unknown, birthDay: unknown): string => {
+    const y = normalizeBirthYear(birthYear);
+    if (y == null) return '';
+    const mNum = normalizeBirthMonthNum(birthMonth);
+    const dNum = normalizeBirthDayNum(birthDay);
+    const now = new Date();
+    if (mNum == null && dNum == null) {
+        const a = now.getFullYear() - y;
+        return a >= 0 && a <= 130 ? String(a) : '';
+    }
+    const month = mNum ?? 1;
+    const day = dNum ?? 1;
+    const birth = new Date(y, month - 1, day);
+    if (Number.isNaN(birth.getTime())) return '';
+    let age = now.getFullYear() - birth.getFullYear();
+    const md = now.getMonth() - birth.getMonth();
+    if (md < 0 || (md === 0 && now.getDate() < birth.getDate())) age -= 1;
+    if (age < 0 || age > 130) return '';
+    return String(age);
+};
+
 const DRIVING_LICENSE_PICKLIST_KEY = 'driving_license';
 const GENDER_PICKLIST_KEY = 'gender';
 const MOBILITY_PICKLIST_KEY = 'mobility';
@@ -211,6 +285,32 @@ const MainContent: React.FC<MainContentProps> = ({
     const mobilityValueSet = useMemo(() => new Set(mobilityOptions.map((o) => o.value)), [mobilityOptions]);
     const mobilityCurrent = formData.mobility != null ? String(formData.mobility) : '';
     const mobilityUnknown = mobilityCurrent !== '' && !mobilityValueSet.has(mobilityCurrent);
+
+    const birthYearChoices = useMemo(() => {
+        const y = new Date().getFullYear();
+        const arr: number[] = [];
+        for (let i = 0; i <= 100; i++) arr.push(y - i);
+        return arr;
+    }, []);
+
+    const birthYearStr = formData.birthYear != null ? String(formData.birthYear).trim() : '';
+    const birthYearNum = normalizeBirthYear(formData.birthYear);
+    const birthYearInList = birthYearNum != null && birthYearChoices.includes(birthYearNum);
+
+    const birthMonthRaw = formData.birthMonth != null ? String(formData.birthMonth).trim() : '';
+    const birthMonthNum = normalizeBirthMonthNum(formData.birthMonth);
+    const birthMonthSelectValue = birthMonthNum != null ? String(birthMonthNum) : birthMonthRaw;
+
+    const birthDayRaw = formData.birthDay != null ? String(formData.birthDay).trim() : '';
+    const birthDayNum = normalizeBirthDayNum(formData.birthDay);
+    const birthDaySelectValue = birthDayNum != null ? String(birthDayNum) : birthDayRaw;
+
+    const computedAge = useMemo(
+        () => computeAgeFromBirth(formData.birthYear, formData.birthMonth, formData.birthDay),
+        [formData.birthYear, formData.birthMonth, formData.birthDay],
+    );
+    const ageDisplayValue =
+        formData.age != null && String(formData.age).trim() !== '' ? String(formData.age) : computedAge;
 
     // States for new item inputs
     const [newLanguageName, setNewLanguageName] = useState('');
@@ -469,6 +569,7 @@ const MainContent: React.FC<MainContentProps> = ({
                             value={mobilityCurrent}
                             onChange={handleInputChange}
                         >
+                            <option value="-"></option>
                             {mobilityOptions.map((v) => (
                                 <option key={v.id || v.value} value={v.value}>
                                     {(v.displayName || v.label).trim() || v.value}
@@ -496,10 +597,10 @@ const MainContent: React.FC<MainContentProps> = ({
                                     ? formData.employmentTypes.map(String)
                                     : formData.employmentType
                                       ? [String(formData.employmentType)]
-                                      : ['שכיר']
+                                      : ['']
                             }
                             onChange={(next) => {
-                                const normalized = next.length ? next : ['שכיר'];
+                                const normalized = next.length ? next : [''];
                                 updateFormPreserveScroll({
                                     ...formData,
                                     employmentTypes: normalized,
@@ -532,33 +633,31 @@ const MainContent: React.FC<MainContentProps> = ({
                             }}
                             placeholder="בחר"
                         />
+
+                        <div id="preferences">
+                            <FormSelect
+                                label={t('form.availability')}
+                                name="availability"
+                                value={formData.availability}
+                                onChange={handleInputChange}
+                            >
+                                <option>בחר</option>
+                                <option value="🟢 מיידי (זמין לעבודה מיד).">🟢 מיידי (זמין לעבודה מיד).</option>
+                                <option value="🟡 חודש הודעה (עובד, מחפש אקטיבית).">
+                                    🟡 חודש הודעה (עובד, מחפש אקטיבית).
+                                </option>
+                                <option value="🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).">
+                                    🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).
+                                </option>
+                                <option value="🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).">
+                                    🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).
+                                </option>
+                            </FormSelect>
+                        </div>
                     </div>
                 </AccordionSection>
             </div>
 
-            <div id="work-experience">
-                <AccordionSection title={t('section.work_experience')} icon={<BriefcaseIcon className="w-5 h-5"/>} defaultOpen>
-                    <WorkExperienceSection 
-                        experience={Array.isArray(formData.workExperience) ? formData.workExperience : []}
-                        onExperienceChange={handleWorkExperienceChange}
-                    />
-                </AccordionSection>
-            </div>
-
-            <div id="preferences">
-                <AccordionSection title={t('section.preferences')} icon={<SparklesIcon className="w-5 h-5"/>} defaultOpen>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <FormSelect label={t('form.availability')} name="availability" value={formData.availability} onChange={handleInputChange}>
-                        <option >בחר</option>
-                            <option value="🟢 מיידי (זמין לעבודה מיד).">🟢 מיידי (זמין לעבודה מיד).</option>
-                            <option value="🟡 חודש הודעה (עובד, מחפש אקטיבית).">🟡 חודש הודעה (עובד, מחפש אקטיבית).</option>
-                            <option value="🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).">🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).</option>
-                            <option value="🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).">🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).</option>
-                        </FormSelect>
-                    </div>
-                </AccordionSection>
-            </div>
-            
             <div id="salary">
                 <AccordionSection title={t('section.salary')} icon={<WalletIcon className="w-5 h-5"/>} defaultOpen>
             <div className="p-4 space-y-4">
@@ -600,13 +699,74 @@ const MainContent: React.FC<MainContentProps> = ({
                 </AccordionSection>
             </div>
 
+            <div id="work-experience">
+                <AccordionSection title={t('section.work_experience')} icon={<BriefcaseIcon className="w-5 h-5"/>} defaultOpen>
+                    <WorkExperienceSection 
+                        experience={Array.isArray(formData.workExperience) ? formData.workExperience : []}
+                        onExperienceChange={handleWorkExperienceChange}
+                    />
+                </AccordionSection>
+            </div>
+            
+            
+
             <div id="birth-date">
                 <AccordionSection title={t('section.birth_date')} icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        <FormSelect label={t('form.birth_year')} name="birthYear" value={formData.birthYear} onChange={handleInputChange}><option>1989</option></FormSelect>
-                        <FormSelect label={t('form.birth_month')} name="birthMonth" value={formData.birthMonth} onChange={handleInputChange}><option>יוני</option></FormSelect>
-                        <FormSelect label={t('form.birth_day')} name="birthDay" value={formData.birthDay} onChange={handleInputChange}><option>15</option></FormSelect>
-                        <FormInput label={t('form.age')} name="age" value={formData.age} onChange={handleInputChange} />
+                        <FormSelect
+                            label={t('form.birth_year')}
+                            name="birthYear"
+                            value={birthYearStr}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {birthYearStr !== '' && !birthYearInList ? (
+                                <option value={birthYearStr}>{birthYearStr}</option>
+                            ) : null}
+                            {birthYearChoices.map((y) => (
+                                <option key={y} value={String(y)}>
+                                    {y}
+                                </option>
+                            ))}
+                        </FormSelect>
+                        <FormSelect
+                            label={t('form.birth_month')}
+                            name="birthMonth"
+                            value={birthMonthSelectValue}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {birthMonthRaw !== '' && birthMonthNum == null ? (
+                                <option value={birthMonthRaw}>{birthMonthRaw}</option>
+                            ) : null}
+                            {HEBREW_MONTH_LABELS.map((label, idx) => (
+                                <option key={label} value={String(idx + 1)}>
+                                    {label}
+                                </option>
+                            ))}
+                        </FormSelect>
+                        <FormSelect
+                            label={t('form.birth_day')}
+                            name="birthDay"
+                            value={birthDaySelectValue}
+                            onChange={handleInputChange}
+                        >
+                            <option value="">-</option>
+                            {birthDayRaw !== '' && birthDayNum == null ? (
+                                <option value={birthDayRaw}>{birthDayRaw}</option>
+                            ) : null}
+                            {Array.from({ length: 31 }, (_, i) => i + 1).map((d) => (
+                                <option key={d} value={String(d)}>
+                                    {d}
+                                </option>
+                            ))}
+                        </FormSelect>
+                        <FormInput
+                            label={t('form.age')}
+                            name="age"
+                            value={ageDisplayValue}
+                            onChange={handleInputChange}
+                        />
                     </div>
                 </AccordionSection>
             </div>

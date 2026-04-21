@@ -22,6 +22,8 @@ type CreationMode = 'choice' | 'ai_input' | 'ai_result' | 'manual';
 
 const initialCandidateState = {
     fullName: "",
+    firstName: "",
+    lastName: "",
     status: "חדש",
     phone: "",
     email: "",
@@ -75,6 +77,47 @@ const loadingMessages = [
     'ממפה פרופיל תעשייתי...',
     'בונה את הפרופיל הסופי...'
 ];
+
+/** Fields returned by GET / candidates / createFromAi that must sync into the form without refresh. */
+const CANDIDATE_API_PASSTHROUGH_KEYS = [
+    'status',
+    'idNumber',
+    'gender',
+    'maritalStatus',
+    'drivingLicense',
+    'drivingLicenses',
+    'mobility',
+    'employmentType',
+    'employmentTypes',
+    'jobScope',
+    'jobScopes',
+    'availability',
+    'preferredWorkModels',
+    'birthYear',
+    'birthMonth',
+    'birthDay',
+    'age',
+    'location',
+    'physicalWork',
+    'salaryMin',
+    'salaryMax',
+    'highlights',
+    'internalTags',
+    'experience',
+    'industry',
+    'field',
+    'sector',
+    'companySize',
+    'candidateNotes',
+    'internalNotes',
+    'resumeUrl',
+    'userId',
+    'searchText',
+    'source',
+    'lastActivity',
+    'lastActive',
+    'matchScore',
+] as const;
 
 const blobToBase64 = (blob: Blob): Promise<string> => {
     return new Promise((resolve, reject) => {
@@ -375,22 +418,48 @@ const NewCandidateViewV2: React.FC = () => {
         };
 
         const tagDetails = Array.isArray(candidateData.tagDetails) ? candidateData.tagDetails : [];
-        setFormData((prev: any) => ({
-            ...prev,
-            fullName: candidateData.fullName || prev.fullName,
-            email: candidateData.email || prev.email,
-            phone: candidateData.phone || prev.phone,
-            address: candidateData.address || prev.address,
-            title: candidateData.title || prev.title,
-            professionalSummary: candidateData.professionalSummary || candidateData.summary || prev.professionalSummary,
-            tags: tags.length > 0 ? tags : prev.tags,
-            tagDetails: tagDetails.length > 0 ? tagDetails : prev.tagDetails,
-            skills,
-            workExperience: experience.length > 0 ? experience : prev.workExperience,
-            education: education.length > 0 ? education : prev.education,
-            languages: languages.length > 0 ? languages : prev.languages,
-            industryAnalysis: candidateData.industryAnalysis || prev.industryAnalysis,
-        }));
+
+        const splitFullNameParts = (full: string) => {
+            const t = String(full || '').trim();
+            if (!t) return { firstName: '', lastName: '' };
+            const idx = t.indexOf(' ');
+            if (idx === -1) return { firstName: t, lastName: '' };
+            return { firstName: t.slice(0, idx).trim(), lastName: t.slice(idx + 1).trim() };
+        };
+        const fromApiFirst = candidateData.firstName != null ? String(candidateData.firstName).trim() : '';
+        const fromApiLast = candidateData.lastName != null ? String(candidateData.lastName).trim() : '';
+        const fromFull = splitFullNameParts(candidateData.fullName || '');
+
+        setFormData((prev: any) => {
+            const next: any = {
+                ...prev,
+                ...(candidateData.id
+                    ? { id: candidateData.id, backendId: candidateData.id }
+                    : {}),
+                fullName: candidateData.fullName || prev.fullName,
+                firstName: fromApiFirst || fromFull.firstName || prev.firstName || '',
+                lastName: fromApiLast || fromFull.lastName || prev.lastName || '',
+                email: candidateData.email || prev.email,
+                phone: candidateData.phone || prev.phone,
+                address: candidateData.address || prev.address,
+                title: candidateData.title || prev.title,
+                professionalSummary:
+                    candidateData.professionalSummary || candidateData.summary || prev.professionalSummary,
+                tags: tags.length > 0 ? tags : prev.tags,
+                tagDetails: tagDetails.length > 0 ? tagDetails : prev.tagDetails,
+                skills,
+                workExperience: experience.length > 0 ? experience : prev.workExperience,
+                education: education.length > 0 ? education : prev.education,
+                languages: languages.length > 0 ? languages : prev.languages,
+                industryAnalysis: candidateData.industryAnalysis || prev.industryAnalysis,
+            };
+            for (const key of CANDIDATE_API_PASSTHROUGH_KEYS) {
+                if (Object.prototype.hasOwnProperty.call(candidateData, key)) {
+                    next[key] = candidateData[key];
+                }
+            }
+            return next;
+        });
 
         setResumeData({
             name: candidateData.fullName || 'Candidate',

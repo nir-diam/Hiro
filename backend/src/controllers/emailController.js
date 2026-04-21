@@ -14,10 +14,12 @@ const {
   fetchResumeText,
   buildParsedUpdates,
   fetchResumeBinaryForMail,
+  buildCandidateModelSchemaJsonForPrompt,
 } = require('./candidateController');
 const Candidate = require('../models/Candidate');
 const candidateTagService = require('../services/candidateTagService');
 const promptService = require('../services/promptService');
+const picklistService = require('../services/picklistService');
 const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
 const NotificationMessage = require('../models/NotificationMessage');
@@ -1571,7 +1573,15 @@ let resumePromptCache = null;
 const getResumePromptTemplate = async () => {
   if (resumePromptCache) return resumePromptCache;
   try {
-    resumePromptCache = await promptService.getById('cv_parsing');
+    const record = await promptService.getById('cv_parsing');
+    const schemaJson = buildCandidateModelSchemaJsonForPrompt();
+    const mobilityPicklist = await picklistService.formatCategoryValuesForLlmPrompt('mobility');
+    const drivingPicklist = await picklistService.formatCategoryValuesForLlmPrompt('driving_license');
+    let template = String(record.template || '');
+    template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
+    template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
+    template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
+    resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[emailController] cv_parsing prompt missing', err.message || err);
     resumePromptCache = null;

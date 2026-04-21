@@ -170,7 +170,11 @@ const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => 
     );
 };
 
-const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask }) => {
+const ReferralsView: React.FC<{
+    onOpenNewTask: () => void;
+    /** When set (candidate profile), only referrals for this candidate are shown. */
+    candidateId?: string | null;
+}> = ({ onOpenNewTask, candidateId }) => {
     const { t } = useLanguage();
     const navigate = useNavigate();
     const [activeReferrals, setActiveReferrals] = useState<ActiveReferral[]>([]);
@@ -215,6 +219,9 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
     
     const [activeSortConfig, setActiveSortConfig] = useState<{ key: keyof ActiveReferral; direction: 'asc' | 'desc' } | null>({ key: 'referralDate', direction: 'desc' });
     const [disqualifiedSortConfig, setDisqualifiedSortConfig] = useState<{ key: keyof DisqualifiedReferral; direction: 'asc' | 'desc' } | null>(null);
+
+    const scopeCandidateId =
+        candidateId != null && String(candidateId).trim() !== '' ? String(candidateId).trim() : null;
 
     // Initial load - set default date range (Month)
     useEffect(() => {
@@ -261,7 +268,10 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
             .then((res) => (res.ok ? res.json() : []))
             .then((data: DisqualifiedReferral[]) => {
                 if (isActive && Array.isArray(data)) {
-                    setDisqualifiedReferrals(data);
+                    const rows = scopeCandidateId
+                        ? data.filter((r) => String(r.candidateId || '').trim() === scopeCandidateId)
+                        : data;
+                    setDisqualifiedReferrals(rows);
                 }
             })
             .catch(() => {
@@ -271,7 +281,7 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                 if (isActive) setDisqualifiedLoading(false);
             });
         return () => { isActive = false; };
-    }, [apiBase]);
+    }, [apiBase, scopeCandidateId]);
 
     useEffect(() => {
         if (!apiBase) {
@@ -292,7 +302,10 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
             .then((res) => (res.ok ? res.json() : []))
             .then((data: ScreeningCvReferralApiRow[]) => {
                 if (isActive && Array.isArray(data)) {
-                    setActiveReferrals(data.map(mapScreeningCvRowToActiveReferral));
+                    const rows = scopeCandidateId
+                        ? data.filter((r) => String(r.candidateId || '').trim() === scopeCandidateId)
+                        : data;
+                    setActiveReferrals(rows.map(mapScreeningCvRowToActiveReferral));
                 }
             })
             .catch(() => {
@@ -302,7 +315,7 @@ const ReferralsView: React.FC<{ onOpenNewTask: () => void; }> = ({ onOpenNewTask
                 if (isActive) setActiveReferralsLoading(false);
             });
         return () => { isActive = false; };
-    }, [apiBase]);
+    }, [apiBase, scopeCandidateId]);
     
     // Update visible columns if language changes
     useEffect(() => {

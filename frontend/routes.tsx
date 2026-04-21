@@ -508,8 +508,16 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     }, [apiBase, urlId]);
 
     const handleFormChange = (updatedData: any) => {
-        setFormData(updatedData);
-        triggerAutoSave(updatedData);
+        if (typeof updatedData === 'function') {
+            setFormData((prev) => {
+                const next = updatedData(prev);
+                triggerAutoSave(next);
+                return next;
+            });
+        } else {
+            setFormData(updatedData);
+            triggerAutoSave(updatedData);
+        }
     };
 
     const handleProfileSwitch = (profileId: string | number) => {
@@ -735,11 +743,36 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     />
                 );
             case 'referrals':
-                return <ReferralsView onOpenNewTask={props.onOpenNewTask} />;
+                return (
+                    <ReferralsView
+                        onOpenNewTask={props.onOpenNewTask}
+                        candidateId={formData.backendId || formData.id}
+                    />
+                );
             case 'events':
-                return <EventsView events={props.events} setEvents={props.setEvents} />;
+                return (
+                    <EventsView
+                        candidateId={String(formData.backendId || formData.id || '')}
+                        candidateName={
+                            formData.fullName
+                            || [formData.firstName, formData.lastName].filter(Boolean).join(' ')
+                            || ''
+                        }
+                        events={props.events}
+                        setEvents={props.setEvents}
+                    />
+                );
             case 'documents':
-                return <DocumentsView />;
+                return (
+                    <DocumentsView
+                        candidateId={String(formData.backendId || formData.id || '')}
+                        candidateName={
+                            formData.fullName
+                            || [formData.firstName, formData.lastName].filter(Boolean).join(' ')
+                            || ''
+                        }
+                    />
+                );
             default:
                 return null;
         }

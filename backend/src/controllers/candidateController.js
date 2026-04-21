@@ -69,6 +69,7 @@ async function jobCandidateScreeningHasRejectionColumns(options = {}) {
 }
 const organizationService = require('../services/organizationService');
 const promptService = require('../services/promptService');
+const picklistService = require('../services/picklistService');
 const candidateTagService = require('../services/candidateTagService');
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const mammoth = require('mammoth');
@@ -153,7 +154,6 @@ const tryParseJson = (text) => {
     const end = endObj === -1 ? endArr : endArr === -1 ? endObj : Math.max(endObj, endArr);
     if (end === -1 || end <= start) return null;
     const slice = trimmed.slice(start, end + 1);
-    let aiTagEntries = [];
     try {
       return JSON.parse(slice);
     } catch {
@@ -167,6 +167,162 @@ const normalizeStringArray = (val) => {
   if (Array.isArray(val)) return val.map((x) => String(x || '').trim()).filter(Boolean);
   if (typeof val === 'string') return val.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
   return [];
+};
+
+const strOrNull = (v) => {
+  if (v == null) return null;
+  const s = String(v).trim();
+  return s || null;
+};
+
+const parseSalaryInt = (v) => {
+  if (v == null || v === '') return null;
+  const n = parseInt(String(v).replace(/[\s,_]/g, ''), 10);
+  return Number.isFinite(n) ? n : null;
+};
+
+/** LLM often returns drivingLicenses as [{ class: "…" }] or similar — extract displayable strings. */
+const normalizeDrivingLicenseList = (arr) => {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const x of arr) {
+    if (x == null) continue;
+    if (typeof x === 'string') {
+      const t = x.trim();
+      if (t && t !== '-') out.push(t);
+      continue;
+    }
+    if (typeof x === 'object') {
+      const t = String(
+        x.value ?? x.class ?? x.name ?? x.label ?? x.license ?? x.type ?? x.title ?? '',
+      ).trim();
+      if (t && t !== '-' && t !== '[object Object]') out.push(t);
+    }
+  }
+  return out;
+};
+
+const MARITAL_STATUS_LIKE = /^(רווק|רווקה|נשוי|נשואה|גרוש|גרושה|אלמן|אלמנה|ידועים בציבור)/i;
+
+const maritalStatusFromAi = (ai) => {
+  const m = strOrNull(ai.maritalStatus);
+  if (m) return m;
+  const st = strOrNull(ai.status);
+  if (st && MARITAL_STATUS_LIKE.test(st)) return st;
+  return null;
+};
+
+/** Map LLM keys (drivingLicense / drivingLicenses, mobility) onto Candidate fields. Omits empty / placeholder "-". */
+const normalizeMobilityDrivingFromAi = (ai) => {
+  if (!ai || typeof ai !== 'object') return {};
+  const out = {};
+  const mob = ai.mobility != null ? String(ai.mobility).trim() : '';
+  if (mob && mob !== '-') out.mobility = mob;
+
+  let licenses = normalizeDrivingLicenseList(ai.drivingLicenses);
+  if (!licenses.length && ai.drivingLicenses != null && typeof ai.drivingLicenses === 'string') {
+    licenses = normalizeStringArray(ai.drivingLicenses).filter((x) => x && x !== '-');
+  }
+  if (!licenses.length && ai.drivingLicense != null) {
+    const one = String(ai.drivingLicense).trim();
+    if (one && one !== '-') licenses = [one];
+  }
+  licenses = licenses.filter((x) => x && x !== '-');
+  if (licenses.length) {
+    out.drivingLicenses = licenses;
+    out.drivingLicense = licenses[0];
+  }
+  return out;
+};
+
+/**
+ * Scalar / JSON fields from CV parse JSON → Candidate model (no skills, workExperience, education, languages, tags).
+ * Uses fallback (e.g. regex extract) when AI omitted a field.
+ */
+const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
+  if (!ai || typeof ai !== 'object') return {};
+  const fb = fallback && typeof fallback === 'object' ? fallback : {};
+  const out = {};
+
+  const mergeStr = (key) => {
+    const v = strOrNull(ai[key]) ?? strOrNull(fb[key]);
+    if (v) out[key] = v;
+  };
+
+  [
+    'email',
+    'phone',
+    'address',
+    'location',
+    'idNumber',
+    'gender',
+    'availability',
+    'physicalWork',
+    'jobScope',
+    'industry',
+    'field',
+    'sector',
+    'companySize',
+    'candidateNotes',
+    'internalNotes',
+    'birthYear',
+    'birthMonth',
+    'birthDay',
+    'age',
+    'title',
+    'professionalSummary',
+  ].forEach(mergeStr);
+
+  const ms = maritalStatusFromAi(ai);
+  if (ms) out.maritalStatus = ms;
+
+  const et = Array.isArray(ai.employmentTypes)
+    ? ai.employmentTypes.map((x) => String(x ?? '').trim()).filter(Boolean)
+    : [];
+  const etSingle = strOrNull(ai.employmentType) ?? strOrNull(fb.employmentType);
+  if (et.length) {
+    out.employmentTypes = et;
+    if (etSingle) out.employmentType = etSingle;
+  } else if (etSingle) {
+    out.employmentType = etSingle;
+    out.employmentTypes = [etSingle];
+  }
+
+  const js = normalizeStringArray(ai.jobScopes);
+  if (js.length) out.jobScopes = js.slice(0, 50);
+
+  const pwm = normalizeStringArray(ai.preferredWorkModels);
+  if (pwm.length) out.preferredWorkModels = pwm.slice(0, 20);
+
+  const hi = normalizeStringArray(ai.highlights);
+  if (hi.length) out.highlights = hi.slice(0, 50);
+
+  const it = normalizeStringArray(ai.internalTags);
+  if (it.length) out.internalTags = it.slice(0, 100);
+
+  const smin = parseSalaryInt(ai.salaryMin ?? fb.salaryMin);
+  const smax = parseSalaryInt(ai.salaryMax ?? fb.salaryMax);
+  if (smin != null) out.salaryMin = smin;
+  if (smax != null) out.salaryMax = smax;
+
+  if (ai.experience != null && typeof ai.experience === 'object') {
+    if (Array.isArray(ai.experience)) {
+      if (ai.experience.length) out.experience = ai.experience;
+    } else if (Object.keys(ai.experience).length) {
+      out.experience = ai.experience;
+    }
+  }
+
+  Object.assign(out, normalizeMobilityDrivingFromAi(ai));
+
+  const fn = strOrNull(ai.firstName) ?? strOrNull(fb.firstName);
+  const ln = strOrNull(ai.lastName) ?? strOrNull(fb.lastName);
+  const full = strOrNull(ai.fullName) ?? strOrNull(fb.fullName);
+  if (fn) out.firstName = fn;
+  if (ln) out.lastName = ln;
+  if (full) out.fullName = full;
+
+  return out;
 };
 
 const normalizeWorkExperience = (arr) => {
@@ -456,6 +612,8 @@ const buildAiResumePrompt = (candidate_tag) => `
 You are an expert CV parser. You receive raw CV text (Hebrew or English).
 Return ONLY a valid JSON object (no markdown, no explanations) matching this schema:
 {
+  "firstName": string|null,
+  "lastName": string|null,
   "fullName": string|null,
   "email": string|null,
   "phone": string|null,
@@ -497,11 +655,48 @@ Output constraints:
 - Do not wrap in \`\`\` fences.
 `;
 
+/** Sequelize attribute type → short label for LLM context */
+const sequelizeAttrTypeLabel = (t) => {
+  if (!t) return 'unknown';
+  if (typeof t === 'string') return t;
+  if (t.key) return String(t.key);
+  const nm = t.constructor && t.constructor.name;
+  if (nm === 'ARRAY') {
+    return `ARRAY(${sequelizeAttrTypeLabel(t.type)})`;
+  }
+  return nm || 'unknown';
+};
+
+/** JSON description of `Candidate` model fields (matches models/Candidate.js) for cv_parsing prompt */
+const buildCandidateModelSchemaJsonForPrompt = () => {
+  const raw = Candidate.rawAttributes;
+  const out = {};
+  for (const [field, def] of Object.entries(raw)) {
+    const entry = {
+      type: sequelizeAttrTypeLabel(def.type),
+      allowNull: def.allowNull !== false,
+    };
+    if (def.primaryKey) entry.primaryKey = true;
+    if (def.defaultValue !== undefined && def.defaultValue !== null) entry.hasDefault = true;
+    if (def.field && def.field !== field) entry.column = def.field;
+    out[field] = entry;
+  }
+  return JSON.stringify(out, null, 2);
+};
+
 let resumePromptCache = null;
 const getResumePromptTemplate = async () => {
   if (resumePromptCache) return resumePromptCache;
   try {
-    resumePromptCache = await promptService.getById('cv_parsing');
+    const record = await promptService.getById('cv_parsing');
+    const schemaJson = buildCandidateModelSchemaJsonForPrompt();
+    const mobilityPicklist = await picklistService.formatCategoryValuesForLlmPrompt('mobility');
+    const drivingPicklist = await picklistService.formatCategoryValuesForLlmPrompt('driving_license');
+    let template = String(record.template || '');
+    template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
+    template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
+    template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
+    resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);
     resumePromptCache = null;
@@ -520,9 +715,9 @@ const parseResumeWithAi = async ({ resumeText }) => {
     return null;
   }
   const promptRecord = await getResumePromptTemplate();
-  promptRecord.template = promptRecord.template.replace('{candidate_tag}', getCandidateTagsSchemaText());
-  const systemPrompt = promptRecord?.template || buildAiResumePrompt(getCandidateTagsSchemaText());
-//
+  const systemPrompt = promptRecord?.template
+    ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
+    : buildAiResumePrompt(getCandidateTagsSchemaText());
 
   console.log('[attachMedia-ai] calling gemini', { resumeLen: String(resumeText).length });
   const raw = await sendChat({
@@ -752,14 +947,27 @@ const createFromAi = async (req, res) => {
       ? roleCoveredTags
       : tags.map((name) => ({ name, raw_type_reason: null, tag_reason: null }));
 
+    const persist = buildPersistFieldsFromAiParse(aiResult, fallback);
+    const industryAnalysis = {
+      ...(typeof fallback.industryAnalysis === 'object' && fallback.industryAnalysis ? fallback.industryAnalysis : {}),
+      ...(typeof aiResult.industryAnalysis === 'object' && aiResult.industryAnalysis ? aiResult.industryAnalysis : {}),
+    };
+
     const candidatePayload = {
-      fullName: aiResult.fullName || fallback.fullName || 'מועמד חדש',
-      email: aiResult.email || fallback.email || null,
-      phone: aiResult.phone || fallback.phone || null,
-      address: aiResult.address || null,
-      title: aiResult.title || fallback.title || null,
+      ...persist,
+      firstName: strOrNull(aiResult.firstName) ?? persist.firstName ?? null,
+      lastName: strOrNull(aiResult.lastName) ?? persist.lastName ?? null,
+      fullName:
+        strOrNull(aiResult.fullName) ??
+        strOrNull(fallback.fullName) ??
+        persist.fullName ??
+        'מועמד חדש',
       professionalSummary:
-        aiResult.professionalSummary || fallback.professionalSummary || fallback.summary || null,
+        strOrNull(aiResult.professionalSummary) ??
+        strOrNull(fallback.professionalSummary) ??
+        strOrNull(fallback.summary) ??
+        persist.professionalSummary ??
+        null,
       skills: {
         soft: softSkills.slice(0, 50),
         technical: techSkills.slice(0, 50),
@@ -768,9 +976,9 @@ const createFromAi = async (req, res) => {
       workExperience: normalizedWorkExperience,
       education: normalizeEducation(aiResult.education || fallback.education),
       languages: normalizeLanguages(aiResult.languages || fallback.languages),
-      industryAnalysis: aiResult.industryAnalysis || fallback.industryAnalysis || {},
+      industryAnalysis,
       searchText: text.slice(0, 50000),
-      source: 'ai-upload',
+      source: strOrNull(aiResult.source) || 'ai-upload',
       status: 'חדש',
     };
 
@@ -884,16 +1092,22 @@ const attachMedia = async (req, res) => {
 
       // Prefer AI parsing (Gemini) to populate candidate fields; fallback to regex parsing.
       let mergedUpdates = { ...baseUpdates };
+      let aiTagEntries = [];
       try {
         const ai = await parseResumeWithAi({ resumeText: extraText || '' });
         if (ai && typeof ai === 'object') {
-          const candidateUpdates = {};
-          if (ai.fullName) candidateUpdates.fullName = String(ai.fullName).trim();
-          if (ai.email) candidateUpdates.email = String(ai.email).trim();
-          if (ai.phone) candidateUpdates.phone = String(ai.phone).trim();
-          if (ai.address) candidateUpdates.address = String(ai.address).trim();
-          if (ai.title) candidateUpdates.title = String(ai.title).trim();
-          if (ai.professionalSummary) candidateUpdates.professionalSummary = String(ai.professionalSummary).trim();
+          const candidateUpdates = { ...buildPersistFieldsFromAiParse(ai, {}) };
+          if (
+            ai.industryAnalysis &&
+            typeof ai.industryAnalysis === 'object' &&
+            Object.keys(ai.industryAnalysis).length
+          ) {
+            const prev =
+              baseCandidate.industryAnalysis && typeof baseCandidate.industryAnalysis === 'object'
+                ? baseCandidate.industryAnalysis
+                : {};
+            candidateUpdates.industryAnalysis = { ...prev, ...ai.industryAnalysis };
+          }
 
           // Skills: merge into candidate.skills (JSONB)
           const softFromAi = normalizeStringArray(ai.skills?.soft);
@@ -2009,6 +2223,7 @@ module.exports = {
   getScreeningData,
   saveScreeningData,
   listScreeningRejections,
+  buildCandidateModelSchemaJsonForPrompt,
 };
 
 

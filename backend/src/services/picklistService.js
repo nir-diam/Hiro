@@ -74,6 +74,26 @@ const listCategoryValuesByKey = async (key) => {
   return sortPicklistValues(rows);
 };
 
+/** Active values as JSON text for LLM prompts (e.g. cv_parsing `${Mobility}` / `${DrivingLicenses}`). */
+const formatCategoryValuesForLlmPrompt = async (categoryKey) => {
+  const k = String(categoryKey || '').trim();
+  if (!k) return '(empty category key)';
+  try {
+    const rows = await listCategoryValuesByKey(k);
+    if (!rows.length) {
+      return `(No active picklist values for category key "${k}".)`;
+    }
+    const list = rows.map((r) => ({
+      value: String(r.value ?? '').trim(),
+      label: String((r.displayName || r.label || r.value) ?? '').trim(),
+    })).filter((x) => x.value || x.label);
+    return JSON.stringify(list, null, 2);
+  } catch (e) {
+    console.warn('[picklist] formatCategoryValuesForLlmPrompt', k, e.message);
+    return `(Could not load picklist "${k}".)`;
+  }
+};
+
 const createCategoryValue = async (categoryId, payload) => {
   return PicklistCategoryValue.create({ categoryId, ...payload });
 };
@@ -191,6 +211,7 @@ module.exports = {
   listSubcategories,
   listCategoryValues,
   listCategoryValuesByKey,
+  formatCategoryValuesForLlmPrompt,
   createCategoryValue,
   updateCategoryValue,
   deleteCategoryValue,

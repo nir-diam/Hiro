@@ -1,3 +1,4 @@
+const path = require('path');
 const { S3Client } = require('@aws-sdk/client-s3');
 const { flexibleChecksumsMiddlewareOptions } = require('@aws-sdk/middleware-flexible-checksums');
 
@@ -30,5 +31,11 @@ const createS3Client = () => {
 const buildPublicUrl = (key) =>
   `https://${process.env.AWS_S3_BUCKET}.s3.${process.env.AWS_REGION}.amazonaws.com/${key}`;
 
-module.exports = { ensureS3Env, createS3Client, buildPublicUrl };
+/** S3 object key: one folder per candidate under candidates/files */
+const buildCandidateDocumentKey = (candidateId, fileName) => {
+  const safeName = path.basename(fileName || 'file');
+  return `candidates/files/${candidateId}/${Date.now()}-${safeName}`;
+};
+
+module.exports = { ensureS3Env, createS3Client, buildPublicUrl, buildCandidateDocumentKey };
 

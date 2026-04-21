@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, ArrowUpTrayIcon } from './Icons';
+import { useLanguage } from '../context/LanguageContext';
 
 export type DocumentType = 'קורות חיים' | 'תעודה' | 'מסמך זיהוי' | 'חוזה' | 'הסכם' | 'חשבונית' | 'אחר';
 
@@ -11,6 +12,8 @@ export interface Document {
   uploadedBy: string;
   notes: string;
   fileSize: number; // in KB
+  key?: string;
+  url?: string;
 }
 
 interface DocumentFormModalProps {
@@ -23,6 +26,7 @@ interface DocumentFormModalProps {
 }
 
 const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, onSave, document, context, contextName }) => {
+  const { t } = useLanguage();
   const [formData, setFormData] = useState({
     name: '',
     type: 'קורות חיים' as DocumentType,
@@ -54,8 +58,6 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
     }
   }, [document, isOpen, context]);
 
-  if (!isOpen) return null;
-
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const nextFile = e.target.files[0];
@@ -76,7 +78,7 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!document && !fileName) {
-        alert('Please select a file to upload.');
+        alert(t('document_form.file_required'));
         return;
     }
     const extension = fileName ? fileName.split('.').pop() : '';
@@ -89,12 +91,14 @@ const DocumentFormModal: React.FC<DocumentFormModalProps> = ({ isOpen, onClose, 
     onClose();
   };
 
+  if (!isOpen) return null;
+
   return (
     <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-center justify-center p-4" onClick={onClose}>
       <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col overflow-hidden text-text-default" onClick={e => e.stopPropagation()}>
         <form onSubmit={handleSubmit}>
           <header className="flex items-center justify-between p-4 border-b border-border-default">
-            <h2 className="text-xl font-bold text-text-default">{document ? 'עריכת פרטי מסמך' : 'העלאת מסמך חדש'}</h2>
+            <h2 className="text-xl font-bold text-text-default">{document ? t('document_form.title_edit') : t('document_form.title_new')}</h2>
             <button type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור">
               <XMarkIcon className="w-6 h-6" />
             </button>

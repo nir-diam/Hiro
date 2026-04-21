@@ -337,7 +337,8 @@ interface CandidateProfileProps {
         candidateEmail?: string | null;
     }) => void;
     onTagsChange: (tags: string[]) => void;
-    onFormChange: (data: any) => void;
+    /** Supports functional updates so async handlers (e.g. resume upload) merge on latest state. */
+    onFormChange: (data: any | ((prev: any) => any)) => void;
     isFavorite: boolean;
     onToggleFavorite: () => void;
     onReportInaccuracy?: () => void;
@@ -967,7 +968,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           });
           if (!attachRes.ok) throw new Error('Failed to attach media');
           const updated = await attachRes.json();
-          onFormChange({ ...candidateData, ...updated });
+          onFormChange((prev: any) => ({ ...prev, ...updated }));
       } catch (err: any) {
           console.error('Resume upload failed', err);
           alert(err?.message || 'העלאת קובץ נכשלה.');
@@ -1298,30 +1299,49 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                           <div className="relative group">
                               <div className="flex-grow min-w-0">
                                   {summaryEditing ? (
-                                      <textarea
-                                          id={summaryId}
-                                          aria-label={t('section.summary')}
-                                          value={summaryDraft}
-                                          onChange={(e) => setSummaryDraft(e.target.value)}
-                                          onBlur={() => {
-                                              const next = summaryDraft.trim();
-                                              const prev = String(candidateData.professionalSummary || '').trim();
-                                              if (next !== prev) {
-                                                  onFormChange({ ...candidateData, professionalSummary: next });
-                                              }
-                                              setSummaryEditing(false);
-                                          }}
-                                          onKeyDown={(e) => {
-                                              if (e.key === 'Escape') {
-                                                  setSummaryDraft(candidateData.professionalSummary || '');
+                                      <div className="relative">
+                                          <textarea
+                                              id={summaryId}
+                                              aria-label={t('section.summary')}
+                                              value={summaryDraft}
+                                              onChange={(e) => setSummaryDraft(e.target.value)}
+                                              onBlur={() => {
+                                                  const next = summaryDraft.trim();
+                                                  const prev = String(candidateData.professionalSummary || '').trim();
+                                                  if (next !== prev) {
+                                                      onFormChange({ ...candidateData, professionalSummary: next });
+                                                  }
                                                   setSummaryEditing(false);
-                                              }
-                                          }}
-                                          rows={6}
-                                          autoFocus
-                                          className="w-full bg-bg-input border border-primary-500 rounded-lg text-text-default text-sm p-2.5 focus:ring-2 focus:ring-primary-200 outline-none resize-y min-h-[8rem] shadow-sm"
-                                          placeholder={t('section.summary_placeholder')}
-                                      />
+                                              }}
+                                              onKeyDown={(e) => {
+                                                  if (e.key === 'Escape') {
+                                                      setSummaryDraft(candidateData.professionalSummary || '');
+                                                      setSummaryEditing(false);
+                                                  }
+                                              }}
+                                              rows={6}
+                                              autoFocus
+                                              className="w-full bg-bg-input border border-primary-500 rounded-lg text-text-default text-sm p-2.5 pb-10 focus:ring-2 focus:ring-primary-200 outline-none resize-y min-h-[8rem] shadow-sm"
+                                              placeholder={t('section.summary_placeholder')}
+                                          />
+                                          {onGenerateExperienceSummary && (
+                                              <div className="absolute left-2 bottom-2 z-10" dir="ltr">
+                                                  <button
+                                                      type="button"
+                                                      aria-live="polite"
+                                                      onClick={() => onGenerateExperienceSummary()}
+                                                      disabled={isGeneratingSummary}
+                                                      className={`text-[10px] font-semibold leading-tight px-2 py-0.5 rounded-full border shadow-sm bg-bg-card/95 backdrop-blur-sm max-w-[11rem] text-right ${
+                                                          isGeneratingSummary
+                                                              ? 'border-border-default text-text-muted bg-bg-subtle cursor-not-allowed'
+                                                              : 'border-primary-500 text-primary-700 hover:bg-primary-50'
+                                                      } transition`}
+                                                  >
+                                                      {isGeneratingSummary ? 'מייצר/ת...' : 'כתוב/שכתב ניסיון עם AI'}
+                                                  </button>
+                                              </div>
+                                          )}
+                                      </div>
                                   ) : (
                                       <div className="relative pr-6">
                                           <div
@@ -1358,19 +1378,42 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                               </p>
                                           </div>
                                           {(candidateData.professionalSummary || '').trim().length > 180 && (
-                                              <button
-                                                  type="button"
-                                                  onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      setSummaryExpanded((v) => !v);
-                                                  }}
-                                                  className="text-xs font-bold text-primary-600 hover:text-primary-800 mt-1 flex items-center gap-1 select-none bg-primary-50 px-2 py-0.5 rounded-full w-fit"
+                                              <div
+                                                  className="mt-1 flex w-full min-w-0 items-center gap-2"
+                                                  dir="ltr"
                                               >
-                                                  {summaryExpanded ? t('section.summary_collapse') : t('section.summary_read_more')}
-                                                  <ChevronDownIcon
-                                                      className={`w-3 h-3 shrink-0 transition-transform ${summaryExpanded ? 'rotate-180' : ''}`}
-                                                  />
-                                              </button>
+                                                  {onGenerateExperienceSummary && summaryExpanded && (
+                                                      <button
+                                                          type="button"
+                                                          aria-live="polite"
+                                                          onClick={(e) => {
+                                                              e.stopPropagation();
+                                                              onGenerateExperienceSummary();
+                                                          }}
+                                                          disabled={isGeneratingSummary}
+                                                          className={`shrink-0 text-[10px] font-semibold leading-tight px-2 py-0.5 rounded-full border shadow-sm bg-bg-card/95 backdrop-blur-sm max-w-[11rem] text-right ${
+                                                              isGeneratingSummary
+                                                                  ? 'border-border-default text-text-muted bg-bg-subtle cursor-not-allowed'
+                                                                  : 'border-primary-500 text-primary-700 hover:bg-primary-50'
+                                                          } transition`}
+                                                      >
+                                                          {isGeneratingSummary ? 'מייצר/ת...' : 'כתוב/שכתב ניסיון עם AI'}
+                                                      </button>
+                                                  )}
+                                                  <button
+                                                      type="button"
+                                                      onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          setSummaryExpanded((v) => !v);
+                                                      }}
+                                                      className="text-xs font-bold text-primary-600 hover:text-primary-800 flex items-center gap-1 select-none bg-primary-50 px-2 py-0.5 rounded-full w-fit ml-auto"
+                                                  >
+                                                      {summaryExpanded ? t('section.summary_collapse') : t('section.summary_read_more')}
+                                                      <ChevronDownIcon
+                                                          className={`w-3 h-3 shrink-0 transition-transform ${summaryExpanded ? 'rotate-180' : ''}`}
+                                                      />
+                                                  </button>
+                                              </div>
                                           )}
                                           <button
                                               type="button"
@@ -1388,25 +1431,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                   )}
                               </div>
                           </div>
-                          {onGenerateExperienceSummary && (
-                              <div className="mt-2 flex flex-col gap-1">
-                                  <button
-                                      type="button"
-                                      aria-live="polite"
-                                      onClick={() => onGenerateExperienceSummary()}
-                                      disabled={isGeneratingSummary}
-                                      className={`text-xs font-bold px-3 py-1.5 rounded-full border w-fit ${
-                                          isGeneratingSummary
-                                              ? 'border-border-default text-text-muted bg-bg-subtle cursor-not-allowed'
-                                              : 'border-primary-500 text-primary-700 hover:bg-primary-50'
-                                      } transition`}
-                                  >
-                                      {isGeneratingSummary ? 'מייצר/ת...' : 'כתוב/שכתב ניסיון עם AI'}
-                                  </button>
-                                  {generateSummaryError && (
-                                      <p className="text-xs text-red-500">{generateSummaryError}</p>
-                                  )}
-                              </div>
+                          {onGenerateExperienceSummary && generateSummaryError && (
+                              <p className="text-xs text-red-500 mt-2">{generateSummaryError}</p>
                           )}
                       </div>
 

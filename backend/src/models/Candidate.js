@@ -67,6 +67,8 @@ const Candidate = sequelize.define(
     searchText: DataTypes.TEXT,
     isArchived: { type: DataTypes.BOOLEAN, defaultValue: false },
     isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    documents: { type: DataTypes.JSONB, defaultValue: [] },
+    events: { type: DataTypes.JSONB, defaultValue: [] },
   },
   {
     tableName: 'candidates',
