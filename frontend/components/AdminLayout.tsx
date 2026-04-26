@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon, ChatBubbleBottomCenterTextIcon } from './Icons';
+import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon, ChatBubbleBottomCenterTextIcon, InformationCircleIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
 const AdminLayout: React.FC = () => {
@@ -19,6 +19,7 @@ const AdminLayout: React.FC = () => {
         { to: '/admin/business-logic', label: 'חוקים עסקיים', icon: <DocumentTextIcon className="w-5 h-5" /> },
         { to: '/admin/picklists', label: 'ניהול picklists', icon: <ListBulletIcon className="w-5 h-5" /> },
         { to: '/admin/help-center', label: 'מרכז עזרה', icon: <DocumentTextIcon className="w-5 h-5" /> },
+        { to: '/admin/reference-info', label: 'מידע עזר', icon: <InformationCircleIcon className="w-5 h-5" /> },
         { to: '/admin/settings/message-templates', label: t('admin.tab_message_templates'), icon: <ChatBubbleBottomCenterTextIcon className="w-5 h-5" /> },
         { to: '/admin/settings/prompts', label: 'AI Prompts', icon: <SparklesIcon className="w-5 h-5" /> },
         { to: '/admin/settings/matching-engine', label: 'מנוע התאמה', icon: <SparklesIcon className="w-5 h-5" /> },

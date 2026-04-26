@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { InformationCircleIcon } from './Icons';
+import ReferenceInfoIcon from './ReferenceInfoIcon';
 import { useLanguage } from '../context/LanguageContext';
 import {
     fetchClientUsageSettings,
@@ -18,20 +19,28 @@ const FormInput: React.FC<{ value: string | number; onChange: (e: React.ChangeEv
     <input type={type} name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm" />
 );
 
-const SettingRow: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+const SettingRow: React.FC<{ label: string; children: React.ReactNode; infoKey?: string }> = ({ label, children, infoKey }) => (
     <div className="grid grid-cols-[auto_1fr] md:grid-cols-2 items-center gap-4 py-3 border-b border-border-default last:border-b-0">
         <label className="text-sm font-semibold text-text-default flex items-center gap-2">
-            <InformationCircleIcon className="w-5 h-5 text-text-subtle flex-shrink-0" />
+            {infoKey ? (
+                <ReferenceInfoIcon infoKey={infoKey} />
+            ) : (
+                <InformationCircleIcon className="w-5 h-5 text-text-subtle flex-shrink-0" />
+            )}
             <span>{label}</span>
         </label>
         <div className="w-full max-w-[200px] justify-self-end">{children}</div>
     </div>
 );
 
-const CheckboxRow: React.FC<{ label: string; name: string; checked: boolean; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; isSub?: boolean }> = ({ label, name, checked, onChange, isSub = false }) => (
+const CheckboxRow: React.FC<{ label: string; name: string; checked: boolean; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; isSub?: boolean; infoKey?: string }> = ({ label, name, checked, onChange, isSub = false, infoKey }) => (
     <div className={`flex items-center justify-between py-3 border-b border-border-default last:border-b-0 ${isSub ? 'pr-8' : ''}`}>
         <label htmlFor={name} className="text-sm font-semibold text-text-default flex items-center gap-2 cursor-pointer">
-            {!isSub && <InformationCircleIcon className="w-5 h-5 text-text-subtle flex-shrink-0" />}
+            {!isSub && (infoKey ? (
+                <ReferenceInfoIcon infoKey={infoKey} />
+            ) : (
+                <InformationCircleIcon className="w-5 h-5 text-text-subtle flex-shrink-0" />
+            ))}
             <span>{label}</span>
         </label>
         <input 
@@ -199,10 +208,10 @@ const UsageSettingsTab: React.FC<{ clientId: string | null }> = ({ clientId }) =
                 <div className="bg-bg-card p-4 rounded-lg border border-border-default">
                     <h3 className="text-base font-bold mb-2">{t('company_settings.interface_settings')}</h3>
                     <div>
-                        <SettingRow label={t('company_settings.double_auth')}><FormSelect name="doubleAuth" value={settings.doubleAuth} onChange={handleChange}><option>לא פעיל</option><option>פעיל</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.google_login')}><FormSelect name="googleLogin" value={settings.googleLogin} onChange={handleChange}><option>פעיל</option><option>לא פעיל</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.double_auth')} infoKey="2FA"><FormSelect name="doubleAuth" value={settings.doubleAuth} onChange={handleChange}><option>לא פעיל</option><option>פעיל</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.google_login')} infoKey="google_sign_in"><FormSelect name="googleLogin" value={settings.googleLogin} onChange={handleChange}><option>פעיל</option><option>לא פעיל</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.initial_screening')}><FormSelect name="initialScreeningLevel" value={settings.initialScreeningLevel} onChange={handleChange}><option>טלפוני</option><option>פרונטלי</option></FormSelect></SettingRow>
-                        <SettingRow label={t('company_settings.return_months')}><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>
+                        <SettingRow label={t('company_settings.return_months')} infoKey="return_to_system"><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>
                         <SettingRow label={t('company_settings.questionnaire_source')}><FormSelect name="questionnaireSource" value={settings.questionnaireSource} onChange={handleChange}><option>חברה</option></FormSelect></SettingRow>
                     </div>
                 </div>
@@ -211,7 +220,7 @@ const UsageSettingsTab: React.FC<{ clientId: string | null }> = ({ clientId }) =
                 <div className="bg-bg-card p-4 rounded-lg border border-border-default">
                     <h3 className="text-base font-bold mb-2">{t('company_settings.additional_settings')}</h3>
                     <div>
-                        <CheckboxRow label={t('company_settings.auto_disconnect')} name="autoDisconnect" checked={settings.autoDisconnect} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.auto_disconnect')} name="autoDisconnect" checked={settings.autoDisconnect} onChange={handleChange} infoKey="auto_logout" />
                         <CheckboxRow label={t('company_settings.logo_on_cv')} name="logoOnCv" checked={settings.logoOnCv} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.no_location_fix')} name="candidateNoLocationToFix" checked={settings.candidateNoLocationToFix} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.no_tag_fix')} name="candidateNoTagToFix" checked={settings.candidateNoTagToFix} onChange={handleChange} />

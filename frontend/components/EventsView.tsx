@@ -8,6 +8,8 @@ import {
 } from './Icons';
 import EventFormModal from './EventFormModal';
 import { useLanguage } from '../context/LanguageContext';
+import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
+import { eventTypeChipClasses } from '../utils/eventTypeChips';
 import { motion, AnimatePresence } from 'motion/react';
 
 // --- TYPES ---
@@ -17,7 +19,7 @@ interface HistoryEntry {
   summary: string;
 }
 
-export type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
+export type EventType = string;
 export type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 export interface Event {
   id: string | number;
@@ -41,7 +43,7 @@ export const normalizeCandidateEventRow = (row: Record<string, unknown>): Event 
   }
   return {
     id: row.id as string | number,
-    type: row.type as EventType,
+    type: String(row.type || 'פגישה'),
     date: String(row.date || new Date().toISOString()),
     coordinator: String(row.coordinator || 'מערכת'),
     status: (row.status as EventStatus) || 'עתידי',
@@ -60,13 +62,6 @@ export const initialEventsData: Event[] = [
   { id: 4, type: 'משימת מערכת', date: '2025-08-14T11:22:00', coordinator: 'מערכת', status: 'הושלם', linkedTo: [], description: '3 קורות חיים חדשים למשרת "אנליסט נתונים" נוספו למערכת.', history: [{ user: 'מערכת', timestamp: '2025-08-14T11:22:00', summary: 'אירוע מערכת אוטומטי' }] },
   { id: 5, type: 'ראיון', date: '2025-08-18T14:00:00', coordinator: 'דנה כהן', status: 'עתידי', linkedTo: [{ type: 'מועמד', name: 'שרית לוי' }], description: 'ראיון התאמה תרבותית למשרת מנהל/ת מוצר.', history: [{ user: 'דנה כהן', timestamp: '2025-08-17T14:00:00', summary: 'יצר את האירוע' }] },
 ];
-
-const eventTypeStyles: { [key in EventType]: { bg: string; text: string; border: string; } } = {
-  'ראיון': { bg: 'bg-secondary-100', text: 'text-secondary-800', border: 'border-secondary-500' },
-  'פגישה': { bg: 'bg-primary-100', text: 'text-primary-800', border: 'border-primary-500' },
-  'תזכורת': { bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-500' },
-  'משימת מערכת': { bg: 'bg-gray-200', text: 'text-gray-800', border: 'border-gray-500' },
-};
 
 const eventStatusStyles: { [key in EventStatus]: { bg: string; text: string; } } = {
   'עתידי': { bg: 'bg-secondary-100', text: 'text-secondary-800' },
@@ -91,7 +86,6 @@ function formatRelativeTime(dateString: string) {
     return new Date(dateString).toLocaleDateString('he-IL');
 }
 
-const eventTypeOptions = ['הכל', 'פגישה', 'ראיון', 'תזכורת', 'משימת מערכת'];
 const COORDINATOR_PRESET = ['דנה כהן', 'אביב לוי', 'יעל שחר', 'אני', 'מערכת'];
 
 interface EventsViewProps {
@@ -115,6 +109,7 @@ const EventsView: React.FC<EventsViewProps> = ({
     const [remoteEvents, setRemoteEvents] = useState<Event[]>([]);
     const [eventsLoadError, setEventsLoadError] = useState<string | null>(null);
     const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+    const [candidateEventTypeNames, setCandidateEventTypeNames] = useState<string[]>([]);
 
     const events = hasPersistedCandidate ? remoteEvents : [];
     const setEvents = setRemoteEvents;
@@ -137,6 +132,31 @@ const EventsView: React.FC<EventsViewProps> = ({
         }
         return out;
     }, [events]);
+
+    const eventTypeFilterOptions = useMemo(() => {
+        const seen = new Set<string>();
+        const out: string[] = ['הכל'];
+        for (const n of candidateEventTypeNames) {
+            if (n && !seen.has(n)) {
+                seen.add(n);
+                out.push(n);
+            }
+        }
+        for (const n of LEGACY_MANUAL_EVENT_TYPE_NAMES) {
+            if (!seen.has(n)) {
+                seen.add(n);
+                out.push(n);
+            }
+        }
+        for (const e of events) {
+            if (e.type && !seen.has(e.type)) {
+                seen.add(e.type);
+                out.push(e.type);
+            }
+        }
+        return out;
+    }, [candidateEventTypeNames, events]);
+
     const [filters, setFilters] = useState({
         eventType: 'הכל',
         coordinator: 'הכל',
@@ -176,6 +196,29 @@ const EventsView: React.FC<EventsViewProps> = ({
              return prev; 
         });
     }, [t]);
+
+    useEffect(() => {
+        if (!apiBase || !hasPersistedCandidate) {
+            setCandidateEventTypeNames([]);
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        let cancelled = false;
+        fetchEventTypes(apiBase, token)
+            .then((rows) => {
+                if (cancelled) return;
+                const names = filterEventTypesForContext(rows, 'candidate')
+                    .map((r) => r.name)
+                    .filter((n) => n.trim() !== '');
+                setCandidateEventTypeNames(names);
+            })
+            .catch(() => {
+                if (!cancelled) setCandidateEventTypeNames([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, hasPersistedCandidate]);
 
     const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -477,7 +520,10 @@ const EventsView: React.FC<EventsViewProps> = ({
 
     const renderCell = (event: Event, columnId: string, isMobile: boolean = false, isExpanded: boolean = false) => {
         switch (columnId) {
-            case 'type': return <span className={`text-[10px] sm:text-xs font-bold px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-md sm:rounded-full ${eventTypeStyles[event.type].bg} ${eventTypeStyles[event.type].text} border border-current/10 shadow-sm`}>{event.type}</span>;
+            case 'type': {
+                const chip = eventTypeChipClasses(event.type);
+                return <span className={`text-[10px] sm:text-xs font-bold px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-md sm:rounded-full ${chip.bg} ${chip.text} border border-current/10 shadow-sm`}>{event.type}</span>;
+            }
             case 'title': 
                 return (
                     <div className="flex flex-col gap-0.5 max-w-[400px]">
@@ -527,7 +573,11 @@ const EventsView: React.FC<EventsViewProps> = ({
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_type')}</label>
                             <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
-                                {eventTypeOptions.map(opt => <option key={opt}>{opt}</option>)}
+                                {eventTypeFilterOptions.map((opt) => (
+                                    <option key={opt} value={opt}>
+                                        {opt}
+                                    </option>
+                                ))}
                             </select>
                         </div>
                         <div>
@@ -685,10 +735,18 @@ const EventsView: React.FC<EventsViewProps> = ({
                 ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {sortedAndFilteredEvents.map(event => (
-                        <div key={eventIdStr(event.id)} onClick={() => toggleRow(event.id)} className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${eventTypeStyles[event.type].border} p-4 flex flex-col justify-between cursor-pointer`}>
+                        <div
+                            key={eventIdStr(event.id)}
+                            onClick={() => toggleRow(event.id)}
+                            className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${eventTypeChipClasses(event.type).border} p-4 flex flex-col justify-between cursor-pointer`}
+                        >
                             <div>
                                 <div className="flex justify-between items-start">
-                                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeStyles[event.type].bg} ${eventTypeStyles[event.type].text}`}>{event.type}</span>
+                                    <span
+                                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeChipClasses(event.type).bg} ${eventTypeChipClasses(event.type).text}`}
+                                    >
+                                        {event.type}
+                                    </span>
                                     <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
                                 </div>
                                 <p className={`text-[13px] text-text-muted my-3 transition-all duration-300 ${expandedRowId === eventIdStr(event.id) ? '' : 'line-clamp-2'}`}>{event.description || event.type}</p>

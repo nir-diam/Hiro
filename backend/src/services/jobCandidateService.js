@@ -80,6 +80,7 @@ const listForCandidate = async (candidateId) => {
       candidateId: plain.candidateId,
       status: plain.status,
       source: plain.source,
+      workflowMeta: plain.workflowMeta && typeof plain.workflowMeta === 'object' ? plain.workflowMeta : {},
       updatedAt: plain.updatedAt,
       createdAt: plain.createdAt,
       job,

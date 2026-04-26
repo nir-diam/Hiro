@@ -151,16 +151,17 @@ const buildAliasMatchLiteral = (lowerTrimmed) =>
   );
 
 const buildSynonymMatchLiteral = (lowerTrimmed) => {
-  // Match when any synonym object has "phrase" value equal to lowerTrimmed (exact, case-insensitive).
-  // Pattern "phrase":"excel" matches {"phrase":"Excel"} but not {"phrase":"Microsoft Excel"}.
-  const pattern = `%"phrase":"${String(lowerTrimmed).replace(/\\/g, '\\\\').replace(/'/g, "''")}"%`;
-  const escapedPattern = sequelize.escape(pattern);
+  // Match only on synonym `phrase` values — not raw JSON (avoids false positives on keys like "priority").
+  const escaped = sequelize.escape(lowerTrimmed);
   return sequelize.where(
     sequelize.literal(`
       EXISTS (
         SELECT 1
-        FROM jsonb_array_elements_text(COALESCE("Tag"."synonyms", '[]'::jsonb)) AS s
-        WHERE s ILIKE ${escapedPattern}
+        FROM jsonb_array_elements(COALESCE("Tag"."synonyms", '[]'::jsonb)) AS syn_elem
+        WHERE jsonb_typeof(syn_elem) = 'object'
+          AND (syn_elem ? 'phrase')
+          AND length(trim(COALESCE(syn_elem->>'phrase', ''))) > 0
+          AND strpos(lower(syn_elem->>'phrase'), lower(${escaped}::text)) > 0
       )
     `),
     true,
@@ -173,8 +174,6 @@ const findTagByNameOrAlias = async (name) => {
 
   const lowerTrimmed = trimmed.toLowerCase();
   const escaped = sequelize.escape(lowerTrimmed);
-  // Same as working SQL: s ILIKE '%"excel"%' (element text contains the term in quotes)
-  const synonymPattern = sequelize.escape(`%"${String(lowerTrimmed).replace(/\\/g, '\\\\').replace(/"/g, '""')}"%`);
 
   // Prefer raw query so synonym/alias match is reliable (no Sequelize alias or literal issues)
   const rows = await sequelize.query(
@@ -185,8 +184,11 @@ const findTagByNameOrAlias = async (name) => {
        OR lower(trim(COALESCE(tag_key, '')::text)) = lower(${escaped})
        OR EXISTS (
          SELECT 1
-         FROM jsonb_array_elements_text(COALESCE(synonyms, '[]'::jsonb)) AS s
-         WHERE s ILIKE ${synonymPattern}
+         FROM jsonb_array_elements(COALESCE(synonyms, '[]'::jsonb)) AS syn_elem
+         WHERE jsonb_typeof(syn_elem) = 'object'
+           AND (syn_elem ? 'phrase')
+           AND length(trim(COALESCE(syn_elem->>'phrase', ''))) > 0
+           AND strpos(lower(syn_elem->>'phrase'), lower(${escaped}::text)) > 0
        )
        OR EXISTS (
          SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS alias

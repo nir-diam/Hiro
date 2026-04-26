@@ -81,6 +81,7 @@ import AdminTagCorrectionsView from './components/AdminTagCorrectionsView';
 import AdminEventsView from './components/AdminEventsView';
 import AdminHelpCenterView from './components/AdminHelpCenterView';
 import AdminBusinessLogicView from './components/AdminBusinessLogicView';
+import AdminReferenceInfoView from './components/AdminReferenceInfoView';
 
 import ManagerLayout from './components/ManagerLayout';
 import ManagerDashboard from './components/ManagerDashboard';
@@ -740,6 +741,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     <InterestedInJobs
                         onOpenNewTask={props.onOpenNewTask}
                         candidateId={formData.backendId || formData.id}
+                        candidatePhone={formData.phone}
+                        candidateEmail={formData.email}
                     />
                 );
             case 'referrals':
@@ -932,6 +935,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                 { path: 'help-center', element: <AdminHelpCenterView /> },
                 { path: 'events', element: <AdminEventsView /> },
                 { path: 'business-logic', element: <AdminBusinessLogicView /> },
+                { path: 'reference-info', element: <AdminReferenceInfoView /> },
                 { path: 'job-fields', element: <AdminJobFieldsView /> },
                 {
                     path: 'settings',

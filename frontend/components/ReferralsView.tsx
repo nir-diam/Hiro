@@ -3,7 +3,7 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon } from './Icons';
 import UpdateStatusModal from './UpdateStatusModal';
-import ReReferModal from './ReReferModal';
+import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import { type Job } from './JobsView';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { useLanguage } from '../context/LanguageContext';
@@ -19,6 +19,8 @@ interface ClientContact {
 interface ActiveReferral {
   id: string;
   clientId: number | null;
+  candidateId: string | null;
+  jobId: string | null;
   status: Status;
   source: string;
   coordinator: string;
@@ -34,6 +36,10 @@ interface ActiveReferral {
   notes: string;
   clientContacts: ClientContact[];
   candidateName: string;
+  candidatePhone: string;
+  candidateEmail: string;
+  inviteCandidate: boolean;
+  inviteClient: boolean;
 }
 
 /** Row from GET /api/email-uploads/screening-cv-referrals */
@@ -56,6 +62,10 @@ interface ScreeningCvReferralApiRow {
   dueDate?: string;
   dueTime?: string;
   clientContacts?: ClientContact[];
+  candidatePhone?: string;
+  candidateEmail?: string;
+  inviteCandidate?: boolean;
+  inviteClient?: boolean;
 }
 
 function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): ActiveReferral {
@@ -67,6 +77,8 @@ function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): Acti
   return {
     id: String(row.id),
     clientId: row.clientId != null && row.clientId !== undefined ? Number(row.clientId) : null,
+    candidateId: row.candidateId != null && String(row.candidateId).trim() !== '' ? String(row.candidateId) : null,
+    jobId: row.jobId != null && String(row.jobId).trim() !== '' ? String(row.jobId) : null,
     status,
     source: String(row.source || ''),
     coordinator: String(row.coordinator || ''),
@@ -81,6 +93,10 @@ function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): Acti
     notes,
     clientContacts: Array.isArray(row.clientContacts) ? row.clientContacts : [],
     candidateName: String(row.candidateName || ''),
+    candidatePhone: row.candidatePhone != null ? String(row.candidatePhone).trim() : '',
+    candidateEmail: row.candidateEmail != null ? String(row.candidateEmail).trim() : '',
+    inviteCandidate: Boolean(row.inviteCandidate),
+    inviteClient: Boolean(row.inviteClient),
   };
 }
 
@@ -443,7 +459,21 @@ const ReferralsView: React.FC<{
         if (!editingReferral) return;
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         if (!apiBase || !token) {
-            setActiveReferrals(prev => prev.map(r => (r.id === editingReferral.id ? { ...r, status: data.status } : r)));
+            setActiveReferrals(prev =>
+                prev.map(r =>
+                    r.id === editingReferral.id
+                        ? {
+                              ...r,
+                              status: data.status,
+                              internalNote: data.note != null ? String(data.note).trim() : '',
+                              referralDueDate: String(data.dueDate || ''),
+                              referralDueTime: String(data.dueTime || ''),
+                              inviteCandidate: Boolean(data.inviteCandidate),
+                              inviteClient: Boolean(data.inviteClient),
+                          }
+                        : r,
+                ),
+            );
             setIsStatusModalOpen(false);
             setEditingReferral(null);
             return;
@@ -452,9 +482,10 @@ const ReferralsView: React.FC<{
             status: data.status,
             dueDate: data.dueDate || null,
             dueTime: data.dueTime || null,
+            note: data.note != null ? String(data.note) : '',
+            inviteCandidate: Boolean(data.inviteCandidate),
+            inviteClient: Boolean(data.inviteClient),
         };
-        const noteLine = data.note != null && String(data.note).trim() !== '' ? String(data.note).trim() : '';
-        if (noteLine) payload.note = noteLine;
 
         const res = await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals/${editingReferral.id}`, {
             method: 'PATCH',
@@ -466,7 +497,7 @@ const ReferralsView: React.FC<{
             throw new Error(err.message || 'שמירה נכשלה');
         }
         const recipientLine = editingReferral.recipientLine || (editingReferral.notes.includes('\n\n') ? editingReferral.notes.split('\n\n')[0] : editingReferral.notes);
-        const nextInternal = noteLine ? noteLine : editingReferral.internalNote;
+        const nextInternal = data.note != null ? String(data.note).trim() : '';
         const combinedNotes = nextInternal ? `${recipientLine}\n\n${nextInternal}` : recipientLine;
         setActiveReferrals(prev =>
             prev.map(r =>
@@ -480,6 +511,8 @@ const ReferralsView: React.FC<{
                           notes: combinedNotes,
                           referralDueDate: String(data.dueDate || ''),
                           referralDueTime: String(data.dueTime || ''),
+                          inviteCandidate: Boolean(data.inviteCandidate),
+                          inviteClient: Boolean(data.inviteClient),
                       },
             ),
         );
@@ -492,9 +525,48 @@ const ReferralsView: React.FC<{
         setReReferModal({ isOpen: true, referral });
     };
 
-    const handleSendReReferral = (data: { notes: string; nextStatus: string; contacts: number[] }) => {
+    const notesToOpinionHtml = (text: string): string => {
+        if (!text?.trim()) return '';
+        const esc = (s: string) =>
+            s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        return `<div dir="rtl">${esc(text).replace(/\n/g, '<br/>')}</div>`;
+    };
+
+    const handleSendReReferral = async (data: ReReferSendPayload) => {
+        const ref = reReferModal.referral;
+        if (!ref) return;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (apiBase && token && ref.candidateId && ref.jobId) {
+            const res = await fetch(`${apiBase}/api/email-uploads/send-screening-cv`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({
+                    candidateId: ref.candidateId,
+                    sends: [
+                        {
+                            jobId: ref.jobId,
+                            jobTitle: ref.jobTitle,
+                            company: ref.clientName,
+                            contacts: data.contacts.map((c) => ({ email: c.email, name: c.name })),
+                            internalOpinionHtml: notesToOpinionHtml(data.notes),
+                        },
+                    ],
+                }),
+            });
+            const errBody = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(typeof errBody?.message === 'string' ? errBody.message : 'שליחת המייל נכשלה');
+            }
+            await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals/${ref.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ status: data.nextStatus }),
+            }).catch(() => {});
+        }
         setReReferModal({ isOpen: false, referral: null });
-        setActiveReferrals(prev => prev.map(r => r.id === reReferModal.referral?.id ? { ...r, status: data.nextStatus as Status, notes: data.notes } : r));
+        setActiveReferrals((prev) =>
+            prev.map((r) => (r.id === ref.id ? { ...r, status: data.nextStatus as Status } : r)),
+        );
     };
 
     const buildFallbackJob = (jobTitle: string, clientName: string): Job => ({
@@ -812,13 +884,29 @@ const ReferralsView: React.FC<{
                     initialNote={editingReferral.internalNote}
                     initialDueDate={editingReferral.referralDueDate}
                     initialDueTime={editingReferral.referralDueTime}
+                    initialInviteCandidate={editingReferral.inviteCandidate}
+                    initialInviteClient={editingReferral.inviteClient}
+                    candidatePhone={editingReferral.candidatePhone}
+                    candidateEmail={editingReferral.candidateEmail}
                 />
             )}
             <ReReferModal
                 isOpen={reReferModal.isOpen}
                 onClose={() => setReReferModal({ isOpen: false, referral: null })}
                 onSend={handleSendReReferral}
-                referral={reReferModal.referral}
+                referral={
+                    reReferModal.referral
+                        ? {
+                              id: reReferModal.referral.id,
+                              candidateId: reReferModal.referral.candidateId,
+                              jobId: reReferModal.referral.jobId,
+                              jobTitle: reReferModal.referral.jobTitle,
+                              clientName: reReferModal.referral.clientName,
+                              candidateName: reReferModal.referral.candidateName,
+                              internalNote: reReferModal.referral.internalNote,
+                          }
+                        : null
+                }
             />
              <JobDetailsDrawer
                 job={selectedJob}

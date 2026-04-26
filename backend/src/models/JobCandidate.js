@@ -28,6 +28,11 @@ const JobCandidate = sequelize.define(
       type: DataTypes.STRING,
       allowNull: true,
     },
+    workflowMeta: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {},
+    },
   },
   {
     tableName: 'job_candidates',

@@ -137,6 +137,106 @@ const tryEmbedCandidate = async (candidateId, extraText = '') => {
 const requiredS3Env = ['AWS_REGION', 'AWS_S3_BUCKET', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'];
 
 // --- AI CV parsing (Gemini) ---
+/**
+ * Salvage a truncated JSON document by:
+ *  - dropping anything before the first `{` or `[`
+ *  - closing an unterminated string
+ *  - trimming any partial token after the last completed value
+ *  - balancing the open `[` / `{` brackets with closing ones
+ * Returns null if it still can't parse.
+ */
+const salvageTruncatedJson = (text) => {
+  const startObj = text.indexOf('{');
+  const startArr = text.indexOf('[');
+  const start = startObj === -1
+    ? startArr
+    : startArr === -1
+      ? startObj
+      : Math.min(startObj, startArr);
+  if (start === -1) return null;
+
+  const stack = [];
+  let inString = false;
+  let escape = false;
+  let lastSafe = -1; // index right after the last fully-closed value at depth>=1
+
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inString) escape = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      if (!inString && stack.length) lastSafe = i + 1;
+      continue;
+    }
+    if (inString) continue;
+
+    if (ch === '{' || ch === '[') {
+      stack.push(ch);
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      stack.pop();
+      lastSafe = i + 1;
+      continue;
+    }
+    if (ch === ',' && stack.length) {
+      lastSafe = i; // drop the trailing comma
+    }
+  }
+
+  let slice;
+  if (inString) {
+    // Unterminated string -> close it, then drop the partial value.
+    slice = `${text.slice(start)}"`;
+    const lastComma = slice.lastIndexOf(',');
+    const lastOpen = Math.max(slice.lastIndexOf('['), slice.lastIndexOf('{'));
+    const cut = Math.max(lastComma, lastOpen);
+    if (cut > 0) slice = slice.slice(0, cut);
+  } else if (lastSafe > start) {
+    slice = text.slice(start, lastSafe);
+    if (slice.endsWith(',')) slice = slice.slice(0, -1);
+  } else {
+    slice = text.slice(start);
+  }
+
+  // Recount the still-open brackets and close them in reverse.
+  const reopened = [];
+  inString = false;
+  escape = false;
+  for (let i = 0; i < slice.length; i += 1) {
+    const ch = slice[i];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { if (inString) escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') reopened.push(ch);
+    else if (ch === '}') {
+      const top = reopened[reopened.length - 1];
+      if (top === '{') reopened.pop();
+    } else if (ch === ']') {
+      const top = reopened[reopened.length - 1];
+      if (top === '[') reopened.pop();
+    }
+  }
+  while (reopened.length) {
+    const open = reopened.pop();
+    slice += open === '{' ? '}' : ']';
+  }
+
+  try {
+    return JSON.parse(slice);
+  } catch {
+    return null;
+  }
+};
+
 const tryParseJson = (text) => {
   if (!text) return null;
   const trimmed = String(text).trim();
@@ -152,13 +252,16 @@ const tryParseJson = (text) => {
     const endObj = trimmed.lastIndexOf('}');
     const endArr = trimmed.lastIndexOf(']');
     const end = endObj === -1 ? endArr : endArr === -1 ? endObj : Math.max(endObj, endArr);
-    if (end === -1 || end <= start) return null;
-    const slice = trimmed.slice(start, end + 1);
-    try {
-      return JSON.parse(slice);
-    } catch {
-      return null;
+    if (end !== -1 && end > start) {
+      const slice = trimmed.slice(start, end + 1);
+      try {
+        return JSON.parse(slice);
+      } catch {
+        // fall through to salvage
+      }
     }
+    // Last resort: salvage a truncated response (close strings/brackets).
+    return salvageTruncatedJson(trimmed);
   }
 };
 
@@ -623,10 +726,13 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
   "skills": { "soft": string[], "technical": string[] },
  "tags": [{
     "name": string,
-    "raw_type": "role" | "skill" | "industry" | "tool" | "degree" | "certification" | "language" | "seniority" |  "soft_skill" ,
+    "evidence": string,
+    "raw_type": "role" | "skill" | "tool" | "degree" | "methodology" | "seniority" | "industry" | "soft_skill",
+    "context": "Core" | "Tool" | "Degree" | "Profile",
+    "raw_type_reason": string|null,
+    "tag_reason": string|null,
     "is_current": boolean,
-    "is_in_summary": boolean,
-    "confidence_score": float
+    "confidence_score": number
   }],
    "languages": [{ "name": string, "level": string|number|null, "levelText": string|null }],
   "workExperience": [{
@@ -684,6 +790,171 @@ const buildCandidateModelSchemaJsonForPrompt = () => {
   return JSON.stringify(out, null, 2);
 };
 
+/**
+ * Gemini-compatible response schema for CV parsing.
+ * Forces the LLM to return EVERY top-level field every time, in the right shape.
+ *
+ * IMPORTANT: Gemini's structured-output schema is a strict SUBSET of OpenAPI 3,
+ * and `gemini-3-flash-preview` is more restrictive than older models. The
+ * keywords confirmed to work on this model are:
+ *   type, items, properties, required, enum, nullable, description, propertyOrdering.
+ * Things known to break (HTTP 400 INVALID_ARGUMENT):
+ *   maxLength, minLength, pattern, minimum, maximum, maxItems, minItems,
+ *   additionalProperties, oneOf/anyOf/allOf, `nullable: true` on required arrays.
+ *
+ * Array sizes and string lengths therefore live in the PROMPT only (Brevity rules),
+ * and the truncation salvager (`salvageTruncatedJson`) plus the validate-and-repair
+ * pass cover whatever leaks through.
+ */
+const buildResumeResponseSchema = () => ({
+  type: 'object',
+  description: 'Parsed CV data. Every key MUST be present even if its value is null/empty.',
+  propertyOrdering: [
+    'firstName', 'lastName', 'fullName', 'email', 'phone', 'address',
+    'birthYear', 'birthMonth', 'birthDay', 'age',
+    'maritalStatus', 'gender',
+    'mobility', 'drivingLicenses',
+    'title', 'professionalSummary',
+    'skills', 'tags', 'languages', 'workExperience', 'education',
+    'industryAnalysis',
+  ],
+  required: [
+    'firstName', 'lastName', 'fullName', 'email', 'phone', 'address',
+    'birthYear', 'birthMonth', 'birthDay', 'age',
+    'maritalStatus', 'gender',
+    'mobility', 'drivingLicenses',
+    'title', 'professionalSummary',
+    'skills', 'tags', 'languages', 'workExperience', 'education',
+  ],
+  properties: {
+    firstName:           { type: 'string', nullable: true },
+    lastName:            { type: 'string', nullable: true },
+    fullName:            { type: 'string', nullable: true },
+    email:               { type: 'string', nullable: true },
+    phone:               { type: 'string', nullable: true },
+    address:             { type: 'string', nullable: true },
+    birthYear:           { type: 'integer', nullable: true, description: '4-digit year, e.g. 1985' },
+    birthMonth:          { type: 'integer', nullable: true, description: '1-12' },
+    birthDay:            { type: 'integer', nullable: true, description: '1-31' },
+    age:                 { type: 'integer', nullable: true, description: 'Computed from birth date if known' },
+    maritalStatus:       { type: 'string', nullable: true },
+    gender:              { type: 'string', nullable: true },
+    mobility:            { type: 'string', nullable: true, description: 'Must be one of the allowed mobility values' },
+    drivingLicenses: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Allowed driving-license codes. Up to 10 items.',
+    },
+    title:               { type: 'string', nullable: true },
+    professionalSummary: { type: 'string', nullable: true, description: '2-3 short lines, ≤ 600 chars, no fluff' },
+    skills: {
+      type: 'object',
+      required: ['soft', 'technical'],
+      properties: {
+        soft:      { type: 'array', items: { type: 'string' }, description: 'Up to 30 items.' },
+        technical: { type: 'array', items: { type: 'string' }, description: 'Up to 30 items.' },
+      },
+    },
+    tags: {
+      type: 'array',
+      description: '10-15 tags total (HARD CAP 15). 1-2 Role tags, exactly 1 Seniority, exactly 1 Industry.',
+      items: {
+        type: 'object',
+        required: ['name', 'evidence', 'raw_type', 'context'],
+        properties: {
+          name:             { type: 'string' },
+          evidence:         { type: 'string', description: 'Verbatim short snippet from the CV. ≤ 160 chars.' },
+          raw_type: {
+            type: 'string',
+            enum: ['role', 'skill', 'tool', 'degree', 'methodology', 'seniority', 'industry', 'soft_skill'],
+          },
+          context: {
+            type: 'string',
+            enum: ['Core', 'Tool', 'Degree', 'Profile'],
+          },
+          raw_type_reason:  { type: 'string', nullable: true, description: 'One Hebrew sentence, ≤ 160 chars.' },
+          tag_reason:       { type: 'string', nullable: true, description: 'One Hebrew sentence, ≤ 160 chars.' },
+          is_current:       { type: 'boolean', nullable: true },
+          confidence_score: { type: 'number',  nullable: true },
+        },
+      },
+    },
+    languages: {
+      type: 'array',
+      description: 'Up to 10 items.',
+      items: {
+        type: 'object',
+        required: ['name'],
+        properties: {
+          name:      { type: 'string' },
+          level:     { type: 'integer', nullable: true, description: '0..100' },
+          levelText: { type: 'string',  nullable: true },
+        },
+      },
+    },
+    workExperience: {
+      type: 'array',
+      description: 'Up to 20 items, most recent first.',
+      items: {
+        type: 'object',
+        required: ['title', 'company'],
+        properties: {
+          title:        { type: 'string', nullable: true },
+          company:      { type: 'string', nullable: true },
+          companyField: { type: 'string', nullable: true },
+          startDate:    { type: 'string', nullable: true, description: 'YYYY-MM' },
+          endDate:      { type: 'string', nullable: true, description: 'YYYY-MM or "Present"' },
+          description:  { type: 'string', nullable: true, description: '2-4 short bullet sentences, ≤ 600 chars' },
+        },
+      },
+    },
+    education: {
+      type: 'array',
+      description: 'Up to 10 items.',
+      items: {
+        type: 'object',
+        required: ['value'],
+        properties: {
+          value: { type: 'string' },
+        },
+      },
+    },
+    industryAnalysis: {
+      type: 'object',
+      properties: {
+        primaryIndustry: { type: 'string', nullable: true },
+        years:           { type: 'number', nullable: true },
+      },
+    },
+  },
+});
+
+/** Required top-level keys we expect the LLM to return; used by the validate-and-repair pass. */
+const RESUME_REQUIRED_TOP_KEYS = [
+  'firstName', 'lastName', 'fullName', 'email', 'phone',
+  'professionalSummary', 'skills', 'tags', 'workExperience', 'education',
+];
+
+const findMissingResumeKeys = (parsed) => {
+  if (!parsed || typeof parsed !== 'object') return [...RESUME_REQUIRED_TOP_KEYS];
+  const missing = [];
+  for (const key of RESUME_REQUIRED_TOP_KEYS) {
+    if (!(key in parsed)) {
+      missing.push(key);
+      continue;
+    }
+    const v = parsed[key];
+    if (key === 'skills') {
+      if (!v || typeof v !== 'object' || !Array.isArray(v.soft) || !Array.isArray(v.technical)) {
+        missing.push(key);
+      }
+    } else if (['tags', 'workExperience', 'education'].includes(key)) {
+      if (!Array.isArray(v)) missing.push(key);
+    }
+  }
+  return missing;
+};
+
 let resumePromptCache = null;
 const getResumePromptTemplate = async () => {
   if (resumePromptCache) return resumePromptCache;
@@ -719,21 +990,85 @@ const parseResumeWithAi = async ({ resumeText }) => {
     ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
     : buildAiResumePrompt(getCandidateTagsSchemaText());
 
-  console.log('[attachMedia-ai] calling gemini', { resumeLen: String(resumeText).length });
+  const cvText = String(resumeText).slice(0, 50000);
+  // NOTE: we deliberately do NOT pass a `responseSchema` here.
+  // gemini-3-flash-preview rejects `maxItems` (HTTP 400 INVALID_ARGUMENT), and
+  // without `maxItems` a strict responseSchema makes the model run away —
+  // it keeps generating tag/work-experience items until it hits maxOutputTokens
+  // (we observed 32,753 output tokens / ~100KB of JSON for one CV).
+  // We keep `responseMimeType: 'application/json'` to force JSON-only output,
+  // and rely on the prompt's HARD CAPS + the controller's validate-and-repair
+  // pass + the truncation salvager to keep the result clean and complete.
+  const generationConfig = {
+    temperature: 0.1,
+    // 16K is plenty for any reasonable CV; if the model still overshoots we
+    // fail fast and let the salvager + repair pass clean up.
+    maxOutputTokens: 16384,
+    responseMimeType: 'application/json',
+    // Disable hidden chain-of-thought — extraction is deterministic and the
+    // thinking budget would otherwise eat the whole output budget.
+    thinkingConfig: { thinkingBudget: 0 },
+  };
+
+  console.log('[attachMedia-ai] calling gemini', { resumeLen: cvText.length });
+  // First pass: pass the CV exactly once (stop double-feeding via history+message).
   const raw = await sendChat({
     apiKey,
     systemPrompt,
-    history: [{ role: 'user', text: resumeText.slice(0, 50000) }],
-    message:resumeText
+    message: `CV TEXT (verbatim, do not summarize before extracting):\n\n${cvText}`,
+    generationConfig,
   });
-  const parsed = tryParseJson(raw);
-  console.log('[attachMedia-ai] gemini response', {
-    rawLen: String(raw || '').length,
+  const rawStr = String(raw || '');
+  let parsed = tryParseJson(rawStr);
+  let missing = findMissingResumeKeys(parsed);
+  const looksTruncated = rawStr.length > 0 && !rawStr.trimEnd().endsWith('}') && !rawStr.trimEnd().endsWith(']');
+
+  console.log('[attachMedia-ai] gemini response', JSON.stringify({
+    rawLen: rawStr.length,
     parsedOk: !!parsed,
-    keys: parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 20) : [],
+    looksTruncated,
+    rawHead: rawStr.slice(0, 300),
+    rawTail: rawStr.slice(-300),
+    keys: parsed && typeof parsed === 'object' ? Object.keys(parsed).slice(0, 30) : [],
+    missing,
     softSkillsCount: Array.isArray(parsed?.skills?.soft) ? parsed.skills.soft.length : 0,
     technicalSkillsCount: Array.isArray(parsed?.skills?.technical) ? parsed.skills.technical.length : 0,
-  });
+    tagsCount: Array.isArray(parsed?.tags) ? parsed.tags.length : 0,
+    workExpCount: Array.isArray(parsed?.workExperience) ? parsed.workExperience.length : 0,
+    educationCount: Array.isArray(parsed?.education) ? parsed.education.length : 0,
+  }));
+
+  // One-shot validate-and-repair pass when the model dropped required keys.
+  if (missing.length) {
+    try {
+      const repairMessage =
+        `Your previous JSON was missing or malformed for these keys: ${JSON.stringify(missing)}.\n` +
+        `Re-read the CV below and return the SAME JSON object you produced before, ` +
+        `but with EVERY required key present (use null / [] / {} when truly unknown). ` +
+        `Do not drop any fields you already populated correctly.\n\n` +
+        `CV TEXT:\n${cvText}`;
+      const repairRaw = await sendChat({
+        apiKey,
+        systemPrompt,
+        message: repairMessage,
+        generationConfig,
+      });
+      const repairedParsed = tryParseJson(repairRaw);
+      if (repairedParsed && typeof repairedParsed === 'object') {
+        parsed = parsed && typeof parsed === 'object'
+          ? { ...parsed, ...repairedParsed }
+          : repairedParsed;
+        const stillMissing = findMissingResumeKeys(parsed);
+        console.log('[attachMedia-ai] repair pass', {
+          repairedKeys: Object.keys(repairedParsed).slice(0, 30),
+          stillMissing,
+        });
+      }
+    } catch (err) {
+      console.warn('[attachMedia-ai] repair pass failed', err.message || err);
+    }
+  }
+
   return parsed;
 };
 
@@ -1842,7 +2177,8 @@ const listLinkedJobs = async (req, res) => {
 const patchJobLinkStatus = async (req, res) => {
   try {
     const { jobCandidateId } = req.params;
-    const { status } = req.body || {};
+    const body = req.body || {};
+    const { status, internalNote, dueDate, dueTime, inviteCandidate, inviteClient } = body;
     if (status === undefined || status === null || String(status).trim() === '') {
       return res.status(400).json({ message: 'status is required' });
     }
@@ -1850,7 +2186,28 @@ const patchJobLinkStatus = async (req, res) => {
     if (!jc) {
       return res.status(404).json({ message: 'Job link not found' });
     }
-    await jc.update({ status: String(status).trim() });
+    const prevMeta =
+      jc.workflowMeta && typeof jc.workflowMeta === 'object' && !Array.isArray(jc.workflowMeta)
+        ? { ...jc.workflowMeta }
+        : {};
+    if (internalNote !== undefined) {
+      prevMeta.internalNote =
+        internalNote === null || internalNote === '' ? null : String(internalNote).trim();
+    }
+    if (dueDate !== undefined) {
+      prevMeta.dueDate = dueDate === null || dueDate === '' ? null : String(dueDate).trim();
+    }
+    if (dueTime !== undefined) {
+      prevMeta.dueTime = dueTime === null || dueTime === '' ? null : String(dueTime).trim();
+    }
+    if (inviteCandidate !== undefined) {
+      prevMeta.inviteCandidate = Boolean(inviteCandidate);
+    }
+    if (inviteClient !== undefined) {
+      prevMeta.inviteClient = Boolean(inviteClient);
+    }
+    prevMeta.workflowUpdatedAt = new Date().toISOString();
+    await jc.update({ status: String(status).trim(), workflowMeta: prevMeta });
     res.set('Cache-Control', 'private, no-store');
     return res.json(jc.get({ plain: true }));
   } catch (err) {

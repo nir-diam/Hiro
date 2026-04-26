@@ -15,6 +15,11 @@ import { deriveLocalCandidateId } from '../utils/candidateId';
 import { EMPTY_LINKED_LABEL } from '../utils/taskLinkedContext';
 import { useAuth } from '../context/AuthContext';
 import { requestNotificationInboxCountsRefresh } from '../services/notificationInboxCounts';
+import {
+    fetchEventTypes,
+    filterEventTypesForContext,
+    type EventTypeApiRow,
+} from '../services/eventTypesApi';
 
 interface NewTaskModalProps {
   isOpen: boolean;
@@ -268,6 +273,25 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
     openSummaryRef.current = onOpenCandidateSummary;
     const [contactsLoading, setContactsLoading] = useState(false);
     const [clientContactOptions, setClientContactOptions] = useState<ClientContactOption[]>([]);
+    const [flightCategories, setFlightCategories] = useState<EventTypeApiRow[]>([]);
+
+    useEffect(() => {
+        if (!isOpen || !apiBase) return;
+        let cancelled = false;
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        (async () => {
+            try {
+                const rows = await fetchEventTypes(apiBase, token);
+                if (cancelled) return;
+                setFlightCategories(filterEventTypesForContext(rows, 'flight'));
+            } catch {
+                if (!cancelled) setFlightCategories([]);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, apiBase]);
     const [formData, setFormData] = useState({
         messageText: '',
         assigneeEmails: [] as string[],
@@ -968,9 +992,17 @@ const NewTaskModal: React.FC<NewTaskModalProps> = ({ isOpen, onClose, onSave, on
                                     <div>
                                         <label className="block text-sm font-bold text-text-default mb-2">קטגוריה</label>
                                         <select name="category" value={formData.category} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 block p-3.5 transition-all shadow-sm">
-                                            <option>כללי</option>
-                                            <option>גיוס</option>
-                                            <option>מכירות</option>
+                                            <option value="כללי">כללי</option>
+                                            {flightCategories.map((cat) => (
+                                                <option key={cat.id} value={cat.name}>
+                                                    {cat.name}
+                                                </option>
+                                            ))}
+                                            {formData.category &&
+                                                formData.category !== 'כללי' &&
+                                                !flightCategories.some((c) => c.name === formData.category) && (
+                                                <option value={formData.category}>{formData.category}</option>
+                                            )}
                                         </select>
                                     </div>
                                     <div>

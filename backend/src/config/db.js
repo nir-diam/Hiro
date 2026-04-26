@@ -46,6 +46,7 @@ const connectDb = async () => {
   require('../models/MessageTemplate');
   require('../models/ClientUsageSetting');
   require('../models/LoginEmailCode');
+  require('../models/EventType');
 
   const User = require('../models/User');
   const Client = require('../models/Client');

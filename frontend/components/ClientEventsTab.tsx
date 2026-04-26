@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, CalendarIcon, LinkIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ClockIcon, Cog6ToothIcon } from './Icons';
-import EventFormModal from './EventFormModal';
+import EventFormModal, { type Event as EventFormEvent } from './EventFormModal';
+import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
+import { eventTypeChipClasses } from '../utils/eventTypeChips';
 
 // --- TYPES ---
 interface HistoryEntry {
@@ -9,7 +11,7 @@ interface HistoryEntry {
   summary: string;
 }
 
-export type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
+export type EventType = string;
 export type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 export interface Event {
   id: string;
@@ -27,13 +29,6 @@ interface ClientEventsTabProps {
     clientId: string;
     clientName: string;
 }
-
-const eventTypeStyles: { [key in EventType]: { bg: string; text: string; border: string; } } = {
-  'ראיון': { bg: 'bg-secondary-100', text: 'text-secondary-800', border: 'border-secondary-500' },
-  'פגישה': { bg: 'bg-primary-100', text: 'text-primary-800', border: 'border-primary-500' },
-  'תזכורת': { bg: 'bg-yellow-100', text: 'text-yellow-800', border: 'border-yellow-500' },
-  'משימת מערכת': { bg: 'bg-gray-200', text: 'text-gray-800', border: 'border-gray-500' },
-};
 
 const eventStatusStyles: { [key in EventStatus]: { bg: string; text: string; } } = {
   'עתידי': { bg: 'bg-secondary-100', text: 'text-secondary-800' },
@@ -68,7 +63,6 @@ const allColumns = [
 
 const defaultVisibleColumns = allColumns.map(c => c.id);
 
-const eventTypeOptions = ['הכל', 'פגישה', 'ראיון', 'תזכורת', 'משימת מערכת'];
 const coordinatorOptions = [];
 
 
@@ -89,6 +83,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
     const [events, setEvents] = useState<Event[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [clientEventTypeNames, setClientEventTypeNames] = useState<string[]>([]);
     const [filters, setFilters] = useState({
         eventType: 'הכל',
         coordinator: 'הכל',
@@ -109,6 +104,53 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
+
+    const eventTypeFilterOptions = useMemo(() => {
+        const seen = new Set<string>();
+        const out: string[] = ['הכל'];
+        for (const n of clientEventTypeNames) {
+            if (n && !seen.has(n)) {
+                seen.add(n);
+                out.push(n);
+            }
+        }
+        for (const n of LEGACY_MANUAL_EVENT_TYPE_NAMES) {
+            if (!seen.has(n)) {
+                seen.add(n);
+                out.push(n);
+            }
+        }
+        for (const e of events) {
+            if (e.type && !seen.has(e.type)) {
+                seen.add(e.type);
+                out.push(e.type);
+            }
+        }
+        return out;
+    }, [clientEventTypeNames, events]);
+
+    useEffect(() => {
+        if (!apiBase) {
+            setClientEventTypeNames([]);
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        let cancelled = false;
+        fetchEventTypes(apiBase, token)
+            .then((rows) => {
+                if (cancelled) return;
+                const names = filterEventTypesForContext(rows, 'client')
+                    .map((r) => r.name)
+                    .filter((n) => n.trim() !== '');
+                setClientEventTypeNames(names);
+            })
+            .catch(() => {
+                if (!cancelled) setClientEventTypeNames([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
 
     const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -281,7 +323,10 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
 
     const renderCell = (event: Event, columnId: string) => {
         switch (columnId) {
-            case 'type': return <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeStyles[event.type].bg} ${eventTypeStyles[event.type].text}`}>{event.type}</span>;
+            case 'type': {
+                const chip = eventTypeChipClasses(event.type);
+                return <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${chip.bg} ${chip.text}`}>{event.type}</span>;
+            }
             case 'title': return <span className="font-semibold text-text-default">{event.title}</span>;
             case 'date': return <span className="flex items-center gap-2"><CalendarIcon className="w-4 h-4 text-text-subtle"/> {new Date(event.date).toLocaleString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>;
             case 'status': return <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>;
@@ -297,7 +342,13 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 items-end">
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">סוג אירוע</label>
-                            <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm">{eventTypeOptions.map(opt => <option key={opt}>{opt}</option>)}</select>
+                            <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm">
+                                {eventTypeFilterOptions.map((opt) => (
+                                    <option key={opt} value={opt}>
+                                        {opt}
+                                    </option>
+                                ))}
+                            </select>
                         </div>
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">רכז</label>
@@ -387,10 +438,18 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                 ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {sortedAndFilteredEvents.map(event => (
-                        <div key={event.id} onClick={() => toggleRow(event.id)} className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${eventTypeStyles[event.type].border} p-4 flex flex-col justify-between cursor-pointer`}>
+                        <div
+                            key={event.id}
+                            onClick={() => toggleRow(event.id)}
+                            className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${eventTypeChipClasses(event.type).border} p-4 flex flex-col justify-between cursor-pointer`}
+                        >
                             <div>
                                 <div className="flex justify-between items-start">
-                                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeStyles[event.type].bg} ${eventTypeStyles[event.type].text}`}>{event.type}</span>
+                                    <span
+                                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeChipClasses(event.type).bg} ${eventTypeChipClasses(event.type).text}`}
+                                    >
+                                        {event.type}
+                                    </span>
                                     <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
                                 </div>
                                 <h3 className="font-bold text-text-default my-2">{event.title}</h3>
@@ -417,11 +476,32 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             )}
             </main>
 
-            <EventFormModal 
+            <EventFormModal
                 isOpen={isModalOpen}
                 onClose={() => setIsModalOpen(false)}
-                onSave={handleSaveEvent}
-                event={editingEvent}
+                onSave={(form) =>
+                    void handleSaveEvent({
+                        id: form.id as string | undefined,
+                        type: form.type,
+                        date: form.date,
+                        description: form.description,
+                        coordinator: form.coordinator,
+                        title: form.description,
+                    })
+                }
+                event={
+                    editingEvent
+                        ? ({
+                              id: editingEvent.id,
+                              type: editingEvent.type,
+                              date: editingEvent.date,
+                              coordinator: editingEvent.coordinator,
+                              status: editingEvent.status,
+                              description: editingEvent.description || editingEvent.title || '',
+                              linkedTo: editingEvent.linkedTo ? [editingEvent.linkedTo] : [],
+                          } satisfies EventFormEvent)
+                        : null
+                }
                 context="client"
             />
         </div>

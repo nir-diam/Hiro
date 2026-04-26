@@ -1,7 +1,8 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { XMarkIcon, CheckCircleIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { fetchEventTypes, filterEventTypesForContext, type EventTypeApiRow } from '../services/eventTypesApi';
 
 interface AddJobEventModalProps {
   isOpen: boolean;
@@ -10,37 +11,62 @@ interface AddJobEventModalProps {
   eventToEdit?: { type: string; description: string } | null;
 }
 
-const eventTypeOptions = [
-    'התקבל עדכון מהלקוח על משרות חדשות', 
-    'לקוח עדכן סטטוס מועמדים', 
-    'לקוח עדכן- המשרה נסגרה+ סטטוס מועמ', 
-    'נשלח מייל ללקוח לגבי משרות חדשות / עי', 
-    'נשלח דיוור', 
-    'נשלח סטטוס מועמדים', 
+/** Fallback list shown only when the API is unreachable or returns no rows for jobs. */
+const fallbackJobEventTypes = [
+    'התקבל עדכון מהלקוח על משרות חדשות',
+    'לקוח עדכן סטטוס מועמדים',
+    'לקוח עדכן- המשרה נסגרה+ סטטוס מועמ',
+    'נשלח מייל ללקוח לגבי משרות חדשות / עי',
+    'נשלח דיוור',
+    'נשלח סטטוס מועמדים',
     'הערה חופשית',
     'סטטוס מועמד',
     'עריכת משרה',
     'הערה',
-    'הוספת מועמד'
+    'הוספת מועמד',
 ];
 
 const AddJobEventModal: React.FC<AddJobEventModalProps> = ({ isOpen, onClose, onSave, eventToEdit }) => {
     const { t } = useLanguage();
-    const [eventType, setEventType] = useState(eventTypeOptions[0]);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [jobEventTypes, setJobEventTypes] = useState<EventTypeApiRow[]>([]);
+    const [eventType, setEventType] = useState(fallbackJobEventTypes[0]);
     const [notes, setNotes] = useState('');
 
     useEffect(() => {
-        if (isOpen) {
-            if (eventToEdit) {
-                // Try to match existing type, or default to first if not found (or add it)
-                setEventType(eventTypeOptions.includes(eventToEdit.type) ? eventToEdit.type : eventTypeOptions[0]);
-                setNotes(eventToEdit.description);
-            } else {
-                setEventType(eventTypeOptions[0]);
-                setNotes('');
+        if (!isOpen || !apiBase) return;
+        let cancelled = false;
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        (async () => {
+            try {
+                const rows = await fetchEventTypes(apiBase, token);
+                if (cancelled) return;
+                setJobEventTypes(filterEventTypesForContext(rows, 'job'));
+            } catch {
+                if (!cancelled) setJobEventTypes([]);
             }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, apiBase]);
+
+    const eventTypeOptions = useMemo<string[]>(() => {
+        if (jobEventTypes.length > 0) return jobEventTypes.map((r) => r.name).filter(Boolean);
+        return fallbackJobEventTypes;
+    }, [jobEventTypes]);
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const fallback = eventTypeOptions[0] ?? '';
+        if (eventToEdit) {
+            setEventType(eventTypeOptions.includes(eventToEdit.type) ? eventToEdit.type : (eventToEdit.type || fallback));
+            setNotes(eventToEdit.description);
+        } else {
+            setEventType(fallback);
+            setNotes('');
         }
-    }, [isOpen, eventToEdit]);
+    }, [isOpen, eventToEdit, eventTypeOptions]);
 
     if (!isOpen) return null;
 
@@ -80,6 +106,7 @@ const AddJobEventModal: React.FC<AddJobEventModalProps> = ({ isOpen, onClose, on
                                 className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 block p-3 transition shadow-sm outline-none cursor-pointer"
                             >
                                 {eventTypeOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                               
                             </select>
                         </div>
                         <div>

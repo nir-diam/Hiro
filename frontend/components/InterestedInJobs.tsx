@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, XMarkIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
-import UpdateStatusModal from './UpdateStatusModal';
+import UpdateStatusModal, { type UpdateStatusFormData } from './UpdateStatusModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { Job } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
@@ -32,6 +32,11 @@ interface JobInterest {
   matchDetails: MatchDetails;
   lastAnalyzed: string;
   linkSource?: string | null;
+  internalNote: string;
+  dueDate: string;
+  dueTime: string;
+  inviteCandidate: boolean;
+  inviteClient: boolean;
 }
 
 type LinkedJobApiRow = {
@@ -42,10 +47,15 @@ type LinkedJobApiRow = {
   updatedAt?: string | null;
   createdAt?: string | null;
   job: Record<string, unknown>;
+  workflowMeta?: Record<string, unknown>;
 };
 
 function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
   const job = row.job || {};
+  const wm =
+    row.workflowMeta && typeof row.workflowMeta === 'object' && !Array.isArray(row.workflowMeta)
+      ? row.workflowMeta
+      : {};
   const title = String(job.title || job.publicJobTitle || '').trim() || '—';
   const city = String(job.city || '').trim();
   const loc = String(job.location || '').trim();
@@ -74,15 +84,20 @@ function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
     },
     lastAnalyzed: lastUpdated,
     linkSource: row.source,
+    internalNote: wm.internalNote != null ? String(wm.internalNote) : '',
+    dueDate: wm.dueDate != null ? String(wm.dueDate) : '',
+    dueTime: wm.dueTime != null ? String(wm.dueTime) : '',
+    inviteCandidate: Boolean(wm.inviteCandidate),
+    inviteClient: Boolean(wm.inviteClient),
   };
 }
 
 export const jobsData: JobInterest[] = [
-  { linkId: 'mock-1', jobId: 'mock-job-1', industry: 'לוגיסטיקה', role: 'מחסנאי/ת', jobTitle: 'דרוש/ה מחסנאי/ת למפעל מוביל', company: 'תנובה', location: 'רחובות', lastUpdated: '14/07/2025', status: 'פעיל', matchScore: 92, matchDetails: { positive: ['5+ שנות ניסיון בניהול מחסן ממוחשב', 'ניסיון עבודה עם מערכת WMS', 'רישיון מלגזה בתוקף'], negative: ['לא צוין ניסיון עם מערכת SAP'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '15.11.2025' },
-  { linkId: 'mock-2', jobId: 'mock-job-2', industry: 'שיווק', role: 'מנהל/ת שיווק דיגיטלי', jobTitle: 'מנהל/ת קמפיינים PPC', company: 'בזק', location: 'תל אביב', lastUpdated: '10/07/2025', status: 'הוזמן לראיון', matchScore: 85, matchDetails: { positive: ['ניסיון מוכח בניהול קמפיינים בגוגל ופייסבוק', 'שליטה מלאה ב-Google Analytics', 'תואר ראשון רלוונטי'], negative: ['ניסיון של 3 שנים בלבד (נדרש 4+)', 'לא צוין ניסיון עם Taboola/Outbrain'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '27/07/2025' },
-  { linkId: 'mock-3', jobId: 'mock-job-3', industry: 'פיננסים', role: 'אנליסט/ית', jobTitle: 'אנליסט/ית לחברת השקעות', company: 'מיטב דש', location: 'גבעתיים', lastUpdated: '05/07/2025', status: 'מועמד משך עניין', matchScore: 68, matchDetails: { positive: ['תואר ראשון בכלכלה', 'שליטה מעולה באקסל'], negative: ['חוסר ניסיון בשוק ההון', 'ניסיון מועט בניתוח דוחות כספיים'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '26/07/2025' },
-  { linkId: 'mock-4', jobId: 'mock-job-4', industry: 'טכנולוגיה', role: 'מהנדס/ת תוכנה', jobTitle: 'Fullstack Developer (React & Node)', company: 'Wix', location: 'הרצליה', lastUpdated: '01/07/2025', status: 'לא רלוונטי', matchScore: 45, matchDetails: { positive: ['ניסיון עם React'], negative: ['אין ניסיון עם Node.js', 'אין ניסיון בעבודה עם TypeScript', 'רק שנתיים ניסיון בתעשייה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '25/07/2025' },
-  { linkId: 'mock-5', jobId: 'mock-job-5', industry: 'קמעונאות', role: 'מנהל/ת סניף', jobTitle: 'מנהל/ת סניף לרשת אופנה', company: 'קסטרו', location: 'ירושלים', lastUpdated: '28/06/2025', status: 'בארכיון', matchScore: 20, matchDetails: { positive: ['ניסיון ניהולי כללי'], negative: ['אין ניסיון מתחום הקמעונאות', 'אין ניסיון בניהול צוות של מעל 5 עובדים', 'אין היכרות עם עולם האופנה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '24/07/2025' },
+  { linkId: 'mock-1', jobId: 'mock-job-1', industry: 'לוגיסטיקה', role: 'מחסנאי/ת', jobTitle: 'דרוש/ה מחסנאי/ת למפעל מוביל', company: 'תנובה', location: 'רחובות', lastUpdated: '14/07/2025', status: 'פעיל', matchScore: 92, matchDetails: { positive: ['5+ שנות ניסיון בניהול מחסן ממוחשב', 'ניסיון עבודה עם מערכת WMS', 'רישיון מלגזה בתוקף'], negative: ['לא צוין ניסיון עם מערכת SAP'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '15.11.2025', internalNote: '', dueDate: '', dueTime: '', inviteCandidate: false, inviteClient: false },
+  { linkId: 'mock-2', jobId: 'mock-job-2', industry: 'שיווק', role: 'מנהל/ת שיווק דיגיטלי', jobTitle: 'מנהל/ת קמפיינים PPC', company: 'בזק', location: 'תל אביב', lastUpdated: '10/07/2025', status: 'הוזמן לראיון', matchScore: 85, matchDetails: { positive: ['ניסיון מוכח בניהול קמפיינים בגוגל ופייסבוק', 'שליטה מלאה ב-Google Analytics', 'תואר ראשון רלוונטי'], negative: ['ניסיון של 3 שנים בלבד (נדרש 4+)', 'לא צוין ניסיון עם Taboola/Outbrain'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '27/07/2025', internalNote: '', dueDate: '', dueTime: '', inviteCandidate: false, inviteClient: false },
+  { linkId: 'mock-3', jobId: 'mock-job-3', industry: 'פיננסים', role: 'אנליסט/ית', jobTitle: 'אנליסט/ית לחברת השקעות', company: 'מיטב דש', location: 'גבעתיים', lastUpdated: '05/07/2025', status: 'מועמד משך עניין', matchScore: 68, matchDetails: { positive: ['תואר ראשון בכלכלה', 'שליטה מעולה באקסל'], negative: ['חוסר ניסיון בשוק ההון', 'ניסיון מועט בניתוח דוחות כספיים'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '26/07/2025', internalNote: '', dueDate: '', dueTime: '', inviteCandidate: false, inviteClient: false },
+  { linkId: 'mock-4', jobId: 'mock-job-4', industry: 'טכנולוגיה', role: 'מהנדס/ת תוכנה', jobTitle: 'Fullstack Developer (React & Node)', company: 'Wix', location: 'הרצליה', lastUpdated: '01/07/2025', status: 'לא רלוונטי', matchScore: 45, matchDetails: { positive: ['ניסיון עם React'], negative: ['אין ניסיון עם Node.js', 'אין ניסיון בעבודה עם TypeScript', 'רק שנתיים ניסיון בתעשייה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '25/07/2025', internalNote: '', dueDate: '', dueTime: '', inviteCandidate: false, inviteClient: false },
+  { linkId: 'mock-5', jobId: 'mock-job-5', industry: 'קמעונאות', role: 'מנהל/ת סניף', jobTitle: 'מנהל/ת סניף לרשת אופנה', company: 'קסטרו', location: 'ירושלים', lastUpdated: '28/06/2025', status: 'בארכיון', matchScore: 20, matchDetails: { positive: ['ניסיון ניהולי כללי'], negative: ['אין ניסיון מתחום הקמעונאות', 'אין ניסיון בניהול צוות של מעל 5 עובדים', 'אין היכרות עם עולם האופנה'], summary: 'התאמה גבוהה מאוד. המועמד עונה על כל דרישות החובה ורוב הדרישות הרצויות. מומלץ להמשיך בתהליך.' }, lastAnalyzed: '24/07/2025', internalNote: '', dueDate: '', dueTime: '', inviteCandidate: false, inviteClient: false },
 ];
 
 const statusStyles: { [key in Status]: { bg: string; text: string; icon: React.ReactElement<{ className?: string }> } } = {
@@ -222,9 +237,16 @@ const JobInterestCard: React.FC<{ job: JobInterest; onStatusClick: () => void; o
 );
 
 
-const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: string | null }> = ({
+const InterestedInJobs: React.FC<{
+    onOpenNewTask: () => void;
+    candidateId?: string | null;
+    candidatePhone?: string | null;
+    candidateEmail?: string | null;
+}> = ({
     onOpenNewTask,
     candidateId = null,
+    candidatePhone = null,
+    candidateEmail = null,
 }) => {
     const { t } = useLanguage();
     const [jobs, setJobs] = useState<JobInterest[]>([]);
@@ -438,6 +460,11 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
                 summary: 'התעניינות נוספה מבחירת תחום בלבד. יש לעדכן פרטים נוספים.',
             },
             lastAnalyzed: new Date().toLocaleDateString('he-IL'),
+            internalNote: '',
+            dueDate: '',
+            dueTime: '',
+            inviteCandidate: false,
+            inviteClient: false,
         };
         setJobs((prevJobs) => [newInterest, ...prevJobs]);
         setIsJobFieldSelectorOpen(false);
@@ -456,7 +483,16 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
             setJobs((prev) =>
                 prev.map((job) =>
                     job.linkId === editingInterest.linkId
-                        ? { ...job, status: data.status, lastUpdated: new Date().toLocaleDateString('he-IL') }
+                        ? {
+                              ...job,
+                              status: data.status,
+                              lastUpdated: new Date().toLocaleDateString('he-IL'),
+                              internalNote: data.note != null ? String(data.note) : '',
+                              dueDate: data.dueDate != null ? String(data.dueDate) : '',
+                              dueTime: data.dueTime != null ? String(data.dueTime) : '',
+                              inviteCandidate: Boolean(data.inviteCandidate),
+                              inviteClient: Boolean(data.inviteClient),
+                          }
                         : job,
                 ),
             );
@@ -467,7 +503,14 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
         const res = await fetch(`${apiBase}/api/candidates/linked-jobs/${editingInterest.linkId}/status`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ status: data.status }),
+            body: JSON.stringify({
+                status: data.status,
+                internalNote: data.note != null ? String(data.note) : '',
+                dueDate: data.dueDate || null,
+                dueTime: data.dueTime || null,
+                inviteCandidate: Boolean(data.inviteCandidate),
+                inviteClient: Boolean(data.inviteClient),
+            }),
         });
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
@@ -476,7 +519,16 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
         setJobs((prev) =>
             prev.map((job) =>
                 job.linkId === editingInterest.linkId
-                    ? { ...job, status: data.status, lastUpdated: new Date().toLocaleDateString('he-IL') }
+                    ? {
+                          ...job,
+                          status: data.status,
+                          lastUpdated: new Date().toLocaleDateString('he-IL'),
+                          internalNote: data.note != null ? String(data.note) : '',
+                          dueDate: data.dueDate != null ? String(data.dueDate) : '',
+                          dueTime: data.dueTime != null ? String(data.dueTime) : '',
+                          inviteCandidate: Boolean(data.inviteCandidate),
+                          inviteClient: Boolean(data.inviteClient),
+                      }
                     : job,
             ),
         );
@@ -680,10 +732,17 @@ const InterestedInJobs: React.FC<{ onOpenNewTask: () => void; candidateId?: stri
                     isOpen={isStatusModalOpen}
                     onClose={() => setIsStatusModalOpen(false)}
                     onSave={handleSaveStatus}
-                    initialStatus={editingInterest.status}
+                    initialStatus={editingInterest.status as UpdateStatusFormData['status']}
                     onOpenNewTask={onOpenNewTask}
                     contextPrimary={editingInterest.jobTitle}
                     contextSecondary={[editingInterest.company, editingInterest.location].filter(Boolean).join(' · ')}
+                    initialNote={editingInterest.internalNote}
+                    initialDueDate={editingInterest.dueDate}
+                    initialDueTime={editingInterest.dueTime}
+                    initialInviteCandidate={editingInterest.inviteCandidate}
+                    initialInviteClient={editingInterest.inviteClient}
+                    candidatePhone={candidatePhone}
+                    candidateEmail={candidateEmail}
                 />
             )}
             

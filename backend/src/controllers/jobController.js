@@ -3,6 +3,8 @@ const jobCandidateService = require('../services/jobCandidateService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
 const Job = require('../models/Job');
 const Tag = require('../models/Tag');
+const Client = require('../models/Client');
+const ClientContact = require('../models/ClientContact');
 
 const analyzeDescription = async (req, res) => {
   try {
@@ -279,5 +281,91 @@ const getCandidates = async (req, res) => {
   }
 };
 
-module.exports = { list, listForCompose, get, create, update, remove, getCandidates, analyzeDescription };
+/**
+ * Contacts for re-sending a screening CV: active client_contacts for the Client
+ * matched by Job.client (name/displayName), plus Job.contacts JSONB (deduped by email).
+ */
+const getReferralClientContacts = async (req, res) => {
+  try {
+    const job = await Job.findByPk(req.params.id);
+    if (!job) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    const label = String(job.client || '').trim().toLowerCase();
+    const emailRe = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+    let clientRow = null;
+    if (label) {
+      const clientCandidates = await Client.findAll({
+        where: { isActive: true },
+        attributes: ['id', 'name', 'displayName'],
+      });
+      clientRow =
+        clientCandidates.find((c) => String(c.name || '').trim().toLowerCase() === label) ||
+        clientCandidates.find((c) => String(c.displayName || '').trim().toLowerCase() === label);
+    }
+
+    const out = [];
+    if (clientRow) {
+      const rows = await ClientContact.findAll({
+        where: { clientId: clientRow.id, isActive: true },
+        attributes: ['id', 'name', 'email', 'role'],
+        order: [['createdAt', 'ASC']],
+      });
+      for (const r of rows) {
+        const c = r.get({ plain: true });
+        const email = String(c.email || '').trim();
+        if (!emailRe.test(email)) continue;
+        out.push({
+          id: String(c.id),
+          name: String(c.name || '').trim(),
+          email,
+          role: String(c.role || '').trim(),
+          source: 'client',
+        });
+      }
+    }
+
+    const plainJob = job.get({ plain: true });
+    const jobJsonContacts = Array.isArray(plainJob.contacts) ? plainJob.contacts : [];
+    const seen = new Set(out.map((c) => c.email.toLowerCase()));
+    jobJsonContacts.forEach((c, i) => {
+      const email = String(c?.email || '').trim();
+      if (!emailRe.test(email)) return;
+      const key = email.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({
+        id: `job:${req.params.id}:${i}`,
+        name: String(c?.name || '').trim(),
+        email,
+        role: String(c?.role || '').trim(),
+        source: 'job',
+      });
+    });
+
+    res.set('Cache-Control', 'private, no-store');
+    return res.json({
+      clientId: clientRow ? String(clientRow.id) : null,
+      clientResolvedName: clientRow ? String(clientRow.displayName || clientRow.name || '') : '',
+      jobClientLabel: String(job.client || ''),
+      contacts: out,
+    });
+  } catch (err) {
+    console.error('[jobController.getReferralClientContacts]', err);
+    return res.status(500).json({ message: err.message || 'Failed to load contacts' });
+  }
+};
+
+module.exports = {
+  list,
+  listForCompose,
+  get,
+  create,
+  update,
+  remove,
+  getCandidates,
+  analyzeDescription,
+  getReferralClientContacts,
+};
 

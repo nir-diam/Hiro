@@ -8,6 +8,7 @@ import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagType
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { buildCandidateFullName } from '../utils/candidateName';
+import { computeAgeFromBirth } from '../utils/ageFromBirth';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
   <button onClick={onClick} title={title} className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors relative z-20 ${className || 'bg-primary-100/70 text-primary-600 hover:bg-primary-200'}`}>
@@ -171,7 +172,7 @@ const EditableField: React.FC<{
     );
 };
 
-type ExperienceSlice = { label: string; color: string; percentage?: number; years?: number };
+type ExperienceSlice = { label: string; color: string; percentage?: number; years?: number; titles?: string[] };
 
 const EXPERIENCE_COLORS = ['bg-primary-500', 'bg-secondary-400', 'bg-emerald-500', 'bg-amber-400', 'bg-sky-500', 'bg-rose-500', 'bg-indigo-500'];
 
@@ -192,7 +193,7 @@ const buildExperienceDistributionFromWork = (workExperience?: any[]): Experience
     const entries = Array.isArray(workExperience) ? workExperience : [];
     if (!entries.length) return [];
     const currentYear = new Date().getFullYear();
-    const buckets: Record<string, { label: string; years: number }> = {};
+    const buckets: Record<string, { label: string; years: number; titles: string[] }> = {};
 
     entries.forEach(item => {
         const label = (item.companyField || item.company || item.title || 'אחר')?.toString().trim() || 'אחר';
@@ -207,10 +208,13 @@ const buildExperienceDistributionFromWork = (workExperience?: any[]): Experience
         }
         const duration = Math.max(0, endYear - startYear);
         if (!duration) return;
-        buckets[label] = {
-            label,
-            years: (buckets[label]?.years || 0) + duration,
-        };
+        const bucket = buckets[label] || { label, years: 0, titles: [] };
+        bucket.years += duration;
+        const titleCandidate = (item.title || '').toString().trim();
+        if (titleCandidate && !bucket.titles.includes(titleCandidate)) {
+            bucket.titles.push(titleCandidate);
+        }
+        buckets[label] = bucket;
     });
 
     const aggregated = Object.values(buckets)
@@ -270,11 +274,21 @@ const ExperienceBar: React.FC<{
             <div className="flex flex-wrap gap-3 mb-3 items-center">
                 {computedData.map((item, index) => {
                     const labelValue = `${item.years ?? 0} ${yearsLabel}`;
+                    const titles = (item.titles || []).filter(Boolean);
+                    const titlesText = titles.join(', ');
                     return (
-                        <div key={index} className="flex items-center gap-1.5 text-[11px]">
-                            <div className={`w-2 h-2 rounded-full ${item.color}`}></div>
+                        <div key={index} className="flex items-center gap-1.5 text-[11px] max-w-full">
+                            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${item.color}`}></div>
                             <span className="text-text-default font-medium">{item.label}</span>
                             <span className="text-text-muted">({labelValue})</span>
+                            {titles.length > 0 && (
+                                <span
+                                    className="text-text-subtle italic truncate max-w-[220px]"
+                                    title={titlesText}
+                                >
+                                    — {titlesText}
+                                </span>
+                            )}
                         </div>
                     );
                 })}
@@ -625,6 +639,12 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const displayFullName =
     buildCandidateFullName(candidateData.firstName, candidateData.lastName) || candidateData.fullName || '';
   const candidateInitials = getInitials(displayFullName);
+
+  const displayAge = useMemo(() => {
+    const a = candidateData?.age;
+    if (a != null && String(a).trim() !== '') return String(a).trim();
+    return computeAgeFromBirth(candidateData?.birthYear, candidateData?.birthMonth, candidateData?.birthDay);
+  }, [candidateData?.age, candidateData?.birthYear, candidateData?.birthMonth, candidateData?.birthDay]);
 
   const currentProfileId = activeProfileId ?? candidateData.id;
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
@@ -1267,7 +1287,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                           />
                           <div className="flex items-center text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1">
                                 <EditableField
-                                    value={candidateData.age ? String(candidateData.age) : ''}
+                                    value={displayAge}
                                     placeholder="גיל"
                                     onSave={(val) => onFormChange({ ...candidateData, age: val })}
                                     className="font-semibold min-w-[40px]"

@@ -25,6 +25,8 @@ const businessLogicRoutes = require('./routes/businessLogicRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const cityRoutes = require('./routes/cityRoutes');
 const userRoutes = require('./routes/userRoutes');
+const eventTypeRoutes = require('./routes/eventTypeRoutes');
+const referenceInfoRoutes = require('./routes/referenceInfoRoutes');
 const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateAdminRoutes } = require('./routes/messageTemplateRoutes');
 
 const app = express();
@@ -58,6 +60,8 @@ app.use('/api/admin/candidate-tags', candidateTagRoutes);
 app.use('/api/admin/business-logic', businessLogicRoutes);
 app.use('/api/email-uploads', emailRoutes);
 app.use('/api/cities', cityRoutes);
+app.use('/api/event-types', eventTypeRoutes);
+app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
 

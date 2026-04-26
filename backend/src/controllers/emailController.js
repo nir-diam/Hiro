@@ -1053,8 +1053,10 @@ const patchScreeningCvReferral = async (req, res) => {
     const hasStatus = status !== undefined && status !== null && String(status).trim() !== '';
     const hasDueDate = dueDate !== undefined;
     const hasDueTime = dueTime !== undefined;
-    if (!hasStatus && !hasNoteKey && !hasDueDate && !hasDueTime) {
-      return res.status(400).json({ message: 'Provide status, note, dueDate, and/or dueTime' });
+    const hasInviteCandidate = Object.prototype.hasOwnProperty.call(bodyRaw, 'inviteCandidate');
+    const hasInviteClient = Object.prototype.hasOwnProperty.call(bodyRaw, 'inviteClient');
+    if (!hasStatus && !hasNoteKey && !hasDueDate && !hasDueTime && !hasInviteCandidate && !hasInviteClient) {
+      return res.status(400).json({ message: 'Provide status, note, dueDate, dueTime, and/or invite flags' });
     }
 
     const record = await NotificationMessage.findByPk(id);
@@ -1080,6 +1082,12 @@ const patchScreeningCvReferral = async (req, res) => {
       const raw = bodyRaw.note;
       const n = raw === null || raw === '' ? null : String(raw).trim();
       nextMeta.referralInternalNote = n || null;
+    }
+    if (hasInviteCandidate) {
+      nextMeta.referralInviteCandidate = Boolean(bodyRaw.inviteCandidate);
+    }
+    if (hasInviteClient) {
+      nextMeta.referralInviteClient = Boolean(bodyRaw.inviteClient);
     }
     nextMeta.referralWorkflowUpdatedAt = new Date().toISOString();
 
@@ -1129,18 +1137,36 @@ const listScreeningCvReferrals = async (req, res) => {
       limit: 500,
     });
 
+    const candIds = [
+      ...new Set(
+        rows
+          .map((r) => r.get('metadata')?.taskPayload?.candidateId)
+          .filter((id) => id && String(id).trim()),
+      ),
+    ];
+    const candRows =
+      candIds.length > 0
+        ? await Candidate.findAll({
+            where: { id: candIds },
+            attributes: ['id', 'phone', 'email'],
+          })
+        : [];
+    const candById = new Map(candRows.map((c) => [c.id, c]));
+
     const out = rows.map((r) => {
       const plain = r.get({ plain: true });
-      const tp = plain.metadata?.taskPayload || {};
+      const meta = plain.metadata || {};
+      const tp = meta.taskPayload || {};
       const sender = plain.sender;
       const recipientLine = [tp.recipientName, plain.toEmail].filter(Boolean).join(' · ');
-      const wf = plain.metadata?.referralWorkflowStatus;
+      const wf = meta.referralWorkflowStatus;
       const workflowStatus =
         wf != null && String(wf).trim() !== '' ? String(wf).trim() : 'חדש';
-      const internal = plain.metadata?.referralInternalNote;
+      const internal = meta.referralInternalNote;
       const notesParts = [recipientLine, internal].filter((x) => x != null && String(x).trim() !== '');
       const internalStr =
         internal != null && String(internal).trim() !== '' ? String(internal).trim() : '';
+      const cand = tp.candidateId ? candById.get(tp.candidateId) : null;
       return {
         id: plain.id,
         candidateId: tp.candidateId || null,
@@ -1160,7 +1186,11 @@ const listScreeningCvReferrals = async (req, res) => {
         dueTime: plain.dueTime != null && String(plain.dueTime).trim() !== '' ? String(plain.dueTime).trim() : '',
         notes: notesParts.length ? notesParts.join('\n\n') : recipientLine,
         clientContacts: [],
-        deliveryStatus: plain.metadata?.deliveryStatus || null,
+        deliveryStatus: meta.deliveryStatus || null,
+        candidatePhone: cand?.phone ? String(cand.phone).trim() : '',
+        candidateEmail: cand?.email ? String(cand.email).trim() : '',
+        inviteCandidate: Boolean(meta.referralInviteCandidate),
+        inviteClient: Boolean(meta.referralInviteClient),
       };
     });
 
