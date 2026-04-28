@@ -82,6 +82,7 @@ import AdminEventsView from './components/AdminEventsView';
 import AdminHelpCenterView from './components/AdminHelpCenterView';
 import AdminBusinessLogicView from './components/AdminBusinessLogicView';
 import AdminReferenceInfoView from './components/AdminReferenceInfoView';
+import AdminSystemEventsView from './components/AdminSystemEventsView';
 
 import ManagerLayout from './components/ManagerLayout';
 import ManagerDashboard from './components/ManagerDashboard';
@@ -934,6 +935,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                 { path: 'picklists', element: <AdminPicklistsView /> },
                 { path: 'help-center', element: <AdminHelpCenterView /> },
                 { path: 'events', element: <AdminEventsView /> },
+                { path: 'system-events', element: <AdminSystemEventsView /> },
                 { path: 'business-logic', element: <AdminBusinessLogicView /> },
                 { path: 'reference-info', element: <AdminReferenceInfoView /> },
                 { path: 'job-fields', element: <AdminJobFieldsView /> },

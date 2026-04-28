@@ -20,6 +20,7 @@ import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import TagSelectorModal, { type TagOption } from './TagSelectorModal';
 import { useLanguage } from '../context/LanguageContext';
 import { deriveLocalCandidateId } from '../utils/candidateId';
+import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
 
 /** Blue ring when an advanced filter differs from its default. */
 const advFieldModifiedClass = 'ring-2 ring-primary-500 rounded-xl';
@@ -1945,6 +1946,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             }
             case 'createDate':
                 return formatIntakeDateCell(candidate.createDate);
+            case 'lastActivity':
+                return formatCandidatePoolLastActive(candidate.lastActivity);
             default:
                 return (candidate as any)[columnId];
         }

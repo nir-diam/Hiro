@@ -1,3 +1,4 @@
+const { randomUUID } = require('crypto');
 const { GetObjectCommand } = require('@aws-sdk/client-s3');
 const { simpleParser } = require('mailparser');
 const emailService = require('../services/emailService');
@@ -10,11 +11,12 @@ const clientService = require('../services/clientService');
 const EmailUpload = require('../models/EmailUpload');
 const { createS3Client } = require('../services/s3Service');
 const {
-  uploadResumeForCandidate,
+  putResumeFileInS3,
   fetchResumeText,
   buildParsedUpdates,
   fetchResumeBinaryForMail,
   buildCandidateModelSchemaJsonForPrompt,
+  ensureOrganizationsFromExperience,
 } = require('./candidateController');
 const Candidate = require('../models/Candidate');
 const candidateTagService = require('../services/candidateTagService');
@@ -25,6 +27,8 @@ const User = require('../models/User');
 const NotificationMessage = require('../models/NotificationMessage');
 const { Op, Sequelize } = require('sequelize');
 const { sequelize } = require('../config/db');
+const systemEventEmitter = require('../utils/systemEventEmitter');
+const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
@@ -182,6 +186,114 @@ const isResumeAttachment = (attachment) => {
   return supportedMimes.some((mimeHint) => contentType.includes(mimeHint));
 };
 
+const BORING_EMAIL_PREFIX = new Set(['noreply', 'no-reply', 'mailer-daemon', 'donotreply', 'no_reply']);
+
+/**
+ * Heuristic: first plausible contact email in CV body (not the envelope From).
+ * Used to split one mail with multiple people’s CVs into separate records + welcome each.
+ */
+const extractFirstEmailFromCvText = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const sample = String(text).slice(0, 20000);
+  const re = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+  let m;
+  while ((m = re.exec(sample)) != null) {
+    const raw = m[0];
+    const e = raw.toLowerCase();
+    const local = e.split('@')[0];
+    if (BORING_EMAIL_PREFIX.has(local) || e.endsWith('@example.com')) continue;
+    return raw;
+  }
+  return null;
+};
+
+const inferNameFromCvTextForEmail = (text, email) => {
+  const fallback = (email && email.split('@')[0]) || 'מועמד';
+  if (!text || typeof text !== 'string') return fallback;
+  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const reName = /^(?:שם|שם מלא|name)\s*[:：]\s*(.+)/i;
+  for (const line of lines.slice(0, 40)) {
+    const mm = line.match(reName);
+    if (mm && mm[1]) return mm[1].replace(/\s+/g, ' ').trim().slice(0, 120) || fallback;
+  }
+  return fallback;
+};
+
+/** Normalize for comparing “same person?” across CVs (spacing + niqqud). */
+const normalizeCvIdentityKey = (s) => {
+  if (!s || typeof s !== 'string') return '';
+  return s
+    .replace(/[\u0591-\u05C7]/g, '')
+    .replace(/["׳״'`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+};
+
+const compactIdentityCompare = (k) => normalizeCvIdentityKey(k).replace(/\s/g, '');
+
+/**
+ * Filename often encodes the candidate when agency footers share one email across CVs:
+ * `…-1-of-3-קורות חיים של מאיה גל ללא.docx`
+ */
+const extractNameHintFromResumeFilename = (fileLabel) => {
+  if (!fileLabel) return null;
+  let s = String(fileLabel).split(/[/\\]/).pop() || '';
+  s = s.replace(/\.[^.]+$/i, '');
+  s = s.replace(/^\d+-\d+-of-\d+-/i, '').replace(/^\d+-/i, '');
+  const m1 = s.match(/של\s+(.+?)(?:\s+ללא)?$/u);
+  if (m1 && m1[1]) {
+    const name = m1[1].replace(/קורות\s*חיים/gi, '').trim();
+    if (name.length >= 2) return name;
+  }
+  const m2 = s.match(/קורות\s*חיים\s*[-–]\s*(.+)/u);
+  if (m2 && m2[1]) {
+    const v = m2[1].trim();
+    if (v.length >= 2) return v;
+  }
+  return null;
+};
+
+/** Best-effort person label for splitting multi-attachment mail (before email heuristics). */
+const extractNameHintFromCvBody = (text) => {
+  if (!text || typeof text !== 'string') return null;
+  const lines = String(text).split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const reName = /^(?:שם|שם מלא|name)\s*[:：]\s*(.+)/i;
+  for (const line of lines.slice(0, 55)) {
+    const mm = line.match(reName);
+    if (mm && mm[1]) {
+      const v = mm[1].replace(/\s+/g, ' ').trim();
+      if (v.length >= 2 && v.length < 120) return v;
+    }
+  }
+  const reCvDash = /^קורות\s*חיים\s*[-–]\s*(.+)$/i;
+  for (const line of lines.slice(0, 8)) {
+    const m = line.match(reCvDash);
+    if (m && m[1]) {
+      const v = m[1].trim();
+      if (v.length >= 2 && v.length < 120) return v;
+    }
+  }
+  if (lines[0]) {
+    const L = lines[0]
+      .replace(/^קו["׳״]?ח\s*[-–]?\s*/i, '')
+      .replace(/^קורות\s*חיים\s*[-–]?\s*/i, '')
+      .trim();
+    if (L.length >= 2 && L.length < 90 && !/@/.test(L) && !/^\d+$/.test(L)) return L;
+  }
+  return null;
+};
+
+/**
+ * Stable label to compare CV 0 vs CV j when contact email is duplicated (agency / shared footer).
+ */
+const extractCvIdentityKey = (text, fileLabel) => {
+  const fromBody = extractNameHintFromCvBody(text || '');
+  const fromFile = extractNameHintFromResumeFilename(fileLabel || '');
+  const raw = fromBody || fromFile;
+  return normalizeCvIdentityKey(raw || '');
+};
+
 const downloadEmailFromS3 = async (bucket, key) => {
   const client = createS3Client();
   const command = new GetObjectCommand({ Bucket: bucket, Key: key });
@@ -220,8 +332,10 @@ const processEmailUpload = async (record) => {
       return;
     }
 
-    const resumeAttachment = (parsed.attachments || []).find(isResumeAttachment);
-    if (!resumeAttachment || !resumeAttachment.content) {
+    const resumeAttachments = (parsed.attachments || []).filter(
+      (a) => isResumeAttachment(a) && a.content,
+    );
+    if (!resumeAttachments.length) {
       console.warn('[email] no resume attachment found', {
         recordId: record.id,
         attachments: (parsed.attachments || []).map((att) => att.filename),
@@ -230,9 +344,24 @@ const processEmailUpload = async (record) => {
       return;
     }
 
-    const fileBase64 = resumeAttachment.content.toString('base64');
-    const filename = resumeAttachment.filename || `resume-${Date.now()}.bin`;
-    const mimeType = resumeAttachment.contentType || 'application/octet-stream';
+    // Same S3 key delivered twice (e.g. duplicate webhook) → do not re-ingest; link this row and exit.
+    const priorIngested = await EmailUpload.findOne({
+      where: {
+        bucket: record.bucket,
+        fileKey: record.fileKey,
+        candidateId: { [Op.not]: null },
+        id: { [Op.ne]: record.id },
+      },
+      order: [['id', 'ASC']],
+    });
+    if (priorIngested) {
+      await record.update({ candidateId: priorIngested.candidateId });
+      console.log(
+        '[email] duplicate S3 / duplicate notify for same fileKey; linked row, skipping full ingest',
+        { recordId: record.id, priorRecordId: priorIngested.id, candidateId: priorIngested.candidateId },
+      );
+      return;
+    }
 
     const toRecipients = parsed.to?.value || [];
     let postingCode = null;
@@ -257,29 +386,183 @@ const processEmailUpload = async (record) => {
       }
     }
 
-    let candidate = await candidateService.findByEmail(fromEmail);
+    let candidate =
+      (await candidateService.findByEmail(fromEmail)) || (await candidateService.findByInboundFromEmail(fromEmail));
     let candidateCreatedViaEmailIngest = false;
     if (!candidate) {
       const inferredName =
         fromAddress?.name?.trim() || fromEmail.split('@')[0] || 'מועמד חדש';
       candidate = await candidateService.create({
         email: fromEmail,
+        /** Stable key when CV/AI later overwrites `email` to a different address. */
+        inboundFromEmail: fromEmail,
         fullName: inferredName,
         source: 'email',
       });
       candidateCreatedViaEmailIngest = true;
       console.log('[email] created new candidate', candidate.id);
+    } else {
+      try {
+        const rawInbound =
+          candidate.get && typeof candidate.get === 'function'
+            ? candidate.get('inboundFromEmail')
+            : candidate.inboundFromEmail;
+        if (!rawInbound) {
+          await candidateService.update(candidate.id, { inboundFromEmail: fromEmail });
+        }
+      } catch (e) {
+        console.warn(
+          '[email] inboundFromEmail not set (run migration add_candidates_inbound_from_email.sql if missing):',
+          e?.message || e,
+        );
+      }
+    }
+    if (candidateCreatedViaEmailIngest) {
+
+      // Audit: 'קליטת קו"ח' — CV received via email
+      systemEventEmitter.emit(null, {
+        ...SYSTEM_EVENTS.CV_RECEIVED,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { id: record?.id || candidate.id },
+      });
+
+      // Audit: 'הגדרת מקור גיוס' — recruitment source set to 'email'
+      systemEventEmitter.emit(null, {
+        ...SYSTEM_EVENTS.CV_SOURCE,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { source: 'email' },
+      });
     }
 
-    const resumeUrl = await uploadResumeForCandidate(candidate.id, fileBase64, filename, mimeType);
-    if (resumeUrl) {
-      console.log('[email] resume uploaded', resumeUrl.slice(0, 60));
-    const extraText = await fetchResumeText(resumeUrl, candidate.id);
-    const parsedUpdates = buildParsedUpdates(candidate, extraText || '');
+    const textChunks = [];
+    /** @type {Array<{ publicUrl: string, key: string, size: number, fileLabel: string }>} */
+    const uploaded = [];
+    const totalResumes = resumeAttachments.length;
+    for (let i = 0; i < resumeAttachments.length; i += 1) {
+      const resumeAttachment = resumeAttachments[i];
+      const fileBase64 = resumeAttachment.content.toString('base64');
+      const rawName =
+        String(resumeAttachment.filename || 'resume')
+          .split(/[/\\]/)
+          .pop()
+          .trim() || 'resume';
+      const filename =
+        totalResumes > 1
+          ? `${i + 1}-of-${totalResumes}-${rawName}`
+          : resumeAttachment.filename || `resume-${Date.now()}.bin`;
+      const mimeType = resumeAttachment.contentType || 'application/octet-stream';
+      const put = await putResumeFileInS3(candidate.id, fileBase64, filename, mimeType);
+      if (!put) continue;
+      uploaded.push({ ...put, fileLabel: filename });
+      console.log(
+        '[email] resume uploaded to S3',
+        `(${i + 1}/${totalResumes})`,
+        put.publicUrl.slice(0, 60),
+      );
+      const piece = (await fetchResumeText(put.publicUrl, candidate.id)) || '';
+      textChunks.push(piece);
+    }
+    if (!uploaded.length) {
+      console.warn('[email] all resume uploads failed', {
+        recordId: record.id,
+        fileKey: record.fileKey,
+        attempted: totalResumes,
+      });
+      return;
+    }
+    if (textChunks.length !== uploaded.length) {
+      console.warn('[email] text/attachment count mismatch, falling back to join', {
+        recordId: record.id,
+        uploaded: uploaded.length,
+        textChunks: textChunks.length,
+      });
+    }
+
+    // Split when: (1) different person on CV / filename despite shared footer email (agency batches),
+    // or (2) different contact email vs file 0 (original behavior).
+    const emailInFirstCv = extractFirstEmailFromCvText(textChunks[0] || '');
+    const identityKey0 = extractCvIdentityKey(textChunks[0] || '', uploaded[0]?.fileLabel || '');
+    const identitySplitIndices = new Set();
+    const splitFileIndices = new Set();
+    for (let j = 1; j < uploaded.length; j += 1) {
+      const identityKeyJ = extractCvIdentityKey(textChunks[j] || '', uploaded[j]?.fileLabel || '');
+      const differsIdentity =
+        identityKey0 &&
+        identityKeyJ &&
+        identityKey0 !== identityKeyJ &&
+        compactIdentityCompare(identityKey0) !== compactIdentityCompare(identityKeyJ);
+      if (differsIdentity) {
+        identitySplitIndices.add(j);
+        splitFileIndices.add(j);
+        console.log('[email] multi-CV: split (distinct CV identity; shared email is OK)', {
+          j,
+          identityKey0,
+          identityKeyJ,
+        });
+        continue;
+      }
+
+      const emailJ = extractFirstEmailFromCvText(textChunks[j] || '');
+      if (!emailJ) continue;
+      const n0 = (emailInFirstCv || '').toLowerCase();
+      const nJ = String(emailJ).toLowerCase();
+      if (nJ === fromEmail) continue;
+      if (n0 && nJ === n0) continue;
+      if (!n0) {
+        if (nJ === fromEmail) continue;
+        splitFileIndices.add(j);
+        continue;
+      }
+      if (nJ !== n0) {
+        splitFileIndices.add(j);
+        console.log('[email] multi-CV: split to separate candidate for attachment index', {
+          j,
+          email: nJ,
+          primaryFileEmail: n0,
+        });
+      }
+    }
+
+    const latest = await candidateService.getById(candidate.id);
+    const prevDocs = Array.isArray(latest?.documents) ? [...latest.documents] : [];
+    const extraDocEntries = uploaded
+      .slice(1)
+      .map((u, idx) => {
+        const j = idx + 1;
+        if (splitFileIndices.has(j)) return null;
+        return {
+          id: randomUUID(),
+          name: u.fileLabel || 'קורות חיים',
+          type: 'resume',
+          uploadDate: new Date().toISOString(),
+          uploadedBy: 'מייל',
+          notes: 'קליטה ממייל (מצורף מרובה)',
+          fileSize: u.size || 0,
+          key: u.key,
+          url: u.publicUrl,
+        };
+      })
+      .filter(Boolean);
+    await candidateService.update(candidate.id, {
+      resumeUrl: uploaded[0].publicUrl,
+      documents: extraDocEntries.length ? [...extraDocEntries, ...prevDocs] : prevDocs,
+    });
+
+    const primaryTextParts = [textChunks[0] || ''];
+    for (let j = 1; j < textChunks.length; j += 1) {
+      if (!splitFileIndices.has(j)) primaryTextParts.push(textChunks[j] || '');
+    }
+    const combinedText = primaryTextParts.filter(Boolean).join('\n\n----\n\n');
+
+    const parsedUpdates = buildParsedUpdates(candidate, combinedText || '');
     if (Object.keys(parsedUpdates).length) {
       await candidateService.update(candidate.id, parsedUpdates);
     }
-    const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(extraText);
+    const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(combinedText);
     if (aiFields && Object.keys(aiFields).length) {
       const safeAi = { ...aiFields };
       const envelopeEmail = candidate.email && String(candidate.email).includes('@');
@@ -287,11 +570,48 @@ const processEmailUpload = async (record) => {
         delete safeAi.email;
       }
       await candidateService.update(candidate.id, safeAi);
+
+      // Audit: 'פרסור ניתוח ועיבוד מידע' — AI parsed CV and applied auto updates
+      systemEventEmitter.emit(null, {
+        ...SYSTEM_EVENTS.CV_PARSED,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { source: aiFields?.source || 'email' },
+      });
+
+      // Audit: 'הגדרת תחום משרה' — candidate "field" inferred by AI
+      if (safeAi.field) {
+        systemEventEmitter.emit(null, {
+          ...SYSTEM_EVENTS.CV_FIELD,
+          entityType: 'Candidate',
+          entityId: candidate.id,
+          entityName: candidate.fullName,
+          params: { job: safeAi.field },
+        });
+      }
     }
     if (aiTags.length) {
       await candidateTagService.syncTagsForCandidate(candidate.id, aiTags);
+
+      // Audit: 'הגדרת תגיות' — tags created/synced for candidate
+      const tagsLabel = aiTags
+        .map((t) => t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name)
+        .filter(Boolean)
+        .slice(0, 12)
+        .join(', ');
+      systemEventEmitter.emit(null, {
+        ...SYSTEM_EVENTS.CV_TAGS,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { tags: tagsLabel || `${aiTags.length} תגיות` },
+      });
     }
     await candidateService.update(candidate.id, { source: 'email' });
+
+    const primarySynced = await candidateService.getById(candidate.id);
+    await ensureOrganizationsFromExperience(primarySynced?.workExperience, candidate.id);
 
     const association = await jobCandidateService.associateCandidateWithJob({
       jobId: resolvedJob?.id || null,
@@ -300,30 +620,135 @@ const processEmailUpload = async (record) => {
     });
     console.log('[email] associated candidate with job', association?.id);
     await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
+    await record.reload();
 
+    let welcomeClientId = null;
+    if (resolvedJob?.client) {
+      welcomeClientId = await clientService.findIdByJobClientLabel(resolvedJob.client);
+    }
+    const welcomeOnce = new Set();
+    const queueWelcome = (cand) => {
+      if (!cand || !cand.email) return;
+      const k = String(cand.email).trim().toLowerCase();
+      if (welcomeOnce.has(k)) {
+        console.log('[email] welcome skipped (dedupe, same address as earlier in this ingest)', k);
+        return;
+      }
+      welcomeOnce.add(k);
       try {
-        const fresh = await candidateService.getById(candidate.id);
-        let welcomeClientId = null;
-        if (resolvedJob?.client) {
-          welcomeClientId = await clientService.findIdByJobClientLabel(resolvedJob.client);
-        }
-        console.log('[email] ingest template email queue (every successful CV-by-mail)', {
-          candidateId: fresh?.id,
-          newCandidateThisIngest: candidateCreatedViaEmailIngest,
-          email: fresh?.email || null,
-          source: fresh?.source,
-          resolvedJobId: resolvedJob?.id || null,
-          welcomeClientId,
-          postingCode: postingCode || null,
-        });
-        messageTemplateService.queueCandidateWelcomeEmail(fresh, {
+        messageTemplateService.queueCandidateWelcomeEmail(cand, {
           clientId: welcomeClientId,
         });
-      } catch (welcomeErr) {
-        console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
+      } catch (e) {
+        console.warn('[email] welcome queue failed for', k, e?.message || e);
       }
+    };
+
+    for (const j of splitFileIndices) {
+      const up = uploaded[j];
+      if (!up) continue;
+      let contactEmail =
+        extractFirstEmailFromCvText(textChunks[j] || '') ||
+        emailInFirstCv ||
+        extractFirstEmailFromCvText(textChunks[0] || '');
+      if (!contactEmail) contactEmail = fromEmail;
+      if (!contactEmail) continue;
+      const norm = String(contactEmail).toLowerCase();
+      if (!identitySplitIndices.has(j) && norm === fromEmail) continue;
+
+      const nameGuess =
+        extractNameHintFromCvBody(textChunks[j] || '') ||
+        extractNameHintFromResumeFilename(up.fileLabel || '') ||
+        inferNameFromCvTextForEmail(textChunks[j] || '', contactEmail);
+
+      let splitCand;
+      if (identitySplitIndices.has(j)) {
+        // Multiple CVs often share one contact email; never reuse another row from findByEmail (would merge 2nd+ splits).
+        splitCand = await candidateService.create({
+          email: norm,
+          fullName: nameGuess,
+          source: 'email',
+          inboundFromEmail: fromEmail,
+        });
+      } else {
+        splitCand = await candidateService.findByEmail(norm);
+        if (!splitCand) {
+          splitCand = await candidateService.create({
+            email: norm,
+            fullName: nameGuess,
+            source: 'email',
+            inboundFromEmail: fromEmail,
+          });
+        } else if (splitCand.id === candidate.id) {
+          splitCand = await candidateService.create({
+            email: norm,
+            fullName: nameGuess,
+            source: 'email',
+            inboundFromEmail: fromEmail,
+          });
+        }
+      }
+      await candidateService.update(splitCand.id, { resumeUrl: up.publicUrl, source: 'email' });
+      const tj = textChunks[j] || '';
+      const { aiFields: splitAi, aiTags: splitTags } = await deriveCandidateFieldsFromResume(tj);
+      if (splitAi && Object.keys(splitAi).length) {
+        const safeS = { ...splitAi };
+        if (norm && (!safeS.email || !String(safeS.email).includes('@'))) {
+          safeS.email = norm;
+        }
+        await candidateService.update(splitCand.id, safeS);
+      }
+      if (splitTags && splitTags.length) {
+        await candidateTagService.syncTagsForCandidate(splitCand.id, splitTags);
+      }
+      await jobCandidateService.associateCandidateWithJob({
+        jobId: resolvedJob?.id || null,
+        candidateId: splitCand.id,
+        source: 'email',
+      });
+      const splitFresh = await candidateService.getById(splitCand.id);
+      await ensureOrganizationsFromExperience(splitFresh?.workExperience, splitCand.id);
+      // Mirror row so GET /api/email-uploads/candidate/:id finds this mail for split candidates (same S3 object as primary).
+      try {
+        await EmailUpload.create({
+          bucket: record.bucket,
+          fileKey: record.fileKey,
+          jobId: record.jobId,
+          to: record.to,
+          from: record.from,
+          subject: record.subject,
+          body: record.body,
+          candidateId: splitCand.id,
+        });
+      } catch (mirrorErr) {
+        console.warn(
+          '[email] failed to mirror EmailUpload for split candidate',
+          splitCand.id,
+          mirrorErr?.message || mirrorErr,
+        );
+      }
+      queueWelcome(splitFresh);
     }
-    console.log('[email] resume attached for candidate', candidate.id, record.fileKey);
+
+    try {
+      const fresh = await candidateService.getById(candidate.id);
+      console.log('[email] ingest template email queue (primary CV-by-mail)', {
+        candidateId: fresh?.id,
+        newCandidateThisIngest: candidateCreatedViaEmailIngest,
+        email: fresh?.email || null,
+        source: fresh?.source,
+        resolvedJobId: resolvedJob?.id || null,
+        welcomeClientId,
+        postingCode: postingCode || null,
+        splitAttachmentWelcomeCount: splitFileIndices.size,
+      });
+      queueWelcome(fresh);
+    } catch (welcomeErr) {
+      console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
+    }
+    console.log('[email] resume(s) attached for candidate', candidate.id, record.fileKey, {
+      count: totalResumes,
+    });
   } catch (error) {
     console.error('[email][processEmailUpload]', {
       message: error?.message || error,
@@ -624,7 +1049,9 @@ const upload = async (req, res) => {
 
   try {
     const record = await emailService.create({ jobId, fileKey, bucket });
-    void processEmailUpload(record);
+    // Await: 201 only after all attachments are stored and candidate is updated, so clients
+    // that load the profile right away see every file (void + early 201 caused a race).
+    await processEmailUpload(record);
     return res.status(201).json(record);
   } catch (error) {
     console.error('Failed to save email upload', error);
@@ -848,6 +1275,26 @@ const send = async (req, res) => {
         to: resolvedToEmail,
         messageId: result?.messageId || null,
       });
+
+      // Audit: 'הודעת משתמש' — generic user-to-user message (general-purpose)
+      const fromName =
+        req?.user?.fullName ||
+        req?.user?.name ||
+        req?.user?.email ||
+        smtpSenderEmail ||
+        'מערכת';
+      const messagePreview = (storedText || '').replace(/\s+/g, ' ').trim().slice(0, 280) || subject;
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.TEAM_USER_MSG,
+        entityType: 'Job',
+        entityId: null,
+        entityName: subject,
+        params: {
+          from: fromName,
+          to: resolvedToEmail,
+          message: messagePreview,
+        },
+      });
     }
 
     console.log('[email][send] sendEmail batch succeeded', { count: results.length });
@@ -926,9 +1373,10 @@ const sendScreeningCv = async (req, res) => {
       const company = typeof block.company === 'string' ? block.company.trim() : '';
       const internalOpinionHtml =
         typeof block.internalOpinionHtml === 'string' ? block.internalOpinionHtml : '';
-      const contacts = Array.isArray(block.contacts) ? block.contacts : [];
+      const rawContacts = Array.isArray(block.contacts) ? block.contacts : [];
 
-      for (const c of contacts) {
+      const contactRows = [];
+      for (const c of rawContacts) {
         const email = typeof c.email === 'string' ? c.email.trim() : '';
         const name = typeof c.name === 'string' ? c.name.trim() : '';
         if (!emailRe.test(email)) {
@@ -936,9 +1384,16 @@ const sendScreeningCv = async (req, res) => {
             message: `כתובת מייל לא תקינה או חסרה: ${email || '(ריק)'}`,
           });
         }
+        contactRows.push({ email, name });
+      }
+      if (contactRows.length === 0) {
+        continue;
+      }
 
-        const subject = `קורות חיים — ${candLabel} | ${jobTitle || 'משרה'}${company ? ` — ${company}` : ''}`;
+      const subject = `קורות חיים — ${candLabel} | ${jobTitle || 'משרה'}${company ? ` — ${company}` : ''}`;
+      const toEmailCombined = contactRows.map((r) => r.email).join(', ');
 
+      const buildBodies = ({ email, name }) => {
         const greeting = name ? `שלום ${escapeHtmlMail(name)},` : 'שלום,';
         const htmlParts = [
           `<p dir="rtl">${greeting}</p>`,
@@ -951,7 +1406,6 @@ const sendScreeningCv = async (req, res) => {
           htmlParts.push(`<div dir="rtl">${internalOpinionHtml}</div>`);
         }
         const htmlBody = htmlParts.join('\n');
-
         const textBody = [
           stripHtmlMail(name ? `שלום ${name},` : 'שלום,'),
           stripHtmlMail(
@@ -963,36 +1417,44 @@ const sendScreeningCv = async (req, res) => {
             ? `\n\nחוות דעת פנימית:\n${stripHtmlMail(internalOpinionHtml)}`
             : '',
         ].join('\n');
+        return { htmlBody, textBody };
+      };
 
-        const savedMessage = await NotificationMessage.create({
-          toEmail: email,
-          subject,
-          text: textBody.trim() ? textBody : null,
-          html: htmlBody,
-          messageType: 'message',
-          status: 'unread',
-          isTask: false,
-          assignee: email,
-          category: 'screening_cv',
-          senderUserId: req?.user?.sub || req?.user?.id || null,
-          metadata: {
-            deliveryStatus: 'pending',
-            taskPayload: {
-              kind: 'screening_cv',
-              candidateId: candidate.id,
-              candidateName: candLabel,
-              jobId,
-              jobTitle: jobTitle || '',
-              clientName: company || '',
-              recipientName: name || '',
-              recipientEmail: email,
-            },
+      const firstBodies = buildBodies(contactRows[0]);
+      const savedMessage = await NotificationMessage.create({
+        toEmail: toEmailCombined,
+        subject,
+        text: firstBodies.textBody.trim() ? firstBodies.textBody : null,
+        html: firstBodies.htmlBody,
+        messageType: 'message',
+        status: 'unread',
+        isTask: false,
+        assignee: contactRows[0].email,
+        category: 'screening_cv',
+        senderUserId: req?.user?.sub || req?.user?.id || null,
+        metadata: {
+          deliveryStatus: 'pending',
+          taskPayload: {
+            kind: 'screening_cv',
+            candidateId: candidate.id,
+            candidateName: candLabel,
+            jobId,
+            jobTitle: jobTitle || '',
+            clientName: company || '',
+            recipients: contactRows.map((r) => ({
+              name: r.name || '',
+              email: r.email,
+            })),
           },
-        });
+        },
+      });
 
-        try {
+      const recipientSends = [];
+      try {
+        for (const row of contactRows) {
+          const { htmlBody, textBody } = buildBodies(row);
           const result = await emailService.sendEmail({
-            toEmail: email,
+            toEmail: row.email,
             subject,
             text: textBody || ' ',
             html: htmlBody,
@@ -1001,32 +1463,55 @@ const sendScreeningCv = async (req, res) => {
             senderEmail: smtpSenderEmail,
             attachments,
           });
-
-          await savedMessage.update({
-            metadata: {
-              ...(savedMessage.metadata || {}),
-              deliveryStatus: 'sent',
-              providerMessageId: result?.messageId || null,
-            },
+          recipientSends.push({
+            to: row.email,
+            messageId: result?.messageId || null,
           });
-
           results.push({
-            to: email,
+            to: row.email,
             jobId,
             messageId: result?.messageId || null,
             notificationMessageId: savedMessage.id,
           });
-        } catch (sendErr) {
-          await savedMessage.update({
-            metadata: {
-              ...(savedMessage.metadata || {}),
-              deliveryStatus: 'failed',
-              deliveryError: sendErr?.message || String(sendErr),
-            },
-          });
-          throw sendErr;
         }
+
+        const firstId = recipientSends[0]?.messageId || null;
+        await savedMessage.update({
+          metadata: {
+            ...(savedMessage.metadata || {}),
+            deliveryStatus: 'sent',
+            providerMessageId: firstId,
+            providerMessageIds: recipientSends.map((x) => x.messageId).filter(Boolean),
+            recipientSends,
+          },
+        });
+      } catch (sendErr) {
+        await savedMessage.update({
+          metadata: {
+            ...(savedMessage.metadata || {}),
+            deliveryStatus: 'failed',
+            deliveryError: sendErr?.message || String(sendErr),
+            recipientSends: recipientSends.length ? recipientSends : undefined,
+          },
+        });
+        throw sendErr;
       }
+    }
+
+    // Audit: 'נשלח סטטוס מועמדים' — bulk candidate-status report dispatched
+    if (results.length) {
+      const namesLabel = results
+        .map((r) => r.to)
+        .filter(Boolean)
+        .slice(0, 12)
+        .join(', ');
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.MAIL_STATUS_BULK,
+        entityType: 'Job',
+        entityId: candidateId,
+        entityName: candidate?.fullName || null,
+        params: { names: namesLabel || `${results.length} נמענים` },
+      });
     }
 
     return res.json({ ok: true, count: results.length, results });
@@ -1118,7 +1603,131 @@ const patchScreeningCvReferral = async (req, res) => {
   }
 };
 
-/** CV sends from candidate screening — one row per outbound email (notification_messages.category = screening_cv). */
+/** @param {unknown} val */
+const normalizeQueryStringArray = (val) => {
+  if (!val) return [];
+  if (Array.isArray(val)) return val.map((x) => String(x || '').trim()).filter(Boolean);
+  if (typeof val === 'string') return val.split(/[,;\n]/).map((x) => x.trim()).filter(Boolean);
+  return [];
+};
+
+/**
+ * @param {Record<string, unknown>} q
+ * @param {boolean} wantsPagination
+ */
+const parseScreeningCvReferralsQuery = (q, wantsPagination) => {
+  const page = Math.max(1, parseInt(String(q.page != null ? q.page : '1'), 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(String(q.pageSize != null ? q.pageSize : '25'), 10) || 25));
+  return {
+    page: wantsPagination ? page : 1,
+    pageSize: wantsPagination ? pageSize : 0,
+    search: String(q.search || '').trim(),
+    referralDateFrom: String(q.referralDate != null ? q.referralDate : q.referralDateFrom || q.dateFrom || '').trim(),
+    referralDateTo: String(
+      q.referralDateEnd != null ? q.referralDateEnd : q.referralDateTo || q.dateTo || '',
+    ).trim(),
+    status: String(q.status || '').trim(),
+    clientNames: normalizeQueryStringArray(q.clientNames),
+    jobTitles: normalizeQueryStringArray(q.jobTitles),
+    coordinators: normalizeQueryStringArray(q.coordinators),
+    lastUpdatedBys: normalizeQueryStringArray(q.lastUpdatedBys),
+    candidateName: String(q.candidateName || '').trim(),
+    source: String(q.source || '').trim(),
+    sortKey: String(q.sortKey || 'referralDate').trim() || 'referralDate',
+    sortDir: String(q.sortDir || 'desc').toLowerCase() === 'asc' ? 'asc' : 'desc',
+  };
+};
+
+const SCREENING_REFERRAL_SORT_KEYS = new Set([
+  'candidateName',
+  'clientName',
+  'jobTitle',
+  'coordinator',
+  'status',
+  'referralDate',
+  'lastUpdatedBy',
+  'source',
+]);
+
+/**
+ * @param {Record<string, unknown>} row
+ * @param {ReturnType<typeof parseScreeningCvReferralsQuery>} f
+ */
+const screeningReferralRowMatchesFilters = (row, f) => {
+  const refDate = new Date(String(row.referralDate));
+  if (f.referralDateFrom) {
+    const start = new Date(f.referralDateFrom);
+    if (Number.isFinite(start.getTime()) && (!Number.isFinite(refDate.getTime()) || refDate < start)) return false;
+  }
+  if (f.referralDateTo) {
+    const end = new Date(f.referralDateTo);
+    if (Number.isFinite(end.getTime())) {
+      end.setHours(23, 59, 59, 999);
+      if (!Number.isFinite(refDate.getTime()) || refDate > end) return false;
+    }
+  }
+  if (f.search) {
+    const s = f.search.toLowerCase();
+    const c = String(row.candidateName || '').toLowerCase();
+    const cl = String(row.clientName || '').toLowerCase();
+    const j = String(row.jobTitle || '').toLowerCase();
+    if (!c.includes(s) && !cl.includes(s) && !j.includes(s)) return false;
+  }
+  if (f.status && String(row.status || '') !== f.status) return false;
+  if (f.clientNames.length) {
+    const c = String(row.clientName || '').trim();
+    if (!c || !f.clientNames.includes(c)) return false;
+  }
+  if (f.jobTitles.length) {
+    const j = String(row.jobTitle || '').trim();
+    if (!j || !f.jobTitles.includes(j)) return false;
+  }
+  if (f.coordinators.length) {
+    const c = String(row.coordinator || '').trim();
+    if (!c || c === '—' || !f.coordinators.includes(c)) return false;
+  }
+  if (f.lastUpdatedBys.length) {
+    const c = String(row.coordinator || '').trim();
+    if (!c || c === '—' || !f.lastUpdatedBys.includes(c)) return false;
+  }
+  if (f.candidateName) {
+    if (!String(row.candidateName || '').toLowerCase().includes(f.candidateName.toLowerCase())) return false;
+  }
+  if (f.source) {
+    if (!String(row.source || '').toLowerCase().includes(f.source.toLowerCase())) return false;
+  }
+  return true;
+};
+
+/**
+ * @param {Record<string, unknown>[]} list
+ * @param {string} sortKey
+ * @param {'asc'|'desc'} sortDir
+ */
+const sortScreeningReferralRows = (list, sortKey, sortDir) => {
+  const key = SCREENING_REFERRAL_SORT_KEYS.has(sortKey) ? sortKey : 'referralDate';
+  const dir = sortDir === 'asc' ? 1 : -1;
+  const getCmp = (a, b) => {
+    if (key === 'referralDate') {
+      const at = new Date(String(a.referralDate || 0)).getTime();
+      const bt = new Date(String(b.referralDate || 0)).getTime();
+      return (Number.isFinite(at) ? at : 0) - (Number.isFinite(bt) ? bt : 0);
+    }
+    const vKey = key === 'lastUpdatedBy' ? 'coordinator' : key;
+    const av = String((a)[vKey] != null ? (a)[vKey] : '');
+    const bv = String((b)[vKey] != null ? (b)[vKey] : '');
+    return av.localeCompare(bv, 'he', { sensitivity: 'base' });
+  };
+  return [...list].sort((a, b) => {
+    const c = getCmp(a, b);
+    if (c === 0) {
+      return String(b.id).localeCompare(String(a.id), 'he');
+    }
+    return dir * c;
+  });
+};
+
+/** CV sends from candidate screening — one row per job send; `toEmail` lists all recipients comma-separated (notification_messages.category = screening_cv). */
 const listScreeningCvReferrals = async (req, res) => {
   try {
     const userId = req.user?.sub || req.user?.id;
@@ -1130,11 +1739,16 @@ const listScreeningCvReferrals = async (req, res) => {
       where.senderUserId = userId;
     }
 
+    const q0 = req.query || {};
+    const wantsPagination =
+      (q0.page != null && String(q0.page) !== '') || (q0.pageSize != null && String(q0.pageSize) !== '');
+    const filterParams = parseScreeningCvReferralsQuery(q0, wantsPagination);
+
     const rows = await NotificationMessage.findAll({
       where,
       include: [{ model: User, as: 'sender', attributes: ['name'], required: false }],
       order: [['createdAt', 'DESC']],
-      limit: 500,
+      limit: 20000,
     });
 
     const candIds = [
@@ -1158,7 +1772,19 @@ const listScreeningCvReferrals = async (req, res) => {
       const meta = plain.metadata || {};
       const tp = meta.taskPayload || {};
       const sender = plain.sender;
-      const recipientLine = [tp.recipientName, plain.toEmail].filter(Boolean).join(' · ');
+      const namesFromRecipients =
+        Array.isArray(tp.recipients) && tp.recipients.length
+          ? tp.recipients
+              .map((x) => (x && x.name ? String(x.name).trim() : ''))
+              .filter(Boolean)
+              .join(' · ')
+          : '';
+      const recipientNamePart =
+        namesFromRecipients ||
+        (tp.recipientName != null && String(tp.recipientName).trim() !== ''
+          ? String(tp.recipientName).trim()
+          : '');
+      const recipientLine = [recipientNamePart, plain.toEmail].filter(Boolean).join(' · ');
       const wf = meta.referralWorkflowStatus;
       const workflowStatus =
         wf != null && String(wf).trim() !== '' ? String(wf).trim() : 'חדש';
@@ -1194,8 +1820,61 @@ const listScreeningCvReferrals = async (req, res) => {
       };
     });
 
+    const filtered = out.filter((row) => screeningReferralRowMatchesFilters(row, filterParams));
+    const sorted = sortScreeningReferralRows(
+      filtered,
+      filterParams.sortKey,
+      filterParams.sortDir,
+    );
+    const total = sorted.length;
+
+    const now = Date.now();
+    const daysInStage = (row) => {
+      const t = new Date(String(row.referralDate || 0)).getTime();
+      if (!Number.isFinite(t)) return 0;
+      return Math.max(0, Math.floor((now - t) / 86400000));
+    };
+
+    const accepted = sorted.filter(
+      (r) => String(r.status || '') === 'התקבל' || String(r.status || '') === 'התקבל לעבודה',
+    ).length;
+    const stages = {
+      new: sorted.filter((r) => r.status === 'חדש').length,
+      review: sorted.filter((r) => r.status === 'בבדיקה').length,
+      interview: sorted.filter((r) => r.status === 'ראיון').length,
+      offer: sorted.filter((r) => r.status === 'הצעה').length,
+      hired: accepted,
+      rejected: sorted.filter((r) => r.status === 'נדחה').length,
+    };
+    const needsAttentionFull = sorted.filter(
+      (r) =>
+        (r.status === 'חדש' || r.status === 'בבדיקה') && daysInStage(r) > 7,
+    );
+    const needsAttention = needsAttentionFull.slice(0, 100).map((r) => ({
+      id: r.id,
+      candidateId: r.candidateId,
+      candidateName: r.candidateName,
+      jobTitle: r.jobTitle,
+      clientName: r.clientName,
+      coordinator: r.coordinator,
+      status: r.status,
+      referralDate: r.referralDate,
+      source: r.source,
+      daysInStage: daysInStage(r),
+    }));
+
+    const stats = { total, accepted, stages, needsAttention };
+    const page = wantsPagination ? filterParams.page : 1;
+    const pageSize = wantsPagination ? filterParams.pageSize : total || 1;
+    const from = wantsPagination ? (page - 1) * pageSize : 0;
+    const pSize = wantsPagination ? pageSize : total;
+    const items = wantsPagination
+      ? sorted.slice(from, from + pSize)
+      : sorted;
+    const totalPages = wantsPagination && pSize > 0 ? Math.max(1, Math.ceil(total / pSize)) : 1;
+
     res.set('Cache-Control', 'private, no-store');
-    return res.json(out);
+    return res.json({ items, total, page, pageSize: wantsPagination ? pageSize : total, totalPages, stats });
   } catch (err) {
     console.error('[email][listScreeningCvReferrals]', err);
     return res.status(500).json({ message: err?.message || 'Failed to list screening CV referrals' });

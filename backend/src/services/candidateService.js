@@ -799,6 +799,14 @@ const findByEmail = async (email) => {
   return Candidate.findOne({ where: { email } });
 };
 
+/** Match envelope sender after `email` was updated from the CV (e.g. gilad@) — set on email-ingest create. */
+const findByInboundFromEmail = async (email) => {
+  if (!email) return null;
+  const n = String(email).trim().toLowerCase();
+  if (!n) return null;
+  return Candidate.findOne({ where: { inboundFromEmail: n } });
+};
+
 const fetchInstanceById = async (id) => {
   const candidate = await Candidate.findByPk(id);
   if (!candidate) {
@@ -941,6 +949,7 @@ module.exports = {
   listPaginated,
   listByWorkedAtOrganization,
   findByEmail,
+  findByInboundFromEmail,
 };
 
 

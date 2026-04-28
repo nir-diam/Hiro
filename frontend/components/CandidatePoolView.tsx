@@ -15,6 +15,7 @@ import PurchaseCandidateModal from './PurchaseCandidateModal';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import { useLanguage } from '../context/LanguageContext';
+import { formatCandidatePoolLastActive, isIsoLikeTimestamp } from '../utils/formatCandidatePoolLastActive';
 
 // --- HELPER FOR ANONYMIZATION ---
 const anonymizeCandidate = (candidate: any, isPurchased: boolean) => {
@@ -103,7 +104,11 @@ const PoolCandidateCard: React.FC<{
             {/* Name & Title */}
             <h3 className="text-xl font-extrabold text-text-default mb-1">{displayCandidate.name}</h3>
             <p className="text-primary-600 font-bold text-sm mb-1">{candidate.title}</p>
-            <p className="text-xs text-text-muted mb-6">לפני {candidate.lastActive}</p>
+            <p className="text-xs text-text-muted mb-6">
+                {isIsoLikeTimestamp(candidate.lastActive)
+                    ? formatCandidatePoolLastActive(candidate.lastActive)
+                    : `לפני ${candidate.lastActive}`}
+            </p>
 
             {/* Experience Section (The Theme-Aware Bar) */}
             <div className="w-full mb-4 text-right">

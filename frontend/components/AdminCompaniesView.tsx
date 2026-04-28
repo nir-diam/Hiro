@@ -209,6 +209,49 @@ function isPersistedOrganizationId(id: CompanyId): boolean {
     return typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id);
 }
 
+/** Apply server `enrichmentMap` entry onto an existing org row (preview or merge). */
+function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>): Company {
+    if (!raw || typeof raw !== 'object') return c;
+    const nameFromApi = raw.name;
+    return {
+        ...c,
+        name: typeof nameFromApi === 'string' && nameFromApi.trim() ? nameFromApi : c.name,
+        nameEn: (typeof raw.nameEn === 'string' && raw.nameEn) || c.nameEn,
+        legalName: (typeof raw.legalName === 'string' && raw.legalName) || c.legalName,
+        aliases: Array.isArray(raw.aliases) ? raw.aliases.map(String) : c.aliases,
+        description: (typeof raw.description === 'string' && raw.description) || c.description,
+        mainField: (typeof raw.mainField === 'string' && raw.mainField) || c.mainField,
+        subField: (typeof raw.subField === 'string' && raw.subField) || c.subField,
+        employeeCount: (typeof raw.employeeCount === 'string' && raw.employeeCount) || c.employeeCount,
+        website: (typeof raw.website === 'string' && raw.website) || c.website,
+        linkedinUrl: (typeof raw.linkedinUrl === 'string' && raw.linkedinUrl) || c.linkedinUrl,
+        foundedYear: (typeof raw.foundedYear === 'string' && raw.foundedYear) || c.foundedYear,
+        location: (typeof raw.location === 'string' && raw.location) || c.location,
+        hqCountry: (typeof raw.hqCountry === 'string' && raw.hqCountry) || c.hqCountry,
+        type: (typeof raw.type === 'string' && raw.type) || c.type,
+        classification: (typeof raw.classification === 'string' && raw.classification) || c.classification,
+        businessModel:
+            raw.businessModel != null && String(raw.businessModel) !== '' ? asBusinessModel(raw.businessModel) : c.businessModel,
+        productType:
+            raw.productType != null && String(raw.productType) !== '' ? asProductType(raw.productType) : c.productType,
+        growthIndicator:
+            raw.growthIndicator != null && String(raw.growthIndicator) !== ''
+                ? asGrowthIndicator(raw.growthIndicator)
+                : c.growthIndicator,
+        structure:
+            raw.structure != null && String(raw.structure) !== '' ? asCorporateStructure(raw.structure) : c.structure,
+        parentCompany:
+            raw.parentCompany != null && String(raw.parentCompany) !== '' ? String(raw.parentCompany) : c.parentCompany,
+        subsidiaries: Array.isArray(raw.subsidiaries) && raw.subsidiaries.length
+            ? (raw.subsidiaries as unknown[]).map(String)
+            : c.subsidiaries,
+        tags: Array.isArray(raw.tags) && raw.tags.length ? (raw.tags as unknown[]).map(String) : c.tags,
+        techTags: Array.isArray(raw.techTags) && raw.techTags.length ? (raw.techTags as unknown[]).map(String) : c.techTags,
+        dataConfidence: raw.dataConfidence != null && raw.dataConfidence !== '' ? asDataConfidence(raw.dataConfidence) : 'Pending Review',
+        lastVerified: new Date().toISOString().split('T')[0],
+    };
+}
+
 // --- Column Definition ---
 const allColumnsDef = [
     { id: 'name', label: 'שם החברה' },
@@ -397,7 +440,10 @@ const CompanyModal: React.FC<{
     onSave: (company: Company) => void | Promise<void>;
     company: Company | null;
     sectorOptions: PicklistValueRow[];
-}> = ({ isOpen, onClose, onSave, company, sectorOptions }) => {
+    /** When false, modal stays open after a successful save (e.g. multi-company enrich preview). */
+    closeAfterSave?: boolean;
+    enrichmentSession?: { current: number; total: number } | null;
+}> = ({ isOpen, onClose, onSave, company, sectorOptions, closeAfterSave = true, enrichmentSession = null }) => {
     const [activeTab, setActiveTab] = useState<'details' | 'users'>('details');
     const [formData, setFormData] = useState<Company>({
         id: 0,
@@ -486,7 +532,7 @@ const CompanyModal: React.FC<{
                 lastVerified: new Date().toISOString().split('T')[0],
             })
         );
-        onClose();
+        if (closeAfterSave) onClose();
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -506,6 +552,14 @@ const CompanyModal: React.FC<{
                         <h2 className="text-xl font-black text-text-default">
                             {company ? 'עריכת פרופיל חברה' : 'הקמת חברה חדשה'}
                         </h2>
+                        {enrichmentSession && enrichmentSession.total > 0 && (
+                            <p className="text-xs text-text-muted font-semibold mt-0.5">
+                                תצוגה מקדימה — העמקה (AI){' '}
+                                <span className="text-primary-600">
+                                    {enrichmentSession.current}/{enrichmentSession.total}
+                                </span>
+                            </p>
+                        )}
                         <div className="flex items-center gap-2 mt-1">
                              <p className="text-xs text-text-muted">Intelligence & Data Enrichment</p>
                         </div>
@@ -797,6 +851,10 @@ const AdminCompaniesView: React.FC = () => {
     // Modal State
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingCompany, setEditingCompany] = useState<Company | null>(null);
+    /** Remaining orgs to review after `editingCompany` (enrich preview queue). */
+    const [enrichmentPreviewQueue, setEnrichmentPreviewQueue] = useState<Company[]>([]);
+    /** Total orgs in this enrich run (for 1/3 style header); 0 = not in enrich flow. */
+    const [enrichmentSessionTotal, setEnrichmentSessionTotal] = useState(0);
 
     // Selection State
     const [selectedIds, setSelectedIds] = useState<Set<CompanyId>>(new Set());
@@ -904,11 +962,15 @@ const AdminCompaniesView: React.FC = () => {
     
     // --- Actions Handlers ---
     const handleEditCompany = (company: Company) => {
+        setEnrichmentPreviewQueue([]);
+        setEnrichmentSessionTotal(0);
         setEditingCompany(company);
         setIsModalOpen(true);
     };
 
     const handleCreateCompany = () => {
+        setEnrichmentPreviewQueue([]);
+        setEnrichmentSessionTotal(0);
         setEditingCompany(null);
         setIsModalOpen(true);
     };
@@ -966,6 +1028,12 @@ const AdminCompaniesView: React.FC = () => {
             }
         }
         await loadOrganizations();
+        setEnrichmentPreviewQueue((q) => {
+            if (q.length === 0) return q;
+            const [next, ...rest] = q;
+            setEditingCompany(next);
+            return rest;
+        });
     };
 
     const handleDeleteCompany = async (id: CompanyId) => {
@@ -1104,176 +1172,74 @@ const AdminCompaniesView: React.FC = () => {
         setDraggingColumn(null);
     };
     
-     // --- AI Enrichment Logic ---
+    // --- AI Enrichment (Deep Dive) — server: POST /api/organizations/enrich (Gemini + SerpAPI/PDL) ---
     const handleBulkEnrich = async () => {
         if (selectedIds.size === 0) return;
+        if (!apiBase) {
+            alert('העשרה דורשת חיבור לשרת (VITE_API_BASE).');
+            return;
+        }
+        const companyIds = [...selectedIds].filter(isPersistedOrganizationId);
+        if (companyIds.length === 0) {
+            alert('ניתן להעמיק רק בחברות שמורות בשרת. בחר שורות עם מזהה מערכת (UUID).');
+            return;
+        }
         setIsEnriching(true);
 
         try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const selectedCompanies = companies.filter(c => selectedIds.has(c.id));
-            const companyNames = selectedCompanies.map(c => c.name);
-
-            // Updated Prompt for Deep Intelligence and Language Enforcment
-            const prompt = `
-            You are a Corporate Intelligence Extraction Agent for an Israeli database.
-            I have a list of Israeli companies: ${JSON.stringify(companyNames)}.
-
-            **MANDATORY INSTRUCTIONS:**
-            1. **LANGUAGE RULES:** 
-               - 'description', 'location', 'mainField', 'subField' MUST be in **HEBREW**.
-               - 'techTags' MUST be in **ENGLISH** (e.g. React, Python, AWS).
-               - 'tags' (general tags) MUST be in **HEBREW** (e.g. שיווק דיגיטלי, ניהול).
-            2. **LOCATION ACCURACY:**
-               - Provide the specific City name in Hebrew (e.g., 'פתח תקווה', 'הרצליה', 'קיסריה', 'איירפורט סיטי').
-               - For "Nisko", use "איירפורט סיטי" or "רמת גן" based on the main entity. Do NOT use "Petah Tikva" unless verified for a specific branch.
-            3. **DATA ENRICHMENT:**
-               - Use the **Google Search tool** to find real data.
-               - Infer 'Business Model', 'Growth Indicator'.
-               - Identify 'Corporate Structure' (Parent/Subsidiary).
-            4. **ALIASES:**
-               - Provide known 'aliases' or variations of the name in Hebrew and English.
-
-            Return a valid JSON array matching this structure:
-            [
-              {
-                "name": "Common Name",
-                "nameEn": "English Name",
-                "legalName": "Full Legal Name",
-                "aliases": ["Alias 1", "Alias 2"],
-                "description": "Hebrew description (2 sentences)",
-                "mainField": "Industry Primary in Hebrew",
-                "subField": "Industry Secondary in Hebrew",
-                "employeeCount": "estimate range",
-                "website": "url",
-                "linkedinUrl": "url", 
-                "foundedYear": "YYYY",
-                "location": "City Name (Hebrew)",
-                "hqCountry": "Country (English)",
-                "type": "one of ['הייטק', 'תעשייה', 'מסחר וקמעונאות', 'שירותים', 'פיננסים', 'נדל\"ן', 'אחר']",
-                "classification": "one of ['פרטית', 'ציבורית', 'ממשלתית', 'מלכ\"ר']",
-                "businessModel": "one of ['B2B', 'B2C', 'B2G', 'Mixed', 'Unknown']",
-                "productType": "one of ['Product', 'Service', 'Platform', 'Project', 'Unknown']",
-                "growthIndicator": "one of ['Growing', 'Stable', 'Shrinking', 'Unknown']",
-                "structure": "one of ['Independent', 'Parent', 'Subsidiary']",
-                "parentCompany": "Name of parent if Subsidiary",
-                "subsidiaries": ["Name1", "Name2"] (if Parent),
-                "tags": ["Tag1 (Hebrew)", "Tag2 (Hebrew)"],
-                "techTags": ["Tech1 (English)", "Tech2 (English)"],
-                "dataConfidence": "one of ['High', 'Medium', 'Low']"
-              }
-            ]
-            `;
-
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-pro-preview', // Strongest model for reasoning
-                contents: prompt,
-                config: { 
-                    tools: [{ googleSearch: {} }] 
-                }
+            const res = await fetch(`${apiBase}/api/organizations/enrich`, {
+                method: 'POST',
+                credentials: 'include',
+                cache: 'no-store',
+                headers: organizationApiHeaders(true),
+                body: JSON.stringify({ companyIds }),
             });
-
-            // Robust JSON extraction
-            const rawText = response.text || "[]";
-            const jsonMatch = rawText.match(/\[[\s\S]*\]/);
-            const jsonStr = jsonMatch ? jsonMatch[0] : "[]";
-
-            let enrichedData = [];
-            try {
-                 enrichedData = JSON.parse(jsonStr);
-            } catch (e) {
-                console.error("JSON Parse Error:", e);
-                console.log("Raw Text:", rawText);
-            }
-
-            if (Array.isArray(enrichedData) && enrichedData.length > 0) {
-                const selected = selectedIds;
-                const persistedIds = new Set<CompanyId>();
-                const nextCompanies = companies.map((c) => {
-                    if (!selected.has(c.id)) return c;
-                    const enriched = enrichedData.find(
-                        (e: { name?: string }) =>
-                            e.name === c.name ||
-                            (e.name &&
-                                (c.name.toLowerCase().includes(String(e.name).toLowerCase()) ||
-                                    String(e.name).toLowerCase().includes(c.name.toLowerCase())))
-                    );
-
-                    if (enriched) {
-                        persistedIds.add(c.id);
-                        return {
-                            ...c,
-                            nameEn: enriched.nameEn || c.nameEn,
-                            legalName: enriched.legalName || c.legalName,
-                            aliases: enriched.aliases && Array.isArray(enriched.aliases) ? enriched.aliases : c.aliases,
-                            description: enriched.description || c.description,
-                            mainField: enriched.mainField || c.mainField,
-                            subField: enriched.subField || c.subField,
-                            employeeCount: enriched.employeeCount || c.employeeCount,
-                            website: enriched.website || c.website,
-                            linkedinUrl: enriched.linkedinUrl || c.linkedinUrl,
-                            foundedYear: enriched.foundedYear || c.foundedYear,
-                            location: enriched.location || c.location,
-                            hqCountry: enriched.hqCountry || c.hqCountry,
-                            type: enriched.type || c.type,
-                            classification: enriched.classification || c.classification,
-                            businessModel: enriched.businessModel || c.businessModel,
-                            productType: enriched.productType || c.productType,
-                            growthIndicator: enriched.growthIndicator || c.growthIndicator,
-                            structure: enriched.structure || 'Independent',
-                            parentCompany: enriched.parentCompany || '',
-                            subsidiaries: enriched.subsidiaries || [],
-                            tags: enriched.tags && Array.isArray(enriched.tags) ? enriched.tags : c.tags,
-                            techTags: enriched.techTags && Array.isArray(enriched.techTags) ? enriched.techTags : c.techTags,
-                            dataConfidence: 'Pending Review',
-                            lastVerified: new Date().toISOString().split('T')[0],
-                        };
-                    }
-                    return c;
-                });
-                setCompanies(nextCompanies);
-
-                if (apiBase) {
-                    for (const id of persistedIds) {
-                        if (!isPersistedOrganizationId(id)) continue;
-                        const row = nextCompanies.find((x) => x.id === id);
-                        if (!row) continue;
-                        try {
-                            const res = await fetch(
-                                `${apiBase}/api/organizations/${encodeURIComponent(String(id))}`,
-                                {
-                                    method: 'PUT',
-                                    credentials: 'include',
-                                    cache: 'no-store',
-                                    headers: organizationApiHeaders(true),
-                                    body: JSON.stringify(companyToOrganizationPayload(row)),
-                                }
-                            );
-                            if (!res.ok) {
-                                const t = await res.text().catch(() => '');
-                                console.warn('[AdminCompaniesView] enrich PUT', id, t || res.status);
-                            }
-                        } catch (err) {
-                            console.warn('[AdminCompaniesView] enrich PUT', id, err);
-                        }
-                    }
-                    await loadOrganizations();
+            const errText = await res.text().catch(() => '');
+            if (!res.ok) {
+                let msg = errText;
+                try {
+                    const j = JSON.parse(errText) as { message?: string };
+                    if (j?.message) msg = j.message;
+                } catch {
+                    /* use raw */
                 }
+                throw new Error(msg || `HTTP ${res.status}`);
+            }
+            const data = JSON.parse(errText) as { enrichmentMap?: Record<string, Record<string, unknown>> };
+            const enrichmentMap = data?.enrichmentMap;
+            if (!enrichmentMap || typeof enrichmentMap !== 'object') {
+                throw new Error('תשובת שרת לא תקינה (חסר enrichmentMap)');
             }
 
-            // Clear selection after success
+            const merged: Company[] = [];
+            for (const id of companyIds) {
+                const row = companies.find((c) => String(c.id) === id);
+                if (!row) continue;
+                const raw = enrichmentMap[id];
+                if (!raw || typeof raw !== 'object') continue;
+                merged.push(mergeEnrichmentRawIntoCompany(row, raw));
+            }
+            if (merged.length === 0) {
+                alert('לא הוחזרו נתוני העמקה לשורות שנבחרו. נסה שוב או בחר חברה אחרת.');
+                return;
+            }
+            setEnrichmentSessionTotal(merged.length);
+            setEnrichmentPreviewQueue(merged.slice(1));
+            setEditingCompany(merged[0] ?? null);
+            setIsModalOpen(true);
             setSelectedIds(new Set());
-
         } catch (error) {
-            console.error("Enrichment failed:", error);
-            // DO NOT ALERT THE USER if it's just a temporary network glitch or XHR error. 
-            // In a real app we might retry or log. For this demo, we'll log to console.
-             alert("אירעה שגיאה בתהליך ההעשרה. ייתכן והרשת אינה יציבה. אנא נסה שנית.");
+            console.error('Enrichment failed:', error);
+            alert(
+                error instanceof Error
+                    ? error.message
+                    : 'אירעה שגיאה בתהליך ההעשרה. ייתכן והרשת אינה יציבה. אנא נסה שנית.'
+            );
         } finally {
             setIsEnriching(false);
         }
     };
-    
+
     // --- AI Chat Logic ---
     const handleOpenChat = () => {
         setIsChatOpen(true);
@@ -1874,10 +1840,23 @@ const AdminCompaniesView: React.FC = () => {
 
             <CompanyModal 
                 isOpen={isModalOpen}
-                onClose={() => setIsModalOpen(false)}
+                onClose={() => {
+                    setEnrichmentPreviewQueue([]);
+                    setEnrichmentSessionTotal(0);
+                    setIsModalOpen(false);
+                }}
                 onSave={handleSaveCompany}
                 company={editingCompany}
                 sectorOptions={sectorOptions}
+                closeAfterSave={enrichmentPreviewQueue.length === 0}
+                enrichmentSession={
+                    enrichmentSessionTotal > 0
+                        ? {
+                              current: enrichmentSessionTotal - enrichmentPreviewQueue.length,
+                              total: enrichmentSessionTotal,
+                          }
+                        : null
+                }
             />
 
             {/* AI Assistant Chat (Floating Button is in Header, Chat logic here) */}

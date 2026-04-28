@@ -68,6 +68,7 @@ const Job = sequelize.define(
       comment: 'Array of skill/tag objects (id, name, key, mode, tag_reason, relevance_score, etc.)',
     },
     aiRawDescription: DataTypes.TEXT,
+    events: { type: DataTypes.JSONB, defaultValue: [] },
   },
   {
     tableName: 'jobs',

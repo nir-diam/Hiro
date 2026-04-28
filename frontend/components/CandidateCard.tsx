@@ -2,6 +2,7 @@
 import React, { useRef } from 'react';
 import { BookmarkIcon, BookmarkIconSolid, ExclamationTriangleIcon, MapPinIcon, ClockIcon, BriefcaseIcon, SparklesIcon } from './Icons';
 import { Candidate } from './CandidatesListView';
+import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
 
 interface CandidateCardProps {
     candidate: Candidate;
@@ -104,6 +105,7 @@ const CompactExperienceBar: React.FC<{ industries: { label: string; percentage: 
 
 const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile, onOpenSummary, missingFields, isFavorite, onToggleFavorite, selectionMode, isSelected, onSelect, onScoreClick }) => {
     const hasMissingFields = missingFields.length > 0;
+    const lastActivityLabel = formatCandidatePoolLastActive(candidate.lastActivity);
 
     return (
         <div 
@@ -182,9 +184,11 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
                         <span className="truncate">{candidate.address}</span>
                     </div>
                 )}
-                <div className="flex items-center gap-1.5">
-                    <ClockIcon className="w-3.5 h-3.5 text-text-subtle" />
-                    <span className="truncate" title={candidate.lastActivity}>{candidate.lastActivity.split(' ')[0]}</span>
+                <div className="flex items-center gap-1.5 min-w-0">
+                    <ClockIcon className="w-3.5 h-3.5 text-text-subtle shrink-0" />
+                    <span className="truncate" title={lastActivityLabel}>
+                        {lastActivityLabel}
+                    </span>
                 </div>
                 <div className="flex items-center gap-1.5">
                     <BriefcaseIcon className="w-3.5 h-3.5 text-text-subtle" />

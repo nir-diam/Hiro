@@ -1,5 +1,5 @@
-
 import React from 'react';
+import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
 import { BriefcaseIcon } from './Icons';
 
 interface Experience {
@@ -77,7 +77,9 @@ const CandidateRow: React.FC<CandidateRowProps> = ({ candidate, onViewProfile, s
             </div>
 
             {/* Last Active */}
-            <p className="text-sm text-text-muted hidden lg:block">{candidate.lastActive} &bull; {candidate.location}</p>
+            <p className="text-sm text-text-muted hidden lg:block">
+                {formatCandidatePoolLastActive(candidate.lastActive)} &bull; {candidate.location}
+            </p>
 
             {/* Actions */}
             <div className="flex justify-end">

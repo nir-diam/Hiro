@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon } from './Icons';
 import UpdateStatusModal from './UpdateStatusModal';
@@ -316,13 +316,17 @@ const ReferralsView: React.FC<{
             cache: 'no-store',
         })
             .then((res) => (res.ok ? res.json() : []))
-            .then((data: ScreeningCvReferralApiRow[]) => {
-                if (isActive && Array.isArray(data)) {
-                    const rows = scopeCandidateId
-                        ? data.filter((r) => String(r.candidateId || '').trim() === scopeCandidateId)
-                        : data;
-                    setActiveReferrals(rows.map(mapScreeningCvRowToActiveReferral));
-                }
+            .then((data: unknown) => {
+                if (!isActive) return;
+                const list: ScreeningCvReferralApiRow[] = Array.isArray(data)
+                    ? (data as ScreeningCvReferralApiRow[])
+                    : (data && typeof data === 'object' && 'items' in (data as object)
+                        ? (data as { items?: ScreeningCvReferralApiRow[] }).items ?? []
+                        : []);
+                const rows = scopeCandidateId
+                    ? list.filter((r) => String(r.candidateId || '').trim() === scopeCandidateId)
+                    : list;
+                setActiveReferrals(rows.map(mapScreeningCvRowToActiveReferral));
             })
             .catch(() => {
                 if (isActive) setActiveReferrals([]);
@@ -388,6 +392,15 @@ const ReferralsView: React.FC<{
         }
         return items;
     }, [activeReferrals, activeSortConfig, startDate, endDate, searchTerm]);
+
+    /** Same idea as דוח הפניות row [0]: swap modal to the first row of the current filtered + sorted list (no server round-trip). */
+    const handleApplyFirstListedReferralToReReferModal = useCallback(async () => {
+        const first = sortedActiveReferrals[0];
+        if (!first) {
+            throw new Error('אין הפניות ברשימה הנוכחית — בדקו טווח תאריכים או חיפוש.');
+        }
+        setReReferModal({ isOpen: true, referral: first });
+    }, [sortedActiveReferrals]);
 
     const sortedDisqualifiedReferrals = useMemo(() => {
         let sortableItems = [...disqualifiedReferrals];
@@ -894,6 +907,7 @@ const ReferralsView: React.FC<{
                 isOpen={reReferModal.isOpen}
                 onClose={() => setReReferModal({ isOpen: false, referral: null })}
                 onSend={handleSendReReferral}
+                applyFirstListedReferral={handleApplyFirstListedReferralToReReferModal}
                 referral={
                     reReferModal.referral
                         ? {

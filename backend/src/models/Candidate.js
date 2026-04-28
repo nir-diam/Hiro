@@ -15,6 +15,8 @@ const Candidate = sequelize.define(
     status: { type: DataTypes.STRING, defaultValue: 'חדש' },
     phone: DataTypes.STRING,
     email: { type: DataTypes.STRING },
+    /** Envelope "From" when created from inbound job mail; re-lookup if email was overwritten by CV/AI. */
+    inboundFromEmail: { type: DataTypes.STRING, allowNull: true },
     address: DataTypes.STRING,
     idNumber: DataTypes.STRING,
     maritalStatus: DataTypes.STRING,

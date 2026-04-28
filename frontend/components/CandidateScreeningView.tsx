@@ -42,51 +42,6 @@ interface SendModalContact {
   email?: string;
 }
 
-export const screeningJobsData: ScreeningJob[] = [
-  { 
-    id: 1, 
-    company: 'Wix', 
-    title: 'מפתח/ת Fullstack', 
-    location: 'תל אביב', 
-    salary: '28-32k ₪',
-    aiMatchScore: 88,
-    description: 'דרוש/ה מפתח/ת Fullstack מנוסה להצטרפות לצוות הליבה שלנו. העבודה כוללת פיתוח פיצ\'רים חדשים מקצה לקצה, תוך שימוש בטכנולוגיות המתקדמות ביותר.',
-    requirements: ['5+ שנות ניסיון בפיתוח Web', 'שליטה מעולה ב-React ו-Node.js', 'ניסיון עם TypeScript - יתרון משמעותי', 'ניסיון בעבודה עם Microservices'],
-    screeningQuestions: [
-        { question: 'מה הניסיון שלך עם מסדי נתונים NoSQL?', answer: '' },
-        { question: 'האם עבדת בסביבת CI/CD? אם כן, תאר/י.', answer: '' },
-    ]
-  },
-  { 
-    id: 2, 
-    company: 'בזק', 
-    title: 'מנהל/ת שיווק דיגיטלי', 
-    location: 'תל אביב', 
-    salary: '18-22k ₪',
-    aiMatchScore: 92,
-    description: 'ניהול כלל הפעילות הדיגיטלית של החברה, כולל קמפיינים ממומנים, SEO, וניהול נכסים דיגיטליים.',
-    requirements: ['4+ שנות ניסיון בניהול שיווק דיגיטלי', 'ניסיון מוכח בניהול תקציבים גדולים', 'שליטה מלאה ב-Google Analytics ו-Google Ads'],
-    screeningQuestions: [
-      { question: 'מה התקציב הגדול ביותר שניהלת בחודש?', answer: '' },
-      { question: 'תאר קמפיין מוצלח במיוחד שהובלת.', answer: '' },
-    ]
-  },
-  { 
-    id: 3, 
-    company: 'אל-על', 
-    title: 'ראש/ת צוות BI', 
-    location: 'לוד', 
-    salary: '25-28k ₪',
-    aiMatchScore: 75,
-    description: 'ניהול צוות של 4 אנליסטים, אחריות על פיתוח דשבורדים, ניתוח נתונים עסקיים והצגת תובנות להנהלה.',
-    requirements: ['3+ שנות ניסיון בניהול צוות BI', 'שליטה מעולה ב-SQL', 'ניסיון עם כלי ויזואליזציה (Tableau/Power BI)', 'רקע בתחום התעופה - יתרון'],
-    screeningQuestions: [
-      { question: 'באיזה כלי ויזואליזציה יש לך הכי הרבה ניסיון?', answer: '' },
-      { question: 'איך אתה מתמודד עם דרישות אד-הוק מההנהלה?', answer: '' },
-    ]
-  },
-];
-
 const AIMatchScore: React.FC<{ score: number }> = ({ score }) => {
     const scoreColor = score > 85 ? 'text-accent-600' : score > 70 ? 'text-primary-600' : 'text-red-600';
     const bgColor = score > 85 ? 'bg-accent-100/70' : score > 70 ? 'bg-primary-100/70' : 'bg-red-100/70';
@@ -99,14 +54,11 @@ const AIMatchScore: React.FC<{ score: number }> = ({ score }) => {
     );
 };
 
-// Mock Resume Data for the split view
-const mockResumeData = {
-    name: '',
-    contact: '',
-    summary: '',
-    experience: [
-        ''
-    ]
+/** Empty fallbacks when the candidate has no field data yet. */
+const emptyResumeDefaults = {
+  name: '',
+  contact: '',
+  summary: '',
 };
 
 function buildResumeDataFromCandidate(candidate?: {
@@ -125,18 +77,18 @@ function buildResumeDataFromCandidate(candidate?: {
   parsedResumeText?: string;
 }, candidateId?: string) {
   if (!candidate) {
-    return { ...mockResumeData, candidateId: candidateId || undefined };
+    return { ...emptyResumeDefaults, experience: [''], candidateId: candidateId || undefined };
   }
 
-  const name = candidate.fullName?.trim() || mockResumeData.name;
+  const name = candidate.fullName?.trim() || emptyResumeDefaults.name;
   const contactParts = [candidate.email, candidate.phone].filter(Boolean);
   const contact =
-    contactParts.length > 0 ? contactParts.join(' | ') : mockResumeData.contact;
+    contactParts.length > 0 ? contactParts.join(' | ') : emptyResumeDefaults.contact;
 
   const summary =
     (candidate.professionalSummary && candidate.professionalSummary.trim()) ||
     (candidate.title && candidate.title.trim()) ||
-    mockResumeData.summary;
+    emptyResumeDefaults.summary;
 
   const experience = Array.isArray(candidate.workExperience) && candidate.workExperience.length > 0
     ? candidate.workExperience.map((exp: any) => {
@@ -148,7 +100,7 @@ function buildResumeDataFromCandidate(candidate?: {
         const line2 = years ? `<br/>${years}` : '';
         return `<b>${line1 || 'ניסיון תעסוקתי'}</b>${line2}`;
       })
-    : mockResumeData.experience;
+    : [''];
 
   const skills = candidate.skills;
   const skillsText = Array.isArray(skills)

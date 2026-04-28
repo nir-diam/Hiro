@@ -310,6 +310,14 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                         onClick={() => handleNavigation(`/candidates${location.pathname.startsWith('/candidates') ? location.search : ''}`)} 
                                         isActive={pathname === '/candidates' || (pathname.startsWith('/candidates/') && !pathname.includes('new'))}
                                     />
+                                    {canPage('page:reports') && (
+                                        <SubMenuLink
+                                            to="/reports/referrals"
+                                            label={t('referrals_view.title')}
+                                            onClick={() => handleNavigation('/reports/referrals')}
+                                            isActive={pathname === '/reports/referrals'}
+                                        />
+                                    )}
                                     <SubMenuLink 
                                         to="/candidates/new"
                                         label={t('nav.new_candidate')}

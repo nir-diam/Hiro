@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { useAuth } from '../context/AuthContext';
 import { XMarkIcon, PlusIcon } from './Icons';
 import {
   fetchEventTypes,
@@ -12,9 +13,13 @@ type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 
 export interface Event {
   id: string | number;
-  type: string;
+  /**
+   * Stored as one or more labels; UI uses a single select (one element when saved from the form).
+   */
+  type: string[];
   date: string;
   coordinator: string;
+  coordinatorUserId?: string;
   status: EventStatus;
   linkedTo: { type: string; name: string }[];
   description: string;
@@ -29,18 +34,45 @@ interface EventFormModalProps {
   context?: EventTypeContext;
 }
 
-const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave, event, context = 'candidate' }) => {
-  const [formData, setFormData] = useState({
+/** Coerce any legacy `type` value (string | string[] | null) into a clean string[]. */
+export const normalizeEventTypes = (raw: unknown): string[] => {
+  if (Array.isArray(raw)) {
+    return raw.map((v) => String(v || '').trim()).filter(Boolean);
+  }
+  const s = String(raw || '').trim();
+  return s ? [s] : [];
+};
+
+const EventFormModal: React.FC<EventFormModalProps> = ({
+  isOpen,
+  onClose,
+  onSave,
+  event,
+  context = 'candidate' as EventTypeContext,
+}) => {
+  const { user } = useAuth();
+  const defaultCoordinator =
+    (user?.name && String(user.name).trim()) ||
+    (user?.email && String(user.email).trim()) ||
+    '';
+  const [formData, setFormData] = useState<{
+    type: string;
+    date: string;
+    time: string;
+    description: string;
+    coordinator: string;
+  }>({
     type: 'פגישה',
     date: '',
     time: '',
     description: '',
-    coordinator: 'דנה כהן',
+    coordinator: '',
   });
 
   const [links, setLinks] = useState<{ type: string; name: string }[]>([]);
   const [apiRows, setApiRows] = useState<EventTypeApiRow[]>([]);
   const [typesLoading, setTypesLoading] = useState(false);
+  const wasTypesLoadingRef = useRef(false);
 
   const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -48,9 +80,10 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
 
   const selectOptions = useMemo(() => {
     const fromApi = filteredRows.map((r) => r.name).filter((n) => n.trim() !== '');
-    const ensureCurrent = event?.type && !fromApi.includes(event.type) ? [event.type] : [];
+    const existing = normalizeEventTypes(event?.type);
+    const ensureCurrent = existing.filter((n) => !fromApi.includes(n));
     const merged = [...ensureCurrent, ...fromApi];
-    if (merged.length > 0) return merged;
+    if (merged.length > 0) return Array.from(new Set(merged));
     return [...LEGACY_MANUAL_EVENT_TYPE_NAMES];
   }, [filteredRows, event?.type]);
 
@@ -75,8 +108,16 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
     if (!isOpen) return;
     if (event) {
       const eventDate = new Date(event.date);
+      const types = normalizeEventTypes(event.type);
+      const inList = types.find((n) => selectOptions.includes(n)) || null;
+      const one =
+        inList ||
+        types[0] ||
+        selectOptions[0] ||
+        LEGACY_MANUAL_EVENT_TYPE_NAMES[0] ||
+        'פגישה';
       setFormData({
-        type: event.type,
+        type: one,
         date: eventDate.toISOString().split('T')[0],
         time: eventDate.toTimeString().substring(0, 5),
         description: event.description || '',
@@ -84,23 +125,40 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
       });
       setLinks(event.linkedTo ? [...event.linkedTo] : []);
     } else {
-      const defaultType = selectOptions[0] ?? 'פגישה';
+      const def =
+        selectOptions.length > 0 ? selectOptions[0] : LEGACY_MANUAL_EVENT_TYPE_NAMES[0] || 'פגישה';
       setFormData({
-        type: defaultType,
+        type: def,
         date: new Date().toISOString().split('T')[0],
         time: new Date().toTimeString().substring(0, 5),
         description: '',
-        coordinator: 'דנה כהן',
+        coordinator: defaultCoordinator,
       });
       setLinks([]);
     }
-  }, [event, isOpen]);
+  }, [event, isOpen, defaultCoordinator]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!isOpen) {
+      wasTypesLoadingRef.current = false;
+      return;
+    }
+    if (event) {
+      wasTypesLoadingRef.current = typesLoading;
+      return;
+    }
+    if (wasTypesLoadingRef.current && !typesLoading && selectOptions.length > 0) {
+      setFormData((prev) => ({ ...prev, type: selectOptions[0] || prev.type }));
+    }
+    wasTypesLoadingRef.current = typesLoading;
+  }, [isOpen, event, typesLoading, selectOptions]);
 
   useEffect(() => {
     if (!isOpen || event) return;
     setFormData((prev) => {
-      if (selectOptions.includes(prev.type)) return prev;
-      return { ...prev, type: selectOptions[0] ?? 'פגישה' };
+      if (prev.type && selectOptions.includes(prev.type)) return prev;
+      const one = selectOptions[0] || LEGACY_MANUAL_EVENT_TYPE_NAMES[0] || 'פגישה';
+      return { ...prev, type: one };
     });
   }, [isOpen, event, selectOptions]);
 
@@ -131,10 +189,13 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
       formData.date && formData.time ? new Date(`${formData.date}T${formData.time}`).toISOString() : new Date().toISOString();
 
     const validLinks = links.filter((link) => link.name.trim() !== '');
+    const one =
+      formData.type.trim() ||
+      (selectOptions.length > 0 ? selectOptions[0] : 'פגישה');
 
     onSave({
       id: event?.id,
-      type: formData.type,
+      type: [one],
       date: finalDate,
       description: formData.description,
       coordinator: formData.coordinator,
@@ -143,7 +204,10 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-40 z-50 flex items-center justify-center p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black bg-opacity-40 p-4 pt-10 sm:pt-14 pb-8"
+      onClick={onClose}
+    >
       <div
         className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-md flex flex-col overflow-hidden text-text-default border border-border-default"
         onClick={(e) => e.stopPropagation()}
@@ -157,15 +221,25 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
           </header>
 
           <main className="p-5 space-y-4 text-right" dir="rtl">
-            <div className="flex gap-2 items-end">
-              <div className="flex-1">
-                <label className="block text-[10px] font-bold text-text-muted mb-1 uppercase tracking-wider">סוג אירוע</label>
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label
+                  htmlFor="event-form-type"
+                  className="block text-[10px] font-bold text-text-muted uppercase tracking-wider"
+                >
+                  סוג אירוע
+                </label>
+                {typesLoading ? <span className="text-[10px] text-text-muted">טוען…</span> : null}
+              </div>
+              {selectOptions.length === 0 ? (
+                <span className="text-[11px] text-text-muted">אין סוגי אירוע מוגדרים</span>
+              ) : (
                 <select
+                  id="event-form-type"
                   name="type"
                   value={formData.type}
                   onChange={handleChange}
-                  disabled={typesLoading && selectOptions.length === 0}
-                  className="w-full bg-bg-input border border-border-default rounded-lg p-1.5 text-xs focus:ring-2 focus:ring-primary-500/20 outline-none disabled:opacity-60"
+                  className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none"
                 >
                   {selectOptions.map((name) => (
                     <option key={name} value={name}>
@@ -173,9 +247,11 @@ const EventFormModal: React.FC<EventFormModalProps> = ({ isOpen, onClose, onSave
                     </option>
                   ))}
                 </select>
-                {typesLoading ? <p className="text-[10px] text-text-muted mt-1">טוען סוגי אירוע…</p> : null}
-              </div>
+              )}
+            </div>
 
+            <div className="flex gap-2 items-end">
+              <div className="flex-1" />
               <div className="flex-none flex items-center gap-1.5 bg-primary-50 border border-primary-100 rounded-lg h-[38px] px-3 relative group focus-within:border-primary-400 transition-all">
                 <input
                   type="date"

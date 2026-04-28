@@ -3,6 +3,7 @@ const candidateController = require('../controllers/candidateController');
 const candidateDocumentController = require('../controllers/candidateDocumentController');
 const candidateEventController = require('../controllers/candidateEventController');
 const authMiddleware = require('../middleware/authMiddleware');
+const { attachDbUser } = require('../middleware/permissionMiddleware');
 
 const router = express.Router();
 
@@ -30,10 +31,10 @@ router.post('/:id/documents/attach', candidateDocumentController.attach);
 router.put('/:id/documents/:docId', candidateDocumentController.update);
 router.delete('/:id/documents/:docId', candidateDocumentController.remove);
 
-router.get('/:id/events', candidateEventController.list);
-router.post('/:id/events', candidateEventController.create);
-router.put('/:id/events/:eventId', candidateEventController.update);
-router.delete('/:id/events/:eventId', candidateEventController.remove);
+router.get('/:id/events', authMiddleware, attachDbUser, candidateEventController.list);
+router.post('/:id/events', authMiddleware, attachDbUser, candidateEventController.create);
+router.put('/:id/events/:eventId', authMiddleware, attachDbUser, candidateEventController.update);
+router.delete('/:id/events/:eventId', authMiddleware, attachDbUser, candidateEventController.remove);
 
 router.get('/:id', candidateController.get);
 router.post('/', candidateController.create);

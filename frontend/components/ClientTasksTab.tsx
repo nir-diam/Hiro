@@ -197,13 +197,7 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
                     <div className="grid grid-cols-2 gap-5">
                         <div>
                             <label className="block text-sm font-bold text-text-default mb-2">לקוח רלוונטי</label>
-                            <input 
-                                type="text" 
-                                value={formData.clientName}
-                                onChange={e => setFormData({...formData, clientName: e.target.value})}
-                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
-                                placeholder="שם הלקוח..."
-                            />
+                        
                         </div>
                         <div>
                              <label className="block text-sm font-bold text-text-default mb-2">הקצאה ל-</label>

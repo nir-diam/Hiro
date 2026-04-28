@@ -13,6 +13,22 @@ const Candidate = require('../models/Candidate');
 const User = require('../models/User');
 const jobCandidateService = require('../services/jobCandidateService');
 const { sequelize } = require('../config/db');
+const systemEventEmitter = require('../utils/systemEventEmitter');
+const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+
+const isMissing = (v) => v === undefined || v === null || v === '';
+
+const valuesDiffer = (a, b) => {
+  if (isMissing(a) && isMissing(b)) return false;
+  if (typeof a === 'object' || typeof b === 'object') {
+    try {
+      return JSON.stringify(a ?? null) !== JSON.stringify(b ?? null);
+    } catch {
+      return a !== b;
+    }
+  }
+  return String(a ?? '') !== String(b ?? '');
+};
 
 /** Until DB migration runs (add_job_candidate_screening_rejection.sql), skip rejection columns */
 let screeningRejectionColumnsCache = null;
@@ -75,6 +91,29 @@ const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...ar
 const mammoth = require('mammoth');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
+
+/** Detect PDF by magic bytes (do not treat as UTF-8 text). */
+const isPdfMagicBuffer = (buf) =>
+  Boolean(buf && buf.length >= 5 && buf.slice(0, 5).toString('ascii') === '%PDF-');
+
+/**
+ * If "extracted text" starts like a PDF header, we fed raw bytes as a string — LLM will invent a profile.
+ * See createFromAi / extractFromBuffer (pdf-parse often returns nothing for scanned/image PDFs).
+ */
+const looksLikeRawPdfUtf8String = (s) => Boolean(s && typeof s === 'string' && s.trimStart().startsWith('%PDF'));
+
+/** Decode client `fileBase64`: strip `data:*;base64,` and whitespace (common in browsers / copy-paste). */
+const decodeFileBase64Payload = (raw) => {
+  if (typeof raw !== 'string' || !raw.trim()) return null;
+  let s = raw.trim();
+  const m = /^data:[^;]*;base64\s*,\s*(.*)$/is.exec(s);
+  if (m) s = m[1];
+  s = s.replace(/\s/g, '');
+  if (!s) return null;
+  const buf = Buffer.from(s, 'base64');
+  return buf.length ? buf : null;
+};
+
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
 const messageTemplateService = require('../services/messageTemplateService');
 
@@ -121,6 +160,220 @@ const extractTextFromImageBuffer = async (buffer) => {
   } finally {
     await worker.terminate();
   }
+};
+
+const PDF_OCR_MAX_PAGES = 5;
+const PDF_OCR_RENDER_SCALE = 2.0;
+const PDF_OCR_MAX_EDGE_PX = 2400;
+/**
+ * If pdf-parse returns at least this many chars, we skip render+OCR (real text-layer CVs are usually much longer).
+ * Below this we still run OCR and take the longer result so metadata-only strings do not mask scans.
+ */
+const PDF_TEXT_MIN_TO_SKIP_OCR = 800;
+const MIN_JPEG_OCR_BYTES = 2000;
+
+let _pdfjsLibCache = null;
+let _nodeCanvasShimForPdfjsInstalled = false;
+/** PDF.js `require('canvas')` for Node polyfills; map to @napi-rs/canvas (prebuilt on Windows/Node 22). */
+const shimNodeCanvasForPdfjs = () => {
+  if (_nodeCanvasShimForPdfjsInstalled) return;
+  const Module = require('module');
+  const napi = require('@napi-rs/canvas');
+  const origLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (request === 'canvas') return napi;
+    return origLoad.apply(this, arguments);
+  };
+  _nodeCanvasShimForPdfjsInstalled = true;
+};
+
+const getPdfjsLib = () => {
+  if (_pdfjsLibCache) return _pdfjsLibCache;
+  shimNodeCanvasForPdfjs();
+  const pdfjsLib = require('pdfjs-dist/legacy/build/pdf.js');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = require.resolve('pdfjs-dist/legacy/build/pdf.worker.js');
+  _pdfjsLibCache = pdfjsLib;
+  return pdfjsLib;
+};
+
+/**
+ * Renders the first N PDF pages to PNG buffers for Tesseract (scanned / image-only PDFs).
+ * Uses @napi-rs/canvas (prebuilt) instead of node-canvas.
+ */
+const renderPdfPagesToPngBuffers = async (buffer) => {
+  const pdfjsLib = getPdfjsLib();
+  const { createCanvas } = require('@napi-rs/canvas');
+  const raw = buffer instanceof Uint8Array ? buffer : Buffer.from(buffer);
+  const u8 = new Uint8Array(raw);
+  const doc = await pdfjsLib.getDocument({
+    data: u8,
+    useSystemFonts: true,
+    isEvalSupported: false,
+    disableFontFace: true,
+  }).promise;
+  const totalPages = doc.numPages || 0;
+  const n = Math.min(totalPages, PDF_OCR_MAX_PAGES);
+  if (!n) {
+    console.warn('[pdf-render] document has no pages', { totalPages });
+    return [];
+  }
+  const out = [];
+  for (let i = 1; i <= n; i += 1) {
+    try {
+      const page = await doc.getPage(i);
+      let viewport = page.getViewport({ scale: PDF_OCR_RENDER_SCALE });
+      const w = viewport.width;
+      const h = viewport.height;
+      const maxE = Math.max(w, h);
+      if (maxE > PDF_OCR_MAX_EDGE_PX) {
+        const s = PDF_OCR_MAX_EDGE_PX / maxE;
+        viewport = page.getViewport({ scale: PDF_OCR_RENDER_SCALE * s });
+      }
+      const cw = Math.ceil(viewport.width);
+      const ch = Math.ceil(viewport.height);
+      const canvas = createCanvas(cw, ch);
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, cw, ch);
+      await page.render({
+        canvasContext: ctx,
+        viewport,
+        background: '#ffffff',
+      }).promise;
+      // eslint-disable-next-line no-await-in-loop
+      out.push(await canvas.encode('png'));
+    } catch (pageErr) {
+      console.error(`[pdf-render-page-${i}]`, pageErr.message || pageErr);
+    }
+  }
+  return out;
+};
+
+/** OCR several image buffers; try eng+heb first, then eng if the result is empty (Hebrew pack can fail offline). */
+const ocrImageBuffersWithSharedWorker = async (buffers) => {
+  if (!buffers || !buffers.length) return '';
+  const runWithLang = async (langs) => {
+    const worker = await createWorker(langs);
+    try {
+      const parts = [];
+      for (let i = 0; i < buffers.length; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        const { data } = await worker.recognize(buffers[i]);
+        const t = (data?.text || '').trim();
+        if (t) parts.push(t);
+      }
+      return parts.join('\n\n').trim();
+    } finally {
+      await worker.terminate();
+    }
+  };
+  try {
+    let text = await runWithLang('eng+heb');
+    if (!text) {
+      text = await runWithLang('eng');
+    }
+    return text;
+  } catch (err) {
+    console.error('[pdf-ocr-error]', err.message || err);
+    return '';
+  }
+};
+
+/**
+ * For PDFs with no text layer, render pages to images and run OCR.
+ */
+/**
+ * Scanned apps often store page bitmaps as raw JPEG bitstreams; those may be visible without inflating XObjects.
+ * Best-effort: collect larger JPEGs (ignore tiny UI icons).
+ */
+const extractJpegBuffersFromBinary = (buf) => {
+  const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  const found = [];
+  let i = 0;
+  while (i < u8.length - 2) {
+    if (u8[i] !== 0xff || u8[i + 1] !== 0xd8 || u8[i + 2] !== 0xff) {
+      i += 1;
+      continue;
+    }
+    const start = i;
+    let j = i + 2;
+    let end = -1;
+    for (; j < u8.length - 1; j += 1) {
+      if (u8[j] === 0xff && u8[j + 1] === 0xd9) {
+        end = j + 2;
+        break;
+      }
+    }
+    if (end > start && end - start >= MIN_JPEG_OCR_BYTES) {
+      found.push(Buffer.from(u8.subarray(start, end)));
+      i = end;
+    } else {
+      i += 1;
+    }
+  }
+  found.sort((a, b) => b.length - a.length);
+  return found.slice(0, 5);
+};
+
+const extractTextFromScannedPdfBuffer = async (buffer) => {
+  let fromRender = '';
+  let pngs = [];
+  try {
+    pngs = await renderPdfPagesToPngBuffers(buffer);
+    if (pngs.length) {
+      fromRender = (await ocrImageBuffersWithSharedWorker(pngs)).trim();
+    }
+  } catch (err) {
+    console.error('[scanned-pdf-ocr]', err.message || err);
+  }
+  if (fromRender.length >= 30) return fromRender;
+  let jpegs = [];
+  try {
+    jpegs = extractJpegBuffersFromBinary(buffer);
+    if (jpegs.length) {
+      const fromJpeg = (await ocrImageBuffersWithSharedWorker(jpegs)).trim();
+      if (fromJpeg.length > fromRender.length) return fromJpeg;
+      if (fromJpeg) return fromJpeg;
+    }
+  } catch (err) {
+    console.error('[jpeg-embedded-ocr]', err.message || err);
+  }
+  if (!fromRender && !pngs.length) {
+    console.warn('[pdf-ocr] no PNGs rendered and no embedded large JPEGs', {
+      bufLen: buffer.length,
+    });
+  } else if (!fromRender && pngs.length) {
+    console.warn('[pdf-ocr] Tesseract returned empty for rendered page images', { pages: pngs.length });
+  }
+  return fromRender;
+};
+
+/** Text layer from pdf-parse; if too short, render pages and OCR (image-only / scanned PDFs). */
+const extractTextFromPdfBuffer = async (buffer) => {
+  let fromParse = '';
+  try {
+    const resPdf = await pdfParse(buffer);
+    fromParse = (resPdf.text && String(resPdf.text).trim()) || '';
+  } catch (e) {
+    console.log('[embed-parse-pdf-error]', e.message || e);
+  }
+  if (fromParse.length >= PDF_TEXT_MIN_TO_SKIP_OCR) return fromParse;
+  let fromOcr = '';
+  try {
+    fromOcr = await extractTextFromScannedPdfBuffer(buffer);
+  } catch (e) {
+    console.log('[scanned-pdf-ocr-fallback-error]', e.message || e);
+  }
+  if (fromOcr.length > fromParse.length) return fromOcr;
+  if (fromOcr) return fromOcr;
+  if (fromParse) return fromParse;
+  if (!fromOcr && !fromParse) {
+    console.warn('[pdf-extract-empty]', {
+      byteLength: buffer.length,
+      headAscii: buffer.slice(0, Math.min(12, buffer.length)).toString('latin1'),
+    });
+  }
+  return '';
 };
 
 // Best-effort embedding wrapper so we don't block main response
@@ -985,6 +1238,10 @@ const parseResumeWithAi = async ({ resumeText }) => {
     console.log('[attachMedia-ai] empty resumeText -> skip ai');
     return null;
   }
+  if (looksLikeRawPdfUtf8String(resumeText)) {
+    console.warn('[attachMedia-ai] skip: input looks like raw PDF bytes, not extracted text');
+    return null;
+  }
   const promptRecord = await getResumePromptTemplate();
   const systemPrompt = promptRecord?.template
     ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
@@ -1193,8 +1450,54 @@ const create = async (req, res) => {
   try {
     const sendWelcome = req.body?.sendWelcomeEmail !== false;
     const candidate = await candidateService.create(req.body);
+
+    // Audit: 'קליטת קו"ח' — manual / API-driven candidate creation
+    systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.CV_RECEIVED,
+      entityType: 'Candidate',
+      entityId: candidate.id,
+      entityName: candidate.fullName,
+      params: { id: candidate.id },
+    });
+
+    // Audit: 'הגדרת מקור גיוס'
+    if (req.body?.source) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_SOURCE,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { source: req.body.source },
+      });
+    }
+
+    // Audit: 'הגדרת תחום משרה' on candidate
+    if (req.body?.field) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_FIELD,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { job: req.body.field },
+      });
+    }
+
     if (Array.isArray(req.body.tags) && req.body.tags.length) {
       await candidateTagService.syncTagsForCandidate(candidate.id, req.body.tags);
+
+      // Audit: 'הגדרת תגיות'
+      const tagsLabel = req.body.tags
+        .map((t) => (typeof t === 'string' ? t : t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name))
+        .filter(Boolean)
+        .slice(0, 12)
+        .join(', ');
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_TAGS,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidate.fullName,
+        params: { tags: tagsLabel || `${req.body.tags.length} תגיות` },
+      });
     }
     const enrichedCandidate = await candidateService.getById(candidate.id);
     // Fire-and-forget embedding only if we have text to embed
@@ -1226,18 +1529,36 @@ const createFromAi = async (req, res) => {
     const { resumeText, fileBase64, mimeType, fileName } = req.body || {};
     let text = typeof resumeText === 'string' ? resumeText : '';
     if (fileBase64 && !text) {
-      const buffer = Buffer.from(fileBase64, 'base64');
+      let buffer = decodeFileBase64Payload(fileBase64);
+      if (!buffer?.length) {
+        buffer = Buffer.from(String(fileBase64).replace(/\s/g, ''), 'base64');
+      }
+      if (!buffer?.length) {
+        return res.status(400).json({ message: 'Invalid or empty file upload (could not decode base64).' });
+      }
       if ((mimeType || '').startsWith('image/')) {
         text = await extractTextFromImageBuffer(buffer);
       } else {
         text = await extractFromBuffer(buffer, mimeType);
       }
-      if (!text || !text.trim()) {
-        text = buffer.toString('utf8');
+      if (!text || !String(text).trim()) {
+        // Never decode PDF/Office as UTF-8: that produces binary noise; Gemini will hallucinate a fake CV.
+        if (!isPdfMagicBuffer(buffer) && !(String(mimeType).toLowerCase().includes('pdf'))) {
+          text = buffer.toString('utf8');
+        }
       }
     }
-    if (!text || !text.trim()) {
-      return res.status(400).json({ message: 'resumeText or fileBase64 is required' });
+    if (!text || !String(text).trim()) {
+      return res.status(400).json({
+        message:
+          'Could not extract readable text from this file. If the PDF is a scan or image-only, paste the resume as text in resumeText, or export a text-based PDF. Otherwise ensure fileBase64 is a valid file.',
+      });
+    }
+    if (looksLikeRawPdfUtf8String(text)) {
+      return res.status(400).json({
+        message:
+          'Extracted data looks like raw PDF bytes, not text. The PDF may be image-based — use resumeText to paste the CV, or a text-based PDF export.',
+      });
     }
 
     const aiResult = (await parseResumeWithAi({ resumeText: text })) || {};
@@ -1270,6 +1591,13 @@ const createFromAi = async (req, res) => {
           })
           .filter(Boolean)
       : [];
+    const TAG_TARGET = 15;
+    if (aiTagObjects.length < TAG_TARGET) {
+      console.warn(
+        `[createFromAi] AI returned ${aiTagObjects.length} tags (target ${TAG_TARGET}). ` +
+          `Consider tightening the cv_parsing prompt or re-running the request.`,
+      );
+    }
       //DISABLE CANDIDATE TAGS BY JOB
     const roleCoveredTags = ensureRoleTagCoverage(aiTagObjects, normalizedWorkExperience);
 
@@ -1318,6 +1646,45 @@ const createFromAi = async (req, res) => {
     };
 
     const createdCandidate = await candidateService.create(candidatePayload);
+
+    // Audit: 'קליטת קו"ח' — AI-driven CV ingestion
+    systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.CV_RECEIVED,
+      entityType: 'Candidate',
+      entityId: createdCandidate.id,
+      entityName: createdCandidate.fullName,
+      params: { id: createdCandidate.id },
+    });
+
+    // Audit: 'פרסור ניתוח ועיבוד מידע' — AI parsed the resume
+    systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.CV_PARSED,
+      entityType: 'Candidate',
+      entityId: createdCandidate.id,
+      entityName: createdCandidate.fullName,
+      params: { source: candidatePayload.source || 'ai-upload' },
+    });
+
+    // Audit: 'הגדרת מקור גיוס'
+    systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.CV_SOURCE,
+      entityType: 'Candidate',
+      entityId: createdCandidate.id,
+      entityName: createdCandidate.fullName,
+      params: { source: candidatePayload.source || 'ai-upload' },
+    });
+
+    // Audit: 'הגדרת תחום משרה' (candidate field)
+    if (candidatePayload.field) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_FIELD,
+        entityType: 'Candidate',
+        entityId: createdCandidate.id,
+        entityName: createdCandidate.fullName,
+        params: { job: candidatePayload.field },
+      });
+    }
+
     if (fileBase64) {
       await uploadResumeForCandidate(createdCandidate.id, fileBase64, fileName, mimeType);
     }
@@ -1325,6 +1692,20 @@ const createFromAi = async (req, res) => {
     void ensureOrganizationsFromExperience(createdCandidate.workExperience, createdCandidate.id);
     if (aiTagsForSync.length) {
       await candidateTagService.syncTagsForCandidate(createdCandidate.id, aiTagsForSync);
+
+      // Audit: 'הגדרת תגיות' — AI tags synced
+      const tagsLabel = aiTagsForSync
+        .map((t) => t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name)
+        .filter(Boolean)
+        .slice(0, 12)
+        .join(', ');
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_TAGS,
+        entityType: 'Candidate',
+        entityId: createdCandidate.id,
+        entityName: createdCandidate.fullName,
+        params: { tags: tagsLabel || `${aiTagsForSync.length} תגיות` },
+      });
     }
     const enrichedCandidate = await candidateService.getById(createdCandidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
@@ -1340,6 +1721,15 @@ const createFromAi = async (req, res) => {
 
 const update = async (req, res) => {
   try {
+    // Snapshot previous values BEFORE applying the update so we can audit only
+    // fields that actually changed.
+    let previous = null;
+    try {
+      previous = await candidateService.getById(req.params.id);
+    } catch {
+      previous = null;
+    }
+
     const candidate = await candidateService.update(req.params.id, req.body);
     const embedText = [
       candidate.fullName,
@@ -1353,6 +1743,101 @@ const update = async (req, res) => {
       void tryEmbedCandidate(candidate.id, embedText);
     }
     const enrichedCandidate = await candidateService.getById(candidate.id);
+
+    const body = req.body || {};
+    const candidateLabel = enrichedCandidate.fullName || candidate.fullName;
+
+    // Audit: 'הגדרת מקור גיוס' — only when value actually changed
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'source') &&
+      body.source &&
+      valuesDiffer(previous?.source, body.source)
+    ) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_SOURCE,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidateLabel,
+        params: { source: body.source },
+      });
+    }
+    // Audit: 'הגדרת תחום משרה' (candidate field) — only when changed
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'field') &&
+      body.field &&
+      valuesDiffer(previous?.field, body.field)
+    ) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CV_FIELD,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidateLabel,
+        params: { job: body.field },
+      });
+    }
+    // Audit: 'הגדרת תגיות' — only when the tags list actually changed.
+    // We surface the *added* tags in the description so the audit message
+    // reflects what was newly attached (matches the row's "נוספו תגיות" template).
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'tags') &&
+      Array.isArray(body.tags) &&
+      valuesDiffer(previous?.tags, body.tags)
+    ) {
+      const tagLabel = (t) =>
+        typeof t === 'string'
+          ? t
+          : t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name || '';
+      const prevSet = new Set(
+        (Array.isArray(previous?.tags) ? previous.tags : []).map(tagLabel).filter(Boolean),
+      );
+      const nextLabels = body.tags.map(tagLabel).filter(Boolean);
+      const added = nextLabels.filter((label) => !prevSet.has(label));
+      const labelForAudit = added.length ? added : nextLabels;
+      const tagsLabel = labelForAudit.slice(0, 12).join(', ');
+      if (tagsLabel) {
+        systemEventEmitter.emit(req, {
+          ...SYSTEM_EVENTS.CV_TAGS,
+          entityType: 'Candidate',
+          entityId: candidate.id,
+          entityName: candidateLabel,
+          params: { tags: tagsLabel },
+        });
+      }
+    }
+    // Audit: 'עדכון שפות' — only when the languages array actually changed
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'languages') &&
+      Array.isArray(body.languages) &&
+      valuesDiffer(previous?.languages, body.languages)
+    ) {
+      const languagesLabel = body.languages
+        .map((l) => (typeof l === 'string' ? l : `${l?.name || ''} (${l?.level || ''})`))
+        .filter(Boolean)
+        .slice(0, 8)
+        .join(', ');
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.SCREEN_LANGS,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidateLabel,
+        params: { languages: languagesLabel || '—' },
+      });
+    }
+    // Audit: 'הודעה פנימית' (candidate internal notes) — only when changed
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'internalNotes') &&
+      body.internalNotes &&
+      valuesDiffer(previous?.internalNotes, body.internalNotes)
+    ) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.TEAM_INTERNAL,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidateLabel,
+        params: { comment: String(body.internalNotes).slice(0, 400) },
+      });
+    }
+
     res.json(enrichedCandidate);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
@@ -1538,7 +2023,12 @@ const attachMedia = async (req, res) => {
   }
 };
 
-const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeType) => {
+/**
+ * Store resume bytes in S3 only (no candidate row update). Use when uploading multiple
+ * files so a single `candidateService.update` can set `resumeUrl` + `documents` together.
+ * @returns {Promise<{ publicUrl: string, key: string, size: number } | null>}
+ */
+const putResumeFileInS3 = async (candidateId, fileBase64, filename, mimeType) => {
   if (!fileBase64) return null;
   const buffer = Buffer.from(fileBase64, 'base64');
   const name = filename ? path.basename(filename) : `resume-${Date.now()}.bin`;
@@ -1552,8 +2042,14 @@ const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeT
   const client = createS3Client();
   await client.send(command);
   const publicUrl = buildPublicUrl(key);
-  await candidateService.update(candidateId, { resumeUrl: publicUrl });
-  return publicUrl;
+  return { publicUrl, key, size: buffer.length };
+};
+
+const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeType) => {
+  const out = await putResumeFileInS3(candidateId, fileBase64, filename, mimeType);
+  if (!out) return null;
+  await candidateService.update(candidateId, { resumeUrl: out.publicUrl });
+  return out.publicUrl;
 };
 
 // Rebuild embeddings for all candidates with resumeUrl (best-effort)
@@ -1612,13 +2108,8 @@ const extractFromBuffer = async (buffer, ct) => {
 
   try {
     // Prefer magic-number detection, then fall back to content-type hints
-    if (looksPdf || contentType.includes('pdf')) {
-      try {
-        const resPdf = await pdfParse(buffer);
-        if (resPdf.text) return resPdf.text;
-      } catch (e) {
-        console.log('[embed-parse-pdf-error]', e.message || e);
-      }
+    if (looksPdf || contentType.includes('pdf') || isPdfMagicBuffer(buffer)) {
+      return await extractTextFromPdfBuffer(buffer);
     }
 
     if (
@@ -1636,12 +2127,25 @@ const extractFromBuffer = async (buffer, ct) => {
       }
     }
 
-    // Last resort: try PDF once more, then plain text decode
+    // Wrong content-type (e.g. application/octet-stream) but file is a valid PDF
     try {
-      const resPdf = await pdfParse(buffer);
-      if (resPdf.text) return resPdf.text;
+      await pdfParse(buffer);
+      return await extractTextFromPdfBuffer(buffer);
     } catch (e) {
-      // ignore final pdf attempt
+      // not a parseable PDF; continue
+    }
+
+    // Do not return UTF-8 decoded PDF/DOCX bytes as "text" — it breaks AI parsing (hallucinated candidates).
+    if (isPdfMagicBuffer(buffer)) {
+      return '';
+    }
+    if (
+      looksZip ||
+      contentType.includes('officedocument') ||
+      contentType.includes('wordprocessingml') ||
+      contentType.includes('msword')
+    ) {
+      return '';
     }
 
     const asText = buffer.toString('utf8');
@@ -2206,8 +2710,57 @@ const patchJobLinkStatus = async (req, res) => {
     if (inviteClient !== undefined) {
       prevMeta.inviteClient = Boolean(inviteClient);
     }
+    const prevStatus = jc.status;
     prevMeta.workflowUpdatedAt = new Date().toISOString();
-    await jc.update({ status: String(status).trim(), workflowMeta: prevMeta });
+    const newStatus = String(status).trim();
+    await jc.update({ status: newStatus, workflowMeta: prevMeta });
+
+    // Resolve a friendly candidate label for the audit description.
+    let candidateLabel = null;
+    try {
+      const cand = await Candidate.findByPk(jc.candidateId, { attributes: ['id', 'fullName', 'email'] });
+      candidateLabel = cand?.fullName || cand?.email || null;
+    } catch {
+      // ignore — label is optional
+    }
+
+    // Audit: 'סטטוס השתנה'
+    if (prevStatus !== newStatus) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CANDIDATE_STATUS,
+        entityType: 'Candidate',
+        entityId: jc.candidateId,
+        entityName: candidateLabel,
+        params: {
+          candidate: candidateLabel || jc.candidateId,
+          status: newStatus,
+        },
+      });
+    }
+    // Audit: 'עדכון תאריך יעד'
+    if (dueDate !== undefined && prevMeta.dueDate) {
+      const dateStr = prevMeta.dueTime
+        ? `${prevMeta.dueDate} ${prevMeta.dueTime}`
+        : prevMeta.dueDate;
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CANDIDATE_DUE_DATE,
+        entityType: 'Candidate',
+        entityId: jc.candidateId,
+        entityName: candidateLabel,
+        params: { date: dateStr },
+      });
+    }
+    // Audit: 'הודעה פנימית' (link-level)
+    if (internalNote !== undefined && prevMeta.internalNote) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.TEAM_INTERNAL,
+        entityType: 'Candidate',
+        entityId: jc.candidateId,
+        entityName: candidateLabel,
+        params: { comment: String(prevMeta.internalNote).slice(0, 400) },
+      });
+    }
+
     res.set('Cache-Control', 'private, no-store');
     return res.json(jc.get({ plain: true }));
   } catch (err) {
@@ -2404,11 +2957,13 @@ const saveScreeningData = async (req, res) => {
       : await jobCandidateScreeningHasRejectionColumns({ forceRefresh: true });
 
     const coreFields = ['candidateId', 'jobId', 'screeningAnswers', 'telephoneImpression', 'internalOpinion'];
+    /** Sequelize needs primary key `id` on the instance for `.update()` — never omit it in attributes. */
+    const coreAttrsForLoad = ['id', ...coreFields];
 
     if (!hasReject) {
       let row = await JobCandidateScreening.findOne({
         where: { candidateId, jobId },
-        attributes: coreFields,
+        attributes: coreAttrsForLoad,
       });
       if (row) {
         await row.update(
@@ -2440,13 +2995,14 @@ const saveScreeningData = async (req, res) => {
 
     const rejectFields = ['screeningStatus', 'rejectionReason', 'rejectionNotes'];
     const allAttrs = [...coreFields, ...rejectFields];
+    const allAttrsForLoad = ['id', ...allAttrs];
     const st = typeof screeningStatus === 'string' ? screeningStatus : 'open';
     const rr = typeof rejectionReason === 'string' ? rejectionReason : null;
     const rn = typeof rejectionNotes === 'string' ? rejectionNotes : null;
 
     let row = await JobCandidateScreening.findOne({
       where: { candidateId, jobId },
-      attributes: allAttrs,
+      attributes: allAttrsForLoad,
     });
     if (row) {
       const updates = {};
@@ -2459,7 +3015,7 @@ const saveScreeningData = async (req, res) => {
       const fields = Object.keys(updates);
       if (fields.length > 0) {
         await row.update(updates, { fields });
-        await row.reload({ attributes: allAttrs });
+        await row.reload({ attributes: allAttrsForLoad });
       }
     } else {
       row = await JobCandidateScreening.create(
@@ -2496,6 +3052,34 @@ const saveScreeningData = async (req, res) => {
       screeningRejectionColumnsCache = false;
       payload = await upsert(true);
     }
+
+    // Audit: 'משוב לאחר ראיון' — only when impression / opinion is actually provided.
+    const overviewParts = [];
+    if (typeof telephoneImpression === 'string' && telephoneImpression.trim()) {
+      overviewParts.push(telephoneImpression.trim());
+    }
+    if (typeof internalOpinion === 'string' && internalOpinion.trim()) {
+      // Strip basic HTML for the audit description.
+      overviewParts.push(internalOpinion.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    }
+    if (overviewParts.length) {
+      const fromName =
+        req?.user?.fullName ||
+        req?.user?.name ||
+        req?.user?.email ||
+        req?.dbUser?.fullName ||
+        req?.dbUser?.email ||
+        'מערכת';
+      const overview = overviewParts.join(' • ').slice(0, 600);
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.TEAM_FEEDBACK,
+        entityType: 'Candidate',
+        entityId: candidateId,
+        entityName: null,
+        params: { from: fromName, overview },
+      });
+    }
+
     res.json(payload);
   } catch (err) {
     const status = err.status || 500;
@@ -2569,6 +3153,7 @@ module.exports = {
   semanticSearch,
   freeSearch,
   uploadResumeForCandidate,
+  putResumeFileInS3,
   generateExperienceSummary,
   fetchResumeText,
   fetchResumeBinaryForMail,
@@ -2581,6 +3166,7 @@ module.exports = {
   saveScreeningData,
   listScreeningRejections,
   buildCandidateModelSchemaJsonForPrompt,
+  ensureOrganizationsFromExperience,
 };
 
 

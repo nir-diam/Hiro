@@ -10,7 +10,7 @@ import {
     CheckCircleIcon, ExclamationTriangleIcon, FireIcon, ChevronUpIcon
 } from './Icons';
 import JobCandidatesView from './JobCandidatesView';
-import JobEventsView, { mockJobEvents as initialJobEvents, JobEvent } from './JobEventsView';
+import JobEventsView, { getJobEventApiHeaders } from './JobEventsView';
 import PublishJobView from './PublishJobView';
 import { mockExistingJob, mockJobCandidates } from '../data/mockJobData';
 import HiroAIChat from './HiroAIChat';
@@ -81,7 +81,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
     const [jobDataState, setJobDataState] = useState(mockExistingJob);
     const [jobLoading, setJobLoading] = useState(true);
     const [jobError, setJobError] = useState<string | null>(null);
-    const [jobEvents, setJobEvents] = useState(initialJobEvents);
+    const [eventsRefreshKey, setEventsRefreshKey] = useState(0);
 
     const [chatMessages, setChatMessages] = useState<Message[]>([]);
     const [chatSession, setChatSession] = useState<Chat | null>(null);
@@ -133,7 +133,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
     const initializeChat = () => {
         if (chatSession) return;
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const contextData = { job: jobDataState, candidatesCount: mockJobCandidates.length, eventsCount: jobEvents.length };
+        const contextData = { job: jobDataState, candidatesCount: mockJobCandidates.length, eventsCount: 0 };
         const systemInstruction = `You are Hiro AI, a brilliant recruitment strategist. You are helping manage the job "${jobDataState.title}". 
         You have three primary superpowers:
         1. Update internal job details (salary, status, priority).
@@ -180,16 +180,36 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || "עודכן." }]);
                     }
                     if (fc.name === 'createJobEvent') {
-                        const { description } = fc.args as any;
-                        // NEW: Actually update the local events state
-                        const newEvent: JobEvent = {
-                            id: Date.now(),
-                            type: 'note',
-                            user: 'Hiro AI',
-                            description: description,
-                            timestamp: new Date().toISOString()
-                        };
-                        setJobEvents(prev => [newEvent, ...prev]);
+                        const { description } = fc.args as { description: string };
+                        if (jobId && apiBase) {
+                            try {
+                                const res = await fetch(
+                                    `${apiBase}/api/jobs/${encodeURIComponent(jobId)}/events`,
+                                    {
+                                        method: 'POST',
+                                        headers: getJobEventApiHeaders(true),
+                                        body: JSON.stringify({
+                                            type: ['הערה'],
+                                            date: new Date().toISOString(),
+                                            description: String(description || ''),
+                                            status: 'עתידי',
+                                            history: [
+                                                {
+                                                    user: 'אני',
+                                                    timestamp: new Date().toISOString(),
+                                                    summary: 'יצר את האירוע',
+                                                },
+                                            ],
+                                        }),
+                                    },
+                                );
+                                if (res.ok) {
+                                    setEventsRefreshKey((k) => k + 1);
+                                }
+                            } catch (e) {
+                                console.error('[ExistingJobView] createJobEvent', e);
+                            }
+                        }
                         const toolRes = await chatSession.sendMessage({ message: `רשמתי את ההערה ביומן המשרה.` });
                         setChatMessages(prev => [...prev, { role: 'model', text: toolRes.text || "האירוע נוסף ליומן." }]);
                     }
@@ -440,7 +460,9 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                                 />
                             </div>
                         )}
-                        {mainView === 'events' && <JobEventsView externalEvents={jobEvents} onAddEvent={(e) => setJobEvents(prev => [e, ...prev])} />}
+                        {mainView === 'events' && (
+                            <JobEventsView jobId={jobId} eventsRefreshKey={eventsRefreshKey} />
+                        )}
                         {mainView === 'publish' && (
                             <div className="p-6">
                                 <PublishJobView job={jobDataState} />

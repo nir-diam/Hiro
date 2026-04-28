@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { 
     MagnifyingGlassIcon, Cog6ToothIcon, Squares2X2Icon, TableCellsIcon,
     PencilIcon, PaperAirplaneIcon, ChevronDownIcon, CheckCircleIcon,
@@ -11,6 +11,7 @@ import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { type Job } from './JobsView';
 import type { Candidate } from './CandidatesListView';
+import { useAuth } from '../context/AuthContext';
 
 // --- TYPES ---
 type ReferralStatus =
@@ -120,6 +121,21 @@ interface ScreeningCvReferralApiRow {
   inviteClient?: boolean;
 }
 
+/** Server aggregate stats (full filtered set, same filters as current page) */
+interface ScreeningCvReferralsListStats {
+  total: number;
+  accepted: number;
+  stages: {
+    new: number;
+    review: number;
+    interview: number;
+    offer: number;
+    hired: number;
+    rejected: number;
+  };
+  needsAttention: ScreeningCvReferralApiRow[];
+}
+
 function initialsFromName(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length >= 2) {
@@ -212,6 +228,140 @@ const allColumns: { id: keyof Referral | 'actions'; header: string }[] = [
   { id: 'lastUpdatedBy', header: 'עודכן ע"י' },
   { id: 'source', header: 'מקור' },
 ];
+
+type ReferralsFilterMultiselectProps = {
+  options: string[];
+  value: string[];
+  onChange: (next: string[]) => void;
+  triggerId: string;
+  /** Shown when `options` is empty */
+  emptyOptionsText?: string;
+};
+
+const ReferralsFilterMultiselect: React.FC<ReferralsFilterMultiselectProps> = ({
+  options,
+  value,
+  onChange,
+  triggerId,
+  emptyOptionsText = 'אין אפשרויות',
+}) => {
+  const [open, setOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) setSearchQuery('');
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const id = window.setTimeout(() => searchInputRef.current?.focus(), 0);
+    return () => clearTimeout(id);
+  }, [open]);
+
+  const normalized = searchQuery.trim().toLowerCase();
+  const filteredOptions = useMemo(() => {
+    if (!normalized) return options;
+    return options.filter((opt) => opt.toLowerCase().includes(normalized));
+  }, [options, normalized]);
+
+  const summary =
+    value.length === 0 ? 'הכל' : value.length === 1 ? value[0] : `${value.length} נבחרו`;
+
+  const toggle = (opt: string) => {
+    if (value.includes(opt)) {
+      onChange(value.filter((x) => x !== opt));
+    } else {
+      onChange([...value, opt]);
+    }
+  };
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <button
+        type="button"
+        id={triggerId}
+        onClick={() => setOpen((o) => !o)}
+        className="w-full bg-white border border-border-default rounded-lg py-2 px-3 text-sm text-right flex items-center justify-between gap-2 min-h-[38px] focus:ring-2 focus:ring-primary-500/20 outline-none cursor-pointer"
+        aria-expanded={open}
+        aria-haspopup="listbox"
+      >
+        <span className="truncate flex-1 min-w-0">{summary}</span>
+        <ChevronDownIcon
+          className={`w-4 h-4 flex-shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open && (
+        <div
+          className="absolute z-[80] mt-1 w-full min-w-0 max-h-64 flex flex-col bg-bg-card border border-border-default rounded-lg shadow-lg overflow-hidden"
+          role="listbox"
+          dir="rtl"
+        >
+          {options.length > 0 ? (
+            <div
+              className="shrink-0 p-2 border-b border-border-subtle bg-bg-subtle/40"
+              onMouseDown={(e) => e.preventDefault()}
+            >
+              <div className="relative">
+                <MagnifyingGlassIcon className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-text-subtle pointer-events-none" />
+                <input
+                  ref={searchInputRef}
+                  type="search"
+                  dir="rtl"
+                  autoComplete="off"
+                  aria-label="חיפוש ברשימה"
+                  placeholder="הקלד לחיפוש…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setOpen(false);
+                    }
+                  }}
+                  className="w-full rounded-md border border-border-default bg-bg-input py-1.5 pl-3 pr-9 text-sm text-text-default placeholder:text-text-subtle focus:ring-2 focus:ring-primary-500/25 focus:border-primary-400 outline-none"
+                />
+              </div>
+            </div>
+          ) : null}
+          <div className="overflow-y-auto min-h-0 max-h-[14rem] py-1.5">
+          {options.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-text-muted">{emptyOptionsText}</div>
+          ) : filteredOptions.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-text-muted text-center">אין התאמה לחיפוש</div>
+          ) : (
+            filteredOptions.map((opt) => (
+              <label
+                key={opt}
+                className="flex items-center gap-2.5 px-3 py-1.5 text-sm cursor-pointer hover:bg-bg-hover"
+              >
+                <input
+                  type="checkbox"
+                  checked={value.includes(opt)}
+                  onChange={() => toggle(opt)}
+                  className="rounded border-border-default text-primary-600 focus:ring-primary-500/30 shrink-0"
+                />
+                <span className="flex-1 min-w-0 truncate">{opt}</span>
+              </label>
+            ))
+          )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
 // --- WIDGET COMPONENTS ---
 
@@ -421,7 +571,25 @@ const ReferralGridCard: React.FC<{
 
 // --- MAIN VIEW ---
 
+const userLabelsFromRows = (
+    rows: { name?: string; email?: string; isActive?: boolean }[] | null | undefined,
+): string[] => {
+    if (!Array.isArray(rows) || !rows.length) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const row of rows) {
+        if (row?.isActive === false) continue;
+        const label = String(row.name || '').trim() || String(row.email || '').trim();
+        if (label && !seen.has(label)) {
+            seen.add(label);
+            out.push(label);
+        }
+    }
+    return out.sort((a, b) => a.localeCompare(b, 'he'));
+};
+
 const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask, onOpenCandidateSummary }) => {
+    const { user } = useAuth();
     const today = new Date();
     const thirtyDaysAgo = new Date(new Date().setDate(today.getDate() - 30));
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -429,13 +597,74 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     // Data State
     const [referrals, setReferrals] = useState<Referral[]>([]);
     const [referralsLoading, setReferralsLoading] = useState(false);
+    const [listStats, setListStats] = useState<ScreeningCvReferralsListStats | null>(null);
+    const [totalCount, setTotalCount] = useState(0);
+    const [totalPages, setTotalPages] = useState(1);
+    const [page, setPage] = useState(1);
+    const [pageSize, setPageSize] = useState(25);
+    const [debouncedSearch, setDebouncedSearch] = useState('');
     const [jobs, setJobs] = useState<Job[]>([]);
+    const [jobsListLoading, setJobsListLoading] = useState(false);
+    const [apiClientLabels, setApiClientLabels] = useState<string[]>([]);
+    const [clientsListLoading, setClientsListLoading] = useState(false);
+    const [coordinatorApiLabels, setCoordinatorApiLabels] = useState<string[]>([]);
+    const [coordinatorsListLoading, setCoordinatorsListLoading] = useState(false);
+
+    // Filters + sort (must be declared before `fetchReferrals` below)
+    const [filters, setFilters] = useState({
+        searchTerm: '',
+        dateRange: 'month',
+        referralDate: thirtyDaysAgo.toISOString().split('T')[0],
+        referralDateEnd: today.toISOString().split('T')[0],
+        status: '',
+        clientNames: [] as string[],
+        candidateName: '',
+        jobTitles: [] as string[],
+        coordinators: [] as string[],
+        source: '',
+        lastUpdatedBys: [] as string[],
+    });
+    const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
+    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+    const [visibleColumns, setVisibleColumns] = useState<string[]>([
+        'status',
+        'candidateName',
+        'jobTitle',
+        'clientName',
+        'referralDate',
+        'coordinator',
+    ]);
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+    const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
+    const [sortConfig, setSortConfig] = useState<{ key: keyof Referral; direction: 'asc' | 'desc' } | null>(null);
+    const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
+    const dragItemIndex = useRef<number | null>(null);
+    const [showMobileStats, setShowMobileStats] = useState(false);
+    const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
+    const [editingReferral, setEditingReferral] = useState<Referral | null>(null);
+    const [reReferModal, setReReferModal] = useState<{ isOpen: boolean; referral: Referral | null }>({
+        isOpen: false,
+        referral: null,
+    });
+    const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+    const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const settingsRef = useRef<HTMLDivElement>(null);
+    const skipSearchPageReset = useRef(true);
+
     useEffect(() => {
         if (!apiBase) return;
         let active = true;
+        setJobsListLoading(true);
         (async () => {
             try {
-                const res = await fetch(`${apiBase}/api/jobs`);
+                const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+                const res = await fetch(`${apiBase}/api/jobs`, {
+                    headers: {
+                        Accept: 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                    cache: 'no-store',
+                });
                 if (!res.ok) throw new Error('Failed to fetch jobs');
                 const payload = await res.json();
                 if (active) {
@@ -443,6 +672,9 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                 }
             } catch (err) {
                 console.error('[ReferralsReportView] failed to load jobs', err);
+                if (active) setJobs([]);
+            } finally {
+                if (active) setJobsListLoading(false);
             }
         })();
         return () => {
@@ -451,169 +683,391 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     }, [apiBase]);
 
     useEffect(() => {
+        const t = setTimeout(() => setDebouncedSearch(filters.searchTerm), 300);
+        return () => clearTimeout(t);
+    }, [filters.searchTerm]);
+
+    useEffect(() => {
+        if (skipSearchPageReset.current) {
+            skipSearchPageReset.current = false;
+            return;
+        }
+        setPage(1);
+    }, [debouncedSearch]);
+
+    const fetchReferrals = useCallback(async () => {
         if (!apiBase) {
             setReferrals([]);
+            setListStats(null);
+            setTotalCount(0);
+            setTotalPages(1);
             return;
         }
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         if (!token) {
             setReferrals([]);
+            setListStats(null);
+            setTotalCount(0);
+            setTotalPages(1);
             return;
         }
-        let active = true;
         setReferralsLoading(true);
-        fetch(`${apiBase}/api/email-uploads/screening-cv-referrals`, {
+        try {
+            const params = new URLSearchParams();
+            params.set('page', String(page));
+            params.set('pageSize', String(pageSize));
+            const s = debouncedSearch.trim();
+            if (s) params.set('search', s);
+            if (filters.referralDate) params.set('referralDate', filters.referralDate);
+            if (filters.referralDateEnd) params.set('referralDateEnd', filters.referralDateEnd);
+            if (filters.status) params.set('status', filters.status);
+            if (filters.clientNames.length) params.set('clientNames', filters.clientNames.join(','));
+            if (filters.jobTitles.length) params.set('jobTitles', filters.jobTitles.join(','));
+            if (filters.coordinators.length) params.set('coordinators', filters.coordinators.join(','));
+            if (filters.lastUpdatedBys.length) params.set('lastUpdatedBys', filters.lastUpdatedBys.join(','));
+            const cn = filters.candidateName.trim();
+            if (cn) params.set('candidateName', cn);
+            const src = filters.source.trim();
+            if (src) params.set('source', src);
+            const sk = sortConfig?.key ?? 'referralDate';
+            const sd = sortConfig?.direction ?? 'desc';
+            params.set('sortKey', String(sk));
+            params.set('sortDir', sd);
+            const res = await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals?${params.toString()}`, {
+                headers: { Authorization: `Bearer ${token}` },
+                cache: 'no-store',
+            });
+            const raw: unknown = res.ok ? await res.json() : null;
+            const rows: ScreeningCvReferralApiRow[] = Array.isArray(raw)
+                ? (raw as ScreeningCvReferralApiRow[])
+                : (raw && typeof raw === 'object' && 'items' in (raw as object)
+                    ? ((raw as { items?: ScreeningCvReferralApiRow[] }).items ?? [])
+                    : []);
+            if (Array.isArray(raw)) {
+                setReferrals(rows.map(mapApiRowToReferral));
+                setListStats(null);
+                setTotalCount(rows.length);
+                setTotalPages(1);
+            } else if (raw && typeof raw === 'object') {
+                const p = raw as {
+                    items?: ScreeningCvReferralApiRow[];
+                    total?: number;
+                    totalPages?: number;
+                    stats?: ScreeningCvReferralsListStats;
+                };
+                setReferrals((p.items ?? []).map(mapApiRowToReferral));
+                setTotalCount(typeof p.total === 'number' ? p.total : 0);
+                setTotalPages(typeof p.totalPages === 'number' ? Math.max(1, p.totalPages) : 1);
+                setListStats(
+                    p.stats && typeof p.stats === 'object'
+                        ? { ...p.stats, needsAttention: p.stats.needsAttention ?? [] }
+                        : null,
+                );
+            } else {
+                setReferrals([]);
+                setListStats(null);
+                setTotalCount(0);
+                setTotalPages(1);
+            }
+        } catch {
+            setReferrals([]);
+            setListStats(null);
+            setTotalCount(0);
+            setTotalPages(1);
+        } finally {
+            setReferralsLoading(false);
+        }
+    }, [
+        apiBase,
+        page,
+        pageSize,
+        debouncedSearch,
+        filters.referralDate,
+        filters.referralDateEnd,
+        filters.status,
+        filters.clientNames,
+        filters.jobTitles,
+        filters.coordinators,
+        filters.lastUpdatedBys,
+        filters.candidateName,
+        filters.source,
+        sortConfig,
+    ]);
+
+    /** First row from GET screening-cv-referrals (same filters/sort as the report, page=1, pageSize=1). */
+    const fetchFirstScreeningCvRowForReRefer = useCallback(async (): Promise<ScreeningCvReferralApiRow | null> => {
+        if (!apiBase) return null;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) return null;
+        const params = new URLSearchParams();
+        params.set('page', '1');
+        params.set('pageSize', '1');
+        const s = debouncedSearch.trim();
+        if (s) params.set('search', s);
+        if (filters.referralDate) params.set('referralDate', filters.referralDate);
+        if (filters.referralDateEnd) params.set('referralDateEnd', filters.referralDateEnd);
+        if (filters.status) params.set('status', filters.status);
+        if (filters.clientNames.length) params.set('clientNames', filters.clientNames.join(','));
+        if (filters.jobTitles.length) params.set('jobTitles', filters.jobTitles.join(','));
+        if (filters.coordinators.length) params.set('coordinators', filters.coordinators.join(','));
+        if (filters.lastUpdatedBys.length) params.set('lastUpdatedBys', filters.lastUpdatedBys.join(','));
+        const cn = filters.candidateName.trim();
+        if (cn) params.set('candidateName', cn);
+        const src = filters.source.trim();
+        if (src) params.set('source', src);
+        const sk = sortConfig?.key ?? 'referralDate';
+        const sd = sortConfig?.direction ?? 'desc';
+        params.set('sortKey', String(sk));
+        params.set('sortDir', sd);
+        const res = await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals?${params.toString()}`, {
             headers: { Authorization: `Bearer ${token}` },
             cache: 'no-store',
+        });
+        const raw: unknown = await res.json().catch(() => null);
+        if (!res.ok) {
+            const msg =
+                raw && typeof raw === 'object' && raw !== null && 'message' in raw
+                    ? String((raw as { message?: string }).message || '')
+                    : '';
+            throw new Error(msg.trim() ? msg : 'בקשת הרשימה נכשלה');
+        }
+        let first: ScreeningCvReferralApiRow | undefined;
+        if (Array.isArray(raw) && raw.length > 0) {
+            first = raw[0] as ScreeningCvReferralApiRow;
+        } else if (raw && typeof raw === 'object' && 'items' in raw) {
+            const items = (raw as { items?: ScreeningCvReferralApiRow[] }).items;
+            if (Array.isArray(items) && items.length > 0) first = items[0];
+        }
+        return first ?? null;
+    }, [
+        apiBase,
+        debouncedSearch,
+        filters.referralDate,
+        filters.referralDateEnd,
+        filters.status,
+        filters.clientNames,
+        filters.jobTitles,
+        filters.coordinators,
+        filters.lastUpdatedBys,
+        filters.candidateName,
+        filters.source,
+        sortConfig,
+    ]);
+
+    const handleApplyFirstListedReferralToReReferModal = useCallback(async () => {
+        const row = await fetchFirstScreeningCvRowForReRefer();
+        if (!row) {
+            throw new Error('אין שורות ברשימה לפי המסננים.');
+        }
+        setReReferModal({ isOpen: true, referral: mapApiRowToReferral(row) });
+    }, [fetchFirstScreeningCvRowForReRefer]);
+
+    useEffect(() => {
+        void fetchReferrals();
+    }, [fetchReferrals]);
+
+    useEffect(() => {
+        if (page > totalPages) setPage(Math.max(1, totalPages));
+    }, [totalPages, page]);
+
+    useEffect(() => {
+        if (!apiBase) {
+            setApiClientLabels([]);
+            return;
+        }
+        let cancelled = false;
+        setClientsListLoading(true);
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            credentials: 'include',
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
         })
             .then((res) => (res.ok ? res.json() : []))
-            .then((data: ScreeningCvReferralApiRow[]) => {
-                if (active && Array.isArray(data)) {
-                    setReferrals(data.map(mapApiRowToReferral));
-                }
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : [];
+                const labels = list
+                    .map((c: Record<string, unknown>) =>
+                        String((c.displayName as string) || (c.name as string) || '').trim(),
+                    )
+                    .filter(Boolean);
+                const unique = [...new Set(labels)].sort((a, b) => a.localeCompare(b, 'he'));
+                setApiClientLabels(unique);
             })
             .catch(() => {
-                if (active) setReferrals([]);
+                if (!cancelled) setApiClientLabels([]);
             })
             .finally(() => {
-                if (active) setReferralsLoading(false);
+                if (!cancelled) setClientsListLoading(false);
             });
         return () => {
-            active = false;
+            cancelled = true;
         };
     }, [apiBase]);
-    
-    // Filters State
-    const [filters, setFilters] = useState({
-        searchTerm: '',
-        dateRange: 'month',
-        referralDate: thirtyDaysAgo.toISOString().split('T')[0],
-        referralDateEnd: today.toISOString().split('T')[0],
-        // Advanced Fields
-        status: '', 
-        clientName: '', 
-        candidateName: '', 
-        jobTitle: '', 
-        coordinator: '', 
-        source: '',
-        lastUpdatedBy: '',
-    });
-    
-    // UI State
-    const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(['status', 'candidateName', 'jobTitle', 'clientName', 'referralDate', 'coordinator']);
-    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
-    const [sortConfig, setSortConfig] = useState<{ key: keyof Referral; direction: 'asc' | 'desc' } | null>(null);
-    const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
-    const dragItemIndex = useRef<number | null>(null);
-    
-    // Mobile State
-    const [showMobileStats, setShowMobileStats] = useState(false); // Mobile Toggle for Sidebar
 
-    // Modals
-    const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
-    const [editingReferral, setEditingReferral] = useState<Referral | null>(null);
-    const [reReferModal, setReReferModal] = useState<{ isOpen: boolean; referral: Referral | null }>({ isOpen: false, referral: null });
-    const [selectedJob, setSelectedJob] = useState<Job | null>(null);
-    const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-    
-    const settingsRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (!apiBase) {
+            setCoordinatorApiLabels([]);
+            return;
+        }
+        let cancelled = false;
+        setCoordinatorsListLoading(true);
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = {
+            Accept: 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        };
+        const role = String(user?.role || '').toLowerCase();
+        const clientId = user?.clientId && String(user.clientId).trim() ? String(user.clientId) : '';
 
+        const fetchStaffUsers = async (): Promise<string[]> => {
+            if (!clientId) return [];
+            const r = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/staff-users`, {
+                credentials: 'include',
+                headers,
+                cache: 'no-store',
+            });
+            const data = r.ok ? await r.json() : [];
+            const list = Array.isArray(data) ? data : [];
+            return userLabelsFromRows(list as { name?: string; email?: string; isActive?: boolean }[]);
+        };
+
+        const run = async () => {
+            if (role === 'super_admin' || role === 'admin') {
+                try {
+                    const r = await fetch(`${apiBase}/api/users`, {
+                        credentials: 'include',
+                        headers,
+                        cache: 'no-store',
+                    });
+                    if (r.ok) {
+                        const data = (await r.json()) as unknown;
+                        if (cancelled) return;
+                        const list = Array.isArray(data) ? data : [];
+                        setCoordinatorApiLabels(
+                            userLabelsFromRows(list as { name?: string; email?: string; isActive?: boolean }[]),
+                        );
+                        return;
+                    }
+                } catch {
+                    /* use tenant staff list below */
+                }
+            }
+            if (cancelled) return;
+            const staff = await fetchStaffUsers();
+            if (!cancelled) setCoordinatorApiLabels(staff);
+        };
+
+        void run()
+            .catch(() => {
+                if (!cancelled) setCoordinatorApiLabels([]);
+            })
+            .finally(() => {
+                if (!cancelled) setCoordinatorsListLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, user?.role, user?.clientId]);
+
+    const clientFilterOptions = useMemo(() => [...apiClientLabels].sort((a, b) => a.localeCompare(b, 'he')), [apiClientLabels]);
+
+    const jobTitleFilterOptions = useMemo(() => {
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const j of jobs) {
+            const t = String(j.title || '').trim();
+            if (t && !seen.has(t)) {
+                seen.add(t);
+                out.push(t);
+            }
+        }
+        return out.sort((a, b) => a.localeCompare(b, 'he'));
+    }, [jobs]);
+
+    const coordinatorFilterOptions = useMemo(
+        () => [...coordinatorApiLabels].sort((a, b) => a.localeCompare(b, 'he')),
+        [coordinatorApiLabels],
+    );
+
+    /** Same user pool as רכז; labels from users/staff (not current page of referrals). */
+    const updaterFilterOptions = useMemo(
+        () => [...coordinatorApiLabels].sort((a, b) => a.localeCompare(b, 'he')),
+        [coordinatorApiLabels],
+    );
+    
     // --- Logic ---
 
     const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         const { name, value } = e.target;
-        setFilters(prev => ({ ...prev, [name]: value }));
-        if (name === 'referralDate' || name === 'referralDateEnd') {
-            setFilters(prev => ({ ...prev, dateRange: 'custom' }));
-        }
+        if (name !== 'searchTerm') setPage(1);
+        setFilters((prev) => {
+            const next = { ...prev, [name]: value } as typeof prev;
+            if (name === 'referralDate' || name === 'referralDateEnd') next.dateRange = 'custom';
+            return next;
+        });
     };
 
     const handleClearFilters = () => {
+        setPage(1);
         setFilters({
             searchTerm: '',
             dateRange: 'month',
             referralDate: thirtyDaysAgo.toISOString().split('T')[0],
             referralDateEnd: today.toISOString().split('T')[0],
-            status: '', clientName: '', candidateName: '', jobTitle: '', 
-            coordinator: '', source: '', lastUpdatedBy: ''
+            status: '',
+            clientNames: [],
+            candidateName: '',
+            jobTitles: [],
+            coordinators: [],
+            source: '',
+            lastUpdatedBys: [],
         });
         setIsAdvancedSearchOpen(false);
     };
 
     const applyDatePreset = (preset: 'today' | 'week' | 'month' | 'quarter') => {
+        setPage(1);
         const end = new Date();
         const start = new Date();
         if (preset === 'week') start.setDate(end.getDate() - 7);
         if (preset === 'month') start.setDate(end.getDate() - 30);
         if (preset === 'quarter') start.setDate(end.getDate() - 90);
-        
-        setFilters(prev => ({
+
+        setFilters((prev) => ({
             ...prev,
             dateRange: preset,
             referralDate: start.toISOString().split('T')[0],
-            referralDateEnd: end.toISOString().split('T')[0]
+            referralDateEnd: end.toISOString().split('T')[0],
         }));
     };
 
-    const sortedAndFilteredReferrals = useMemo(() => {
-        return referrals.filter(referral => {
-            const refDate = new Date(referral.referralDate);
-            const startDate = filters.referralDate ? new Date(filters.referralDate) : null;
-            const endDate = filters.referralDateEnd ? new Date(filters.referralDateEnd) : null;
-            if (endDate) endDate.setHours(23, 59, 59, 999);
-            
-            // Basic Matches
-            const matchesDate = (!startDate || refDate >= startDate) && (!endDate || refDate <= endDate);
-            const searchLower = filters.searchTerm.toLowerCase();
-            const matchesSearch = !searchLower || 
-                referral.candidateName.toLowerCase().includes(searchLower) ||
-                referral.clientName.toLowerCase().includes(searchLower) ||
-                referral.jobTitle.toLowerCase().includes(searchLower);
-
-            // Advanced Matches
-            const matchesStatus = !filters.status || referral.status === filters.status;
-            const matchesClient = !filters.clientName || referral.clientName.toLowerCase().includes(filters.clientName.toLowerCase());
-            const matchesCoordinator = !filters.coordinator || referral.coordinator.toLowerCase().includes(filters.coordinator.toLowerCase());
-            const matchesSource = !filters.source || referral.source.toLowerCase().includes(filters.source.toLowerCase());
-            const matchesUpdater = !filters.lastUpdatedBy || referral.lastUpdatedBy.toLowerCase().includes(filters.lastUpdatedBy.toLowerCase());
-            const matchesCandidate = !filters.candidateName || referral.candidateName.toLowerCase().includes(filters.candidateName.toLowerCase());
-            const matchesJobTitleAdv = !filters.jobTitle || referral.jobTitle.toLowerCase().includes(filters.jobTitle.toLowerCase());
-            
-            return matchesDate && matchesSearch && matchesStatus && matchesClient && matchesCoordinator && matchesSource && matchesUpdater && matchesCandidate && matchesJobTitleAdv;
-        }).sort((a, b) => {
-            if (!sortConfig) return 0;
-            const aVal = a[sortConfig.key];
-            const bVal = b[sortConfig.key];
-            if (sortConfig.key === 'referralDate') {
-                const at = new Date(String(aVal)).getTime();
-                const bt = new Date(String(bVal)).getTime();
-                return sortConfig.direction === 'asc' ? at - bt : bt - at;
-            }
-            if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
-            if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
-            return 0;
-        });
-    }, [referrals, filters, sortConfig]);
-
-    // Insights Calculation
     const insights = useMemo(() => {
-        const total = sortedAndFilteredReferrals.length;
-        const accepted = sortedAndFilteredReferrals.filter(r => r.status === 'התקבל' || r.status === 'התקבל לעבודה').length;
-        const stages = {
-            new: sortedAndFilteredReferrals.filter(r => r.status === 'חדש').length,
-            review: sortedAndFilteredReferrals.filter(r => r.status === 'בבדיקה').length,
-            interview: sortedAndFilteredReferrals.filter(r => r.status === 'ראיון').length,
-            offer: sortedAndFilteredReferrals.filter(r => r.status === 'הצעה').length,
-            hired: accepted,
-            rejected: sortedAndFilteredReferrals.filter(r => r.status === 'נדחה').length,
+        if (listStats) {
+            return {
+                total: listStats.total,
+                accepted: listStats.accepted,
+                stages: listStats.stages,
+                needsAttention: (listStats.needsAttention || []).map(mapApiRowToReferral),
+            };
+        }
+        return {
+            total: 0,
+            accepted: 0,
+            stages: {
+                new: 0,
+                review: 0,
+                interview: 0,
+                offer: 0,
+                hired: 0,
+                rejected: 0,
+            },
+            needsAttention: [] as Referral[],
         };
-        const needsAttention = sortedAndFilteredReferrals.filter(r => (r.status === 'חדש' || r.status === 'בבדיקה') && (r.daysInStage && r.daysInStage > 7));
-        
-        return { total, accepted, stages, needsAttention };
-    }, [sortedAndFilteredReferrals]);
+    }, [listStats]);
 
     const requestSort = (key: keyof Referral) => {
         let direction: 'asc' | 'desc' = 'asc';
@@ -770,6 +1224,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         );
         setIsStatusModalOpen(false);
         setEditingReferral(null);
+        void fetchReferrals();
     };
 
     const handleOpenReReferModal = (e: React.MouseEvent, referral: Referral) => {
@@ -819,6 +1274,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         setReferrals((prev) =>
             prev.map((r) => (r.id === ref.id ? { ...r, status: data.nextStatus as ReferralStatus } : r)),
         );
+        void fetchReferrals();
     };
 
     const renderCell = (referral: Referral, columnId: string) => {
@@ -914,11 +1370,79 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                         <div><label className="block text-xs font-bold text-text-muted mb-1">תאריך מ-</label><input type="date" name="referralDate" value={filters.referralDate} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">תאריך עד-</label><input type="date" name="referralDateEnd" value={filters.referralDateEnd} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">סטטוס / שלב</label><select name="status" value={filters.status} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm"><option value="">הכל</option>{statusOptions.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
-                        <div><label className="block text-xs font-bold text-text-muted mb-1">לקוח</label><input type="text" name="clientName" value={filters.clientName} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם לקוח..." /></div>
+                        <div>
+                            <label htmlFor="filter-referrals-client" className="block text-xs font-bold text-text-muted mb-1">
+                                לקוח
+                            </label>
+                            {clientsListLoading ? (
+                                <p className="text-[10px] text-text-muted mb-1">טוען רשימת לקוחות…</p>
+                            ) : null}
+                            <ReferralsFilterMultiselect
+                                triggerId="filter-referrals-client"
+                                options={clientFilterOptions}
+                                value={filters.clientNames}
+                                onChange={(clientNames) => {
+                                    setPage(1);
+                                    setFilters((prev) => ({ ...prev, clientNames }));
+                                }}
+                                emptyOptionsText="אין לקוחות ברשימה"
+                            />
+                        </div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">מועמד</label><input type="text" name="candidateName" value={filters.candidateName} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם מועמד..." /></div>
-                        <div><label className="block text-xs font-bold text-text-muted mb-1">משרה</label><input type="text" name="jobTitle" value={filters.jobTitle} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="כותרת משרה..." /></div>
-                        <div><label className="block text-xs font-bold text-text-muted mb-1">רכז</label><input type="text" name="coordinator" value={filters.coordinator} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם רכז..." /></div>
-                        <div><label className="block text-xs font-bold text-text-muted mb-1">משתמש מעדכן</label><input type="text" name="lastUpdatedBy" value={filters.lastUpdatedBy} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם משתמש..." /></div>
+                        <div>
+                            <label htmlFor="filter-referrals-job" className="block text-xs font-bold text-text-muted mb-1">
+                                משרה
+                            </label>
+                            {jobsListLoading ? (
+                                <p className="text-[10px] text-text-muted mb-1">טוען משרות…</p>
+                            ) : null}
+                            <ReferralsFilterMultiselect
+                                triggerId="filter-referrals-job"
+                                options={jobTitleFilterOptions}
+                                value={filters.jobTitles}
+                                onChange={(jobTitles) => {
+                                    setPage(1);
+                                    setFilters((prev) => ({ ...prev, jobTitles }));
+                                }}
+                                emptyOptionsText="אין משרות ברשימה"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="filter-referrals-coordinator" className="block text-xs font-bold text-text-muted mb-1">
+                                רכז
+                            </label>
+                            {coordinatorsListLoading ? (
+                                <p className="text-[10px] text-text-muted mb-1">טוען רכזים…</p>
+                            ) : null}
+                            <ReferralsFilterMultiselect
+                                triggerId="filter-referrals-coordinator"
+                                options={coordinatorFilterOptions}
+                                value={filters.coordinators}
+                                onChange={(coordinators) => {
+                                    setPage(1);
+                                    setFilters((prev) => ({ ...prev, coordinators }));
+                                }}
+                                emptyOptionsText="אין רכזים ברשימה"
+                            />
+                        </div>
+                        <div>
+                            <label htmlFor="filter-referrals-updater" className="block text-xs font-bold text-text-muted mb-1">
+                                משתמש מעדכן
+                            </label>
+                            {coordinatorsListLoading ? (
+                                <p className="text-[10px] text-text-muted mb-1">טוען משתמשים…</p>
+                            ) : null}
+                            <ReferralsFilterMultiselect
+                                triggerId="filter-referrals-updater"
+                                options={updaterFilterOptions}
+                                value={filters.lastUpdatedBys}
+                                onChange={(lastUpdatedBys) => {
+                                    setPage(1);
+                                    setFilters((prev) => ({ ...prev, lastUpdatedBys }));
+                                }}
+                                emptyOptionsText="אין משתמשים ברשימה"
+                            />
+                        </div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">מקור גיוס</label><input type="text" name="source" value={filters.source} onChange={handleFilterChange} className="w-full bg-bg-input border-border-default rounded-lg py-2 px-3 text-sm" placeholder="מקור..." /></div>
                         
                         <div className="md:col-span-4 lg:col-span-5 flex justify-end gap-2 mt-2 pt-2 border-t border-border-default/50">
@@ -980,7 +1504,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                      <header className="flex justify-between items-center p-4 border-b border-border-default bg-bg-subtle/30 flex-shrink-0">
                          <div className="flex items-center gap-2">
                             <h3 className="font-bold text-text-default">רשימת הפניות</h3>
-                            <span className="bg-bg-subtle px-2 py-0.5 rounded text-xs font-bold border border-border-default text-text-muted">{sortedAndFilteredReferrals.length}</span>
+                            <span className="bg-bg-subtle px-2 py-0.5 rounded text-xs font-bold border border-border-default text-text-muted">{totalCount}</span>
                         </div>
                          <div className="flex items-center gap-2">
                             <div className="flex bg-bg-subtle p-1 rounded-lg border border-border-default">
@@ -1004,6 +1528,47 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                             </div>
                         </div>
                      </header>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 border-b border-border-default bg-white text-sm text-text-muted">
+                        <span>
+                            עמוד {totalPages > 0 ? page : 0} מתוך {totalPages} · {totalCount} רשומות
+                        </span>
+                        <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-1.5 text-xs">
+                                <span>שורות בעמוד</span>
+                                <select
+                                    value={pageSize}
+                                    onChange={(e) => {
+                                        setPage(1);
+                                        setPageSize(Number(e.target.value));
+                                    }}
+                                    className="bg-bg-input border border-border-default rounded-md py-1 px-2 text-sm"
+                                >
+                                    {[10, 25, 50, 100].map((n) => (
+                                        <option key={n} value={n}>
+                                            {n}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            <button
+                                type="button"
+                                className="px-2.5 py-1 rounded-md border border-border-default hover:bg-bg-hover disabled:opacity-40"
+                                disabled={page <= 1 || referralsLoading}
+                                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                            >
+                                ‹
+                            </button>
+                            <button
+                                type="button"
+                                className="px-2.5 py-1 rounded-md border border-border-default hover:bg-bg-hover disabled:opacity-40"
+                                disabled={page >= totalPages || referralsLoading || totalCount === 0}
+                                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                            >
+                                ›
+                            </button>
+                        </div>
+                    </div>
 
                     <div className="flex-1 p-0 bg-white rounded-b-2xl">
                         {viewMode === 'table' ? (
@@ -1036,16 +1601,14 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                                         <tr>
                                             <td colSpan={visibleColumns.length + 2} className="p-16 text-center text-text-muted text-sm">טוען נתוני דוח…</td>
                                         </tr>
-                                    ) : sortedAndFilteredReferrals.length === 0 ? (
+                                    ) : !referralsLoading && totalCount === 0 ? (
                                         <tr>
                                             <td colSpan={visibleColumns.length + 2} className="p-16 text-center text-text-muted text-sm">
-                                                {referrals.length === 0
-                                                    ? 'אין הפניות. שליחות קו״ח ממסך סינון יופיעו כאן לאחר התחברות.'
-                                                    : 'אין רשומות התואמות למסננים.'}
+                                                אין רשומות להצגה. אם הוספת מסננים, נסה לרווח אותם. שליחות קו״ח ממסך סינון מופיעות אחרי התחברות.
                                             </td>
                                         </tr>
                                     ) : (
-                                    sortedAndFilteredReferrals.map(referral => (
+                                    referrals.map(referral => (
                                         <React.Fragment key={referral.id}>
                                             <tr onClick={() => setExpandedRowId(prevId => prevId === referral.id ? null : referral.id)} className="hover:bg-primary-50/30 cursor-pointer group transition-colors">
                                                 <td className="p-4 text-center">
@@ -1074,14 +1637,12 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4">
                                 {referralsLoading ? (
                                     <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm">טוען…</div>
-                                ) : sortedAndFilteredReferrals.length === 0 ? (
-                                    <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm">
-                                        {referrals.length === 0
-                                            ? 'אין הפניות להצגה.'
-                                            : 'אין רשומות התואמות למסננים.'}
+                                ) : !referralsLoading && totalCount === 0 ? (
+                                    <div className="col-span-full flex items-center justify-center py-16 text-text-muted text-sm text-center">
+                                        אין רשומות להצגה.
                                     </div>
                                 ) : (
-                                sortedAndFilteredReferrals.map(referral => (
+                                referrals.map(referral => (
                                     <div key={referral.id} className="group h-full">
                                         <ReferralGridCard 
                                             referral={referral} 
@@ -1103,6 +1664,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                 isOpen={reReferModal.isOpen}
                 onClose={() => setReReferModal({ isOpen: false, referral: null })}
                 onSend={handleSendReReferral}
+                applyFirstListedReferral={handleApplyFirstListedReferralToReReferModal}
                 referral={
                     reReferModal.referral
                         ? {

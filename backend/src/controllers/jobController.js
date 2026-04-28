@@ -5,6 +5,34 @@ const Job = require('../models/Job');
 const Tag = require('../models/Tag');
 const Client = require('../models/Client');
 const ClientContact = require('../models/ClientContact');
+const systemEventEmitter = require('../utils/systemEventEmitter');
+const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+
+const isMissingValue = (v) => v === undefined || v === null || v === '';
+
+const valuesDiffer = (a, b) => {
+  if (isMissingValue(a) && isMissingValue(b)) return false;
+  if (typeof a === 'object' || typeof b === 'object') {
+    try {
+      return JSON.stringify(a ?? null) !== JSON.stringify(b ?? null);
+    } catch {
+      return a !== b;
+    }
+  }
+  return String(a ?? '') !== String(b ?? '');
+};
+
+const buildQuestionsLabel = (job) => {
+  const tel = Array.isArray(job?.telephoneQuestions) ? job.telephoneQuestions : [];
+  const dig = Array.isArray(job?.digitalQuestions) ? job.digitalQuestions : [];
+  const all = [...tel, ...dig];
+  if (!all.length) return null;
+  const labels = all
+    .map((q) => (typeof q === 'string' ? q : q?.text || q?.question || q?.title))
+    .filter(Boolean)
+    .slice(0, 6);
+  return labels.length ? labels.join(' • ') : `${all.length} שאלות`;
+};
 
 const analyzeDescription = async (req, res) => {
   try {
@@ -19,7 +47,14 @@ const analyzeDescription = async (req, res) => {
 
     const result = await jobService.analyzeRawDescription(text);
 
-    
+    // Audit: 'ניתוח ועיבוד משרה' — AI analyzed a job description
+    systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.JOB_AI_ANALYSIS,
+      entityType: 'Job',
+      entityId: result?.id || null,
+      entityName: result?.title || null,
+      params: { candidate: result?.client || result?.title || 'לקוח' },
+    });
 
     // eslint-disable-next-line no-console
     console.log('[jobController.analyzeDescription] success, returning result keys', Object.keys(result || {}));
@@ -37,8 +72,12 @@ const analyzeDescription = async (req, res) => {
 };
 
 const list = async (_req, res) => {
-  const jobs = await jobService.list();
-  res.json(jobs);
+  try {
+    const jobs = await jobService.list();
+    res.json(jobs);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
+  }
 };
 
 /**
@@ -193,6 +232,29 @@ const create = async (req, res) => {
     }
 
     const job = await jobService.create(payload);
+
+    // Audit: 'הגדרת תחום משרה' — job category assigned
+    if (job?.field || job?.role) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.JOB_FIELD_ASSIGN,
+        entityType: 'Job',
+        entityId: job.id,
+        entityName: job.title || job.role,
+        params: { category: job.field || job.role },
+      });
+    }
+    // Audit: 'יצירת שאלון סינון' — screening questions created
+    const qLabel = buildQuestionsLabel(job);
+    if (qLabel) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.JOB_QUESTIONS,
+        entityType: 'Job',
+        entityId: job.id,
+        entityName: job.title,
+        params: { questions: qLabel, querstions: qLabel },
+      });
+    }
+
     res.status(201).json(job);
   } catch (err) {
     res.status(400).json({ message: err.message || 'Create failed' });
@@ -202,6 +264,14 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const payload = { ...req.body };
+
+    // Snapshot previous job state for change-detection-based audits.
+    let previous = null;
+    try {
+      previous = await jobService.getById(req.params.id);
+    } catch {
+      previous = null;
+    }
 
     // Normalize languages into skills on update as well
     if (Array.isArray(payload.languages) && payload.languages.length > 0) {
@@ -252,6 +322,59 @@ const update = async (req, res) => {
     }
 
     const job = await jobService.update(req.params.id, payload);
+
+    const body = req.body || {};
+
+    // Audit: 'הגדרת תחום משרה' — only when changed
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'field') &&
+      body.field &&
+      valuesDiffer(previous?.field, body.field)
+    ) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.JOB_FIELD_ASSIGN,
+        entityType: 'Job',
+        entityId: job.id,
+        entityName: job.title || job.role,
+        params: { category: body.field },
+      });
+    }
+    // Audit: 'יצירת שאלון סינון' — only when one of the question arrays changed
+    const telChanged =
+      Object.prototype.hasOwnProperty.call(body, 'telephoneQuestions') &&
+      valuesDiffer(previous?.telephoneQuestions, body.telephoneQuestions);
+    const digChanged =
+      Object.prototype.hasOwnProperty.call(body, 'digitalQuestions') &&
+      valuesDiffer(previous?.digitalQuestions, body.digitalQuestions);
+    if (telChanged || digChanged) {
+      const qLabel = buildQuestionsLabel(job);
+      if (qLabel) {
+        systemEventEmitter.emit(req, {
+          ...SYSTEM_EVENTS.JOB_QUESTIONS,
+          entityType: 'Job',
+          entityId: job.id,
+          entityName: job.title,
+          params: { questions: qLabel, querstions: qLabel },
+        });
+      }
+    }
+    // Audit: 'עדכון רכזים' — only when the touched recruiter field actually changed
+    const recruiterField =
+      ['recruiter', 'recruitingCoordinator', 'accountManager'].find(
+        (f) =>
+          Object.prototype.hasOwnProperty.call(body, f) &&
+          valuesDiffer(previous?.[f], body[f]),
+      );
+    if (recruiterField && body[recruiterField]) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.SCREEN_RECRUITER,
+        entityType: 'Job',
+        entityId: job.id,
+        entityName: job.title,
+        params: { name: body[recruiterField] },
+      });
+    }
+
     res.json(job);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });

@@ -2,6 +2,8 @@ const { Op } = require('sequelize');
 const MessageTemplate = require('../models/MessageTemplate');
 const Client = require('../models/Client');
 const emailService = require('./emailService');
+const systemEventEmitter = require('../utils/systemEventEmitter');
+const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
 const ALLOWED_CHANNELS = new Set(['email', 'sms', 'whatsapp']);
 
@@ -360,6 +362,16 @@ const sendScopedTemplateEmail = async ({
   });
 
   console.log(`[message-templates] sent key="${key}" providerMessageId=${result?.messageId || result?.id || 'n/a'}`);
+
+  // Audit: 'נשלח דיוור' — automated template email was sent.
+  systemEventEmitter.emit(null, {
+    ...SYSTEM_EVENTS.MAIL_SENT,
+    entityType: 'Candidate',
+    entityId: null,
+    entityName: toEmail,
+    params: { email: key },
+  });
+
   return result;
 };
 

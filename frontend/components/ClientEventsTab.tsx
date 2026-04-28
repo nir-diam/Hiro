@@ -1,8 +1,16 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, CalendarIcon, LinkIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ClockIcon, Cog6ToothIcon } from './Icons';
 import EventFormModal, { type Event as EventFormEvent } from './EventFormModal';
 import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
-import { eventTypeChipClasses } from '../utils/eventTypeChips';
+import { eventTypeChipClasses, normalizeEventTypes } from '../utils/eventTypeChips';
+import { hebrewDescriptionChangeLine, hebrewLinkedListChangeLine } from '../utils/eventHistoryText';
+import {
+  mergeJournalAndAudit,
+  filterAuditByDateRange,
+  sortMergedByColumn,
+  type MergedRow,
+} from '../utils/mergeJournalAndAudit';
+import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLogsApi';
 
 // --- TYPES ---
 interface HistoryEntry {
@@ -15,7 +23,8 @@ export type EventType = string;
 export type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 export interface Event {
   id: string;
-  type: EventType;
+  /** One or more types tagged on this event. Always normalized to string[] on read. */
+  type: EventType[];
   title: string;
   date: string;
   coordinator: string;
@@ -68,7 +77,7 @@ const coordinatorOptions = [];
 
 const normalizeEvent = (row: any): Event => ({
     id: String(row.id),
-    type: row.type,
+    type: normalizeEventTypes(row.type),
     title: row.title,
     date: row.date,
     coordinator: row.coordinator,
@@ -81,6 +90,7 @@ const normalizeEvent = (row: any): Event => ({
 const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [events, setEvents] = useState<Event[]>([]);
+    const [entityAuditItems, setEntityAuditItems] = useState<AuditLogEntry[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [clientEventTypeNames, setClientEventTypeNames] = useState<string[]>([]);
@@ -170,11 +180,19 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         setFilters(prev => ({ ...prev, [name]: value }));
     };
 
-    const toggleRow = (id: string) => {
-        setExpandedRowId(prevId => (prevId === id ? null : id));
-        if (expandedRowId !== id) {
+    const mergeRowKey = (row: MergedRow<Event>) =>
+        row.kind === 'journal' ? row.event.id : `audit:${row.entry.id}`;
+
+    const toggleMergedRow = (row: MergedRow<Event>) => {
+        const key = mergeRowKey(row);
+        setExpandedRowId((prev) => {
+            if (prev === key) {
+                setHistoryVisibleEventId(null);
+                return null;
+            }
             setHistoryVisibleEventId(null);
-        }
+            return key;
+        });
     };
 
     const handleCreateEvent = () => {
@@ -198,23 +216,58 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         setOpenMenuId(null);
     };
 
-     const handleSaveEvent = async (eventData: Omit<Event, 'id' | 'status' | 'linkedTo'> & { id?: string }) => {
+     const handleSaveEvent = async (
+        eventData: Omit<Event, 'id' | 'status' | 'linkedTo'> & { id?: string; linkedTo?: { type: string; name: string }[] },
+    ) => {
         if (!apiBase || !clientId) return;
+        const newLinks = eventData.linkedTo ?? [];
+        const newLinkedSingle = newLinks[0] ?? null;
+
         if (eventData.id) {
-            const oldEvent = events.find(e => e.id === eventData.id);
+            const oldEvent = events.find((e) => e.id === eventData.id);
             const changes: string[] = [];
-            if (oldEvent && oldEvent.title !== eventData.title) changes.push(`שינה את הכותרת מ-"${oldEvent.title}" ל-"${eventData.title}"`);
-            if (oldEvent && oldEvent.type !== eventData.type) changes.push(`שינה את סוג האירוע מ-"${oldEvent.type}" ל-"${eventData.type}"`);
+            if (oldEvent && oldEvent.title !== eventData.title) {
+                changes.push(`שינה את הכותרת מ-"${oldEvent.title}" ל-"${eventData.title}"`);
+            }
+            const oldTypeKey = (oldEvent?.type ?? []).join(' / ');
+            const newTypeKey = (eventData.type ?? []).join(' / ');
+            if (oldEvent && oldTypeKey !== newTypeKey) {
+                changes.push(`שינה את סוג האירוע מ-"${oldTypeKey}" ל-"${newTypeKey}"`);
+            }
             if (oldEvent) {
                 const oldDateStr = new Date(oldEvent.date).toLocaleString('he-IL');
                 const newDateStr = new Date(eventData.date).toLocaleString('he-IL');
-                if (oldDateStr !== newDateStr) changes.push(`שינה את התאריך מ-${oldDateStr} ל-${newDateStr}`);
-                if (oldEvent.description !== eventData.description) changes.push('עדכן את התיאור');
+                if (oldDateStr !== newDateStr) {
+                    changes.push(`שינה את התאריך מ-${oldDateStr} ל-${newDateStr}`);
+                }
+                if (oldEvent.description !== eventData.description) {
+                    changes.push(hebrewDescriptionChangeLine(oldEvent.description, eventData.description || ''));
+                }
+                const linkLine = hebrewLinkedListChangeLine(
+                    oldEvent.linkedTo ? [oldEvent.linkedTo] : [],
+                    newLinks,
+                );
+                if (linkLine) changes.push(linkLine);
             }
-            const newHistoryEntry = changes.length > 0 ? { user: 'אני', timestamp: new Date().toISOString(), summary: changes.join(', ') } : null;
-            const updatedHistory = newHistoryEntry ? [newHistoryEntry, ...(oldEvent?.history || [])] : (oldEvent?.history || []);
+            const ts = new Date().toISOString();
+            const newEntries: HistoryEntry[] = changes.map((summary) => ({
+                user: 'אני',
+                timestamp: ts,
+                summary,
+            }));
+            const updatedHistory =
+                newEntries.length > 0 ? [...newEntries, ...(oldEvent?.history || [])] : oldEvent?.history || [];
 
-            const payload = { ...eventData, coordinator: 'אני', history: updatedHistory };
+            const payload = {
+                title: eventData.title,
+                type: eventData.type,
+                date: eventData.date,
+                description: eventData.description || '',
+                coordinator: 'אני',
+                status: oldEvent?.status ?? 'עתידי',
+                linkedTo: newLinkedSingle,
+                history: updatedHistory,
+            };
             const res = await fetch(`${apiBase}/api/clients/${clientId}/events/${eventData.id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -222,7 +275,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             });
             if (res.ok) {
                 const updated = normalizeEvent(await res.json());
-                setEvents(events.map(e => e.id === updated.id ? updated : e));
+                setEvents(events.map((e) => (e.id === updated.id ? updated : e)));
             }
         } else {
             const payload = {
@@ -231,8 +284,8 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                 date: eventData.date,
                 description: eventData.description || '',
                 coordinator: 'אני',
-                status: 'עתידי',
-                linkedTo: { type: 'לקוח', name: clientName },
+                status: 'עתידי' as const,
+                linkedTo: newLinkedSingle ?? { type: 'לקוח', name: clientName },
                 history: [{ user: 'אני', timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }],
             };
             const res = await fetch(`${apiBase}/api/clients/${clientId}/events`, {
@@ -264,6 +317,25 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             .finally(() => { if (active) setIsLoading(false); });
         return () => { active = false; };
     }, [apiBase, clientId]);
+
+    useEffect(() => {
+        if (!apiBase || !clientId) {
+            setEntityAuditItems([]);
+            return;
+        }
+        let cancelled = false;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        fetchAuditLogsByEntity(apiBase, token, 'client', clientId, { page: 1, pageSize: 500 })
+            .then((r) => {
+                if (!cancelled) setEntityAuditItems(r.items);
+            })
+            .catch(() => {
+                if (!cancelled) setEntityAuditItems([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, clientId]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -282,7 +354,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             if (fromDate && eventDate < fromDate) return false;
             if (toDate && eventDate > toDate) return false;
             if (filters.coordinator !== 'הכל' && event.coordinator !== filters.coordinator) return false; // use event.coordinator
-            if (filters.eventType !== 'הכל' && event.type !== filters.eventType) return false;
+            if (filters.eventType !== 'הכל' && !(event.type || []).includes(filters.eventType)) return false;
             return true;
         });
 
@@ -297,6 +369,59 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         }
         return filtered;
     }, [events, filters, sortConfig]);
+
+    const getMergedSortValue = useCallback((row: MergedRow<Event>, columnKey: string): string => {
+        if (row.kind === 'audit') {
+            const e = row.entry;
+            switch (columnKey) {
+                case 'type':
+                    return `ביקורת ${e.action}`;
+                case 'title':
+                    return e.description;
+                case 'date':
+                    return e.timestamp;
+                case 'coordinator':
+                    return e.user.name || e.user.email || '';
+                case 'status':
+                    return e.level;
+                default:
+                    return '';
+            }
+        }
+        const ev = row.event;
+        switch (columnKey) {
+            case 'type':
+                return (ev.type || []).join(' ');
+            case 'title':
+                return ev.title || '';
+            case 'date':
+                return ev.date;
+            case 'coordinator':
+                return ev.coordinator || '';
+            case 'status':
+                return ev.status || '';
+            default:
+                return String((ev as Record<string, unknown>)[columnKey] ?? '');
+        }
+    }, []);
+
+    const displayedRows = useMemo(() => {
+        const auditFiltered = filterAuditByDateRange(entityAuditItems, filters.fromDate, filters.toDate);
+        const merged = mergeJournalAndAudit(
+            sortedAndFilteredEvents,
+            (e) => new Date(e.date).getTime(),
+            auditFiltered,
+        );
+        if (!sortConfig) return merged;
+        return sortMergedByColumn(merged, sortConfig.key, sortConfig.direction, getMergedSortValue);
+    }, [
+        sortedAndFilteredEvents,
+        entityAuditItems,
+        filters.fromDate,
+        filters.toDate,
+        sortConfig,
+        getMergedSortValue,
+    ]);
 
     const handleColumnToggle = (columnId: string) => {
         setVisibleColumns(prev => {
@@ -324,13 +449,85 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
     const renderCell = (event: Event, columnId: string) => {
         switch (columnId) {
             case 'type': {
-                const chip = eventTypeChipClasses(event.type);
-                return <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${chip.bg} ${chip.text}`}>{event.type}</span>;
+                const types = event.type || [];
+                if (types.length === 0) return null;
+                return (
+                    <div className="flex flex-wrap gap-1">
+                        {types.map((t) => {
+                            const chip = eventTypeChipClasses(t);
+                            return (
+                                <span key={t} className={`text-xs font-semibold px-2.5 py-1 rounded-full ${chip.bg} ${chip.text}`}>
+                                    {t}
+                                </span>
+                            );
+                        })}
+                    </div>
+                );
             }
             case 'title': return <span className="font-semibold text-text-default">{event.title}</span>;
             case 'date': return <span className="flex items-center gap-2"><CalendarIcon className="w-4 h-4 text-text-subtle"/> {new Date(event.date).toLocaleString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>;
             case 'status': return <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>;
             default: return (event as any)[columnId] || '-';
+        }
+    };
+
+    const auditActionHe: Record<string, string> = {
+        create: 'יצירה',
+        update: 'עדכון',
+        delete: 'מחיקה',
+        login: 'התחברות',
+        export: 'ייצוא',
+        system: 'מערכת',
+    };
+
+    const renderAuditCell = (entry: AuditLogEntry, columnId: string) => {
+        switch (columnId) {
+            case 'type':
+                return (
+                    <div className="flex flex-wrap gap-1">
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                            יומן ביקורת
+                        </span>
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                            {auditActionHe[entry.action] || entry.action}
+                        </span>
+                    </div>
+                );
+            case 'title':
+                return (
+                    <span className="font-semibold text-text-default line-clamp-2 break-words">{entry.description || '—'}</span>
+                );
+            case 'date':
+                return (
+                    <span className="flex items-center gap-2">
+                        <CalendarIcon className="w-4 h-4 text-text-subtle" />
+                        {new Date(entry.timestamp).toLocaleString('he-IL', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                        })}
+                    </span>
+                );
+            case 'coordinator':
+                return <span>{entry.user.name || entry.user.email || '—'}</span>;
+            case 'status':
+                return (
+                    <span
+                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                            entry.level === 'error' || entry.level === 'critical'
+                                ? 'bg-red-100 text-red-800'
+                                : entry.level === 'warning'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-slate-100 text-slate-700'
+                        }`}
+                    >
+                        {entry.level}
+                    </span>
+                );
+            default:
+                return '—';
         }
     };
 
@@ -378,7 +575,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             </div>
             
             <main className="flex-1 overflow-y-auto">
-            {sortedAndFilteredEvents.length > 0 ? (
+            {displayedRows.length > 0 ? (
                 viewMode === 'table' ? (
                 <div className="overflow-x-auto border border-border-default rounded-lg">
                     <table className="w-full text-sm text-right min-w-[800px]">
@@ -408,9 +605,54 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
-                        {sortedAndFilteredEvents.map(event => (
+                        {displayedRows.map((row) => {
+                            const rKey = mergeRowKey(row);
+                            if (row.kind === 'audit') {
+                                const a = row.entry;
+                                return (
+                                    <React.Fragment key={rKey}>
+                                        <tr
+                                            onClick={() => toggleMergedRow(row)}
+                                            className="hover:bg-bg-hover cursor-pointer group bg-slate-50/50"
+                                        >
+                                            {visibleColumns.map((colId) => (
+                                                <td key={colId} className="p-4 text-text-muted">
+                                                    {renderAuditCell(a, colId)}
+                                                </td>
+                                            ))}
+                                            <td className="p-4 text-center text-text-subtle text-xs">ביקורת</td>
+                                            <td className="p-4 sticky left-0 bg-bg-card w-16" />
+                                        </tr>
+                                        {expandedRowId === rKey && (
+                                            <tr className="bg-slate-50/80">
+                                                <td colSpan={visibleColumns.length + 2} className="px-8 py-4 text-sm text-text-muted">
+                                                    <p className="font-bold text-text-default mb-1">יומן ביקורת מערכת</p>
+                                                    <p>
+                                                        <span className="font-bold">תיאור:</span> {a.description || '—'}
+                                                    </p>
+                                                    <p className="text-xs text-text-subtle mt-2">
+                                                        {new Date(a.timestamp).toLocaleString('he-IL')} • {formatRelativeTime(a.timestamp)}
+                                                    </p>
+                                                    {a.changes && a.changes.length > 0 && (
+                                                        <ul className="mt-2 text-xs space-y-1 pr-2 border-r-2 border-border-default">
+                                                            {a.changes.map((c, i) => (
+                                                                <li key={i}>
+                                                                    <span className="font-medium">{c.field}:</span> {String(c.oldValue ?? '—')} →{' '}
+                                                                    {String(c.newValue ?? '—')}
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </React.Fragment>
+                                );
+                            }
+                            const event = row.event;
+                            return (
                             <React.Fragment key={event.id}>
-                                <tr onClick={() => toggleRow(event.id)} className="hover:bg-bg-hover cursor-pointer group">
+                                <tr onClick={() => toggleMergedRow(row)} className="hover:bg-bg-hover cursor-pointer group">
                                     {visibleColumns.map(colId => <td key={colId} className="p-4 text-text-muted">{renderCell(event, colId)}</td>)}
                                     <td className="p-4 text-center">
                                         <div onClick={(e) => e.stopPropagation()} className="relative inline-block" ref={openMenuId === event.id ? menuRef : null}>
@@ -424,33 +666,88 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                                 </tr>
                                 {expandedRowId === event.id && (
                                     <tr className="bg-primary-50/20"><td colSpan={visibleColumns.length + 2} className="px-8 py-4 text-sm text-text-muted">
-                                        <p><span className="font-bold">תיאור מלא:</span> {event.description || "אין תיאור זמין."}</p>
                                         <div className="mt-4"><button onClick={(e) => { e.stopPropagation(); setHistoryVisibleEventId(prev => prev === event.id ? null : event.id); }} className="flex items-center gap-2 text-xs font-semibold hover:text-primary-600"><ClockIcon className="w-4 h-4" /><span>היסטוריית שינויים</span></button>
-                                            {historyVisibleEventId === event.id && (<div className="mt-2 pt-2 border-t space-y-2 text-xs text-text-subtle">{event.history?.map((entry, index) => (<p key={index} className="flex items-start gap-2"><span className="font-semibold text-text-muted">{entry.user}:</span><span>{entry.summary}</span><span className="flex-shrink-0">&bull; {formatRelativeTime(entry.timestamp)}</span></p>)) || <p>אין היסטוריית שינויים.</p>}</div>)}
+                                            {historyVisibleEventId === event.id && (
+                                                <div className="mt-2 pt-2 border-t space-y-2 text-xs text-text-subtle">
+                                                    {event.history?.map((entry, index) => (
+                                                        <p key={index} className="flex items-start gap-2 text-start">
+                                                            <span className="font-semibold text-text-muted shrink-0">
+                                                                {entry.user}:
+                                                            </span>
+                                                            <span className="min-w-0">
+                                                                <span className="break-words">{entry.summary}</span>
+                                                                <span className="whitespace-nowrap">
+                                                                    {' '}
+                                                                    • {formatRelativeTime(entry.timestamp)}
+                                                                </span>
+                                                            </span>
+                                                        </p>
+                                                    )) || <p>אין היסטוריית שינויים.</p>}
+                                                </div>
+                                            )}
                                         </div>
                                     </td></tr>
                                 )}
                             </React.Fragment>
-                        ))}
+                            );
+                        })}
                         </tbody>
                     </table>
                 </div>
                 ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {sortedAndFilteredEvents.map(event => (
+                    {displayedRows.map((row) => {
+                        if (row.kind === 'audit') {
+                            const a = row.entry;
+                            const rKey = mergeRowKey(row);
+                            return (
+                                <div
+                                    key={rKey}
+                                    onClick={() => toggleMergedRow(row)}
+                                    className="bg-bg-card rounded-lg shadow-sm border-r-4 border-slate-300 p-4 flex flex-col justify-between cursor-pointer"
+                                >
+                                    <div>
+                                        <div className="flex justify-between items-start gap-2">
+                                            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-800">יומן ביקורת</span>
+                                            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800">
+                                                {auditActionHe[a.action] || a.action}
+                                            </span>
+                                        </div>
+                                        <p className={`text-xs text-text-muted my-2 ${expandedRowId === rKey ? '' : 'line-clamp-3'}`}>{a.description || '—'}</p>
+                                        <p className="text-xs text-text-muted flex items-center gap-1.5">
+                                            <CalendarIcon className="w-4 h-4 text-text-subtle" />
+                                            {new Date(a.timestamp).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}
+                                        </p>
+                                    </div>
+                                    <div className="mt-3 pt-3 border-t border-border-default text-xs text-text-muted">
+                                        {a.user.name || a.user.email || '—'}
+                                    </div>
+                                </div>
+                            );
+                        }
+                        const event = row.event;
+                        const types = event.type || [];
+                        const primaryType = types[0] ?? '';
+                        const primaryChip = eventTypeChipClasses(primaryType);
+                        return (
                         <div
                             key={event.id}
-                            onClick={() => toggleRow(event.id)}
-                            className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${eventTypeChipClasses(event.type).border} p-4 flex flex-col justify-between cursor-pointer`}
+                            onClick={() => toggleMergedRow(row)}
+                            className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${primaryChip.border} p-4 flex flex-col justify-between cursor-pointer`}
                         >
                             <div>
-                                <div className="flex justify-between items-start">
-                                    <span
-                                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeChipClasses(event.type).bg} ${eventTypeChipClasses(event.type).text}`}
-                                    >
-                                        {event.type}
-                                    </span>
-                                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
+                                <div className="flex justify-between items-start gap-2">
+                                    <div className="flex flex-wrap gap-1">
+                                        {types.map((t) => {
+                                            const chip = eventTypeChipClasses(t);
+                                            return (
+                                                <span key={t} className={`text-xs font-semibold px-2.5 py-1 rounded-full ${chip.bg} ${chip.text}`}>
+                                                    {t}
+                                                </span>
+                                            );
+                                        })}
+                                    </div>
+                                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
                                 </div>
                                 <h3 className="font-bold text-text-default my-2">{event.title}</h3>
                                 <p className={`text-xs text-text-muted mb-2 transition-all duration-300 ${expandedRowId === event.id ? '' : 'line-clamp-2'}`}>{event.description}</p>
@@ -464,7 +761,8 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                                 </div>
                             </div>
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
                 )
             ) : (
@@ -487,6 +785,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                         description: form.description,
                         coordinator: form.coordinator,
                         title: form.description,
+                        linkedTo: form.linkedTo,
                     })
                 }
                 event={

@@ -22,7 +22,7 @@ export interface ReReferReferralContext {
     jobTitle: string;
     clientName: string;
     candidateName: string;
-    /** Pre-filled when user clicks "ייבוא הפניה אחרונה" */
+    /** Staff note on the referral row (optional; e.g. pasted into הערות when no list import). */
     internalNote?: string;
 }
 
@@ -31,6 +31,11 @@ interface ReReferModalProps {
     onClose: () => void;
     onSend: (data: ReReferSendPayload) => void | Promise<void>;
     referral: ReReferReferralContext | null;
+    /**
+     * Fetches list row [0] (same filters/sort as the report), maps it to referral context, and updates parent state
+     * so the modal matches opening fresh on that row (candidate, job, contacts). הערות stay empty for manual entry.
+     */
+    applyFirstListedReferral?: () => Promise<void>;
 }
 
 const nextStatusOptions = ['נשלחו קו"ח', 'בבדיקה', 'ראיון', 'הצעה'];
@@ -43,7 +48,13 @@ const getInitials = (name: string) => {
     return name.substring(0, 2).toUpperCase();
 };
 
-const ReReferModal: React.FC<ReReferModalProps> = ({ isOpen, onClose, onSend, referral }) => {
+const ReReferModal: React.FC<ReReferModalProps> = ({
+    isOpen,
+    onClose,
+    onSend,
+    referral,
+    applyFirstListedReferral,
+}) => {
     const [notes, setNotes] = useState('');
     const [nextStatus, setNextStatus] = useState('נשלחו קו"ח');
     const [contacts, setContacts] = useState<ReReferContact[]>([]);
@@ -53,6 +64,8 @@ const ReReferModal: React.FC<ReReferModalProps> = ({ isOpen, onClose, onSend, re
     const [metaHint, setMetaHint] = useState<string | null>(null);
     const [sending, setSending] = useState(false);
     const [sendError, setSendError] = useState<string | null>(null);
+    const [importingListedNote, setImportingListedNote] = useState(false);
+    const [importListedNoteError, setImportListedNoteError] = useState<string | null>(null);
 
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -121,6 +134,7 @@ const ReReferModal: React.FC<ReReferModalProps> = ({ isOpen, onClose, onSend, re
         setNotes('');
         setNextStatus('נשלחו קו"ח');
         setSendError(null);
+        setImportListedNoteError(null);
         void loadContacts();
     }, [isOpen, referral, loadContacts]);
 
@@ -132,10 +146,27 @@ const ReReferModal: React.FC<ReReferModalProps> = ({ isOpen, onClose, onSend, re
         );
     };
 
-    const handleImportLastNote = () => {
+    const handleImportLastNote = async () => {
+        setImportListedNoteError(null);
+        if (applyFirstListedReferral) {
+            setImportingListedNote(true);
+            try {
+                await applyFirstListedReferral();
+            } catch (e: unknown) {
+                setImportListedNoteError(e instanceof Error ? e.message : 'ייבוא מהרשימה נכשל');
+            } finally {
+                setImportingListedNote(false);
+            }
+            return;
+        }
         const raw = referral.internalNote != null ? String(referral.internalNote).trim() : '';
         if (raw) setNotes(raw);
     };
+
+    const canImportFromCurrentRow =
+        referral.internalNote != null && String(referral.internalNote).trim().length > 0;
+    const importLastNoteDisabled =
+        importingListedNote || (!applyFirstListedReferral && !canImportFromCurrentRow);
 
     const handleSend = async () => {
         setSendError(null);
@@ -214,15 +245,18 @@ const ReReferModal: React.FC<ReReferModalProps> = ({ isOpen, onClose, onSend, re
                                 className="w-full h-[180px] sm:h-[240px] overflow-y-auto bg-bg-input border border-border-default rounded-lg p-4 text-sm resize-none outline-none focus:border-primary-400 transition-colors"
                                 placeholder="הקלד הערות לשליחה..."
                             />
-                            <div className="flex justify-start mt-1">
+                            <div className="flex flex-col items-start gap-1 mt-1">
                                 <button
                                     type="button"
-                                    onClick={handleImportLastNote}
-                                    disabled={!referral.internalNote || !String(referral.internalNote).trim()}
+                                    onClick={() => void handleImportLastNote()}
+                                    disabled={importLastNoteDisabled}
                                     className="text-sm font-semibold text-text-default hover:text-primary-700 underline underline-offset-4 decoration-border-default hover:decoration-primary-300 transition-colors disabled:opacity-40 disabled:no-underline"
                                 >
-                                    ייבוא הפניה אחרונה
+                                    {importingListedNote ? 'מייבא מהרשימה…' : 'ייבוא הפניה אחרונה'}
                                 </button>
+                                {importListedNoteError ? (
+                                    <p className="text-[11px] text-red-700 text-right">{importListedNoteError}</p>
+                                ) : null}
                             </div>
                         </div>
 

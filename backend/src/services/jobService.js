@@ -3,7 +3,14 @@ const Prompt = require('../models/Prompt');
 const { sendChat } = require('./geminiService');
 const cityService = require('./cityService');
 
-const list = async () => Job.findAll();
+/**
+ * List jobs for table/UI — omits `events` (unbounded JSONB) so the query stays fast;
+ * use getById or job events API for a single job’s journal.
+ */
+const list = async () =>
+  Job.findAll({
+    attributes: { exclude: ['events'] },
+  });
 
 const getById = async (id) => {
   const job = await Job.findByPk(id);

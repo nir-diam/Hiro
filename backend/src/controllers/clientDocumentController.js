@@ -4,6 +4,8 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { v4: uuidv4 } = require('uuid');
 const clientService = require('../services/clientService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
+const systemEventEmitter = require('../utils/systemEventEmitter');
+const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
 const list = async (req, res) => {
   const client = await clientService.getById(req.params.id);
@@ -53,6 +55,19 @@ const attach = async (req, res) => {
 
     const next = [doc, ...prev];
     await clientService.update(req.params.id, { documents: next });
+
+    // Audit: 'העלאת מסמך' (client-scoped)
+    systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.CLIENT_DOC,
+      entityType: 'Client',
+      entityId: req.params.id,
+      entityName: client?.name || client?.displayName || null,
+      params: {
+        filename: doc.name || '—',
+        candidate: client?.name || client?.displayName || req.params.id,
+      },
+    });
+
     res.status(201).json(doc);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Attach failed' });

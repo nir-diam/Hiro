@@ -179,7 +179,7 @@ const AppContent: React.FC = () => {
                 : undefined;
         const newEvent = {
             id: Date.now(),
-            type: taskData.isTask ? 'משימת מערכת' : 'תזכורת',
+            type: [taskData.isTask ? 'משימת מערכת' : 'תזכורת'],
             description: taskData.messageText,
             date: dateIso,
             coordinator: primaryAssignee,

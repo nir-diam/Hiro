@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon, ChatBubbleBottomCenterTextIcon, InformationCircleIcon } from './Icons';
+import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon, ChatBubbleBottomCenterTextIcon, InformationCircleIcon, BoltIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
 const AdminLayout: React.FC = () => {
@@ -16,6 +16,7 @@ const AdminLayout: React.FC = () => {
         { to: '/admin/jobs', label: t('admin.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },
         { to: '/admin/job-fields', label: t('admin.tab_job_fields'), icon: <SquaresPlusIcon className="w-5 h-5" /> },
         { to: '/admin/events', label: 'יומן אירועים', icon: <ShieldCheckIcon className="w-5 h-5" /> },
+        { to: '/admin/system-events', label: 'אירועי מערכת אוטומטיים', icon: <BoltIcon className="w-5 h-5" /> },
         { to: '/admin/business-logic', label: 'חוקים עסקיים', icon: <DocumentTextIcon className="w-5 h-5" /> },
         { to: '/admin/picklists', label: 'ניהול picklists', icon: <ListBulletIcon className="w-5 h-5" /> },
         { to: '/admin/help-center', label: 'מרכז עזרה', icon: <DocumentTextIcon className="w-5 h-5" /> },

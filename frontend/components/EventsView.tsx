@@ -1,16 +1,24 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { 
     PlusIcon, ClockIcon, UserIcon, PencilIcon, SparklesIcon, TrashIcon, 
     CalendarIcon, TableCellsIcon, Squares2X2Icon, ChatBubbleBottomCenterTextIcon,
     LinkIcon, Cog6ToothIcon, EllipsisVerticalIcon, BriefcaseIcon, BuildingOffice2Icon,
-    XMarkIcon, UserGroupIcon
+    UserGroupIcon, ChevronDownIcon
 } from './Icons';
 import EventFormModal from './EventFormModal';
+import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
 import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
-import { eventTypeChipClasses } from '../utils/eventTypeChips';
-import { motion, AnimatePresence } from 'motion/react';
+import { eventTypeChipClasses, normalizeEventTypes } from '../utils/eventTypeChips';
+import { hebrewDescriptionChangeLine, hebrewLinkedListChangeLine } from '../utils/eventHistoryText';
+import {
+  mergeJournalAndAudit,
+  filterAuditByDateRange,
+  sortMergedByColumn,
+  type MergedRow,
+} from '../utils/mergeJournalAndAudit';
+import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLogsApi';
 
 // --- TYPES ---
 interface HistoryEntry {
@@ -23,9 +31,12 @@ export type EventType = string;
 export type EventStatus = 'עתידי' | 'הושלם' | 'בוטל';
 export interface Event {
   id: string | number;
-  type: EventType;
+  /** One or more types tagged on this event. Always normalized to string[] on read. */
+  type: EventType[];
   date: string;
   coordinator: string;
+  /** Staff user UUID when the event was created/updated by a logged-in user. */
+  coordinatorUserId?: string;
   status: EventStatus;
   linkedTo: { type: string; name: string }[];
   description: string;
@@ -41,9 +52,10 @@ export const normalizeCandidateEventRow = (row: Record<string, unknown>): Event 
   } else if (raw && typeof raw === 'object' && raw !== null && 'name' in (raw as object)) {
     linked = [raw as { type: string; name: string }];
   }
-  return {
+  const types = normalizeEventTypes(row.type);
+  const base: Event = {
     id: row.id as string | number,
-    type: String(row.type || 'פגישה'),
+    type: types.length ? types : ['פגישה'],
     date: String(row.date || new Date().toISOString()),
     coordinator: String(row.coordinator || 'מערכת'),
     status: (row.status as EventStatus) || 'עתידי',
@@ -52,16 +64,102 @@ export const normalizeCandidateEventRow = (row: Record<string, unknown>): Event 
     notes: row.notes != null ? String(row.notes) : undefined,
     history: Array.isArray(row.history) ? (row.history as HistoryEntry[]) : [],
   };
+  if (row.coordinatorUserId != null && String(row.coordinatorUserId).trim() !== '') {
+    base.coordinatorUserId = String(row.coordinatorUserId);
+  }
+  return base;
 };
 
-// --- MOCK DATA ---
-export const initialEventsData: Event[] = [
-  { id: 1, type: 'ראיון', date: '2025-08-15T10:00:00', coordinator: 'דנה כהן', status: 'עתידי', linkedTo: [{ type: 'מועמד', name: 'גדעון שפירא' }], description: 'ראיון למשרת מפתח Fullstack ב-Wix. לבדוק ניסיון ב-React ו-Node.js.', history: [{ user: 'דנה כהן', timestamp: '2025-08-14T10:00:00', summary: 'יצר את האירוע' }] },
-  { id: 2, type: 'פגישה', date: '2025-08-14T16:30:00', coordinator: 'אביב לוי', status: 'הושלם', linkedTo: [{ type: 'צוות', name: 'גיוס טכנולוגי' }], description: 'סקירת מועמדים פתוחים, תכנון משימות לשבוע הבא.', history: [{ user: 'אביב לוי', timestamp: '2025-08-14T16:00:00', summary: 'יצר את האירוע' }] },
-  { id: 3, type: 'תזכורת', date: '2025-08-16T09:00:00', coordinator: 'יעל שחר', status: 'עתידי', linkedTo: [{ type: 'מועמד', name: 'יאיר כהן' }], description: 'לשלוח מייל ללקוח לקבלת משוב על הראיון.', history: [{ user: 'יעל שחר', timestamp: '2025-08-15T09:00:00', summary: 'יצר את האירוע' }] },
-  { id: 4, type: 'משימת מערכת', date: '2025-08-14T11:22:00', coordinator: 'מערכת', status: 'הושלם', linkedTo: [], description: '3 קורות חיים חדשים למשרת "אנליסט נתונים" נוספו למערכת.', history: [{ user: 'מערכת', timestamp: '2025-08-14T11:22:00', summary: 'אירוע מערכת אוטומטי' }] },
-  { id: 5, type: 'ראיון', date: '2025-08-18T14:00:00', coordinator: 'דנה כהן', status: 'עתידי', linkedTo: [{ type: 'מועמד', name: 'שרית לוי' }], description: 'ראיון התאמה תרבותית למשרת מנהל/ת מוצר.', history: [{ user: 'דנה כהן', timestamp: '2025-08-17T14:00:00', summary: 'יצר את האירוע' }] },
-];
+const getEventFetchHeaders = (withJson: boolean): Record<string, string> => {
+  const h: Record<string, string> = { Accept: 'application/json' };
+  if (withJson) h['Content-Type'] = 'application/json';
+  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+  if (token) h.Authorization = `Bearer ${token}`;
+  return h;
+};
+
+type EventsFilterMultiselectProps = {
+    options: string[];
+    value: string[];
+    onChange: (next: string[]) => void;
+    triggerId: string;
+};
+
+const EventsFilterMultiselect: React.FC<EventsFilterMultiselectProps> = ({
+    options,
+    value,
+    onChange,
+    triggerId,
+}) => {
+    const [open, setOpen] = useState(false);
+    const wrapRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const onDoc = (e: MouseEvent) => {
+            if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [open]);
+
+    const summary =
+        value.length === 0 ? 'הכל' : value.length === 1 ? value[0] : `${value.length} נבחרו`;
+
+    const toggle = (opt: string) => {
+        if (value.includes(opt)) {
+            onChange(value.filter((x) => x !== opt));
+        } else {
+            onChange([...value, opt]);
+        }
+    };
+
+    return (
+        <div className="relative" ref={wrapRef}>
+            <button
+                type="button"
+                id={triggerId}
+                onClick={() => setOpen((o) => !o)}
+                className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm text-right flex items-center justify-between gap-2 min-h-[38px] focus:ring-2 focus:ring-primary-500/20 outline-none cursor-pointer"
+                aria-expanded={open}
+                aria-haspopup="listbox"
+            >
+                <span className="truncate flex-1 min-w-0">{summary}</span>
+                <ChevronDownIcon
+                    className={`w-4 h-4 flex-shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`}
+                />
+            </button>
+            {open && (
+                <div
+                    className="absolute z-40 mt-1 w-full min-w-0 max-h-48 overflow-y-auto bg-bg-card border border-border-default rounded-lg shadow-lg py-1.5"
+                    role="listbox"
+                    dir="rtl"
+                >
+                    {options.length === 0 ? (
+                        <div className="px-3 py-2 text-sm text-text-muted">אין אפשרויות</div>
+                    ) : (
+                        options.map((opt) => (
+                            <label
+                                key={opt}
+                                className="flex items-center gap-2.5 px-3 py-1.5 text-sm cursor-pointer hover:bg-bg-hover"
+                            >
+                                <input
+                                    type="checkbox"
+                                    checked={value.includes(opt)}
+                                    onChange={() => toggle(opt)}
+                                    className="rounded border-border-default text-primary-600 focus:ring-primary-500/30 shrink-0"
+                                />
+                                <span className="flex-1 min-w-0 truncate">{opt}</span>
+                            </label>
+                        ))
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
 
 const eventStatusStyles: { [key in EventStatus]: { bg: string; text: string; } } = {
   'עתידי': { bg: 'bg-secondary-100', text: 'text-secondary-800' },
@@ -86,8 +184,6 @@ function formatRelativeTime(dateString: string) {
     return new Date(dateString).toLocaleDateString('he-IL');
 }
 
-const COORDINATOR_PRESET = ['דנה כהן', 'אביב לוי', 'יעל שחר', 'אני', 'מערכת'];
-
 interface EventsViewProps {
     candidateId?: string;
     candidateName?: string;
@@ -100,7 +196,13 @@ const EventsView: React.FC<EventsViewProps> = ({
     candidateName = '',
 }) => {
     const { t } = useLanguage();
+    const { user } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const clientIdForCandidate = user?.clientId && String(user.clientId).trim() ? String(user.clientId) : '';
+    const actorDisplayName =
+        (user?.name && String(user.name).trim()) ||
+        (user?.email && String(user.email).trim()) ||
+        'משתמש';
     const resolvedCandidateId =
         candidateId && String(candidateId).trim() && String(candidateId) !== 'undefined'
             ? String(candidateId)
@@ -109,16 +211,56 @@ const EventsView: React.FC<EventsViewProps> = ({
     const [remoteEvents, setRemoteEvents] = useState<Event[]>([]);
     const [eventsLoadError, setEventsLoadError] = useState<string | null>(null);
     const [isLoadingEvents, setIsLoadingEvents] = useState(false);
+    const [entityAuditItems, setEntityAuditItems] = useState<AuditLogEntry[]>([]);
     const [candidateEventTypeNames, setCandidateEventTypeNames] = useState<string[]>([]);
+    const [clientStaffCoordinatorLabels, setClientStaffCoordinatorLabels] = useState<string[]>([]);
 
     const events = hasPersistedCandidate ? remoteEvents : [];
     const setEvents = setRemoteEvents;
 
+    /** Staff of the current tenant (same client the candidate is managed under for logged-in recruiters). */
+    useEffect(() => {
+        if (!apiBase || !clientIdForCandidate || !hasPersistedCandidate) {
+            setClientStaffCoordinatorLabels([]);
+            return;
+        }
+        let cancelled = false;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = { Accept: 'application/json' };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        fetch(
+            `${apiBase}/api/clients/${encodeURIComponent(clientIdForCandidate)}/staff-users`,
+            { credentials: 'include', headers, cache: 'no-store' },
+        )
+            .then((r) => (r.ok ? r.json() : []))
+            .then((rows) => {
+                if (cancelled) return;
+                const list: string[] = [];
+                const seen = new Set<string>();
+                for (const row of Array.isArray(rows) ? rows : []) {
+                    const r = row as { name?: string; email?: string; isActive?: boolean };
+                    if (r.isActive === false) continue;
+                    const label = String(r.name || '').trim() || String(r.email || '').trim();
+                    if (label && !seen.has(label)) {
+                        seen.add(label);
+                        list.push(label);
+                    }
+                }
+                setClientStaffCoordinatorLabels(list);
+            })
+            .catch(() => {
+                if (!cancelled) setClientStaffCoordinatorLabels([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, clientIdForCandidate, hasPersistedCandidate]);
+
     const coordinatorOptions = useMemo(() => {
         const seen = new Set<string>();
         const out: string[] = ['הכל'];
-        for (const c of COORDINATOR_PRESET) {
-            if (!seen.has(c)) {
+        for (const c of clientStaffCoordinatorLabels) {
+            if (c && !seen.has(c)) {
                 seen.add(c);
                 out.push(c);
             }
@@ -131,7 +273,7 @@ const EventsView: React.FC<EventsViewProps> = ({
             }
         }
         return out;
-    }, [events]);
+    }, [clientStaffCoordinatorLabels, events]);
 
     const eventTypeFilterOptions = useMemo(() => {
         const seen = new Set<string>();
@@ -149,17 +291,28 @@ const EventsView: React.FC<EventsViewProps> = ({
             }
         }
         for (const e of events) {
-            if (e.type && !seen.has(e.type)) {
-                seen.add(e.type);
-                out.push(e.type);
+            for (const t of e.type) {
+                if (t && !seen.has(t)) {
+                    seen.add(t);
+                    out.push(t);
+                }
             }
         }
         return out;
     }, [candidateEventTypeNames, events]);
 
+    const eventTypeMultiOptions = useMemo(
+        () => eventTypeFilterOptions.filter((o) => o !== 'הכל'),
+        [eventTypeFilterOptions],
+    );
+    const coordinatorMultiOptions = useMemo(
+        () => coordinatorOptions.filter((o) => o !== 'הכל'),
+        [coordinatorOptions],
+    );
+
     const [filters, setFilters] = useState({
-        eventType: 'הכל',
-        coordinator: 'הכל',
+        eventType: [] as string[],
+        coordinator: [] as string[],
         fromDate: '',
         toDate: '',
     });
@@ -267,14 +420,6 @@ const EventsView: React.FC<EventsViewProps> = ({
 
     const eventIdStr = (id: string | number) => String(id);
 
-    const toggleRow = (id: string | number) => {
-        const key = eventIdStr(id);
-        setExpandedRowId((prevId) => (prevId === key ? null : key));
-        if (expandedRowId !== key) {
-            setHistoryVisibleEventId(null);
-        }
-    };
-
     const handleCreateEvent = () => {
         setEditingEvent(null);
         setIsModalOpen(true);
@@ -293,6 +438,7 @@ const EventsView: React.FC<EventsViewProps> = ({
             if (hasPersistedCandidate && apiBase) {
                 void fetch(`${apiBase}/api/candidates/${resolvedCandidateId}/events/${encodeURIComponent(key)}`, {
                     method: 'DELETE',
+                    headers: getEventFetchHeaders(false),
                 }).catch(() => null);
             }
         }
@@ -316,8 +462,10 @@ const EventsView: React.FC<EventsViewProps> = ({
                 const idKey = eventIdStr(eventData.id);
                 const oldEvent = events.find((e) => eventIdStr(e.id) === idKey);
                 const changes: string[] = [];
-                if (oldEvent && oldEvent.type !== eventData.type) {
-                    changes.push(`שינה את סוג האירוע מ-"${oldEvent.type}" ל-"${eventData.type}"`);
+                const oldTypeKey = (oldEvent?.type ?? []).join(' / ');
+                const newTypeKey = (eventData.type ?? []).join(' / ');
+                if (oldEvent && oldTypeKey !== newTypeKey) {
+                    changes.push(`שינה את סוג האירוע מ-"${oldTypeKey}" ל-"${newTypeKey}"`);
                 }
                 if (oldEvent) {
                     const oldDateStr = new Date(oldEvent.date).toLocaleString('he-IL');
@@ -325,24 +473,28 @@ const EventsView: React.FC<EventsViewProps> = ({
                     if (oldDateStr !== newDateStr) {
                         changes.push(`שינה את התאריך מ-${oldDateStr} ל-${newDateStr}`);
                     }
-                    if (oldEvent.description !== eventData.description) changes.push('עדכן את התיאור');
+                    if (oldEvent.description !== eventData.description) {
+                        changes.push(hebrewDescriptionChangeLine(oldEvent.description, eventData.description || ''));
+                    }
+                    const linkLine = hebrewLinkedListChangeLine(oldEvent.linkedTo, eventData.linkedTo ?? []);
+                    if (linkLine) changes.push(linkLine);
                 }
-                const newHistoryEntry =
-                    changes.length > 0
-                        ? { user: 'אני', timestamp: new Date().toISOString(), summary: changes.join(', ') }
-                        : null;
-                const updatedHistory = newHistoryEntry
-                    ? [newHistoryEntry, ...(oldEvent?.history || [])]
-                    : oldEvent?.history || [];
+                const ts = new Date().toISOString();
+                const newHistoryEntries: HistoryEntry[] = changes.map((summary) => ({
+                    user: actorDisplayName,
+                    timestamp: ts,
+                    summary,
+                }));
+                const updatedHistory =
+                    newHistoryEntries.length > 0 ? [...newHistoryEntries, ...(oldEvent?.history || [])] : oldEvent?.history || [];
 
                 const res = await fetch(`${apiBase}/api/candidates/${resolvedCandidateId}/events/${encodeURIComponent(idKey)}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getEventFetchHeaders(true),
                     body: JSON.stringify({
                         type: eventData.type,
                         date: eventData.date,
                         description: eventData.description || '',
-                        coordinator: 'אני',
                         linkedTo: eventData.linkedTo,
                         history: updatedHistory,
                         status: oldEvent?.status ?? 'עתידי',
@@ -355,15 +507,16 @@ const EventsView: React.FC<EventsViewProps> = ({
             } else {
                 const res = await fetch(`${apiBase}/api/candidates/${resolvedCandidateId}/events`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: getEventFetchHeaders(true),
                     body: JSON.stringify({
                         type: eventData.type,
                         date: eventData.date,
                         description: eventData.description || '',
-                        coordinator: 'אני',
                         status: 'עתידי',
                         linkedTo: defaultLinked(),
-                        history: [{ user: 'אני', timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }],
+                        history: [
+                            { user: actorDisplayName, timestamp: new Date().toISOString(), summary: 'יצר את האירוע' },
+                        ],
                     }),
                 });
                 if (res.ok) {
@@ -382,25 +535,34 @@ const EventsView: React.FC<EventsViewProps> = ({
                     if (eventIdStr(e.id) !== idKey) return e;
                     const oldEvent = e;
                     const changes: string[] = [];
-                    if (oldEvent.type !== eventData.type) {
-                        changes.push(`שינה את סוג האירוע מ-"${oldEvent.type}" ל-"${eventData.type}"`);
+                    const oldTypeKey = (oldEvent.type ?? []).join(' / ');
+                    const newTypeKey = (eventData.type ?? []).join(' / ');
+                    if (oldTypeKey !== newTypeKey) {
+                        changes.push(`שינה את סוג האירוע מ-"${oldTypeKey}" ל-"${newTypeKey}"`);
                     }
                     const oldDateStr = new Date(oldEvent.date).toLocaleString('he-IL');
                     const newDateStr = new Date(eventData.date).toLocaleString('he-IL');
                     if (oldDateStr !== newDateStr) {
                         changes.push(`שינה את התאריך מ-${oldDateStr} ל-${newDateStr}`);
                     }
-                    if (oldEvent.description !== eventData.description) changes.push('עדכן את התיאור');
+                    if (oldEvent.description !== eventData.description) {
+                        changes.push(hebrewDescriptionChangeLine(oldEvent.description, eventData.description || ''));
+                    }
+                    const linkLine = hebrewLinkedListChangeLine(oldEvent.linkedTo, eventData.linkedTo ?? []);
+                    if (linkLine) changes.push(linkLine);
 
-                    const newHistoryEntry =
-                        changes.length > 0
-                            ? { user: 'אני', timestamp: new Date().toISOString(), summary: changes.join(', ') }
-                            : null;
-                    const updatedHistory = newHistoryEntry
-                        ? [newHistoryEntry, ...(oldEvent.history || [])]
-                        : oldEvent.history;
+                    const ts2 = new Date().toISOString();
+                    const newHistoryEntries2: HistoryEntry[] = changes.map((summary) => ({
+                        user: actorDisplayName,
+                        timestamp: ts2,
+                        summary,
+                    }));
+                    const updatedHistory =
+                        newHistoryEntries2.length > 0
+                            ? [...newHistoryEntries2, ...(oldEvent.history || [])]
+                            : oldEvent.history;
 
-                    return { ...oldEvent, ...eventData, coordinator: 'אני', history: updatedHistory } as Event;
+                    return { ...oldEvent, ...eventData, coordinator: actorDisplayName, history: updatedHistory } as Event;
                 }),
             );
         } else {
@@ -409,10 +571,10 @@ const EventsView: React.FC<EventsViewProps> = ({
                 type: eventData.type,
                 date: eventData.date,
                 description: eventData.description || '',
-                coordinator: 'אני',
+                coordinator: actorDisplayName,
                 status: 'עתידי',
                 linkedTo: defaultLinked(),
-                history: [{ user: 'אני', timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }],
+                history: [{ user: actorDisplayName, timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }],
             };
             setEvents([newEvent, ...events]);
         }
@@ -424,7 +586,10 @@ const EventsView: React.FC<EventsViewProps> = ({
         let active = true;
         setIsLoadingEvents(true);
         setEventsLoadError(null);
-        fetch(`${apiBase}/api/candidates/${resolvedCandidateId}/events`)
+        fetch(`${apiBase}/api/candidates/${resolvedCandidateId}/events`, {
+            headers: getEventFetchHeaders(false),
+            cache: 'no-store',
+        })
             .then((r) => {
                 if (!r.ok) throw new Error('load');
                 return r.json();
@@ -446,6 +611,25 @@ const EventsView: React.FC<EventsViewProps> = ({
             active = false;
         };
     }, [hasPersistedCandidate, apiBase, resolvedCandidateId, t]);
+
+    useEffect(() => {
+        if (!apiBase || !hasPersistedCandidate || !resolvedCandidateId) {
+            setEntityAuditItems([]);
+            return;
+        }
+        let cancelled = false;
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        fetchAuditLogsByEntity(apiBase, token, 'candidate', resolvedCandidateId, { page: 1, pageSize: 500 })
+            .then((r) => {
+                if (!cancelled) setEntityAuditItems(r.items);
+            })
+            .catch(() => {
+                if (!cancelled) setEntityAuditItems([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, hasPersistedCandidate, resolvedCandidateId]);
     
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -464,8 +648,15 @@ const EventsView: React.FC<EventsViewProps> = ({
 
             if (fromDate && eventDate < fromDate) return false;
             if (toDate && eventDate > toDate) return false;
-            if (filters.coordinator !== 'הכל' && event.coordinator !== filters.coordinator) return false;
-            if (filters.eventType !== 'הכל' && event.type !== filters.eventType) return false;
+            if (filters.coordinator.length > 0 && !filters.coordinator.includes(event.coordinator)) {
+                return false;
+            }
+            if (
+                filters.eventType.length > 0 &&
+                !(event.type || []).some((t) => filters.eventType.includes(t))
+            ) {
+                return false;
+            }
             return true;
         });
 
@@ -484,6 +675,63 @@ const EventsView: React.FC<EventsViewProps> = ({
         }
         return filtered;
     }, [events, filters, sortConfig]);
+
+    const getMergedSortValue = useCallback((row: MergedRow<Event>, columnKey: string): string => {
+        if (row.kind === 'audit') {
+            const e = row.entry;
+            switch (columnKey) {
+                case 'type':
+                    return `ביקורת ${e.action}`;
+                case 'title':
+                    return e.description;
+                case 'date':
+                    return e.timestamp;
+                case 'coordinator':
+                    return e.user.name || e.user.email || '';
+                case 'status':
+                    return e.level;
+                case 'linkedTo':
+                    return '';
+                default:
+                    return '';
+            }
+        }
+        const ev = row.event;
+        switch (columnKey) {
+            case 'type':
+                return (ev.type || []).join(' ');
+            case 'title':
+                return String(ev.description || '');
+            case 'date':
+                return ev.date;
+            case 'coordinator':
+                return ev.coordinator || '';
+            case 'status':
+                return ev.status || '';
+            case 'linkedTo':
+                return (ev.linkedTo || []).map((l) => `${l.type}:${l.name}`).join(' ');
+            default:
+                return '';
+        }
+    }, []);
+
+    const displayedRows = useMemo(() => {
+        const auditFiltered = filterAuditByDateRange(entityAuditItems, filters.fromDate, filters.toDate);
+        const merged = mergeJournalAndAudit(
+            sortedAndFilteredEvents,
+            (e) => new Date(e.date).getTime(),
+            auditFiltered,
+        );
+        if (!sortConfig) return merged;
+        return sortMergedByColumn(merged, sortConfig.key, sortConfig.direction, getMergedSortValue);
+    }, [
+        sortedAndFilteredEvents,
+        entityAuditItems,
+        filters.fromDate,
+        filters.toDate,
+        sortConfig,
+        getMergedSortValue,
+    ]);
 
     const handleColumnToggle = (columnId: string) => {
         setVisibleColumns(prev => {
@@ -521,16 +769,29 @@ const EventsView: React.FC<EventsViewProps> = ({
     const renderCell = (event: Event, columnId: string, isMobile: boolean = false, isExpanded: boolean = false) => {
         switch (columnId) {
             case 'type': {
-                const chip = eventTypeChipClasses(event.type);
-                return <span className={`text-[10px] sm:text-xs font-bold px-2 sm:px-2.5 py-0.5 sm:py-1 rounded-md sm:rounded-full ${chip.bg} ${chip.text} border border-current/10 shadow-sm`}>{event.type}</span>;
-            }
-            case 'title': 
+                const types = event.type || [];
+                if (types.length === 0) return null;
                 return (
-                    <div className="flex flex-col gap-0.5 max-w-[400px]">
-                         <div className={`text-[13px] text-text-muted leading-relaxed transition-all duration-300 ${isExpanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>
-                             {event.description || event.type}
-                         </div>
+                    <div className="flex flex-wrap gap-1">
+                        {types.map((t) => {
+                            const chip = eventTypeChipClasses(t);
+                            return (
+                                <span
+                                    key={t}
+                                    className={`text-xs font-semibold px-2.5 py-1 rounded-full ${chip.bg} ${chip.text}`}
+                                >
+                                    {t}
+                                </span>
+                            );
+                        })}
                     </div>
+                );
+            }
+            case 'title':
+                return (
+                    <span className={`font-semibold text-text-default ${isMobile || !isExpanded ? 'line-clamp-2' : 'whitespace-pre-wrap'}`}>
+                        {event.description || (event.type || []).join(' / ')}
+                    </span>
                 );
             case 'date': return <span className="flex items-center gap-2"><CalendarIcon className="w-4 h-4 text-text-subtle"/> {new Date(event.date).toLocaleString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>;
             case 'status': return <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>;
@@ -548,6 +809,85 @@ const EventsView: React.FC<EventsViewProps> = ({
                 );
             default: return (event as any)[columnId] || '-';
         }
+    };
+
+    const auditActionHe: Record<string, string> = {
+        create: 'יצירה',
+        update: 'עדכון',
+        delete: 'מחיקה',
+        login: 'התחברות',
+        export: 'ייצוא',
+        system: 'מערכת',
+    };
+
+    const renderAuditCell = (entry: AuditLogEntry, columnId: string) => {
+        switch (columnId) {
+            case 'type':
+                return (
+                    <div className="flex flex-wrap gap-1">
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
+                            יומן ביקורת
+                        </span>
+                        <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
+                            {auditActionHe[entry.action] || entry.action}
+                        </span>
+                    </div>
+                );
+            case 'title':
+                return (
+                    <span className="font-semibold text-text-default line-clamp-2 break-words">
+                        {entry.description || '—'}
+                    </span>
+                );
+            case 'date':
+                return (
+                    <span className="flex items-center gap-2">
+                        <CalendarIcon className="w-4 h-4 text-text-subtle" />
+                        {new Date(entry.timestamp).toLocaleString('he-IL', {
+                            day: '2-digit',
+                            month: '2-digit',
+                            year: 'numeric',
+                            hour: '2-digit',
+                            minute: '2-digit',
+                        })}
+                    </span>
+                );
+            case 'coordinator':
+                return <span>{entry.user.name || entry.user.email || '—'}</span>;
+            case 'status':
+                return (
+                    <span
+                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${
+                            entry.level === 'error' || entry.level === 'critical'
+                                ? 'bg-red-100 text-red-800'
+                                : entry.level === 'warning'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-slate-100 text-slate-700'
+                        }`}
+                    >
+                        {entry.level}
+                    </span>
+                );
+            case 'linkedTo':
+                return <span className="text-text-subtle">—</span>;
+            default:
+                return '—';
+        }
+    };
+
+    const mergeRowKey = (row: MergedRow<Event>) =>
+        row.kind === 'journal' ? eventIdStr(row.event.id) : `audit:${row.entry.id}`;
+
+    const toggleMergedRow = (row: MergedRow<Event>) => {
+        const key = mergeRowKey(row);
+        setExpandedRowId((prev) => {
+            if (prev === key) {
+                setHistoryVisibleEventId(null);
+                return null;
+            }
+            setHistoryVisibleEventId(null);
+            return key;
+        });
     };
 
     if (!hasPersistedCandidate) {
@@ -571,20 +911,26 @@ const EventsView: React.FC<EventsViewProps> = ({
                 <div className="p-4 bg-bg-subtle rounded-xl border border-border-default w-full">
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 items-end">
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_type')}</label>
-                            <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
-                                {eventTypeFilterOptions.map((opt) => (
-                                    <option key={opt} value={opt}>
-                                        {opt}
-                                    </option>
-                                ))}
-                            </select>
+                            <label htmlFor="filter-event-type" className="block text-xs font-semibold text-text-muted mb-1">
+                                {t('job_events.filter_type')}
+                            </label>
+                            <EventsFilterMultiselect
+                                triggerId="filter-event-type"
+                                options={eventTypeMultiOptions}
+                                value={filters.eventType}
+                                onChange={(eventType) => setFilters((prev) => ({ ...prev, eventType }))}
+                            />
                         </div>
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_recruiter')}</label>
-                            <select name="coordinator" value={filters.coordinator} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none">
-                                {coordinatorOptions.map(opt => <option key={opt}>{opt}</option>)}
-                            </select>
+                            <label htmlFor="filter-coordinator" className="block text-xs font-semibold text-text-muted mb-1">
+                                {t('job_events.filter_recruiter')}
+                            </label>
+                            <EventsFilterMultiselect
+                                triggerId="filter-coordinator"
+                                options={coordinatorMultiOptions}
+                                value={filters.coordinator}
+                                onChange={(coordinator) => setFilters((prev) => ({ ...prev, coordinator }))}
+                            />
                         </div>
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('job_events.filter_from')}</label>
@@ -610,11 +956,11 @@ const EventsView: React.FC<EventsViewProps> = ({
             </div>
             
             <main className="flex-1 overflow-y-auto">
-            {sortedAndFilteredEvents.length > 0 ? (
+            {displayedRows.length > 0 ? (
                 viewMode === 'table' ? (
-                <div className="overflow-x-auto sm:border sm:border-border-default sm:rounded-lg">
-                    <table className="w-full text-sm text-right min-w-0 sm:min-w-[800px]">
-                        <thead className="hidden sm:table-header-group text-xs text-text-muted uppercase bg-bg-subtle">
+                <div className="overflow-x-auto border border-border-default rounded-lg">
+                    <table className="w-full text-sm text-right min-w-[800px]">
+                        <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                             <tr>
                                 {visibleColumns.map((colId, index) => {
                                     const col = allColumns.find(c => c.id === colId);
@@ -640,92 +986,122 @@ const EventsView: React.FC<EventsViewProps> = ({
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
-                        {sortedAndFilteredEvents.map(event => {
+                        {displayedRows.map((row) => {
+                            const rKey = mergeRowKey(row);
+                            const isExpanded = expandedRowId === rKey;
+                            if (row.kind === 'audit') {
+                                const a = row.entry;
+                                return (
+                                    <React.Fragment key={rKey}>
+                                        <tr
+                                            onClick={() => toggleMergedRow(row)}
+                                            className="hover:bg-bg-hover cursor-pointer group bg-slate-50/50"
+                                        >
+                                            {visibleColumns.map((colId) => (
+                                                <td
+                                                    key={colId}
+                                                    className="p-4 text-text-muted border-b border-border-subtle group-hover:bg-bg-hover transition-colors"
+                                                >
+                                                    {renderAuditCell(a, colId)}
+                                                </td>
+                                            ))}
+                                            <td className="p-4 text-center border-b border-border-subtle text-text-subtle text-xs">
+                                                ביקורת
+                                            </td>
+                                            <td className="p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-16 border-b border-border-subtle" />
+                                        </tr>
+                                        {isExpanded && (
+                                            <tr className="bg-slate-50/80">
+                                                <td
+                                                    colSpan={visibleColumns.length + 2}
+                                                    className="px-8 py-4 text-sm text-text-muted border-b border-border-subtle"
+                                                >
+                                                    <p className="font-bold text-text-default mb-1">יומן ביקורת מערכת</p>
+                                                    <p>
+                                                        <span className="font-bold">תיאור:</span> {a.description || '—'}
+                                                    </p>
+                                                    <p className="text-xs text-text-subtle mt-2">
+                                                        {new Date(a.timestamp).toLocaleString('he-IL')} •{' '}
+                                                        {formatRelativeTime(a.timestamp)}
+                                                    </p>
+                                                    {a.changes && a.changes.length > 0 && (
+                                                        <ul className="mt-2 text-xs space-y-1 pr-2 border-r-2 border-border-default">
+                                                            {a.changes.map((c, i) => (
+                                                                <li key={i}>
+                                                                    <span className="font-medium">{c.field}:</span>{' '}
+                                                                    {String(c.oldValue ?? '—')} → {String(c.newValue ?? '—')}
+                                                                </li>
+                                                            ))}
+                                                        </ul>
+                                                    )}
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </React.Fragment>
+                                );
+                            }
+                            const event = row.event;
                             const evKey = eventIdStr(event.id);
-                            const isExpanded = expandedRowId === evKey;
                             return (
                                 <React.Fragment key={evKey}>
-                                    <tr 
-                                        onClick={() => toggleRow(event.id)} 
-                                        className={`
-                                            hover:bg-bg-hover cursor-pointer transition-all duration-300
-                                            flex flex-col sm:table-row p-3 sm:p-0 relative group
-                                            ${isExpanded ? 'bg-primary-50/10 sm:border-b-0' : 'border-b border-border-subtle'}
-                                        `}
-                                    >
-                                        <div className="sm:hidden flex items-start justify-between gap-3">
-                                            <div className="flex-1 flex flex-col gap-1.5">
-                                                <div className="flex items-center gap-2">
-                                                    {renderCell(event, 'type')}
-                                                    <span className="text-[10px] text-text-muted font-mono">{formatRelativeTime(event.date)}</span>
-                                                </div>
-                                                <div className="flex flex-col gap-0.5 max-w-[400px]">
-                                                    <div className={`text-[12px] sm:text-[13px] text-text-muted transition-all duration-300 mt-0.5 ${isExpanded ? 'whitespace-pre-wrap' : 'line-clamp-2'}`}>
-                                                        {event.description || event.type}
-                                                    </div>
-                                                </div>
-
-                                                <div className="flex items-center gap-3 mt-1 text-text-subtle font-medium">
-                                                    <div className="text-[10px] flex items-center gap-1">
-                                                        <ClockIcon className="w-3 h-3"/>
-                                                        {new Date(event.date).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' })}
-                                                    </div>
-                                                    <div className="text-[10px] flex items-center gap-1">
-                                                        <UserIcon className="w-3 h-3 opacity-60"/>
-                                                        {event.coordinator}
-                                                    </div>
-                                                    {event.linkedTo && event.linkedTo.length > 0 && (
-                                                        <div className="text-[10px] flex items-center flex-wrap gap-x-2 gap-y-1">
-                                                            {event.linkedTo.map((link, idx) => (
-                                                                <div key={idx} className="text-primary-600 bg-primary-50 px-1.5 py-0.5 rounded flex items-center flex-row-reverse gap-1 border border-primary-100">
-                                                                    {getLinkIcon(link.type)}
-                                                                    {link.name}
-                                                                </div>
-                                                            ))}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <div className="flex flex-col items-center gap-2">
-                                                <div className={`text-[10px] font-extrabold px-2.5 py-0.5 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text} shadow-sm border border-current/10`}>
-                                                    {event.status}
-                                                </div>
-                                                <div onClick={(e) => e.stopPropagation()} className="relative inline-block" ref={openMenuId === evKey ? menuRef : null}>
-                                                    <button type="button" onClick={() => setOpenMenuId(openMenuId === evKey ? null : evKey)} className="p-2 rounded-xl hover:bg-bg-hover text-text-muted transition-colors">
-                                                        <EllipsisVerticalIcon className="w-5 h-5"/>
-                                                    </button>
-                                                    {openMenuId === evKey && (
-                                                        <div className="absolute left-0 mt-2 w-44 bg-bg-card rounded-2xl shadow-2xl border border-border-default z-20 animate-in fade-in zoom-in-95 duration-150 p-1 text-right">
-                                                            <button type="button" onClick={() => handleEditEvent(event)} className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-bg-hover rounded-xl text-text-default font-semibold">
-                                                                <PencilIcon className="w-4 h-4 opacity-70"/> ערוך
-                                                            </button>
-                                                            <button type="button" onClick={() => { setOpenMenuId(null); setHistoryVisibleEventId(evKey); }} className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-bg-hover rounded-xl text-text-default font-semibold">
-                                                                <ClockIcon className="w-4 h-4 opacity-70"/> היסטוריית שינויים
-                                                            </button>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        </div>
-
+                                    <tr onClick={() => toggleMergedRow(row)} className="hover:bg-bg-hover cursor-pointer group">
                                         {visibleColumns.map(colId => (
-                                            <td key={colId} className="hidden sm:table-cell p-4 text-text-muted border-b border-border-subtle group-hover:bg-bg-hover transition-colors">
+                                            <td key={colId} className="p-4 text-text-muted border-b border-border-subtle group-hover:bg-bg-hover transition-colors">
                                                 {renderCell(event, colId, false, isExpanded)}
                                             </td>
                                         ))}
-                                        <td className="hidden sm:table-cell p-4 text-center border-b border-border-subtle group-hover:bg-bg-hover transition-colors">
+                                        <td className="p-4 text-center border-b border-border-subtle group-hover:bg-bg-hover transition-colors">
                                             <div onClick={(e) => e.stopPropagation()} className="relative inline-block" ref={openMenuId === evKey ? menuRef : null}>
-                                                <button type="button" onClick={() => setOpenMenuId(openMenuId === evKey ? null : evKey)} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors"><EllipsisVerticalIcon className="w-5 h-5"/></button>
+                                                <button type="button" onClick={() => setOpenMenuId(openMenuId === evKey ? null : evKey)} className="p-2 rounded-full hover:bg-bg-hover text-text-muted"><EllipsisVerticalIcon className="w-5 h-5"/></button>
                                                 {openMenuId === evKey && (
-                                                    <div className="absolute left-0 sm:left-auto sm:right-0 mt-2 w-44 bg-bg-card rounded-2xl shadow-2xl border border-border-default z-20 animate-in fade-in zoom-in-95 duration-150 p-1 text-right">
-                                                        <button type="button" onClick={() => handleEditEvent(event)} className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-bg-hover rounded-xl text-text-default font-semibold"><PencilIcon className="w-4 h-4 opacity-70"/> ערוך</button>
-                                                        <button type="button" onClick={() => { setOpenMenuId(null); setHistoryVisibleEventId(evKey); }} className="w-full text-right flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-bg-hover rounded-xl text-text-default font-semibold"><ClockIcon className="w-4 h-4 opacity-70"/> היסטוריית שינויים</button>
+                                                    <div className="absolute left-0 mt-2 w-40 bg-bg-card rounded-lg shadow-xl border border-border-default z-10 text-right">
+                                                        <button type="button" onClick={() => handleEditEvent(event)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm hover:bg-bg-hover"><PencilIcon className="w-4 h-4"/> ערוך</button>
+                                                        <button type="button" onClick={() => handleDeleteEvent(event.id)} className="w-full text-right flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"><TrashIcon className="w-4 h-4"/> מחק</button>
                                                     </div>
                                                 )}
                                             </div>
                                         </td>
-                                        <td className="hidden sm:table-cell p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-16 border-b border-border-subtle transition-colors" />
+                                        <td className="p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-16 border-b border-border-subtle" />
                                     </tr>
+                                    {isExpanded && (
+                                        <tr className="bg-primary-50/20">
+                                            <td colSpan={visibleColumns.length + 2} className="px-8 py-4 text-sm text-text-muted border-b border-border-subtle">
+                                               
+                                                <div className="mt-4">
+                                                    <button
+                                                        type="button"
+                                                        onClick={(e) => { e.stopPropagation(); setHistoryVisibleEventId((prev) => (prev === evKey ? null : evKey)); }}
+                                                        className="flex items-center gap-2 text-xs font-semibold hover:text-primary-600"
+                                                    >
+                                                        <ClockIcon className="w-4 h-4" />
+                                                        <span>היסטוריית שינויים</span>
+                                                    </button>
+                                                    {historyVisibleEventId === evKey && (
+                                                        <div className="mt-2 pt-2 border-t space-y-2 text-xs text-text-subtle">
+                                                            {event.history && event.history.length > 0 ? (
+                                                                event.history.map((entry, index) => (
+                                                                    <p key={index} className="flex items-start gap-2 text-start">
+                                                                        <span className="font-semibold text-text-muted shrink-0">
+                                                                            {entry.user}:
+                                                                        </span>
+                                                                        <span className="min-w-0">
+                                                                            <span className="break-words">{entry.summary}</span>
+                                                                            <span className="whitespace-nowrap">
+                                                                                {' '}
+                                                                                • {formatRelativeTime(entry.timestamp)}
+                                                                            </span>
+                                                                        </span>
+                                                                    </p>
+                                                                ))
+                                                            ) : (
+                                                                <p>אין היסטוריית שינויים.</p>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    )}
                                 </React.Fragment>
                             );
                         })}
@@ -734,22 +1110,64 @@ const EventsView: React.FC<EventsViewProps> = ({
                 </div>
                 ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {sortedAndFilteredEvents.map(event => (
+                    {displayedRows.map((row) => {
+                        if (row.kind === 'audit') {
+                            const a = row.entry;
+                            const rKey = mergeRowKey(row);
+                            return (
+                                <div
+                                    key={rKey}
+                                    onClick={() => toggleMergedRow(row)}
+                                    className="bg-bg-card rounded-lg shadow-sm border-r-4 border-slate-300 p-4 flex flex-col justify-between cursor-pointer"
+                                >
+                                    <div>
+                                        <div className="flex justify-between items-start gap-2">
+                                            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-800">
+                                                יומן ביקורת
+                                            </span>
+                                            <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800">
+                                                {auditActionHe[a.action] || a.action}
+                                            </span>
+                                        </div>
+                                        <p className={`text-[13px] text-text-muted my-3 ${expandedRowId === rKey ? '' : 'line-clamp-3'}`}>
+                                            {a.description || '—'}
+                                        </p>
+                                        <p className="text-xs text-text-muted flex items-center gap-1.5">
+                                            <CalendarIcon className="w-4 h-4 text-text-subtle" />
+                                            {new Date(a.timestamp).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}
+                                        </p>
+                                    </div>
+                                    <div className="mt-3 pt-3 border-t border-border-default text-xs text-text-muted">
+                                        {a.user.name || a.user.email || '—'}
+                                    </div>
+                                </div>
+                            );
+                        }
+                        const event = row.event;
+                        const types = event.type || [];
+                        const primaryType = types[0] ?? '';
+                        const primaryChip = eventTypeChipClasses(primaryType);
+                        return (
                         <div
                             key={eventIdStr(event.id)}
-                            onClick={() => toggleRow(event.id)}
-                            className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${eventTypeChipClasses(event.type).border} p-4 flex flex-col justify-between cursor-pointer`}
+                            onClick={() => toggleMergedRow(row)}
+                            className={`bg-bg-card rounded-lg shadow-sm border-r-4 ${primaryChip.border} p-4 flex flex-col justify-between cursor-pointer`}
                         >
                             <div>
-                                <div className="flex justify-between items-start">
-                                    <span
-                                        className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventTypeChipClasses(event.type).bg} ${eventTypeChipClasses(event.type).text}`}
-                                    >
-                                        {event.type}
-                                    </span>
-                                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
+                                <div className="flex justify-between items-start gap-2">
+                                    <div className="flex flex-wrap gap-1">
+                                        {types.map((t) => {
+                                            const chip = eventTypeChipClasses(t);
+                                            return (
+                                                <span key={t} className={`text-xs font-semibold px-2.5 py-1 rounded-full ${chip.bg} ${chip.text}`}>
+                                                    {t}
+                                                </span>
+                                            );
+                                        })}
+                                    </div>
+                                    <span className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
                                 </div>
-                                <p className={`text-[13px] text-text-muted my-3 transition-all duration-300 ${expandedRowId === eventIdStr(event.id) ? '' : 'line-clamp-2'}`}>{event.description || event.type}</p>
+                                <p className={`text-[13px] text-text-muted my-3 transition-all duration-300 ${expandedRowId === eventIdStr(event.id) ? '' : 'line-clamp-2'}`}>{event.description || types.join(' / ')}</p>
                                 
                                 {event.linkedTo && event.linkedTo.length > 0 && (
                                     <div className="flex flex-wrap gap-2 mb-3">
@@ -768,10 +1186,12 @@ const EventsView: React.FC<EventsViewProps> = ({
                                 <span className="text-xs text-text-muted">נוצר ע"י: {event.coordinator}</span>
                                 <div className="flex gap-1">
                                     <button onClick={(e) => { e.stopPropagation(); handleEditEvent(event); }} className="p-1.5 rounded-full hover:bg-bg-hover text-text-muted"><PencilIcon className="w-4 h-4"/></button>
+                                    <button onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event.id); }} className="p-1.5 rounded-full hover:bg-red-100 text-red-500"><TrashIcon className="w-4 h-4"/></button>
                                 </div>
                             </div>
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
                 )
             ) : (
@@ -782,60 +1202,6 @@ const EventsView: React.FC<EventsViewProps> = ({
                 </div>
             )}
             </main>
-
-            {/* History Modal */}
-            <AnimatePresence>
-                {historyVisibleEventId && (
-                    <motion.div 
-                        initial={{ opacity: 0 }} 
-                        animate={{ opacity: 1 }} 
-                        exit={{ opacity: 0 }} 
-                        className="fixed inset-0 z-[100] flex items-center justify-center bg-gray-900/40 backdrop-blur-sm p-4" 
-                        onClick={() => setHistoryVisibleEventId(null)}
-                    >
-                        <motion.div 
-                            initial={{ scale: 0.95, opacity: 0 }} 
-                            animate={{ scale: 1, opacity: 1 }} 
-                            exit={{ scale: 0.95, opacity: 0 }} 
-                            onClick={e => e.stopPropagation()}
-                            className="bg-white rounded-2xl shadow-xl w-full max-w-lg flex flex-col max-h-[85vh] overflow-hidden"
-                        >
-                            <div className="flex items-center justify-between px-6 py-4 border-b border-border-default bg-gray-50/50">
-                                <div className="flex items-center gap-3">
-                                    <div className="w-8 h-8 rounded-full bg-primary-100 flex items-center justify-center">
-                                        <ClockIcon className="w-4 h-4 text-primary-600"/>
-                                    </div>
-                                    <h3 className="font-bold text-[15px] tracking-tight text-text-default">היסטוריית שינויים</h3>
-                                </div>
-                                <button onClick={() => setHistoryVisibleEventId(null)} className="p-2 rounded-xl hover:bg-gray-200 text-gray-500 transition-colors">
-                                    <XMarkIcon className="w-5 h-5"/>
-                                </button>
-                            </div>
-                            <div className="p-6 overflow-y-auto space-y-7 relative">
-                                {events.find(e => eventIdStr(e.id) === historyVisibleEventId)?.history?.map((entry, index, arr) => (
-                                    <div key={index} className="flex gap-5 relative group">
-                                        {index !== arr.length - 1 && <div className="absolute top-7 right-[9px] w-[2px] h-[calc(100%+12px)] bg-gray-100"></div>}
-                                        <div className="w-[20px] h-[20px] rounded-full border-[4px] border-primary-500 bg-white shadow-sm mt-0.5 flex-shrink-0 z-10" />
-                                        <div className="flex-1 pb-2">
-                                            <div className="flex justify-between items-start mb-1.5 leading-none">
-                                                <span className="font-extrabold text-[14px] text-text-default">{entry.user}</span>
-                                                <span className="text-[12px] text-text-subtle font-semibold whitespace-nowrap ml-2 opacity-80">{formatRelativeTime(entry.timestamp)}</span>
-                                            </div>
-                                            <p className="text-[13px] text-text-muted leading-relaxed font-medium">{entry.summary}</p>
-                                        </div>
-                                    </div>
-                                ))}
-                                {(!events.find(e => eventIdStr(e.id) === historyVisibleEventId)?.history || events.find(e => eventIdStr(e.id) === historyVisibleEventId)?.history?.length === 0) && (
-                                    <div className="text-center py-10 flex flex-col items-center">
-                                         <ClockIcon className="w-10 h-10 text-gray-300 mb-3" />
-                                         <span className="text-gray-500 text-sm font-semibold">אין היסטוריית שינויים.</span>
-                                    </div>
-                                )}
-                            </div>
-                        </motion.div>
-                    </motion.div>
-                )}
-            </AnimatePresence>
 
             <EventFormModal 
                 isOpen={isModalOpen}

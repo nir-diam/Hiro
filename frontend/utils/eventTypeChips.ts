@@ -11,3 +11,22 @@ const FALLBACK = { bg: 'bg-slate-100', text: 'text-slate-800', border: 'border-s
 export function eventTypeChipClasses(type: string): { bg: string; text: string; border: string } {
   return LEGACY_CHIPS[type] ?? FALLBACK;
 }
+
+/**
+ * Coerce any incoming `type` (string | string[] | null | undefined) into a
+ * clean string[]. Used everywhere on the read side so legacy single-string
+ * events stored before the multi-select migration still render correctly.
+ */
+export function normalizeEventTypes(raw: unknown): string[] {
+  if (Array.isArray(raw)) {
+    return raw.map((v) => String(v || '').trim()).filter(Boolean);
+  }
+  const s = String(raw || '').trim();
+  return s ? [s] : [];
+}
+
+/** Convenience: pick the first type for layouts that only render one chip. */
+export function primaryEventType(raw: unknown, fallback = ''): string {
+  const list = normalizeEventTypes(raw);
+  return list[0] ?? fallback;
+}
