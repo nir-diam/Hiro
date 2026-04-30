@@ -317,6 +317,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                 candidateName: finalResumeData.name || 'מועמד',
                 candidatePhone: phone,
                 candidateEmail: emailAddr || undefined,
+                candidateId: candidateIdentifier || undefined,
             });
         }
     }

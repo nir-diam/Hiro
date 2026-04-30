@@ -7,13 +7,6 @@ function authHeaders(): HeadersInit {
     return h;
 }
 
-export type JobComposeRow = {
-    id: string;
-    title: string;
-    client: string;
-    postingCode?: string | null;
-};
-
 async function parseErr(res: Response): Promise<string> {
     try {
         const j = (await res.json()) as { message?: string };
@@ -23,25 +16,22 @@ async function parseErr(res: Response): Promise<string> {
     }
 }
 
-/** Jobs scoped to the signed-in user's client (or all jobs when no tenant). */
-export async function fetchJobsForCompose(): Promise<JobComposeRow[]> {
-    const res = await fetch(`${apiBase()}/api/jobs/for-compose`, {
-        headers: authHeaders(),
-        cache: 'no-store',
-    });
-    if (!res.ok) throw new Error(await parseErr(res));
-    return res.json();
-}
-
-/** POST /api/jobs/log-smart-import-open — audit when staff opens AI smart-import modal on NewJobView */
-export async function logJobSmartImportModalOpen(body: {
+export type LogWhatsappOpenBody = {
+    candidateId?: string | null;
+    candidateName?: string;
+    phone?: string;
+    messagePreview?: string;
+    templateId?: string | null;
     jobId?: string | null;
-    jobTitle?: string;
-    context?: string;
-}): Promise<void> {
+};
+
+/** POST /api/messaging/log-whatsapp-open — writes audit_logs on the server */
+export async function logWhatsappComposeOpen(body: LogWhatsappOpenBody): Promise<void> {
     const base = apiBase();
-    if (!base) return;
-    const res = await fetch(`${base}/api/jobs/log-smart-import-open`, {
+    if (!base) {
+        throw new Error('לא מוגדר VITE_API_BASE — לא ניתן לרשום ביקורת. הגדר את כתובת ה-API ונסה שוב.');
+    }
+    const res = await fetch(`${base}/api/messaging/log-whatsapp-open`, {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify(body),

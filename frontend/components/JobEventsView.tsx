@@ -5,6 +5,7 @@ import {
     CalendarIcon, TableCellsIcon, Squares2X2Icon,
     EllipsisVerticalIcon, Cog6ToothIcon,
 } from './Icons';
+import { EventsFilterMultiselect } from './EventsFilterMultiselect';
 import AddJobEventModal from './AddJobEventModal';
 import { useLanguage } from '../context/LanguageContext';
 import { eventTypeChipClasses } from '../utils/eventTypeChips';
@@ -16,6 +17,19 @@ import {
   type MergedRow,
 } from '../utils/mergeJournalAndAudit';
 import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLogsApi';
+
+/** Audit type filter — must match multiselect options and audit row rendering. */
+const AUDIT_LOG_FILTER_LABEL = 'יומן ביקורת';
+const AUDIT_ACTION_HE: Record<string, string> = {
+    create: 'יצירה',
+    update: 'עדכון',
+    delete: 'מחיקה',
+    login: 'התחברות',
+    export: 'ייצוא',
+    system: 'מערכת',
+};
+
+const JOB_EVENT_TYPE_LABELS = ['סטטוס מועמד', 'עריכת משרה', 'הערה', 'הוספת מועמד', 'מערכת'];
 
 // --- TYPES ---
 export type JobEventStatus = 'עתידי' | 'הושלם' | 'בוטל';
@@ -53,8 +67,6 @@ const eventStatusStyles: { [key in JobEventStatus]: { bg: string; text: string }
     הושלם: { bg: 'bg-accent-100', text: 'text-accent-800' },
     בוטל: { bg: 'bg-red-100', text: 'text-red-800' },
 };
-
-const eventTypeOptions = ['הכל', 'סטטוס מועמד', 'עריכת משרה', 'הערה', 'הוספת מועמד', 'מערכת'];
 
 export const getJobEventApiHeaders = (json: boolean): Record<string, string> => {
     const h: Record<string, string> = { Accept: 'application/json' };
@@ -190,8 +202,8 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
 
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [eventFilters, setEventFilters] = useState({
-        eventType: 'הכל',
-        coordinator: 'הכל',
+        eventType: [] as string[],
+        coordinator: [] as string[],
         fromDate: '',
         toDate: '',
     });
@@ -212,7 +224,7 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
 
     const coordinatorOptions = useMemo(() => {
         const seen = new Set<string>();
-        const out: string[] = ['הכל'];
+        const out: string[] = [];
         for (const e of jobEvents) {
             if (e.user && !seen.has(e.user)) {
                 seen.add(e.user);
@@ -221,6 +233,51 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
         }
         return out;
     }, [jobEvents]);
+
+    const eventTypeFilterOptions = useMemo(() => {
+        const seen = new Set<string>();
+        const out: string[] = ['הכל'];
+        for (const t of JOB_EVENT_TYPE_LABELS) {
+            if (t && !seen.has(t)) {
+                seen.add(t);
+                out.push(t);
+            }
+        }
+        for (const e of jobEvents) {
+            if (e.type && !seen.has(e.type)) {
+                seen.add(e.type);
+                out.push(e.type);
+            }
+        }
+        if (!seen.has(AUDIT_LOG_FILTER_LABEL)) {
+            seen.add(AUDIT_LOG_FILTER_LABEL);
+            out.push(AUDIT_LOG_FILTER_LABEL);
+        }
+        for (const he of Object.values(AUDIT_ACTION_HE)) {
+            if (he && !seen.has(he)) {
+                seen.add(he);
+                out.push(he);
+            }
+        }
+        for (const row of entityAuditItems) {
+            const raw = String(row.action || '').trim();
+            const he = AUDIT_ACTION_HE[raw] || raw;
+            if (he && !seen.has(he)) {
+                seen.add(he);
+                out.push(he);
+            }
+        }
+        return out;
+    }, [jobEvents, entityAuditItems]);
+
+    const eventTypeMultiOptions = useMemo(
+        () => eventTypeFilterOptions.filter((o) => o !== 'הכל'),
+        [eventTypeFilterOptions],
+    );
+    const coordinatorMultiOptions = useMemo(
+        () => coordinatorOptions.filter((o) => o !== 'הכל'),
+        [coordinatorOptions],
+    );
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -453,8 +510,13 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
 
             if (fromDate && eventDate < fromDate) return false;
             if (toDate && eventDate > toDate) return false;
-            if (eventFilters.coordinator !== 'הכל' && event.user !== eventFilters.coordinator) return false;
-            if (eventFilters.eventType !== 'הכל' && event.type !== eventFilters.eventType) {
+            if (eventFilters.coordinator.length > 0 && !eventFilters.coordinator.includes(event.user)) {
+                return false;
+            }
+            if (
+                eventFilters.eventType.length > 0 &&
+                !eventFilters.eventType.includes(event.type)
+            ) {
                 return false;
             }
             return true;
@@ -519,9 +581,28 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
     }, []);
 
     const displayedRows = useMemo(() => {
-        const auditFiltered = jobId
+        let auditFiltered = jobId
             ? filterAuditByDateRange(entityAuditItems, eventFilters.fromDate, eventFilters.toDate)
             : [];
+
+        if (jobId && eventFilters.coordinator.length > 0) {
+            auditFiltered = auditFiltered.filter((e) => {
+                const who = String(e.user.name || '').trim() || String(e.user.email || '').trim();
+                return who && eventFilters.coordinator.includes(who);
+            });
+        }
+
+        if (jobId && eventFilters.eventType.length > 0) {
+            const sel = new Set(eventFilters.eventType);
+            auditFiltered = auditFiltered.filter((entry) => {
+                const actionHe = AUDIT_ACTION_HE[entry.action] || entry.action;
+                if (sel.has(AUDIT_LOG_FILTER_LABEL)) return true;
+                if (sel.has(actionHe)) return true;
+                if (entry.action && sel.has(entry.action)) return true;
+                return false;
+            });
+        }
+
         const merged = mergeJournalAndAudit<JobEvent>(
             sortedAndFilteredEvents,
             (e: JobEvent) => new Date(e.timestamp).getTime(),
@@ -534,6 +615,8 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
         entityAuditItems,
         eventFilters.fromDate,
         eventFilters.toDate,
+        eventFilters.coordinator,
+        eventFilters.eventType,
         jobId,
         sortConfig,
         getMergedSortValue,
@@ -615,25 +698,16 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
         }
     };
 
-    const auditActionHe: Record<string, string> = {
-        create: 'יצירה',
-        update: 'עדכון',
-        delete: 'מחיקה',
-        login: 'התחברות',
-        export: 'ייצוא',
-        system: 'מערכת',
-    };
-
     const renderAuditCell = (entry: AuditLogEntry, colId: string) => {
         switch (colId) {
             case 'type':
                 return (
                     <div className="flex flex-wrap gap-1">
                         <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-                            יומן ביקורת
+                            {AUDIT_LOG_FILTER_LABEL}
                         </span>
                         <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
-                            {auditActionHe[entry.action] || entry.action}
+                            {AUDIT_ACTION_HE[entry.action] || entry.action}
                         </span>
                     </div>
                 );
@@ -723,38 +797,32 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
             <div className="p-4 bg-bg-subtle/50 rounded-xl border border-border-default">
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 items-end">
                     <div>
-                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">
+                        <label
+                            htmlFor="job-events-filter-event-type"
+                            className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide"
+                        >
                             {t('job_events.filter_type')}
                         </label>
-                        <select
-                            name="eventType"
+                        <EventsFilterMultiselect
+                            triggerId="job-events-filter-event-type"
+                            options={eventTypeMultiOptions}
                             value={eventFilters.eventType}
-                            onChange={handleEventFilterChange}
-                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none"
-                        >
-                            {eventTypeOptions.map((opt) => (
-                                <option key={opt} value={opt}>
-                                    {opt}
-                                </option>
-                            ))}
-                        </select>
+                            onChange={(eventType) => setEventFilters((prev) => ({ ...prev, eventType }))}
+                        />
                     </div>
                     <div>
-                        <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">
+                        <label
+                            htmlFor="job-events-filter-coordinator"
+                            className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide"
+                        >
                             {t('job_events.filter_recruiter')}
                         </label>
-                        <select
-                            name="coordinator"
+                        <EventsFilterMultiselect
+                            triggerId="job-events-filter-coordinator"
+                            options={coordinatorMultiOptions}
                             value={eventFilters.coordinator}
-                            onChange={handleEventFilterChange}
-                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500/20 outline-none"
-                        >
-                            {coordinatorOptions.map((opt) => (
-                                <option key={opt} value={opt}>
-                                    {opt}
-                                </option>
-                            ))}
-                        </select>
+                            onChange={(coordinator) => setEventFilters((prev) => ({ ...prev, coordinator }))}
+                        />
                     </div>
                     <div>
                         <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">
@@ -1020,7 +1088,7 @@ const JobEventsView: React.FC<JobEventsViewProps> = ({
                                                         יומן ביקורת
                                                     </span>
                                                     <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800">
-                                                        {auditActionHe[a.action] || a.action}
+                                                        {AUDIT_ACTION_HE[a.action] || a.action}
                                                     </span>
                                                 </div>
                                                 <p

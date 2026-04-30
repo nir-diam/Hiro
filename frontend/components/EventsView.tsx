@@ -4,7 +4,7 @@ import {
     PlusIcon, ClockIcon, UserIcon, PencilIcon, SparklesIcon, TrashIcon, 
     CalendarIcon, TableCellsIcon, Squares2X2Icon, ChatBubbleBottomCenterTextIcon,
     LinkIcon, Cog6ToothIcon, EllipsisVerticalIcon, BriefcaseIcon, BuildingOffice2Icon,
-    UserGroupIcon, ChevronDownIcon
+    UserGroupIcon
 } from './Icons';
 import EventFormModal from './EventFormModal';
 import { useAuth } from '../context/AuthContext';
@@ -19,6 +19,7 @@ import {
   type MergedRow,
 } from '../utils/mergeJournalAndAudit';
 import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLogsApi';
+import { EventsFilterMultiselect } from './EventsFilterMultiselect';
 
 // --- TYPES ---
 interface HistoryEntry {
@@ -78,93 +79,21 @@ const getEventFetchHeaders = (withJson: boolean): Record<string, string> => {
   return h;
 };
 
-type EventsFilterMultiselectProps = {
-    options: string[];
-    value: string[];
-    onChange: (next: string[]) => void;
-    triggerId: string;
-};
-
-const EventsFilterMultiselect: React.FC<EventsFilterMultiselectProps> = ({
-    options,
-    value,
-    onChange,
-    triggerId,
-}) => {
-    const [open, setOpen] = useState(false);
-    const wrapRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        if (!open) return;
-        const onDoc = (e: MouseEvent) => {
-            if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-                setOpen(false);
-            }
-        };
-        document.addEventListener('mousedown', onDoc);
-        return () => document.removeEventListener('mousedown', onDoc);
-    }, [open]);
-
-    const summary =
-        value.length === 0 ? 'הכל' : value.length === 1 ? value[0] : `${value.length} נבחרו`;
-
-    const toggle = (opt: string) => {
-        if (value.includes(opt)) {
-            onChange(value.filter((x) => x !== opt));
-        } else {
-            onChange([...value, opt]);
-        }
-    };
-
-    return (
-        <div className="relative" ref={wrapRef}>
-            <button
-                type="button"
-                id={triggerId}
-                onClick={() => setOpen((o) => !o)}
-                className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm text-right flex items-center justify-between gap-2 min-h-[38px] focus:ring-2 focus:ring-primary-500/20 outline-none cursor-pointer"
-                aria-expanded={open}
-                aria-haspopup="listbox"
-            >
-                <span className="truncate flex-1 min-w-0">{summary}</span>
-                <ChevronDownIcon
-                    className={`w-4 h-4 flex-shrink-0 text-text-muted transition-transform ${open ? 'rotate-180' : ''}`}
-                />
-            </button>
-            {open && (
-                <div
-                    className="absolute z-40 mt-1 w-full min-w-0 max-h-48 overflow-y-auto bg-bg-card border border-border-default rounded-lg shadow-lg py-1.5"
-                    role="listbox"
-                    dir="rtl"
-                >
-                    {options.length === 0 ? (
-                        <div className="px-3 py-2 text-sm text-text-muted">אין אפשרויות</div>
-                    ) : (
-                        options.map((opt) => (
-                            <label
-                                key={opt}
-                                className="flex items-center gap-2.5 px-3 py-1.5 text-sm cursor-pointer hover:bg-bg-hover"
-                            >
-                                <input
-                                    type="checkbox"
-                                    checked={value.includes(opt)}
-                                    onChange={() => toggle(opt)}
-                                    className="rounded border-border-default text-primary-600 focus:ring-primary-500/30 shrink-0"
-                                />
-                                <span className="flex-1 min-w-0 truncate">{opt}</span>
-                            </label>
-                        ))
-                    )}
-                </div>
-            )}
-        </div>
-    );
-};
-
 const eventStatusStyles: { [key in EventStatus]: { bg: string; text: string; } } = {
   'עתידי': { bg: 'bg-secondary-100', text: 'text-secondary-800' },
   'הושלם': { bg: 'bg-accent-100', text: 'text-accent-800' },
   'בוטל': { bg: 'bg-red-100', text: 'text-red-800' },
+};
+
+/** Audit "סוג" column — bucket + Hebrew action; must match filter multiselect. */
+const AUDIT_LOG_FILTER_LABEL = 'יומן ביקורת';
+const AUDIT_ACTION_HE: Record<string, string> = {
+    create: 'יצירה',
+    update: 'עדכון',
+    delete: 'מחיקה',
+    login: 'התחברות',
+    export: 'ייצוא',
+    system: 'מערכת',
 };
 
 function formatRelativeTime(dateString: string) {
@@ -298,8 +227,26 @@ const EventsView: React.FC<EventsViewProps> = ({
                 }
             }
         }
+        if (!seen.has(AUDIT_LOG_FILTER_LABEL)) {
+            seen.add(AUDIT_LOG_FILTER_LABEL);
+            out.push(AUDIT_LOG_FILTER_LABEL);
+        }
+        for (const he of Object.values(AUDIT_ACTION_HE)) {
+            if (he && !seen.has(he)) {
+                seen.add(he);
+                out.push(he);
+            }
+        }
+        for (const row of entityAuditItems) {
+            const raw = String(row.action || '').trim();
+            const he = AUDIT_ACTION_HE[raw] || raw;
+            if (he && !seen.has(he)) {
+                seen.add(he);
+                out.push(he);
+            }
+        }
         return out;
-    }, [candidateEventTypeNames, events]);
+    }, [candidateEventTypeNames, events, entityAuditItems]);
 
     const eventTypeMultiOptions = useMemo(
         () => eventTypeFilterOptions.filter((o) => o !== 'הכל'),
@@ -716,8 +663,27 @@ const EventsView: React.FC<EventsViewProps> = ({
     }, []);
 
     const displayedRows = useMemo(() => {
-        const auditFiltered = filterAuditByDateRange(entityAuditItems, filters.fromDate, filters.toDate);
-        const merged = mergeJournalAndAudit(
+        let auditFiltered = filterAuditByDateRange(entityAuditItems, filters.fromDate, filters.toDate);
+
+        if (filters.coordinator.length > 0) {
+            auditFiltered = auditFiltered.filter((e) => {
+                const who = String(e.user.name || '').trim() || String(e.user.email || '').trim();
+                return who && filters.coordinator.includes(who);
+            });
+        }
+
+        if (filters.eventType.length > 0) {
+            const sel = new Set(filters.eventType);
+            auditFiltered = auditFiltered.filter((entry) => {
+                const actionHe = AUDIT_ACTION_HE[entry.action] || entry.action;
+                if (sel.has(AUDIT_LOG_FILTER_LABEL)) return true;
+                if (sel.has(actionHe)) return true;
+                if (entry.action && sel.has(entry.action)) return true;
+                return false;
+            });
+        }
+
+        const merged = mergeJournalAndAudit<Event>(
             sortedAndFilteredEvents,
             (e) => new Date(e.date).getTime(),
             auditFiltered,
@@ -729,6 +695,8 @@ const EventsView: React.FC<EventsViewProps> = ({
         entityAuditItems,
         filters.fromDate,
         filters.toDate,
+        filters.coordinator,
+        filters.eventType,
         sortConfig,
         getMergedSortValue,
     ]);
@@ -811,25 +779,16 @@ const EventsView: React.FC<EventsViewProps> = ({
         }
     };
 
-    const auditActionHe: Record<string, string> = {
-        create: 'יצירה',
-        update: 'עדכון',
-        delete: 'מחיקה',
-        login: 'התחברות',
-        export: 'ייצוא',
-        system: 'מערכת',
-    };
-
     const renderAuditCell = (entry: AuditLogEntry, columnId: string) => {
         switch (columnId) {
             case 'type':
                 return (
                     <div className="flex flex-wrap gap-1">
                         <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-                            יומן ביקורת
+                            {AUDIT_LOG_FILTER_LABEL}
                         </span>
                         <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
-                            {auditActionHe[entry.action] || entry.action}
+                            {AUDIT_ACTION_HE[entry.action] || entry.action}
                         </span>
                     </div>
                 );
@@ -1123,10 +1082,10 @@ const EventsView: React.FC<EventsViewProps> = ({
                                     <div>
                                         <div className="flex justify-between items-start gap-2">
                                             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-800">
-                                                יומן ביקורת
+                                                {AUDIT_LOG_FILTER_LABEL}
                                             </span>
                                             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800">
-                                                {auditActionHe[a.action] || a.action}
+                                                {AUDIT_ACTION_HE[a.action] || a.action}
                                             </span>
                                         </div>
                                         <p className={`text-[13px] text-text-muted my-3 ${expandedRowId === rKey ? '' : 'line-clamp-3'}`}>

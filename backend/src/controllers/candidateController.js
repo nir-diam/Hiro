@@ -84,6 +84,7 @@ async function jobCandidateScreeningHasRejectionColumns(options = {}) {
   return screeningRejectionColumnsCache;
 }
 const organizationService = require('../services/organizationService');
+const candidateCompletenessService = require('../services/candidateCompletenessService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const candidateTagService = require('../services/candidateTagService');
@@ -1353,6 +1354,13 @@ const list = async (req, res) => {
         return res.status(400).json({ message: 'Invalid adv JSON' });
       }
     }
+    const dc = req.query.dataIncomplete ?? req.query.incomplete;
+    if (dc === '1' || String(dc).toLowerCase() === 'true') {
+      advanced =
+        advanced && typeof advanced === 'object' && !Array.isArray(advanced)
+          ? { ...advanced, dataIncomplete: true }
+          : { dataIncomplete: true };
+    }
     const payload = await candidateService.listPaginated({
       page,
       limit: clampedLimit,
@@ -1513,11 +1521,13 @@ const create = async (req, res) => {
       void tryEmbedCandidate(candidate.id, embedText);
     }
     await ensureOrganizationsFromExperience(enrichedCandidate.workExperience, enrichedCandidate.id);
+    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
+    const enrichedAfter = await candidateService.getById(candidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome) {
-      messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, { clientId: welcomeClientId });
+      messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, { clientId: welcomeClientId });
     }
-    res.status(201).json(enrichedCandidate);
+    res.status(201).json(enrichedAfter);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Create failed' });
   }
@@ -1642,7 +1652,6 @@ const createFromAi = async (req, res) => {
       industryAnalysis,
       searchText: text.slice(0, 50000),
       source: strOrNull(aiResult.source) || 'ai-upload',
-      status: 'חדש',
     };
 
     const createdCandidate = await candidateService.create(candidatePayload);
@@ -1707,6 +1716,7 @@ const createFromAi = async (req, res) => {
         params: { tags: tagsLabel || `${aiTagsForSync.length} תגיות` },
       });
     }
+    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(createdCandidate.id, req);
     const enrichedCandidate = await candidateService.getById(createdCandidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome) {
@@ -1838,9 +1848,56 @@ const update = async (req, res) => {
       });
     }
 
-    res.json(enrichedCandidate);
+    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
+    const refreshed = await candidateService.getById(candidate.id);
+    res.json(refreshed);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
+  }
+};
+
+const approveDataCorrections = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const usage = await candidateCompletenessService.resolveUsageSettingsForRequest(req);
+    const tagCount = await candidateCompletenessService.countActiveTagsForCandidate(id);
+    const row = await candidateService.getById(id);
+    const { ok, missing } = candidateCompletenessService.evaluateCandidateDataCompleteness(row, usage, tagCount);
+    if (!ok) {
+      return res.status(400).json({
+        message: 'לא ניתן לאשר: עדיין חסרים שדות חובה לפי הגדרות החברה.',
+        missing,
+      });
+    }
+    const updated = await candidateService.update(id, {
+      status: candidateCompletenessService.STATUS_ACTIVE,
+      statusExplanation: null,
+    });
+    const label = updated.fullName || row.fullName || '';
+    const dbUser = req.dbUser;
+    const jwtUser = req.user || {};
+    const actor =
+      (dbUser && `${dbUser.firstName || ''} ${dbUser.lastName || ''}`.trim()) ||
+      dbUser?.fullName ||
+      jwtUser.name ||
+      jwtUser.email ||
+      null;
+    await systemEventEmitter.emit(req, {
+      ...SYSTEM_EVENTS.CANDIDATE_DATA_APPROVED,
+      entityType: 'Candidate',
+      entityId: id,
+      entityName: label,
+      params: {
+        name: label || id,
+        fromStatus: candidateCompletenessService.STATUS_INCOMPLETE,
+        toStatus: candidateCompletenessService.STATUS_ACTIVE,
+        actor: actor || '—',
+      },
+    });
+    res.json(updated);
+  } catch (err) {
+    const status = err.status || 500;
+    res.status(status).json({ message: err.message || 'אישור תיקונים נכשל' });
   }
 };
 
@@ -3145,6 +3202,7 @@ module.exports = {
   create,
   createFromAi,
   update,
+  approveDataCorrections,
   remove,
   createUploadUrl,
   attachMedia,

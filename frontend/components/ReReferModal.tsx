@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { XMarkIcon, PaperAirplaneIcon, CheckCircleIcon } from './Icons';
 
 export type ReReferContact = {
@@ -24,6 +24,8 @@ export interface ReReferReferralContext {
     candidateName: string;
     /** Staff note on the referral row (optional; e.g. pasted into הערות when no list import). */
     internalNote?: string;
+    /** Plain body saved on `notification_messages.text` for this screening send (read-only preview). */
+    notificationText?: string;
 }
 
 interface ReReferModalProps {
@@ -32,10 +34,10 @@ interface ReReferModalProps {
     onSend: (data: ReReferSendPayload) => void | Promise<void>;
     referral: ReReferReferralContext | null;
     /**
-     * Fetches list row [0] (same filters/sort as the report), maps it to referral context, and updates parent state
-     * so the modal matches opening fresh on that row (candidate, job, contacts). הערות stay empty for manual entry.
+     * Loads the first screening row for the **same candidate** (same filters/sort as the report / board),
+     * then updates parent state so the modal matches that row. הערות stay empty for manual entry.
      */
-    applyFirstListedReferral?: () => Promise<void>;
+    applyFirstListedReferral?: (candidateId: string | null) => Promise<void>;
 }
 
 const nextStatusOptions = ['נשלחו קו"ח', 'בבדיקה', 'ראיון', 'הצעה'];
@@ -66,6 +68,8 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
     const [sendError, setSendError] = useState<string | null>(null);
     const [importingListedNote, setImportingListedNote] = useState(false);
     const [importListedNoteError, setImportListedNoteError] = useState<string | null>(null);
+    /** Last value we set from referral prop / API — fetch won’t overwrite if the user edited away from this. */
+    const notesProgrammaticSeedRef = useRef('');
 
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -131,12 +135,57 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
 
     useEffect(() => {
         if (!isOpen || !referral) return;
-        setNotes('');
+        const propBody = referral.notificationText != null ? String(referral.notificationText).trim() : '';
+        notesProgrammaticSeedRef.current = propBody;
+        setNotes(propBody);
         setNextStatus('נשלחו קו"ח');
         setSendError(null);
         setImportListedNoteError(null);
         void loadContacts();
     }, [isOpen, referral, loadContacts]);
+
+    useEffect(() => {
+        if (!isOpen || !referral?.id || !String(referral.id).trim()) {
+            return;
+        }
+        if (!apiBase) {
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            return;
+        }
+        let cancelled = false;
+        const rid = String(referral.id).trim();
+        void fetch(`${apiBase}/api/email-uploads/screening-cv-referrals/${encodeURIComponent(rid)}`, {
+            headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+            cache: 'no-store',
+        })
+            .then(async (res) => {
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    throw new Error(typeof data?.message === 'string' ? data.message : 'טעינת טקסט המייל נכשלה');
+                }
+                return data?.notificationText != null ? String(data.notificationText) : '';
+            })
+            .then((t) => {
+                if (!cancelled) {
+                    const trimmed = String(t || '').trim();
+                    if (!trimmed) return;
+                    setNotes((prev) => {
+                        if (prev !== notesProgrammaticSeedRef.current) return prev;
+                        notesProgrammaticSeedRef.current = trimmed;
+                        return trimmed;
+                    });
+                }
+            })
+            .catch(() => {
+                /* keep notes from referral.notificationText */
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, referral?.id, apiBase]);
 
     if (!isOpen || !referral) return null;
 
@@ -151,7 +200,7 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
         if (applyFirstListedReferral) {
             setImportingListedNote(true);
             try {
-                await applyFirstListedReferral();
+                await applyFirstListedReferral(referral.candidateId ?? null);
             } catch (e: unknown) {
                 setImportListedNoteError(e instanceof Error ? e.message : 'ייבוא מהרשימה נכשל');
             } finally {
@@ -160,13 +209,21 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
             return;
         }
         const raw = referral.internalNote != null ? String(referral.internalNote).trim() : '';
-        if (raw) setNotes(raw);
+        if (raw) {
+            notesProgrammaticSeedRef.current = raw;
+            setNotes(raw);
+        }
     };
 
     const canImportFromCurrentRow =
         referral.internalNote != null && String(referral.internalNote).trim().length > 0;
+    const canImportListedSameCandidate = Boolean(
+        applyFirstListedReferral &&
+            referral.candidateId != null &&
+            String(referral.candidateId).trim() !== '',
+    );
     const importLastNoteDisabled =
-        importingListedNote || (!applyFirstListedReferral && !canImportFromCurrentRow);
+        importingListedNote || (!canImportListedSameCandidate && !canImportFromCurrentRow);
 
     const handleSend = async () => {
         setSendError(null);
@@ -242,8 +299,9 @@ const ReReferModal: React.FC<ReReferModalProps> = ({
                             <textarea
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
-                                className="w-full h-[180px] sm:h-[240px] overflow-y-auto bg-bg-input border border-border-default rounded-lg p-4 text-sm resize-none outline-none focus:border-primary-400 transition-colors"
-                                placeholder="הקלד הערות לשליחה..."
+                                className="w-full h-[180px] sm:h-[240px] overflow-y-auto bg-bg-input border border-border-default rounded-lg p-4 text-sm resize-none outline-none focus:border-primary-400 transition-colors whitespace-pre-wrap break-words leading-relaxed"
+                                dir="auto"
+                                placeholder="הקלד הערות לשליחה או ערוך את גוף המייל השמור..."
                             />
                             <div className="flex flex-col items-start gap-1 mt-1">
                                 <button

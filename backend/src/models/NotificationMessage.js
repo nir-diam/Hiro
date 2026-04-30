@@ -31,7 +31,7 @@ const NotificationMessage = sequelize.define(
       defaultValue: 'message',
     },
     status: {
-      type: DataTypes.ENUM('unread', 'tasks', 'archived', 'deleted'),
+      type: DataTypes.STRING(500),
       allowNull: false,
       defaultValue: 'unread',
     },

@@ -175,9 +175,15 @@ async function sendWithResend(plan, { toEmail, subject, text, html, fromEmail, a
 
   const body = {};
   if (html) body.html = html;
-  if (text) body.text = text;
+  const textStr = text != null ? String(text) : '';
+  if (textStr.trim().length > 0) {
+    body.text = textStr;
+  } else if (html) {
+    body.text = stripHtml(html) || ' ';
+  } else {
+    body.text = '';
+  }
   if (!body.html && !body.text) body.text = '';
-  if (body.html && !body.text) body.text = stripHtml(html) || ' ';
 
   if (Array.isArray(attachments) && attachments.length) {
     body.attachments = attachments.map((a) => {
@@ -223,6 +229,13 @@ const sendEmail = async ({
 
   const humandFrom = resolveHumandSenderFrom({ clientName, fromEmail, senderEmail });
 
+  const plainForSmtp =
+    text != null && String(text).trim().length > 0
+      ? String(text)
+      : html
+        ? stripHtml(html) || ' '
+        : '';
+
   if (plan.type === 'resend') {
     return sendWithResend(plan, {
       toEmail,
@@ -255,7 +268,7 @@ const sendEmail = async ({
     from: resolvedFrom,
     to: toEmail,
     subject,
-    text,
+    text: plainForSmtp,
     html,
   };
 

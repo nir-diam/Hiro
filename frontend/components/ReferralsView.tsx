@@ -1,14 +1,14 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon } from './Icons';
+import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon, PaperAirplaneIcon } from './Icons';
 import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import { type Job } from './JobsView';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { useLanguage } from '../context/LanguageContext';
 
-type Status = 'התקבל לעבודה' | 'נדחה' | 'בהמתנה' | 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון';
+type Status = 'התקבל לעבודה' | 'נדחה' | 'בהמתנה' | 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'נשלחו קו"ח' | 'נשלחו קורות חיים';
 
 interface ClientContact {
     id: number;
@@ -40,6 +40,8 @@ interface ActiveReferral {
   candidateEmail: string;
   inviteCandidate: boolean;
   inviteClient: boolean;
+  /** Plain body from `notification_messages.text` for this screening send. */
+  notificationText: string;
 }
 
 /** Row from GET /api/email-uploads/screening-cv-referrals */
@@ -66,11 +68,12 @@ interface ScreeningCvReferralApiRow {
   candidateEmail?: string;
   inviteCandidate?: boolean;
   inviteClient?: boolean;
+  notificationText?: string;
 }
 
 function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): ActiveReferral {
-  const rawStatus = String(row.status || 'חדש').trim();
-  const status = (rawStatus in statusStyles ? rawStatus : 'חדש') as Status;
+  const rawStatus = String(row.status || '').trim();
+  const status = (rawStatus !== '' ? rawStatus : 'חדש') as Status;
   const notes = String(row.notes || '');
   const recipientLine = String(row.recipientLine || '').trim() || (notes.includes('\n\n') ? notes.split('\n\n')[0] : notes);
   const internalNote = String(row.internalNote || '').trim();
@@ -97,6 +100,7 @@ function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): Acti
     candidateEmail: row.candidateEmail != null ? String(row.candidateEmail).trim() : '',
     inviteCandidate: Boolean(row.inviteCandidate),
     inviteClient: Boolean(row.inviteClient),
+    notificationText: row.notificationText != null ? String(row.notificationText) : '',
   };
 }
 
@@ -122,6 +126,8 @@ const statusStyles: Partial<Record<Status, { text: string; bg: string; border: s
     'בבדיקה': { text: 'text-purple-700', bg: 'bg-purple-50', border: 'border-purple-200', icon: FunnelIcon },
     'ראיון': { text: 'text-indigo-700', bg: 'bg-indigo-50', border: 'border-indigo-200', icon: UserGroupIcon },
     'הצעה': { text: 'text-cyan-700', bg: 'bg-cyan-50', border: 'border-cyan-200', icon: DocumentArrowDownIcon },
+    'נשלחו קו"ח': { text: 'text-cyan-700', bg: 'bg-cyan-50', border: 'border-cyan-200', icon: PaperAirplaneIcon },
+    'נשלחו קורות חיים': { text: 'text-cyan-700', bg: 'bg-cyan-50', border: 'border-cyan-200', icon: PaperAirplaneIcon },
 };
 
 const StatCard: React.FC<{ title: string; value: number; icon: any; colorClass: string }> = ({ title, value, icon: Icon, colorClass }) => (
@@ -393,14 +399,21 @@ const ReferralsView: React.FC<{
         return items;
     }, [activeReferrals, activeSortConfig, startDate, endDate, searchTerm]);
 
-    /** Same idea as דוח הפניות row [0]: swap modal to the first row of the current filtered + sorted list (no server round-trip). */
-    const handleApplyFirstListedReferralToReReferModal = useCallback(async () => {
-        const first = sortedActiveReferrals[0];
-        if (!first) {
-            throw new Error('אין הפניות ברשימה הנוכחית — בדקו טווח תאריכים או חיפוש.');
-        }
-        setReReferModal({ isOpen: true, referral: first });
-    }, [sortedActiveReferrals]);
+    /** Same board row order: first listed referral for this candidate (not another candidate). */
+    const handleApplyFirstListedReferralToReReferModal = useCallback(
+        async (candidateId: string | null) => {
+            const cid = candidateId != null ? String(candidateId).trim() : '';
+            if (!cid) {
+                throw new Error('חסר מזהה מועמד — לא ניתן לייבא מהרשימה.');
+            }
+            const first = sortedActiveReferrals.find((r) => String(r.candidateId || '').trim() === cid);
+            if (!first) {
+                throw new Error('אין הפניה של אותו מועמד ברשימה הנוכחית — בדקו טווח תאריכים או חיפוש.');
+            }
+            setReReferModal({ isOpen: true, referral: first });
+        },
+        [sortedActiveReferrals],
+    );
 
     const sortedDisqualifiedReferrals = useMemo(() => {
         let sortableItems = [...disqualifiedReferrals];
@@ -901,6 +914,8 @@ const ReferralsView: React.FC<{
                     initialInviteClient={editingReferral.inviteClient}
                     candidatePhone={editingReferral.candidatePhone}
                     candidateEmail={editingReferral.candidateEmail}
+                    emailNotificationText={editingReferral.notificationText}
+                    screeningCvNotificationId={editingReferral.id}
                 />
             )}
             <ReReferModal
@@ -918,6 +933,7 @@ const ReferralsView: React.FC<{
                               clientName: reReferModal.referral.clientName,
                               candidateName: reReferModal.referral.candidateName,
                               internalNote: reReferModal.referral.internalNote,
+                              notificationText: reReferModal.referral.notificationText,
                           }
                         : null
                 }

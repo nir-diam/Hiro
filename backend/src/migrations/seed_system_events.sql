@@ -39,5 +39,24 @@ INSERT INTO system_events (
 
   -- 7. דיוור ודיווח --------------------------------------------------------
   (true, 'דיוור ודיווח',     'נשלח דיוור',                 'נשלח מייל אוטומטי מסוג: אישור קבלת קו"ח',                    true,  false, false, '#000000', '#dcfce7', 19),
-  (true, 'דיוור ודיווח',     'נשלח סטטוס מועמדים',         'נשלח ריכוז סטטוס מועמדים לאנשי קשר: אביטל, אריה',            false, true,  true,  '#000000', '#dbeafe', 20)
+  (true, 'דיוור ודיווח',     'נשלח סטטוס מועמדים',         'נשלח ריכוז סטטוס מועמדים לאנשי קשר: אביטל, אריה',            false, true,  true,  '#000000', '#dbeafe', 20),
+
+  -- 8. שלמות נתוני מועמד (אישור תיקונים בפרופיל) ------------------------------
+  (true, 'שלמות נתוני מועמד', 'אישור תיקונים',             'מועמד {name}: אושרה השלמת שדות חובה (אישור תיקונים) על ידי {actor}. מעבר מ-{fromStatus} ל-{toStatus}.', true, false, false, '#000000', '#ecfccb', 21)
 ON CONFLICT DO NOTHING;
+
+-- 9. פתיחת WhatsApp מהממשק -------------------------------------------------
+INSERT INTO system_events (
+  "isActive", "triggerName", "eventName", "contentTemplate",
+  "forCandidate", "forJob", "forClient", "textColor", "bgColor", "sortOrder"
+)
+SELECT
+  true,
+  'תקשורת צוות',
+  'פתיחת WhatsApp',
+  'נפתח קישור WhatsApp למועמד {name} · טלפון {phoneDisplay}. תצוגת הודעה: {messagePreview}',
+  true, false, false, '#000000', '#dcfce7', 22
+WHERE NOT EXISTS (
+  SELECT 1 FROM system_events e
+  WHERE e."triggerName" = 'תקשורת צוות' AND e."eventName" = 'פתיחת WhatsApp'
+);

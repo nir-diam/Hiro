@@ -35,6 +35,7 @@ import QuestionnaireBuilderView from './components/QuestionnaireBuilderView';
 import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
 import { syncCandidateNameFields } from './utils/candidateName';
 import PipelineSettingsView from './components/PipelineSettingsView';
+import StatusSettingsView from './components/StatusSettingsView';
 import DocumentTemplatesView from './components/DocumentTemplatesView';
 import CandidatePoolView from './components/CandidatePoolView';
 import ReferralsReportView from './components/ReferralsReportView';
@@ -281,6 +282,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const [candidateFetchError, setCandidateFetchError] = useState<string | null>(null);
     const [isUpdatingCandidate, setIsUpdatingCandidate] = useState(false);
     const [candidateUpdateMessage, setCandidateUpdateMessage] = useState<string | null>(null);
+    const [approveCorrectionsLoading, setApproveCorrectionsLoading] = useState(false);
     const [candidateList, setCandidateList] = useState<{ id: string }[]>([]);
 
     const loadProfilesForUser = useCallback(async (userId?: string | number) => {
@@ -509,6 +511,33 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         }, 600);
     }, [apiBase, urlId]);
 
+    const handleApproveDataCorrections = useCallback(async () => {
+        const id = String(formData.backendId || urlId || '');
+        if (!apiBase || !id) {
+            setCandidateUpdateMessage('מזהה מועמד חסר.');
+            return;
+        }
+        setApproveCorrectionsLoading(true);
+        setCandidateUpdateMessage(null);
+        try {
+            const res = await fetch(`${apiBase}/api/candidates/${id}/approve-data-corrections`, {
+                method: 'POST',
+                headers: { ...authHeaders() },
+            });
+            const body = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(typeof body?.message === 'string' ? body.message : 'אישור נכשל');
+            const normalized = normalizeCandidatePayload(body);
+            const localId = deriveLocalCandidateId(body.id ?? body.userId, formData.id);
+            setFormData({ ...normalized, id: localId, backendId: body.id });
+            setCandidateUpdateMessage('המועמד אושר והועבר למצב פעיל.');
+            window.dispatchEvent(new CustomEvent('candidate-data-refreshed', { detail: { backendId: id } }));
+        } catch (err: unknown) {
+            setCandidateUpdateMessage(err instanceof Error ? err.message : 'אישור נכשל');
+        } finally {
+            setApproveCorrectionsLoading(false);
+        }
+    }, [apiBase, authHeaders, formData.backendId, formData.id, urlId]);
+
     const handleFormChange = (updatedData: any) => {
         if (typeof updatedData === 'function') {
             setFormData((prev) => {
@@ -733,7 +762,11 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                                 onFormChange={handleFormChange} 
                                 onInternalTagsChange={handleInternalTagsChange} 
                             />
-                            <ResumeViewer resumeData={mockResumeData} onOpenMessageModal={props.openMessageModal} />
+                            <ResumeViewer
+                                resumeData={mockResumeData}
+                                onOpenMessageModal={props.openMessageModal}
+                                candidateId={formData.backendId || urlId || null}
+                            />
                         </div>
                     </>
                 );
@@ -813,6 +846,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 onGenerateExperienceSummary={handleGenerateExperienceSummary}
                 isGeneratingSummary={isGeneratingSummary}
                 generateSummaryError={generateSummaryError}
+                onApproveDataCorrections={handleApproveDataCorrections}
+                approveCorrectionsLoading={approveCorrectionsLoading}
             />
             
             <div ref={props.contentAreaRef} className="scroll-mt-32"></div>
@@ -886,6 +921,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="company" replace /> },
                  { path: 'company', element: <CompanySettingsView /> },
+                 { path: 'statuses', element: <StatusSettingsView /> },
                  { path: 'pipelines', element: <PipelineSettingsView /> },
                  { path: 'documents', element: <DocumentTemplatesView /> },
                  { path: 'coordinators', element: <CoordinatorsSettingsView /> },

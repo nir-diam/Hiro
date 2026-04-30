@@ -674,6 +674,11 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
         }
       }
     }
+
+    if (advanced.dataIncomplete === true) {
+      const n = pushBind(binds, 'חסר נתונים');
+      fragments.push(`"status" = $${n}`);
+    }
   }
 
   const whereSql = fragments.join(' AND ');

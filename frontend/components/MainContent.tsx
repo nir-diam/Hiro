@@ -3,7 +3,7 @@ import React, { useId, useState, useEffect, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import AccordionSection from './AccordionSection';
 import ContentNavBar from './ContentNavBar';
-import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon } from './Icons';
+import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon, InformationCircleIcon } from './Icons';
 import WorkExperienceSection from './WorkExperienceSection';
 import { TagInput } from './TagInput';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -41,11 +41,14 @@ const FormInput: React.FC<{ label: string; name: string; value: string; onChange
     );
 };
 
-const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode }> = ({ label, name, value, onChange, children }) => {
+const FormSelect: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLSelectElement>) => void; children: React.ReactNode; labelExtra?: React.ReactNode }> = ({ label, name, value, onChange, children, labelExtra }) => {
     const id = useId();
     return (
         <div>
-            <label htmlFor={id} className="block text-sm font-semibold text-text-muted mb-1">{label}</label>
+            <div className="flex items-center gap-2 mb-1 min-h-[1.25rem]">
+                <label htmlFor={id} className="block text-sm font-semibold text-text-muted flex-1">{label}</label>
+                {labelExtra}
+            </div>
             <select id={id} name={name} value={value} onChange={onChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm">
                 {children}
             </select>
@@ -465,7 +468,36 @@ const MainContent: React.FC<MainContentProps> = ({
                             onChange={handleNamePartChange}
                             required
                         />
-                        {viewMode === 'recruiter' && <FormSelect label={t('form.status')} name="status" value={formData.status} onChange={handleInputChange}><option>חדש</option><option>עבר בדיקה ראשונית</option></FormSelect>}
+                        {viewMode === 'recruiter' && (
+                            <FormSelect
+                                label={t('form.status')}
+                                name="status"
+                                value={formData.status || ''}
+                                onChange={handleInputChange}
+                                labelExtra={
+                                    <details className="relative z-10 shrink-0">
+                                        <summary
+                                            className="list-none cursor-pointer rounded-full p-1 text-primary-600 hover:text-primary-700 hover:bg-primary-500/10 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-1 focus:ring-offset-bg-card [&::-webkit-details-marker]:hidden flex items-center justify-center"
+                                            aria-label={t('form.status_tip_aria')}
+                                        >
+                                            <InformationCircleIcon className="h-4 w-4" />
+                                        </summary>
+                                        <div
+                                            role="tooltip"
+                                            className="absolute z-[60] mt-1 max-h-48 w-max max-w-[min(20rem,calc(100vw-2rem))] overflow-y-auto whitespace-normal rounded-lg border border-border-default bg-bg-card p-3 text-start text-xs leading-relaxed text-text-default shadow-lg end-0 top-full"
+                                        >
+                                            {String(formData.statusExplanation || '').trim() || t('form.status_tip_empty')}
+                                        </div>
+                                    </details>
+                                }
+                            >
+                                <option value="">—</option>
+                                <option value="חסר נתונים">חסר נתונים</option>
+                                <option value="פעיל">פעיל</option>
+                                <option value="חדש">חדש</option>
+                                <option value="עבר בדיקה ראשונית">עבר בדיקה ראשונית</option>
+                            </FormSelect>
+                        )}
                         <FormInput label={t('form.phone')} name="phone" value={formData.phone} onChange={handleInputChange} required />
                         <FormInput label={t('form.email')} name="email" value={formData.email} onChange={handleInputChange} type="email" icon={<EnvelopeIcon className="w-4 h-4" />}/>
                         <FormInput label={t('form.address')} name="address" value={formData.address} onChange={handleInputChange} required icon={<MapPinIcon className="w-4 h-4" />} />

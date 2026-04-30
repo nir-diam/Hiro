@@ -1,43 +1,12 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { XMarkIcon, PaperAirplaneIcon, CalendarIcon, ClockIcon, PhoneIcon, EnvelopeIcon, WhatsappIcon, Microsoft365Icon, OutlookTaskIcon, GoogleCalendarIcon } from './Icons';
 import Tooltip from './Tooltip';
-
-type Status =
-    | 'חדש'
-    | 'בבדיקה'
-    | 'ראיון'
-    | 'הצעה'
-    | 'התקבל'
-    | 'נדחה'
-    | 'פעיל'
-    | 'הוזמן לראיון'
-    | 'לא רלוונטי'
-    | 'מועמד משך עניין'
-    | 'בארכיון'
-    | 'התקבל לעבודה'
-    | 'בהמתנה'
-    | 'נשלחו קו"ח';
-
-const statusOptions: Status[] = [
-    'חדש',
-    'בבדיקה',
-    'ראיון',
-    'הצעה',
-    'התקבל',
-    'נדחה',
-    'פעיל',
-    'הוזמן לראיון',
-    'לא רלוונטי',
-    'מועמד משך עניין',
-    'בארכיון',
-    'התקבל לעבודה',
-    'בהמתנה',
-    'נשלחו קו"ח',
-];
+import { useAuth } from '../context/AuthContext';
+import { fetchRecruitmentStatuses, type RecruitmentStatusDto } from '../services/recruitmentStatusesApi';
 
 export type UpdateStatusFormData = {
-    status: Status;
+    status: string;
     note: string;
     dueDate: string;
     dueTime: string;
@@ -49,7 +18,7 @@ interface UpdateStatusModalProps {
     isOpen: boolean;
     onClose: () => void;
     onSave: (data: UpdateStatusFormData) => void | Promise<void>;
-    initialStatus: Status;
+    initialStatus: string;
     onOpenNewTask: () => void;
     /** e.g. candidate name */
     contextPrimary?: string;
@@ -62,6 +31,10 @@ interface UpdateStatusModalProps {
     initialInviteClient?: boolean;
     candidatePhone?: string | null;
     candidateEmail?: string | null;
+    /** Plain body from `notification_messages.text` for the screening send (read-only). */
+    emailNotificationText?: string | null;
+    /** When set, loads stored email body from GET screening-cv-referrals/:id (notification row id). */
+    screeningCvNotificationId?: string | null;
 }
 
 const digitsOnly = (s: string) => String(s || '').replace(/\D/g, '');
@@ -81,7 +54,13 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({
     initialInviteClient,
     candidatePhone,
     candidateEmail,
+    emailNotificationText,
+    screeningCvNotificationId,
 }) => {
+    const { user } = useAuth();
+    const clientId = user?.clientId ?? null;
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+
     const [formData, setFormData] = useState<UpdateStatusFormData>({
         status: initialStatus,
         note: '',
@@ -92,6 +71,54 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({
     });
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [recruitmentStatuses, setRecruitmentStatuses] = useState<RecruitmentStatusDto[]>([]);
+    const [statusesLoading, setStatusesLoading] = useState(false);
+    const [statusesError, setStatusesError] = useState<string | null>(null);
+    const [fetchedEmailBody, setFetchedEmailBody] = useState<string | null>(null);
+
+    useEffect(() => {
+        if (!isOpen || !clientId) {
+            if (!isOpen) setRecruitmentStatuses([]);
+            return;
+        }
+        let cancelled = false;
+        setStatusesLoading(true);
+        setStatusesError(null);
+        void fetchRecruitmentStatuses(clientId)
+            .then((rows) => {
+                if (!cancelled) setRecruitmentStatuses(Array.isArray(rows) ? rows : []);
+            })
+            .catch((e: unknown) => {
+                if (!cancelled) setStatusesError(e instanceof Error ? e.message : 'טעינת סטטוסים נכשלה');
+            })
+            .finally(() => {
+                if (!cancelled) setStatusesLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, clientId]);
+
+    const statusSelectRows = useMemo(() => {
+        const active = recruitmentStatuses.filter((r) => r.isActive !== false);
+        const hasName = (n: string) => active.some((r) => r.name === n);
+        if (formData.status && !hasName(formData.status)) {
+            const orphan: RecruitmentStatusDto = {
+                id: '__current__',
+                name: formData.status,
+                group: '',
+                textColor: '#6b7280',
+                isActive: true,
+            };
+            return [orphan, ...active];
+        }
+        return active;
+    }, [recruitmentStatuses, formData.status]);
+
+    const selectedStatusColor = useMemo(() => {
+        const row = statusSelectRows.find((r) => r.name === formData.status);
+        return row?.textColor && /^#[0-9a-f]{3,8}$/i.test(row.textColor) ? row.textColor : undefined;
+    }, [statusSelectRows, formData.status]);
 
     useEffect(() => {
         if (!isOpen) return;
@@ -108,6 +135,53 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({
             inviteClient: Boolean(initialInviteClient),
         });
     }, [isOpen, initialStatus, initialNote, initialDueDate, initialDueTime, initialInviteCandidate, initialInviteClient]);
+
+    useEffect(() => {
+        if (!isOpen) {
+            setFetchedEmailBody(null);
+            return;
+        }
+        const sid = screeningCvNotificationId != null ? String(screeningCvNotificationId).trim() : '';
+        if (!sid || !apiBase) {
+            setFetchedEmailBody(null);
+            return;
+        }
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        if (!token) {
+            setFetchedEmailBody(null);
+            return;
+        }
+        let cancelled = false;
+        setFetchedEmailBody(null);
+        void fetch(`${apiBase}/api/email-uploads/screening-cv-referrals/${encodeURIComponent(sid)}`, {
+            headers: { Accept: 'application/json', Authorization: `Bearer ${token}` },
+            cache: 'no-store',
+        })
+            .then(async (res) => {
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) {
+                    throw new Error(typeof data?.message === 'string' ? data.message : 'טעינת טקסט המייל נכשלה');
+                }
+                return data?.notificationText != null ? String(data.notificationText) : '';
+            })
+            .then((t) => {
+                if (!cancelled) setFetchedEmailBody(t);
+            })
+            .catch(() => {
+                if (!cancelled) setFetchedEmailBody(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, screeningCvNotificationId, apiBase]);
+
+    const displayEmailNotificationText = useMemo(() => {
+        const sid = screeningCvNotificationId != null ? String(screeningCvNotificationId).trim() : '';
+        if (sid) {
+            return fetchedEmailBody !== null ? fetchedEmailBody : (emailNotificationText ?? '');
+        }
+        return emailNotificationText ?? '';
+    }, [screeningCvNotificationId, fetchedEmailBody, emailNotificationText]);
 
     if (!isOpen) return null;
 
@@ -214,18 +288,43 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({
                         <div className="flex flex-col gap-5">
                             <div>
                                 <label className="block text-sm font-bold text-text-muted mb-1.5 text-right">סטטוס:</label>
+                                {!clientId && (
+                                    <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 text-right">
+                                        אין ארגון מקושר לחשבון — מוצגים רק הסטטוס הנוכחי מתוך המערכת.
+                                    </p>
+                                )}
+                                {statusesError && (
+                                    <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-3 py-2 mb-2 text-right">
+                                        {statusesError}
+                                    </p>
+                                )}
                                 <select
                                     name="status"
                                     value={formData.status}
                                     onChange={handleChange}
-                                    className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5 outline-none focus:border-primary-400 transition-colors"
+                                    disabled={statusesLoading && statusSelectRows.length === 0}
+                                    style={selectedStatusColor ? { color: selectedStatusColor } : undefined}
+                                    className="w-full bg-bg-input border border-border-default text-sm rounded-lg p-2.5 outline-none focus:border-primary-400 transition-colors font-semibold disabled:opacity-60"
                                 >
-                                    {statusOptions.map((s) => (
-                                        <option key={s} value={s}>
-                                            {s}
+                                    {statusSelectRows.length === 0 ? (
+                                        <option value={formData.status}>
+                                            {statusesLoading ? '…' : formData.status || '—'}
                                         </option>
-                                    ))}
+                                    ) : (
+                                        statusSelectRows.map((row) => (
+                                            <option
+                                                key={row.id}
+                                                value={row.name}
+                                                style={row.textColor ? { color: row.textColor } : undefined}
+                                            >
+                                                {row.name}
+                                            </option>
+                                        ))
+                                    )}
                                 </select>
+                                {statusesLoading && (
+                                    <p className="text-xs text-text-muted mt-1 text-right">טוען סטטוסים מהשרת…</p>
+                                )}
                             </div>
 
                             <div>
@@ -346,6 +445,17 @@ const UpdateStatusModal: React.FC<UpdateStatusModalProps> = ({
 
                         <div className="flex flex-col gap-4 h-full">
                             <div className="flex-1 flex flex-col min-h-[150px]">
+                                {displayEmailNotificationText != null && String(displayEmailNotificationText).trim() !== '' ? (
+                                    <div className="mb-3 rounded-lg border border-border-default bg-bg-subtle/80 p-3 text-right">
+                                       
+                                        <div
+                                            className="max-h-[min(180px,35vh)] overflow-y-auto text-sm text-text-default whitespace-pre-wrap break-words leading-relaxed"
+                                            dir="auto"
+                                        >
+                                            {String(displayEmailNotificationText)}
+                                        </div>
+                                    </div>
+                                ) : null}
                                 <label htmlFor="internal-note" className="block text-sm font-bold text-text-muted mb-1.5 text-right">
                                     הערה פנימית (תיעוד הפעולה):
                                 </label>

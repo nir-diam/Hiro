@@ -8,6 +8,7 @@ const router = express.Router();
 
 router.get('/', jobController.list);
 router.get('/for-compose', authMiddleware, attachDbUser, jobController.listForCompose);
+router.post('/log-smart-import-open', authMiddleware, attachDbUser, jobController.logSmartImportModalOpen);
 router.get('/:id/referral-client-contacts', authMiddleware, jobController.getReferralClientContacts);
 router.get('/:id/candidates', optionalAuth, jobController.getCandidates);
 router.get('/:id/events', authMiddleware, attachDbUser, jobEventController.list);

@@ -28,6 +28,7 @@ const userRoutes = require('./routes/userRoutes');
 const eventTypeRoutes = require('./routes/eventTypeRoutes');
 const systemEventRoutes = require('./routes/systemEventRoutes');
 const auditLogRoutes = require('./routes/auditLogRoutes');
+const messagingRoutes = require('./routes/messagingRoutes');
 const referenceInfoRoutes = require('./routes/referenceInfoRoutes');
 const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateAdminRoutes } = require('./routes/messageTemplateRoutes');
 
@@ -65,6 +66,7 @@ app.use('/api/cities', cityRoutes);
 app.use('/api/event-types', eventTypeRoutes);
 app.use('/api/system-events', systemEventRoutes);
 app.use('/api/audit-logs', auditLogRoutes);
+app.use('/api/messaging', messagingRoutes);
 app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);

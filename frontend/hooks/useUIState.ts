@@ -10,6 +10,8 @@ export interface MessageModalConfig {
     candidatePhone: string;
     /** Used for email channel / `POST .../send` */
     candidateEmail?: string | null;
+    /** Backend candidate UUID when known (audit / system events) */
+    candidateId?: string | null;
 }
 
 export const useUIState = () => {

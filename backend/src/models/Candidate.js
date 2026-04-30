@@ -13,6 +13,8 @@ const Candidate = sequelize.define(
     firstName: DataTypes.STRING,
     lastName: DataTypes.STRING,
     status: { type: DataTypes.STRING, defaultValue: 'חדש' },
+    /** Narrative for recruiters: why סטטוס is set (e.g. missing fields vs ready for אישור תיקונים). */
+    statusExplanation: { type: DataTypes.TEXT, allowNull: true },
     phone: DataTypes.STRING,
     email: { type: DataTypes.STRING },
     /** Envelope "From" when created from inbound job mail; re-lookup if email was overwritten by CV/AI. */

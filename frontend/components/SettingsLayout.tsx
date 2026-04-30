@@ -9,7 +9,8 @@ import {
     GlobeAmericasIcon, 
     ClipboardDocumentListIcon,
     DocumentTextIcon,
-    ArrowPathIcon // Icon for Pipelines
+    ArrowPathIcon, // Icon for Pipelines
+    FlagIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
@@ -24,7 +25,8 @@ const SettingsLayout: React.FC = () => {
 
     const navItems = [
         { to: '/settings/company', label: t('nav.company_settings'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
-        { to: '/settings/pipelines', label: 'תהליכי עבודה', icon: <ArrowPathIcon className="w-5 h-5" /> }, 
+        { to: '/settings/statuses', label: 'עריכת סטטוסים', icon: <FlagIcon className="w-5 h-5" /> },
+        { to: '/settings/pipelines', label: 'תהליכי עבודה', icon: <ArrowPathIcon className="w-5 h-5" /> },
         { to: '/settings/documents', label: 'Document Studio', icon: <DocumentTextIcon className="w-5 h-5" /> }, // New
         { to: '/settings/coordinators', label: t('nav.coordinators'), icon: <UserGroupIcon className="w-5 h-5" /> },
         { to: '/settings/agreements', label: 'סוגי הסכמים', icon: <ClipboardDocumentListIcon className="w-5 h-5" /> }, // Swapped icon to allow DocumentTextIcon for studio

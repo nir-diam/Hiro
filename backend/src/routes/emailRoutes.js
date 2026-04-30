@@ -12,6 +12,7 @@ router.patch('/messages/:id/status', authMiddleware, emailController.updateNotif
 router.post('/send', authMiddleware, emailController.send);
 router.post('/send-screening-cv', authMiddleware, emailController.sendScreeningCv);
 router.get('/screening-cv-referrals', authMiddleware, emailController.listScreeningCvReferrals);
+router.get('/screening-cv-referrals/:id', authMiddleware, emailController.getScreeningCvReferralById);
 router.patch('/screening-cv-referrals/:id', authMiddleware, emailController.patchScreeningCvReferral);
 
 module.exports = router;

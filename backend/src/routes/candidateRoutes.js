@@ -24,6 +24,12 @@ router.get('/:id/relevant-jobs', candidateController.getRelevantJobs);
 router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.get('/:id/screening-data', candidateController.getScreeningData);
 router.put('/:id/screening-data', candidateController.saveScreeningData);
+router.post(
+  '/:id/approve-data-corrections',
+  authMiddleware,
+  attachDbUser,
+  candidateController.approveDataCorrections,
+);
 
 router.get('/:id/documents', candidateDocumentController.list);
 router.post('/:id/documents/upload-url', candidateDocumentController.createUploadUrl);

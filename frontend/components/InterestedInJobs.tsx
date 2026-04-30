@@ -2,7 +2,7 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, XMarkIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
-import UpdateStatusModal, { type UpdateStatusFormData } from './UpdateStatusModal';
+import UpdateStatusModal from './UpdateStatusModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { Job } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
@@ -732,7 +732,7 @@ const InterestedInJobs: React.FC<{
                     isOpen={isStatusModalOpen}
                     onClose={() => setIsStatusModalOpen(false)}
                     onSave={handleSaveStatus}
-                    initialStatus={editingInterest.status as UpdateStatusFormData['status']}
+                    initialStatus={String(editingInterest.status ?? '')}
                     onOpenNewTask={onOpenNewTask}
                     contextPrimary={editingInterest.jobTitle}
                     contextSecondary={[editingInterest.company, editingInterest.location].filter(Boolean).join(' · ')}

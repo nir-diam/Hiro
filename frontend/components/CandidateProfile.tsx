@@ -369,6 +369,9 @@ interface CandidateProfileProps {
     onGenerateExperienceSummary?: () => void;
     isGeneratingSummary?: boolean;
     generateSummaryError?: string | null;
+    /** אישור מעבר מ"חסר נתונים" ל-"פעיל" אחרי השלמת שדות */
+    onApproveDataCorrections?: () => void | Promise<void>;
+    approveCorrectionsLoading?: boolean;
 }
 
 const CONTEXT_LABELS: Record<string, string> = {
@@ -626,6 +629,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   onGenerateExperienceSummary,
   isGeneratingSummary = false,
   generateSummaryError,
+  onApproveDataCorrections,
+  approveCorrectionsLoading = false,
 }) => {
   const { t } = useLanguage();
   const summaryId = useId();
@@ -1063,11 +1068,18 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const companyInitials = sourceClientLabel ? getInitials(sourceClientLabel) : '';
   
   const openModal = (mode: MessageMode) => {
+    const cid =
+      candidateData.backendId != null && String(candidateData.backendId).trim()
+        ? String(candidateData.backendId).trim()
+        : typeof candidateData.id === 'string' && candidateData.id.trim()
+          ? candidateData.id.trim()
+          : undefined;
     onOpenMessageModal({
         mode,
         candidateName: displayFullName,
         candidatePhone: candidateData.phone,
         candidateEmail: candidateData.email || candidateData.contactEmail || undefined,
+        candidateId: cid,
     });
   };
 
@@ -1201,8 +1213,33 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     );
   };
 
+  const isIncompleteProfile = String(candidateData.status || '').trim() === 'חסר נתונים';
+  const statusExplanationTrimmed = String(candidateData.statusExplanation || '').trim();
+
   return (
       <div className="space-y-4">
+      {isIncompleteProfile && typeof onApproveDataCorrections === 'function' && (
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 shadow-sm">
+              <div className="min-w-0 flex-1 space-y-2 text-right">
+                  <p className="text-sm font-semibold text-amber-950">
+                      פרופיל זה סומן כחסר נתונים. לאחר שהשלמתם את כל השדות החובה במערכת, לחצו להעברת המועמד לסטטוס &quot;פעיל&quot;.
+                  </p>
+                  {statusExplanationTrimmed ? (
+                      <p className="text-sm font-normal text-amber-900/90 whitespace-pre-wrap">
+                          {statusExplanationTrimmed}
+                      </p>
+                  ) : null}
+              </div>
+              <button
+                  type="button"
+                  disabled={approveCorrectionsLoading}
+                  onClick={() => void onApproveDataCorrections()}
+                  className="shrink-0 rounded-lg bg-amber-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-amber-700 disabled:opacity-50"
+              >
+                  {approveCorrectionsLoading ? 'מעביר…' : 'אישור תיקונים'}
+              </button>
+          </div>
+      )}
       <div className="flex justify-center gap-2">
           <button
             type="button"

@@ -16,6 +16,8 @@ import {
 } from './Icons';
 import ResumeViewer from './ResumeViewer';
 import { InternalOpinionEditorModal, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
+import { useLanguage } from '../context/LanguageContext';
+import { buildParsedScreeningCvHtmlForPdf, renderScreeningCvHtmlToPdfBase64 } from '../utils/screeningCvPdfExport';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -59,6 +61,7 @@ const emptyResumeDefaults = {
   name: '',
   contact: '',
   summary: '',
+  education: undefined as string[] | undefined,
 };
 
 function buildResumeDataFromCandidate(candidate?: {
@@ -66,6 +69,7 @@ function buildResumeDataFromCandidate(candidate?: {
   title?: string;
   professionalSummary?: string;
   workExperience?: any[];
+  education?: any[];
   skills?: any;
   email?: string;
   phone?: string;
@@ -102,6 +106,19 @@ function buildResumeDataFromCandidate(candidate?: {
       })
     : [''];
 
+  const education =
+    Array.isArray(candidate.education) && candidate.education.length > 0
+      ? candidate.education.map((edu: any) => {
+          if (typeof edu === 'string') return edu;
+          const deg = String(edu?.degree || edu?.title || '').trim();
+          const inst = String(edu?.institution || edu?.school || '').trim();
+          const years = String(edu?.years || edu?.period || '').trim();
+          const line1 = [deg, inst].filter(Boolean).join(', ');
+          const line2 = years ? `<br/>${years}` : '';
+          return `<b>${line1 || 'השכלה'}</b>${line2}`;
+        })
+      : undefined;
+
   const skills = candidate.skills;
   const skillsText = Array.isArray(skills)
     ? skills.map((s) => (typeof s === 'string' ? s : String(s?.name || s?.label || '').trim())).filter(Boolean).join(', ')
@@ -119,6 +136,7 @@ function buildResumeDataFromCandidate(candidate?: {
     contact,
     summary,
     experience,
+    education,
     raw,
     resumeUrl: candidate.resumeUrl || candidate.resumeFileUrl || undefined,
     candidateId: candidateId || undefined,
@@ -210,6 +228,7 @@ const CandidateScreeningView: React.FC<{
     title?: string;
     professionalSummary?: string;
     workExperience?: any[];
+    education?: any[];
     skills?: any;
     email?: string;
     phone?: string;
@@ -217,8 +236,10 @@ const CandidateScreeningView: React.FC<{
     resumeFileUrl?: string;
     resumeText?: string;
     resumeRaw?: string;
+    resume?: string;
   };
 }> = ({ onBack, candidateId, candidate }) => {
+    const { t } = useLanguage();
     const [jobs, setJobs] = useState<ScreeningJob[]>([]);
     const [selectedJobs, setSelectedJobs] = useState<(number | string)[]>([]);
     const [expandedJobId, setExpandedJobId] = useState<number | string | null>(null);
@@ -238,6 +259,8 @@ const CandidateScreeningView: React.FC<{
     const [sendModalJobIds, setSendModalJobIds] = useState<(number | string)[]>([]);
     const [selectedContactsByJob, setSelectedContactsByJob] = useState<Record<string, Record<string, boolean>>>({});
     const [sendCvSubmitting, setSendCvSubmitting] = useState(false);
+    const [sendAttachOriginalCv, setSendAttachOriginalCv] = useState(true);
+    const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
     const resumeSendCvAfterOpinionRef = useRef(false);
     const saveTimeoutByJobRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const candidateResumeData = useMemo(
@@ -668,13 +691,18 @@ const CandidateScreeningView: React.FC<{
       setSendModalJobIds([]);
       setSelectedContactsByJob({});
       setSendCvSubmitting(false);
+      setSendAttachOriginalCv(true);
+      setSendAttachSystemPdf(false);
     }, []);
 
     const openSendCvModal = useCallback(() => {
       if (selectedJobs.length === 0) return;
       setSendModalJobIds([...selectedJobs]);
+      const hasFile = Boolean(candidateResumeData.resumeUrl);
+      setSendAttachOriginalCv(hasFile);
+      setSendAttachSystemPdf(!hasFile);
       setSendCvModalOpen(true);
-    }, [selectedJobs]);
+    }, [selectedJobs, candidateResumeData.resumeUrl]);
 
     const toggleSendContact = useCallback((jobId: string, contactId: string) => {
       setSelectedContactsByJob((prev) => ({
@@ -692,7 +720,7 @@ const CandidateScreeningView: React.FC<{
 
       for (const id of jobIds) {
         const jid = String(id);
-        const job = jobs.find((j) => j.id === id);
+        const job = jobs.find((j) => String(j.id) === String(id));
         const list = job ? contactsListFromScreeningJob(job) : [];
         if (list.length === 0) {
           alert('למשרה אחת או יותר מהנבחרות לא הוגדרו אנשי קשר. הוסיפו אנשי קשר בכרטיס המשרה ואז נסו שוב.');
@@ -721,12 +749,55 @@ const CandidateScreeningView: React.FC<{
         return;
       }
 
+      if (!sendAttachOriginalCv && !sendAttachSystemPdf) {
+        alert('בחרו לפחות סוג קובץ אחד לצירוף.');
+        return;
+      }
+      if (sendAttachOriginalCv && !candidateResumeData.resumeUrl) {
+        alert('אין קובץ מקורי למועמד — בטלו את \"קובץ מועמד מקורי\" או סמנו \"קובץ מועמד מערכת\".');
+        return;
+      }
+
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      if (!token) {
+        alert('נדרשת התחברות כדי לשלוח מייל.');
+        return;
+      }
+
       setSendCvSubmitting(true);
       try {
+        let systemCvPdfBase64: string | undefined;
+        if (sendAttachSystemPdf) {
+          try {
+            const summaryHtml = (candidateResumeData.summary || '').replace(
+              /עבודה עצמאית/g,
+              '<span style="background:rgba(254,240,138,0.55);padding:2px 4px;border-radius:4px;">עבודה עצמאית</span>',
+            );
+            const pdfHtml = buildParsedScreeningCvHtmlForPdf(
+              candidateResumeData.name,
+              candidateResumeData.contact,
+              summaryHtml,
+              candidateResumeData.experience,
+              candidateResumeData.education,
+              {
+                summary: t('section.summary'),
+                work: t('section.work_experience'),
+                education: t('section.education'),
+              },
+            );
+            systemCvPdfBase64 = await renderScreeningCvHtmlToPdfBase64(pdfHtml);
+          } catch (pdfErr) {
+            console.error('[screening] system CV PDF failed', pdfErr);
+            alert('יצירת PDF מערכת נכשלה. נסו שוב או בטלו את סימון קובץ המערכת.');
+            return;
+          }
+        }
+
         const payload = jobIds.map((id) => {
-          const job = jobs.find((j) => j.id === id);
+          const job = jobs.find((j) => String(j.id) === String(id));
           const contacts = job ? contactsListFromScreeningJob(job) : [];
           const sel = selectedContactsByJob[String(id)] || {};
+          const sc = job ? getScreeningForJob(job) : { answers: [] as string[], telephoneImpression: '' };
           return {
             jobId: id,
             jobTitle: job?.title,
@@ -738,14 +809,19 @@ const CandidateScreeningView: React.FC<{
                 name: c.name || '',
               })),
             internalOpinionHtml: internalOpinionByJobId[String(id)] || '',
+            jobDescriptionPlain: job ? stripHtmlToText(job.description || '') : '',
+            jobRequirementsPlain: job
+              ? (job.requirements || []).map((r) => stripHtmlToText(String(r))).filter(Boolean)
+              : [],
+            screeningQa: job
+              ? (job.screeningQuestions || []).map((sq, i) => ({
+                  question: sq.question || '',
+                  answer: sc.answers[i] ?? '',
+                }))
+              : [],
+            telephoneImpression: sc.telephoneImpression || '',
           };
         });
-
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        if (!token) {
-          alert('נדרשת התחברות כדי לשלוח מייל.');
-          return;
-        }
 
         const res = await fetch(`${apiBase}/api/email-uploads/send-screening-cv`, {
           method: 'POST',
@@ -753,7 +829,13 @@ const CandidateScreeningView: React.FC<{
             'Content-Type': 'application/json',
             Authorization: `Bearer ${token}`,
           },
-          body: JSON.stringify({ candidateId, sends: payload }),
+          body: JSON.stringify({
+            candidateId,
+            attachOriginalCv: sendAttachOriginalCv,
+            attachSystemCvPdf: sendAttachSystemPdf,
+            systemCvPdfBase64: systemCvPdfBase64 || undefined,
+            sends: payload,
+          }),
         });
 
         const data = await res.json().catch(() => ({}));
@@ -774,10 +856,19 @@ const CandidateScreeningView: React.FC<{
       selectedContactsByJob,
       jobs,
       internalOpinionByJobId,
+      getScreeningForJob,
       candidateId,
       candidateResumeData.name,
+      candidateResumeData.resumeUrl,
+      candidateResumeData.contact,
+      candidateResumeData.summary,
+      candidateResumeData.experience,
+      candidateResumeData.education,
       closeSendCvModal,
       apiBase,
+      sendAttachOriginalCv,
+      sendAttachSystemPdf,
+      t,
     ]);
 
     const sendModalJobs = useMemo(
@@ -805,7 +896,7 @@ const CandidateScreeningView: React.FC<{
     }, [sendModalJobs, selectedContactsByJob]);
 
     const sendCvSendDisabled =
-      sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail;
+      sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail || (!sendAttachOriginalCv && !sendAttachSystemPdf);
 
     const allSelected = useMemo(() => jobs.length > 0 && selectedJobs.length === jobs.length, [jobs, selectedJobs]);
 
@@ -1169,10 +1260,15 @@ const CandidateScreeningView: React.FC<{
                     <div className="p-6 space-y-6 overflow-y-auto max-h-[70vh] custom-scrollbar flex-1 min-h-0">
                       <div className="bg-primary-50 p-4 rounded-xl border border-primary-100">
                         <p className="text-sm text-primary-800 leading-relaxed">
-                          אתה עומד לשלוח את קורות החיים של{' '}
+                          אתה עומד לשלוח את המועמד{' '}
                           <span className="font-bold">{candidateResumeData.name}</span> עבור{' '}
-                          <span className="font-bold">{sendModalJobIds.length}</span> משרות. הלקוחות יקבלו את קורות החיים
-                          המקוריים בצירוף חוות הדעת המקצועית שהופקה.
+                          <span className="font-bold">{sendModalJobIds.length}</span> משרות, עם חוות הדעת המקצועית
+                          שהוזנה. הקבצים המצורפים למייל ייקבעו לפי הבחירה למטה.
+                          {!candidateResumeData.resumeUrl ? (
+                            <span className="block mt-2 font-semibold text-primary-900">
+                              אין קובץ מקורי שמור למועמד — יוצג קובץ מערכת (PDF) כברירת מחדל.
+                            </span>
+                          ) : null}
                         </p>
                       </div>
                       <div className="space-y-4">
@@ -1266,6 +1362,43 @@ const CandidateScreeningView: React.FC<{
                             );
                           })}
                         </div>
+                      </div>
+                      <div className="space-y-3 pt-2 border-t border-border-default/60">
+                        <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">קבצים מצורפים למייל</h4>
+                        <label className="flex items-start gap-3 cursor-pointer text-sm text-text-default">
+                          <input
+                            type="checkbox"
+                            className="mt-1 rounded border-border-default"
+                            checked={sendAttachOriginalCv}
+                            onChange={(e) => setSendAttachOriginalCv(e.target.checked)}
+                            disabled={sendCvSubmitting || !candidateResumeData.resumeUrl}
+                          />
+                          <span>
+                            <span className="font-semibold block">קובץ מועמד מקורי</span>
+                            <span className="text-text-subtle text-xs">
+                              הקובץ כפי שהועלה למערכת (PDF, Word וכו&apos;).
+                              {!candidateResumeData.resumeUrl ? ' — לא זמין למועמד זה.' : ''}
+                            </span>
+                          </span>
+                        </label>
+                        <label className="flex items-start gap-3 cursor-pointer text-sm text-text-default">
+                          <input
+                            type="checkbox"
+                            className="mt-1 rounded border-border-default"
+                            checked={sendAttachSystemPdf}
+                            onChange={(e) => setSendAttachSystemPdf(e.target.checked)}
+                            disabled={sendCvSubmitting}
+                          />
+                          <span>
+                            <span className="font-semibold block">קובץ מועמד מערכת</span>
+                            <span className="text-text-subtle text-xs">
+                              PDF שנוצר מתצוגת קו&quot;ח מעובדת במערכת (תקציר, ניסיון, השכלה), כפי שמוצגים בטאב הקורות חיים.
+                            </span>
+                          </span>
+                        </label>
+                        <p className="text-xs text-text-subtle">
+                          ניתן לסמן את שני הסעיפים כדי לשלוח את שני הקבצים יחד.
+                        </p>
                       </div>
                       <div className="flex items-start gap-3 p-3 bg-yellow-50 rounded-lg border border-yellow-100">
                         <div className="mt-0.5 shrink-0">

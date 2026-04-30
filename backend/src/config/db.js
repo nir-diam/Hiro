@@ -47,17 +47,21 @@ const connectDb = async () => {
   require('../models/ClientUsageSetting');
   require('../models/LoginEmailCode');
   require('../models/EventType');
+  require('../models/RecruitmentStatus');
 
   const User = require('../models/User');
   const Client = require('../models/Client');
   const MessageTemplate = require('../models/MessageTemplate');
   const ClientUsageSetting = require('../models/ClientUsageSetting');
+  const RecruitmentStatus = require('../models/RecruitmentStatus');
   User.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
   Client.hasMany(User, { foreignKey: 'clientId', as: 'members' });
   MessageTemplate.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
   Client.hasMany(MessageTemplate, { foreignKey: 'clientId', as: 'messageTemplates' });
   Client.hasOne(ClientUsageSetting, { foreignKey: 'clientId', as: 'usageSettings' });
   ClientUsageSetting.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  Client.hasMany(RecruitmentStatus, { foreignKey: 'clientId', as: 'recruitmentStatuses' });
+  RecruitmentStatus.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
   await sequelize.sync();
   console.log('PostgreSQL connected & models synced');

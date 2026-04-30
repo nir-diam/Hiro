@@ -28,7 +28,8 @@ type ReferralStatus =
   | 'מועמד משך עניין'
   | 'בארכיון'
   | 'בהמתנה'
-  | 'נשלחו קו"ח';
+  | 'נשלחו קו"ח'
+  | 'נשלחו קורות חיים';
 
 interface InterviewQA {
   question: string;
@@ -68,6 +69,8 @@ interface Referral {
   candidateEmail: string;
   inviteCandidate: boolean;
   inviteClient: boolean;
+  /** Plain body from `notification_messages.text` for this screening send. */
+  notificationText: string;
 }
 
 interface ReferralsReportViewProps {
@@ -90,6 +93,8 @@ const statusStyles: { [key: string]: string } = {
   'בארכיון': 'bg-gray-100 text-gray-600 border-gray-200',
   'בהמתנה': 'bg-amber-100 text-amber-800 border-amber-200',
   'נשלחו קו"ח': 'bg-cyan-100 text-cyan-800 border-cyan-200',
+  /** Same intent as ReRefer default label; recruitment_settings may use full wording */
+  'נשלחו קורות חיים': 'bg-cyan-100 text-cyan-800 border-cyan-200',
 };
 
 const statusOptions: ReferralStatus[] = ['חדש', 'בבדיקה', 'ראיון', 'הצעה', 'התקבל', 'נדחה', 'התקבל לעבודה', 'בהמתנה', 'פעיל'];
@@ -119,6 +124,7 @@ interface ScreeningCvReferralApiRow {
   candidateEmail?: string;
   inviteCandidate?: boolean;
   inviteClient?: boolean;
+  notificationText?: string;
 }
 
 /** Server aggregate stats (full filtered set, same filters as current page) */
@@ -163,8 +169,8 @@ function mapApiRowToReferral(row: ScreeningCvReferralApiRow): Referral {
   const daysInStage = Number.isFinite(rd.getTime())
     ? Math.max(0, Math.floor((Date.now() - rd.getTime()) / 86400000))
     : 0;
-  const rawStatus = String(row.status || 'חדש').trim();
-  const status = (rawStatus in statusStyles ? rawStatus : 'חדש') as ReferralStatus;
+  const rawStatus = String(row.status || '').trim();
+  const status = (rawStatus !== '' ? rawStatus : 'חדש') as ReferralStatus;
   const notes = String(row.notes || '');
   const recipientLine = String(row.recipientLine || '').trim() || (notes.includes('\n\n') ? notes.split('\n\n')[0] : notes);
   const internalNote = String(row.internalNote || '').trim();
@@ -198,6 +204,7 @@ function mapApiRowToReferral(row: ScreeningCvReferralApiRow): Referral {
     candidateEmail: row.candidateEmail != null ? String(row.candidateEmail).trim() : '',
     inviteCandidate: Boolean(row.inviteCandidate),
     inviteClient: Boolean(row.inviteClient),
+    notificationText: row.notificationText != null ? String(row.notificationText) : '',
   };
 }
 
@@ -497,6 +504,16 @@ const ExpandedRowContent: React.FC<{ referral: Referral, className?: string, lay
             <div>
                 <p className="font-bold text-text-default mb-1">תקציר / פידבק:</p>
                 <p className="text-text-muted bg-white p-3 rounded-lg border border-border-default whitespace-pre-line leading-relaxed">{referral.feedbackSummary}</p>
+                {referral.notificationText.trim() !== '' ? (
+                    <div className="mt-3">
+                        <div
+                            className="text-text-muted bg-white p-3 rounded-lg border border-border-default whitespace-pre-wrap break-words leading-relaxed max-h-[min(320px,50vh)] overflow-y-auto"
+                            dir="auto"
+                        >
+                            {referral.notificationText}
+                        </div>
+                    </div>
+                ) : null}
             </div>
             {referral.interviewQA.length > 0 && (
                 <div>
@@ -534,7 +551,7 @@ const ReferralGridCard: React.FC<{
                         <p className="text-xs text-text-muted truncate max-w-[150px]">{referral.jobTitle}</p>
                     </div>
                 </div>
-                <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${statusStyles[referral.status] || 'bg-gray-100'}`}>
+                <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${statusStyles[referral.status] || 'bg-slate-100 text-slate-800 border-slate-200'}`}>
                     {referral.status}
                 </span>
              </div>
@@ -794,16 +811,20 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         sortConfig,
     ]);
 
-    /** First row from GET screening-cv-referrals (same filters/sort as the report, page=1, pageSize=1). */
-    const fetchFirstScreeningCvRowForReRefer = useCallback(async (): Promise<ScreeningCvReferralApiRow | null> => {
-        if (!apiBase) return null;
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-        if (!token) return null;
-        const params = new URLSearchParams();
-        params.set('page', '1');
-        params.set('pageSize', '1');
-        const s = debouncedSearch.trim();
-        if (s) params.set('search', s);
+    /** First row from GET screening-cv-referrals for the same candidate (same filters/sort as the report, page=1, pageSize=1). */
+    const fetchFirstScreeningCvRowForReRefer = useCallback(
+        async (candidateId: string | null): Promise<ScreeningCvReferralApiRow | null> => {
+            const cid = candidateId != null ? String(candidateId).trim() : '';
+            if (!cid) return null;
+            if (!apiBase) return null;
+            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+            if (!token) return null;
+            const params = new URLSearchParams();
+            params.set('page', '1');
+            params.set('pageSize', '1');
+            params.set('candidateId', cid);
+            const s = debouncedSearch.trim();
+            if (s) params.set('search', s);
         if (filters.referralDate) params.set('referralDate', filters.referralDate);
         if (filters.referralDateEnd) params.set('referralDateEnd', filters.referralDateEnd);
         if (filters.status) params.set('status', filters.status);
@@ -854,13 +875,23 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         sortConfig,
     ]);
 
-    const handleApplyFirstListedReferralToReReferModal = useCallback(async () => {
-        const row = await fetchFirstScreeningCvRowForReRefer();
-        if (!row) {
-            throw new Error('אין שורות ברשימה לפי המסננים.');
-        }
-        setReReferModal({ isOpen: true, referral: mapApiRowToReferral(row) });
-    }, [fetchFirstScreeningCvRowForReRefer]);
+    const handleApplyFirstListedReferralToReReferModal = useCallback(
+        async (candidateId: string | null) => {
+            const cid = candidateId != null ? String(candidateId).trim() : '';
+            if (!cid) {
+                throw new Error('חסר מזהה מועמד — לא ניתן לייבא מהרשימה.');
+            }
+            const row = await fetchFirstScreeningCvRowForReRefer(cid);
+            if (!row) {
+                throw new Error('אין הפניה של אותו מועמד ברשימה לפי המסננים.');
+            }
+            if (String(row.candidateId || '').trim() !== cid) {
+                throw new Error('ייבוא נכשל — המועמד אינו תואם.');
+            }
+            setReReferModal({ isOpen: true, referral: mapApiRowToReferral(row) });
+        },
+        [fetchFirstScreeningCvRowForReRefer],
+    );
 
     useEffect(() => {
         void fetchReferrals();
@@ -1281,7 +1312,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         switch (columnId) {
             case 'status':
                 return (
-                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${statusStyles[referral.status] || 'bg-gray-100'}`}>
+                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${statusStyles[referral.status] || 'bg-slate-100 text-slate-800 border-slate-200'}`}>
                         {referral.status}
                     </span>
                 );
@@ -1675,6 +1706,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                               clientName: reReferModal.referral.clientName,
                               candidateName: reReferModal.referral.candidateName,
                               internalNote: reReferModal.referral.internalNote,
+                              notificationText: reReferModal.referral.notificationText,
                           }
                         : null
                 }
@@ -1695,6 +1727,8 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                     initialInviteClient={editingReferral.inviteClient}
                     candidatePhone={editingReferral.candidatePhone}
                     candidateEmail={editingReferral.candidateEmail}
+                    emailNotificationText={editingReferral.notificationText}
+                    screeningCvNotificationId={editingReferral.id}
                 />
             )}
              <JobDetailsDrawer job={selectedJob} isOpen={isDrawerOpen} onClose={() => setIsDrawerOpen(false)} />

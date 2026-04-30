@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, CalendarIcon, LinkIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ClockIcon, Cog6ToothIcon } from './Icons';
 import EventFormModal, { type Event as EventFormEvent } from './EventFormModal';
+import { EventsFilterMultiselect } from './EventsFilterMultiselect';
 import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
 import { eventTypeChipClasses, normalizeEventTypes } from '../utils/eventTypeChips';
 import { hebrewDescriptionChangeLine, hebrewLinkedListChangeLine } from '../utils/eventHistoryText';
@@ -11,6 +12,16 @@ import {
   type MergedRow,
 } from '../utils/mergeJournalAndAudit';
 import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLogsApi';
+
+const AUDIT_LOG_FILTER_LABEL = 'יומן ביקורת';
+const AUDIT_ACTION_HE: Record<string, string> = {
+    create: 'יצירה',
+    update: 'עדכון',
+    delete: 'מחיקה',
+    login: 'התחברות',
+    export: 'ייצוא',
+    system: 'מערכת',
+};
 
 // --- TYPES ---
 interface HistoryEntry {
@@ -72,9 +83,6 @@ const allColumns = [
 
 const defaultVisibleColumns = allColumns.map(c => c.id);
 
-const coordinatorOptions = [];
-
-
 const normalizeEvent = (row: any): Event => ({
     id: String(row.id),
     type: normalizeEventTypes(row.type),
@@ -95,8 +103,8 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
     const [error, setError] = useState<string | null>(null);
     const [clientEventTypeNames, setClientEventTypeNames] = useState<string[]>([]);
     const [filters, setFilters] = useState({
-        eventType: 'הכל',
-        coordinator: 'הכל',
+        eventType: [] as string[],
+        coordinator: [] as string[],
         fromDate: '',
         toDate: '',
     });
@@ -131,13 +139,55 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             }
         }
         for (const e of events) {
-            if (e.type && !seen.has(e.type)) {
-                seen.add(e.type);
-                out.push(e.type);
+            for (const t of e.type || []) {
+                if (t && !seen.has(t)) {
+                    seen.add(t);
+                    out.push(t);
+                }
+            }
+        }
+        if (!seen.has(AUDIT_LOG_FILTER_LABEL)) {
+            seen.add(AUDIT_LOG_FILTER_LABEL);
+            out.push(AUDIT_LOG_FILTER_LABEL);
+        }
+        for (const he of Object.values(AUDIT_ACTION_HE)) {
+            if (he && !seen.has(he)) {
+                seen.add(he);
+                out.push(he);
+            }
+        }
+        for (const row of entityAuditItems) {
+            const raw = String(row.action || '').trim();
+            const he = AUDIT_ACTION_HE[raw] || raw;
+            if (he && !seen.has(he)) {
+                seen.add(he);
+                out.push(he);
             }
         }
         return out;
-    }, [clientEventTypeNames, events]);
+    }, [clientEventTypeNames, events, entityAuditItems]);
+
+    const coordinatorOptions = useMemo(() => {
+        const seen = new Set<string>();
+        const out: string[] = ['הכל'];
+        for (const e of events) {
+            const c = e.coordinator;
+            if (c && !seen.has(c)) {
+                seen.add(c);
+                out.push(c);
+            }
+        }
+        return out;
+    }, [events]);
+
+    const eventTypeMultiOptions = useMemo(
+        () => eventTypeFilterOptions.filter((o) => o !== 'הכל'),
+        [eventTypeFilterOptions],
+    );
+    const coordinatorMultiOptions = useMemo(
+        () => coordinatorOptions.filter((o) => o !== 'הכל'),
+        [coordinatorOptions],
+    );
 
     useEffect(() => {
         if (!apiBase) {
@@ -353,8 +403,15 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             const toDate = filters.toDate ? new Date(filters.toDate) : null;
             if (fromDate && eventDate < fromDate) return false;
             if (toDate && eventDate > toDate) return false;
-            if (filters.coordinator !== 'הכל' && event.coordinator !== filters.coordinator) return false; // use event.coordinator
-            if (filters.eventType !== 'הכל' && !(event.type || []).includes(filters.eventType)) return false;
+            if (filters.coordinator.length > 0 && !filters.coordinator.includes(event.coordinator)) {
+                return false;
+            }
+            if (
+                filters.eventType.length > 0 &&
+                !(event.type || []).some((t) => filters.eventType.includes(t))
+            ) {
+                return false;
+            }
             return true;
         });
 
@@ -401,15 +458,34 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             case 'status':
                 return ev.status || '';
             default:
-                return String((ev as Record<string, unknown>)[columnKey] ?? '');
+                return String((ev as unknown as Record<string, unknown>)[columnKey] ?? '');
         }
     }, []);
 
     const displayedRows = useMemo(() => {
-        const auditFiltered = filterAuditByDateRange(entityAuditItems, filters.fromDate, filters.toDate);
-        const merged = mergeJournalAndAudit(
+        let auditFiltered = filterAuditByDateRange(entityAuditItems, filters.fromDate, filters.toDate);
+
+        if (filters.coordinator.length > 0) {
+            auditFiltered = auditFiltered.filter((e) => {
+                const who = String(e.user.name || '').trim() || String(e.user.email || '').trim();
+                return who && filters.coordinator.includes(who);
+            });
+        }
+
+        if (filters.eventType.length > 0) {
+            const sel = new Set(filters.eventType);
+            auditFiltered = auditFiltered.filter((entry) => {
+                const actionHe = AUDIT_ACTION_HE[entry.action] || entry.action;
+                if (sel.has(AUDIT_LOG_FILTER_LABEL)) return true;
+                if (sel.has(actionHe)) return true;
+                if (entry.action && sel.has(entry.action)) return true;
+                return false;
+            });
+        }
+
+        const merged = mergeJournalAndAudit<Event>(
             sortedAndFilteredEvents,
-            (e) => new Date(e.date).getTime(),
+            (e: Event) => new Date(e.date).getTime(),
             auditFiltered,
         );
         if (!sortConfig) return merged;
@@ -419,6 +495,8 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         entityAuditItems,
         filters.fromDate,
         filters.toDate,
+        filters.coordinator,
+        filters.eventType,
         sortConfig,
         getMergedSortValue,
     ]);
@@ -471,25 +549,16 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         }
     };
 
-    const auditActionHe: Record<string, string> = {
-        create: 'יצירה',
-        update: 'עדכון',
-        delete: 'מחיקה',
-        login: 'התחברות',
-        export: 'ייצוא',
-        system: 'מערכת',
-    };
-
     const renderAuditCell = (entry: AuditLogEntry, columnId: string) => {
         switch (columnId) {
             case 'type':
                 return (
                     <div className="flex flex-wrap gap-1">
                         <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-700 border border-slate-200">
-                            יומן ביקורת
+                            {AUDIT_LOG_FILTER_LABEL}
                         </span>
                         <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
-                            {auditActionHe[entry.action] || entry.action}
+                            {AUDIT_ACTION_HE[entry.action] || entry.action}
                         </span>
                     </div>
                 );
@@ -538,18 +607,26 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                 <div className="p-4 bg-bg-subtle rounded-xl border border-border-default w-full">
                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-4 items-end">
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">סוג אירוע</label>
-                            <select name="eventType" value={filters.eventType} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm">
-                                {eventTypeFilterOptions.map((opt) => (
-                                    <option key={opt} value={opt}>
-                                        {opt}
-                                    </option>
-                                ))}
-                            </select>
+                            <label htmlFor="client-events-filter-type" className="block text-xs font-semibold text-text-muted mb-1">
+                                סוג אירוע
+                            </label>
+                            <EventsFilterMultiselect
+                                triggerId="client-events-filter-type"
+                                options={eventTypeMultiOptions}
+                                value={filters.eventType}
+                                onChange={(eventType) => setFilters((prev) => ({ ...prev, eventType }))}
+                            />
                         </div>
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">רכז</label>
-                            <select name="coordinator" value={filters.coordinator} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm">{coordinatorOptions.map(opt => <option key={opt}>{opt}</option>)}</select>
+                            <label htmlFor="client-events-filter-coordinator" className="block text-xs font-semibold text-text-muted mb-1">
+                                רכז
+                            </label>
+                            <EventsFilterMultiselect
+                                triggerId="client-events-filter-coordinator"
+                                options={coordinatorMultiOptions}
+                                value={filters.coordinator}
+                                onChange={(coordinator) => setFilters((prev) => ({ ...prev, coordinator }))}
+                            />
                         </div>
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">מתאריך</label>
@@ -710,7 +787,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                                         <div className="flex justify-between items-start gap-2">
                                             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-slate-100 text-slate-800">יומן ביקורת</span>
                                             <span className="text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-800">
-                                                {auditActionHe[a.action] || a.action}
+                                                {AUDIT_ACTION_HE[a.action] || a.action}
                                             </span>
                                         </div>
                                         <p className={`text-xs text-text-muted my-2 ${expandedRowId === rKey ? '' : 'line-clamp-3'}`}>{a.description || '—'}</p>

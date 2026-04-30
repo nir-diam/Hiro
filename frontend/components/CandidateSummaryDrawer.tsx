@@ -442,6 +442,12 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
             candidateName: resumeData.name || candidate.name,
             candidatePhone: displayPhone || candidate.phone,
             candidateEmail: displayEmail || undefined,
+            candidateId:
+                candidate.backendId != null && String(candidate.backendId).trim()
+                    ? String(candidate.backendId).trim()
+                    : candidate.id != null && String(candidate.id).trim()
+                      ? String(candidate.id).trim()
+                      : undefined,
         });
     }
   };

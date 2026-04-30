@@ -15,6 +15,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import { useLanguage } from '../context/LanguageContext';
+import { logJobSmartImportModalOpen } from '../services/jobsApi';
 
 // --- TYPES ---
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
@@ -2377,7 +2378,25 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     </p>
                 </div>
                 <div className="flex items-center gap-3">
-                     <button type="button" onClick={() => setIsAIModalOpen(true)} className="flex items-center gap-2 bg-primary-600 text-white font-bold py-2.5 px-5 rounded-xl hover:shadow-lg transition-all transform hover:scale-105">
+                     <button
+                        type="button"
+                        onClick={() => {
+                            setIsAIModalOpen(true);
+                            const persistedUuid =
+                                (isEditing &&
+                                    jobData &&
+                                    (jobData as { id?: string }).id != null &&
+                                    String((jobData as { id?: string }).id).trim()) ||
+                                (jobId != null && String(jobId).trim()) ||
+                                null;
+                            void logJobSmartImportModalOpen({
+                                jobId: persistedUuid,
+                                jobTitle: formData.jobTitle || formData.publicJobTitle || '',
+                                context: isEmbedded ? 'job_edit' : 'job_new',
+                            }).catch(() => {});
+                        }}
+                        className="flex items-center gap-2 bg-primary-600 text-white font-bold py-2.5 px-5 rounded-xl hover:shadow-lg transition-all transform hover:scale-105"
+                    >
                         <SparklesIcon className="w-5 h-5"/>
                         <span>{t('new_job.smart_import')}</span>
                     </button>

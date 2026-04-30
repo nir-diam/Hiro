@@ -7,6 +7,7 @@ const Client = require('../models/Client');
 const ClientContact = require('../models/ClientContact');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+const auditLogger = require('../utils/auditLogger');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
 
@@ -32,6 +33,96 @@ const buildQuestionsLabel = (job) => {
     .filter(Boolean)
     .slice(0, 6);
   return labels.length ? labels.join(' • ') : `${all.length} שאלות`;
+};
+
+/** Hebrew labels for job fields — used when logging “שמור” / PUT job updates to audit_logs. */
+const JOB_UPDATE_AUDIT_LABELS = {
+  title: 'כותרת',
+  publicJobTitle: 'כותרת לפרסום',
+  client: 'לקוח',
+  field: 'תחום',
+  role: 'תפקיד',
+  priority: 'עדיפות',
+  clientType: 'סוג לקוח',
+  city: 'עיר',
+  region: 'אזור',
+  gender: 'מגדר',
+  mobility: 'ניידות',
+  licenseType: 'רישיון נהיגה',
+  postingCode: 'קוד משרה',
+  validityDays: 'ימי תוקף',
+  recruitingCoordinator: 'רכז גיוס',
+  accountManager: 'אחראי חשבון',
+  salaryMin: 'שכר מינ׳',
+  salaryMax: 'שכר מקס׳',
+  ageMin: 'גיל מינ׳',
+  ageMax: 'גיל מקס׳',
+  openPositions: 'מספר משרות פתוחות',
+  status: 'סטטוס',
+  recruiter: 'מגייס',
+  location: 'מיקום',
+  jobType: 'סוג משרה',
+  description: 'תיאור',
+  PublicDescription: 'תיאור לפרסום',
+  requirements: 'דרישות',
+  rating: 'דירוג',
+  healthProfile: 'פרופיל בריאות',
+  internalNotes: 'הערות פנימיות',
+  uniqueEmail: 'מייל ייחודי',
+  contacts: 'אנשי קשר',
+  recruitmentSources: 'מקורות גיוס',
+  telephoneQuestions: 'שאלות טלפוניות',
+  digitalQuestions: 'שאלות דיגיטליות',
+  languages: 'שפות',
+  skills: 'כישורים / תגיות',
+  aiRawDescription: 'טקסט גולמי (ייבוא AI)',
+};
+
+const SKIP_JOB_UPDATE_COMPARE_KEYS = new Set([
+  'id',
+  'createdAt',
+  'updatedAt',
+  'events',
+  /** Form always resends counters / openDate — would noise every save */
+  'associatedCandidates',
+  'waitingForScreening',
+  'activeProcess',
+  'openDate',
+]);
+
+const serializeAuditValue = (val, maxLen = 480) => {
+  if (val === undefined) return undefined;
+  if (val === null) return null;
+  if (typeof val === 'string') return val.length > maxLen ? `${val.slice(0, maxLen)}…` : val;
+  if (typeof val === 'number' || typeof val === 'boolean') return val;
+  try {
+    const s = JSON.stringify(val);
+    return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
+  } catch {
+    return '[ערך]';
+  }
+};
+
+const collectJobFieldChangesForAudit = (prevPlain, nextPlain) => {
+  const changeLines = [];
+  const changes = [];
+  if (!prevPlain || !nextPlain) {
+    return { changeLines, changes };
+  }
+  for (const key of Object.keys(JOB_UPDATE_AUDIT_LABELS)) {
+    if (SKIP_JOB_UPDATE_COMPARE_KEYS.has(key)) continue;
+    const a = prevPlain[key];
+    const b = nextPlain[key];
+    if (!valuesDiffer(a, b)) continue;
+    const label = JOB_UPDATE_AUDIT_LABELS[key];
+    changeLines.push(label);
+    changes.push({
+      field: label,
+      oldValue: serializeAuditValue(a),
+      newValue: serializeAuditValue(b),
+    });
+  }
+  return { changeLines, changes };
 };
 
 const analyzeDescription = async (req, res) => {
@@ -375,6 +466,38 @@ const update = async (req, res) => {
       });
     }
 
+    try {
+      const prevPlain =
+        previous && typeof previous.get === 'function' ? previous.get({ plain: true }) : previous;
+      const nextPlain = job.get({ plain: true });
+      const { changeLines, changes } = collectJobFieldChangesForAudit(prevPlain, nextPlain);
+      let description;
+      if (!prevPlain) {
+        description = `שמירת משרה · עודכנה במערכת (ללא צילום גרסה קודמת להשוואה)`;
+      } else if (changeLines.length > 0) {
+        description = `שמירת משרה · השתנו השדות: ${changeLines.join(', ')}`;
+      } else {
+        description = 'שמירת משרה · לא זוהו הבדלים בשדות הנספרים (או ערכים זהים לאחר נרמול)';
+      }
+      await auditLogger.logAwait(req, {
+        level: 'info',
+        action: 'update',
+        description: description.slice(0, 4000),
+        entityType: 'Job',
+        entityId: String(job.id),
+        entityName: String(job.title || job.role || ''),
+        changes: changes.length ? changes : undefined,
+        metadata: {
+          jobFormSave: true,
+          changedFieldLabels: changeLines,
+          changedCount: changeLines.length,
+        },
+      });
+    } catch (auditErr) {
+      // eslint-disable-next-line no-console
+      console.error('[jobController.update] job save audit failed', auditErr);
+    }
+
     res.json(job);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
@@ -480,6 +603,45 @@ const getReferralClientContacts = async (req, res) => {
   }
 };
 
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Staff opened the “ייבוא חכם” / AI paste modal on NewJobView. */
+const logSmartImportModalOpen = async (req, res) => {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const rawId = body.jobId != null && String(body.jobId).trim() ? String(body.jobId).trim() : null;
+    const jobTitle = body.jobTitle != null && String(body.jobTitle).trim() ? String(body.jobTitle).trim() : '';
+    const context = body.context != null && String(body.context).trim() ? String(body.context).trim() : '';
+    const entityId = rawId && UUID_RE.test(rawId) ? rawId : null;
+
+    const descriptionParts = [
+      'נפתח חלון ייבוא חכם למשרה (AI)',
+      jobTitle ? `כותרת: ${jobTitle}` : null,
+    ].filter(Boolean);
+    const description = descriptionParts.join(' · ') || 'נפתח חלון ייבוא חכם למשרה (AI)';
+
+    await auditLogger.logAwait(req, {
+      level: 'info',
+      action: 'system',
+      description: description.slice(0, 4000),
+      entityType: entityId ? 'Job' : null,
+      entityId,
+      entityName: jobTitle || null,
+      metadata: {
+        newJobSmartImportModalOpen: true,
+        context: context || undefined,
+        rawJobId: rawId || undefined,
+      },
+    });
+
+    return res.status(204).end();
+  } catch (err) {
+    console.error('[jobController.logSmartImportModalOpen]', err);
+    return res.status(500).json({ message: err.message || 'Failed to log' });
+  }
+};
+
 module.exports = {
   list,
   listForCompose,
@@ -490,5 +652,6 @@ module.exports = {
   getCandidates,
   analyzeDescription,
   getReferralClientContacts,
+  logSmartImportModalOpen,
 };
 

@@ -1,9 +1,21 @@
 
-import React, { useState, useEffect, useId, useMemo, useCallback } from 'react';
-import { XMarkIcon, WhatsappIcon, EnvelopeIcon, ChatBubbleBottomCenterTextIcon, PaperClipIcon, PlusIcon, TrashIcon } from './Icons';
+import React, { useState, useEffect, useId, useMemo, useCallback, useRef } from 'react';
+import { useMatch } from 'react-router-dom';
+import {
+    XMarkIcon,
+    WhatsappIcon,
+    EnvelopeIcon,
+    ChatBubbleBottomCenterTextIcon,
+    PaperClipIcon,
+    PlusIcon,
+    TrashIcon,
+    ChevronDownIcon,
+    MagnifyingGlassIcon,
+} from './Icons';
 import { fetchMessageTemplatesForCompose, type MessageTemplateDto } from '../services/messageTemplatesApi';
 import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
 import { sendNotificationEmail } from '../services/emailSendApi';
+import { logWhatsappComposeOpen } from '../services/messagingApi';
 
 type MessageMode = 'whatsapp' | 'sms' | 'email';
 
@@ -24,6 +36,42 @@ function escapeHtml(s: string) {
         .replace(/>/g, '&gt;');
 }
 
+/** Audit block from `message_templates` row (compose API / MessageTemplateDto). */
+function formatMessageTemplateAuditBlock(t: MessageTemplateDto): string {
+    const lines: string[] = [t.name];
+    if (t.templateKey) lines.push(`מפתח: ${t.templateKey}`);
+    lines.push(`נושא: ${t.subject}`);
+    if (t.lastUpdated) {
+        let d = t.lastUpdated;
+        try {
+            d = new Date(t.lastUpdated).toLocaleString('he-IL');
+        } catch {
+            /* keep raw */
+        }
+        lines.push(`עודכן: ${d}${t.updatedBy ? ` · ${t.updatedBy}` : ''}`);
+    }
+    lines.push(`מזהה: ${t.id}`);
+    return lines.join('\n');
+}
+
+function messageTemplateTaskLabel(t: MessageTemplateDto): string {
+    return `${t.name}${t.templateKey ? ` (${t.templateKey})` : ''} · ${t.id}`;
+}
+
+function jobComposeRowLabel(j: JobComposeRow): string {
+    return `${j.title} (${j.client})${j.postingCode ? ` · ${j.postingCode}` : ''}`;
+}
+
+/** E.164 digits without + for https://api.whatsapp.com/send?phone= */
+function toWhatsAppPhoneDigits(raw: string): string {
+    const d = String(raw || '').replace(/\D/g, '');
+    if (!d) return '';
+    if (d.startsWith('972')) return d;
+    if (d.startsWith('0') && d.length >= 9 && d.length <= 11) return `972${d.slice(1)}`;
+    if (d.length === 9 && d.startsWith('5')) return `972${d}`;
+    return d;
+}
+
 /** Optional compose lists: don't surface auth/token failures under the dropdowns. */
 function isSilentComposeFetchError(message: string): boolean {
     return /invalid\s+token|unauthorized|jwt\s+(expired|invalid|malformed)|token\s+expired|^401(\s|$)|\b401\b|forbidden|^403(\s|$)/i.test(
@@ -38,6 +86,7 @@ interface SendMessageModalProps {
   candidateName: string;
   candidatePhone: string;
   candidateEmail?: string | null;
+  candidateId?: string | null;
 }
 
 const modalConfig = {
@@ -77,6 +126,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     candidateName,
     candidatePhone,
     candidateEmail,
+    candidateId,
 }) => {
     const [content, setContent] = useState('');
     const [subject, setSubject] = useState('');
@@ -92,9 +142,28 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [jobsError, setJobsError] = useState<string | null>(null);
     const [selectedTemplateId, setSelectedTemplateId] = useState('');
     const [selectedJobId, setSelectedJobId] = useState('');
+    const [jobPickerOpen, setJobPickerOpen] = useState(false);
+    const [jobSearchQuery, setJobSearchQuery] = useState('');
+    const jobPickerRef = useRef<HTMLDivElement>(null);
 
     const titleId = useId();
     const config = modalConfig[mode];
+
+    /** Prefer prop from opener; fall back to URL e.g. #/candidates/:candidateId when modal is global. */
+    const candidateRouteMatch = useMatch({ path: '/candidates/:candidateId', end: false });
+    const resolvedCandidateId = useMemo(() => {
+        const fromProp = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
+        if (fromProp) return fromProp;
+        const fromRoute = candidateRouteMatch?.params?.candidateId;
+        if (
+            fromRoute &&
+            String(fromRoute).trim() &&
+            String(fromRoute).toLowerCase() !== 'new'
+        ) {
+            return String(fromRoute).trim();
+        }
+        return null;
+    }, [candidateId, candidateRouteMatch?.params?.candidateId]);
 
     const channelTemplates = useMemo(() => {
         const ch = config.channel;
@@ -108,6 +177,25 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         return parts.join(' · ');
     }, [candidateName, candidatePhone, candidateEmail]);
 
+    const filteredJobsForPicker = useMemo(() => {
+        const q = jobSearchQuery.trim().toLowerCase();
+        if (!q) return jobs;
+        return jobs.filter((j) => {
+            const hay = `${j.title} ${j.client} ${j.postingCode || ''}`.toLowerCase();
+            return hay.includes(q);
+        });
+    }, [jobs, jobSearchQuery]);
+
+    useEffect(() => {
+        if (!jobPickerOpen) return;
+        const onDoc = (e: MouseEvent) => {
+            const el = jobPickerRef.current;
+            if (el && !el.contains(e.target as Node)) setJobPickerOpen(false);
+        };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [jobPickerOpen]);
+
     useEffect(() => {
         if (!isOpen) return;
         setContent('');
@@ -115,6 +203,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setAttachments(['']);
         setSelectedTemplateId('');
         setSelectedJobId('');
+        setJobPickerOpen(false);
+        setJobSearchQuery('');
         setTemplatesError(null);
         setJobsError(null);
         setSubmitError(null);
@@ -178,6 +268,64 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         e.preventDefault();
         setSubmitError(null);
 
+        if (!content.trim()) {
+            setSubmitError('תוכן ההודעה חובה');
+            return;
+        }
+
+        const trimmedContent = content.trim();
+        const selectedTpl = selectedTemplateId
+            ? templates.find((t) => t.id === selectedTemplateId)
+            : undefined;
+        const selectedJob = selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined;
+
+        const templateAuditPlain = selectedTpl ? formatMessageTemplateAuditBlock(selectedTpl) : '';
+        const jobValuePlain = selectedJob ? jobComposeRowLabel(selectedJob) : '';
+        const composeScopeSubline =
+            composeScope === 'admin' ? 'תבניות מערכת (Hiro)' : composeScope === 'client' ? 'תבניות הארגון' : '';
+
+        const templateFooterLine = selectedTpl ? `תבנית שמורה: ${messageTemplateTaskLabel(selectedTpl)}` : '';
+        const jobFooterLine = selectedJob ? `משרה מקושרת: ${jobValuePlain}` : '';
+
+        const footerPlainParts: string[] = [];
+        if (selectedTpl) {
+            let block = `תבנית שמורה:\n${templateAuditPlain}`;
+            if (composeScopeSubline) block += `\n${composeScopeSubline}`;
+            footerPlainParts.push(block);
+        }
+        if (selectedJob) {
+            footerPlainParts.push(`משרה מקושרת:\n${jobValuePlain}`);
+        }
+        const footerPlain = footerPlainParts.length ? `\n\n—\n${footerPlainParts.join('\n\n')}` : '';
+        const textOut = `${trimmedContent}`;
+
+        if (mode === 'whatsapp') {
+            const waPhone = toWhatsAppPhoneDigits(candidatePhone);
+            if (!waPhone) {
+                setSubmitError('אין מספר טלפון תקין ל־WhatsApp (נדרש מספר עם קידומת או 0)');
+                return;
+            }
+            setIsSubmitting(true);
+            try {
+                await logWhatsappComposeOpen({
+                    candidateId: resolvedCandidateId,
+                    candidateName,
+                    phone: candidatePhone,
+                    messagePreview: textOut,
+                    templateId: selectedTemplateId || null,
+                    jobId: selectedJobId || null,
+                });
+                const url = `https://api.whatsapp.com/send?phone=${encodeURIComponent(waPhone)}&text=${encodeURIComponent(textOut)}`;
+                window.open(url, '_blank', 'noopener,noreferrer');
+                onClose();
+            } catch (err: unknown) {
+                setSubmitError(err instanceof Error ? err.message : 'רישום ביקורת נכשל — נסו שוב');
+            } finally {
+                setIsSubmitting(false);
+            }
+            return;
+        }
+
         if (mode !== 'email') {
             setSubmitError('שליחה דרך השרת זמינה כרגע רק למייל. השתמשו בערוץ המייל.');
             return;
@@ -192,40 +340,6 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             setSubmitError('נושא המייל חובה');
             return;
         }
-        if (!content.trim()) {
-            setSubmitError('תוכן ההודעה חובה');
-            return;
-        }
-
-        const trimmedContent = content.trim();
-        const selectedTpl = selectedTemplateId
-            ? templates.find((t) => t.id === selectedTemplateId)
-            : undefined;
-        const selectedJob = selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined;
-
-        const templateValuePlain = selectedTpl
-            ? `${selectedTpl.name}${selectedTpl.templateKey ? ` (${selectedTpl.templateKey})` : ''}`
-            : '';
-        const jobValuePlain = selectedJob
-            ? `${selectedJob.title} (${selectedJob.client})${selectedJob.postingCode ? ` · ${selectedJob.postingCode}` : ''}`
-            : '';
-        const composeScopeSubline =
-            composeScope === 'admin' ? 'תבניות מערכת (Hiro)' : composeScope === 'client' ? 'תבניות הארגון' : '';
-
-        const templateFooterLine = selectedTpl ? `תבנית שמורה: ${templateValuePlain}` : '';
-        const jobFooterLine = selectedJob ? `משרה מקושרת: ${jobValuePlain}` : '';
-
-        const footerPlainParts: string[] = [];
-        if (selectedTpl) {
-            let block = `תבנית שמורה:\n${templateValuePlain}`;
-            if (composeScopeSubline) block += `\n${composeScopeSubline}`;
-            footerPlainParts.push(block);
-        }
-        if (selectedJob) {
-            footerPlainParts.push(`משרה מקושרת:\n${jobValuePlain}`);
-        }
-        const footerPlain = footerPlainParts.length ? `\n\n—\n${footerPlainParts.join('\n\n')}` : '';
-        const textOut = `${trimmedContent}${footerPlain}`;
 
         const mainHtml = `<div dir="rtl" style="white-space:pre-wrap;font-family:sans-serif;">${escapeHtml(trimmedContent).replace(/\n/g, '<br/>')}</div>`;
 
@@ -237,7 +351,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             footerBlocks.push(
                 `<div style="margin-bottom:0.9em;">` +
                     `<div style="font-weight:700;color:#333;font-size:13px;">תבנית שמורה:</div>` +
-                    `<div style="color:#555;margin-top:0.25em;">${escapeHtml(templateValuePlain)}</div>` +
+                    `<div style="color:#555;margin-top:0.25em;white-space:pre-wrap;">${escapeHtml(templateAuditPlain)}</div>` +
                     scopeHtml +
                 `</div>`,
             );
@@ -267,6 +381,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                 messageType: 'message',
                 taskPayload: {
                     source: 'SendMessageModal',
+                    candidateId: resolvedCandidateId,
+                    candidateName,
                     templateId: selectedTemplateId || null,
                     jobId: selectedJobId || null,
                     composeScope: composeScope,
@@ -302,6 +418,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const templatesErrBlocksHints = !!(templatesError && !isSilentComposeFetchError(templatesError));
     const jobsErrBlocksHints = !!(jobsError && !isSilentComposeFetchError(jobsError));
+    const selectedJobRow = selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined;
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4" onClick={onClose}>
@@ -354,20 +471,85 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
                         <div>
                              <label className="block text-sm font-semibold text-text-muted mb-1.5">משרה מקושרת:</label>
-                            <select
-                                className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"
-                                value={selectedJobId}
-                                onChange={(e) => setSelectedJobId(e.target.value)}
-                                disabled={jobsLoading}
-                            >
-                                <option value="">---</option>
-                                {jobs.map((j) => (
-                                    <option key={j.id} value={j.id}>
-                                        {j.title} ({j.client})
-                                        {j.postingCode ? ` · ${j.postingCode}` : ''}
-                                    </option>
-                                ))}
-                            </select>
+                            <div className="relative" ref={jobPickerRef}>
+                                <button
+                                    type="button"
+                                    disabled={jobsLoading}
+                                    onClick={() => {
+                                        if (jobsLoading) return;
+                                        setJobPickerOpen((o) => !o);
+                                    }}
+                                    className="w-full flex items-center justify-between gap-2 bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-right disabled:opacity-60"
+                                    aria-haspopup="listbox"
+                                    aria-expanded={jobPickerOpen}
+                                >
+                                    <span className="truncate flex-1">
+                                        {selectedJobRow ? jobComposeRowLabel(selectedJobRow) : '---'}
+                                    </span>
+                                    <ChevronDownIcon className={`w-4 h-4 flex-shrink-0 transition-transform ${jobPickerOpen ? 'rotate-180' : ''}`} />
+                                </button>
+                                {jobPickerOpen && !jobsLoading && (
+                                    <div
+                                        className="absolute z-50 mt-1 w-full rounded-lg border border-border-default bg-bg-card shadow-lg flex flex-col max-h-72 overflow-hidden"
+                                        role="listbox"
+                                    >
+                                        <div className="p-2 border-b border-border-default flex items-center gap-2 bg-bg-subtle/40">
+                                            <MagnifyingGlassIcon className="w-4 h-4 text-text-muted flex-shrink-0" />
+                                            <input
+                                                type="search"
+                                                value={jobSearchQuery}
+                                                onChange={(e) => setJobSearchQuery(e.target.value)}
+                                                placeholder="חיפוש לפי שם משרה, לקוח או קוד…"
+                                                className="flex-1 min-w-0 bg-bg-input border border-border-default text-text-default text-sm rounded-md px-2 py-1.5"
+                                                autoComplete="off"
+                                                aria-label="חיפוש משרה"
+                                                onMouseDown={(e) => e.stopPropagation()}
+                                            />
+                                        </div>
+                                        <ul className="overflow-y-auto py-1 text-sm">
+                                            <li>
+                                                <button
+                                                    type="button"
+                                                    role="option"
+                                                    className="w-full text-right px-3 py-2 hover:bg-bg-hover text-text-muted"
+                                                    onClick={() => {
+                                                        setSelectedJobId('');
+                                                        setJobPickerOpen(false);
+                                                    }}
+                                                >
+                                                    —
+                                                </button>
+                                            </li>
+                                            {filteredJobsForPicker.map((j) => (
+                                                <li key={j.id}>
+                                                    <button
+                                                        type="button"
+                                                        role="option"
+                                                        className={`w-full text-right px-3 py-2 hover:bg-bg-hover ${
+                                                            j.id === selectedJobId ? 'bg-primary-50 text-primary-800 font-medium' : ''
+                                                        }`}
+                                                        onClick={() => {
+                                                            setSelectedJobId(j.id);
+                                                            setJobPickerOpen(false);
+                                                            setJobSearchQuery('');
+                                                        }}
+                                                    >
+                                                        {jobComposeRowLabel(j)}
+                                                    </button>
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        {filteredJobsForPicker.length === 0 && jobs.length > 0 && (
+                                            <div className="px-3 py-4 text-center text-text-subtle text-xs">
+                                                לא נמצאו משרות התואמות לחיפוש
+                                            </div>
+                                        )}
+                                        {jobs.length === 0 && (
+                                            <div className="px-3 py-4 text-center text-text-subtle text-xs">אין משרות ברשימה</div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
                             {jobsLoading && (
                                 <p className="text-xs text-text-subtle mt-1">טוען משרות…</p>
                             )}
@@ -459,7 +641,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                             className={`flex items-center gap-2 text-white font-bold py-2 px-6 rounded-lg transition shadow-sm disabled:opacity-60 disabled:pointer-events-none ${config.buttonClass}`}
                         >
                             {config.buttonIcon}
-                            <span>{isSubmitting && mode === 'email' ? 'שולח…' : config.buttonText}</span>
+                            <span>
+                                {isSubmitting && mode === 'email'
+                                    ? 'שולח…'
+                                    : isSubmitting && mode === 'whatsapp'
+                                      ? 'פותח…'
+                                      : config.buttonText}
+                            </span>
                         </button>
                     </footer>
                 </form>

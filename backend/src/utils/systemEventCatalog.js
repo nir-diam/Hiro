@@ -22,21 +22,24 @@ const SYSTEM_EVENTS = {
   CANDIDATE_STATUS:   { triggerName: 'שינוי סטטוס מועמד', eventName: 'סטטוס השתנה' },
   CANDIDATE_DUE_DATE: { triggerName: 'שינוי סטטוס מועמד', eventName: 'עדכון תאריך יעד' },
 
-  // 4. תקשורת צוות
+  // 4. שלמות נתוני מועמד (אישור תיקונים בפרופיל)
+  CANDIDATE_DATA_APPROVED: { triggerName: 'שלמות נתוני מועמד', eventName: 'אישור תיקונים' },
+
+  // 5. תקשורת צוות
   TEAM_FEEDBACK:    { triggerName: 'תקשורת צוות', eventName: 'משוב לאחר ראיון' },
   TEAM_INTERNAL:    { triggerName: 'תקשורת צוות', eventName: 'הודעה פנימית' },
   TEAM_USER_MSG:    { triggerName: 'תקשורת צוות', eventName: 'הודעת משתמש' },
 
-  // 5. ניהול תיק לקוח
+  // 6. ניהול תיק לקוח
   CLIENT_UPDATE:    { triggerName: 'ניהול תיק לקוח', eventName: 'התקבל עדכון מהלקוח' },
   CLIENT_DOC:       { triggerName: 'ניהול תיק לקוח', eventName: 'העלאת מסמך' },
   CLIENT_NOTICE:    { triggerName: 'ניהול תיק לקוח', eventName: 'הערה חשובה (גורף)' },
 
-  // 6. סינון וטיוב
+  // 7. סינון וטיוב
   SCREEN_LANGS:    { triggerName: 'סינון וטיוב', eventName: 'עדכון שפות' },
   SCREEN_RECRUITER:{ triggerName: 'סינון וטיוב', eventName: 'עדכון רכזים' },
 
-  // 7. דיוור ודיווח
+  // 8. דיוור ודיווח
   MAIL_SENT:       { triggerName: 'דיוור ודיווח', eventName: 'נשלח דיוור' },
   MAIL_STATUS_BULK:{ triggerName: 'דיוור ודיווח', eventName: 'נשלח סטטוס מועמדים' },
 };

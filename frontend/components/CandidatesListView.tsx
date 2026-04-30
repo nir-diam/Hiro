@@ -988,6 +988,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [showFavoritesOnly, setShowFavoritesOnly] = useState(
         () => listViewSnapshot?.showFavoritesOnly ?? false,
     );
+    const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
 
     const skipUrlHydrateOnceRef = useRef(listViewSnapshot !== null);
 
@@ -1040,6 +1041,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         if (fav !== null) {
             setShowFavoritesOnly(fav === '1');
         }
+        const incomplete = searchParamsFromUrl.get('incomplete');
+        if (incomplete !== null) {
+            setShowIncompleteOnly(incomplete === '1');
+        }
         const field = searchParamsFromUrl.get('field') || '';
         const industry = searchParamsFromUrl.get('industry') || '';
         const sizesParam = searchParamsFromUrl.get('sizes') || '';
@@ -1067,6 +1072,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 else params.delete('needs');
                 if (showFavoritesOnly) params.set('fav', '1');
                 else params.delete('fav');
+                if (showIncompleteOnly) params.set('incomplete', '1');
+                else params.delete('incomplete');
                 if (companyFilters.field) params.set('field', companyFilters.field);
                 else params.delete('field');
                 if (companyFilters.industry) params.set('industry', companyFilters.industry);
@@ -1079,7 +1086,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             },
             { replace: true },
         );
-    }, [searchTerm, showNeedsAttention, showFavoritesOnly, companyFilters, setUrlSearchParams]);
+    }, [searchTerm, showNeedsAttention, showFavoritesOnly, showIncompleteOnly, companyFilters, setUrlSearchParams]);
 
     // --- SMART SEARCH STATE ---
     const [isSmartSearchOpen, setIsSmartSearchOpen] = useState(false);
@@ -1141,6 +1148,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             limit: number;
             search: string;
             advanced: AppliedAdvancedSearchPayload | null;
+            dataIncomplete?: boolean;
         }) => {
             if (!apiBase) return;
             setSuspendListPolling(false);
@@ -1154,6 +1162,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 if (st) params.set('search', st);
                 if (opts.advanced != null) {
                     params.set('adv', JSON.stringify(opts.advanced));
+                }
+                if (opts.dataIncomplete) {
+                    params.set('dataIncomplete', '1');
                 }
                 const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
                 if (!res.ok) throw new Error('failed to load');
@@ -1186,6 +1197,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 appliedAdvancedFilters == null
                     ? null
                     : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+            dataIncomplete: showIncompleteOnly,
         });
     }, [
         page,
@@ -1196,6 +1208,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         languageFilters,
         complexRules,
         fetchCandidatesList,
+        showIncompleteOnly,
     ]);
 
     // Poll backend for updates every 10s on current page
@@ -2108,6 +2121,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 title={t('candidates.favorites_only_tooltip')}
                             >
                                 {showFavoritesOnly ? <BookmarkIconSolid className="w-5 h-5" /> : <BookmarkIcon className="w-5 h-5" />}
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowIncompleteOnly((v) => !v);
+                                    setPage(1);
+                                }}
+                                className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${showIncompleteOnly ? 'bg-red-100 text-red-800 border-red-300' : 'bg-bg-card text-text-default border-border-default hover:border-red-300'}`}
+                                title="הצג מועמדים עם סטטוס חסר נתונים"
+                            >
+                                <DocumentTextIcon className="w-5 h-5" />
                             </button>
                         </div>
 

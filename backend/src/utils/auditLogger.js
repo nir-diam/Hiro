@@ -74,4 +74,30 @@ const log = (req, payload = {}) => {
   });
 };
 
-module.exports = { log };
+/** Same as log but rejects on DB failure (for endpoints that must persist audit before 204). */
+const logAwait = async (req, payload = {}) => {
+  const baseUser = userFromRequest(req);
+  const merged = {
+    timestamp: payload.timestamp || new Date(),
+    level: payload.level || 'info',
+    action: payload.action || 'system',
+    description: payload.description || '',
+    userId: payload.userId !== undefined ? payload.userId : baseUser.userId,
+    userName: payload.userName !== undefined ? payload.userName : baseUser.userName,
+    userEmail: payload.userEmail !== undefined ? payload.userEmail : baseUser.userEmail,
+    userRole: payload.userRole !== undefined ? payload.userRole : baseUser.userRole,
+    userIp: payload.userIp !== undefined ? payload.userIp : extractIp(req),
+    userAvatar: payload.userAvatar,
+    entityType: payload.entity?.type ?? payload.entityType ?? null,
+    entityId: payload.entity?.id ?? payload.entityId ?? null,
+    entityName: payload.entity?.name ?? payload.entityName ?? null,
+    metadata: {
+      ...(extractUserAgent(req) ? { userAgent: extractUserAgent(req) } : {}),
+      ...(payload.metadata || {}),
+    },
+    changes: Array.isArray(payload.changes) ? payload.changes : [],
+  };
+  return auditLogService.create(merged);
+};
+
+module.exports = { log, logAwait };
