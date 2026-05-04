@@ -12,9 +12,12 @@ const JobCandidateScreening = require('../models/JobCandidateScreening');
 const Candidate = require('../models/Candidate');
 const User = require('../models/User');
 const jobCandidateService = require('../services/jobCandidateService');
+const jobCandidateStatusService = require('../services/jobCandidateStatusService');
+const screeningInclusionService = require('../services/screeningInclusionService');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
+const auditLogger = require('../utils/auditLogger');
 
 const isMissing = (v) => v === undefined || v === null || v === '';
 
@@ -28,6 +31,55 @@ const valuesDiffer = (a, b) => {
     }
   }
   return String(a ?? '') !== String(b ?? '');
+};
+
+const AUDIT_CANDIDATE_FIELD_SKIP = new Set([
+  'id',
+  'backendId',
+  'tagDetails',
+  'sendWelcomeEmail',
+  'matchedJobs',
+  'jobMatchesCount',
+  'embedding',
+  'searchText',
+  'createdAt',
+  'updatedAt',
+]);
+
+const clampAuditValue = (v) => {
+  if (v === undefined || v === null) return v;
+  if (typeof v === 'string') {
+    return v.length > 8000 ? `${v.slice(0, 8000)}…` : v;
+  }
+  if (typeof v === 'number' || typeof v === 'boolean') return v;
+  if (Array.isArray(v) || (typeof v === 'object' && v !== null && v.constructor === Object)) {
+    try {
+      const s = JSON.stringify(v);
+      if (s.length <= 16000) return v;
+      return { _truncated: true, length: s.length, preview: s.slice(0, 6000) };
+    } catch {
+      return '[unserializable]';
+    }
+  }
+  return v;
+};
+
+/** Audit log `changes` only for keys present on the request body that actually differ after save. */
+const buildCandidateUpdateAuditChanges = (previous, refreshed, body) => {
+  const changes = [];
+  if (!previous || !refreshed || !body || typeof body !== 'object') return changes;
+  for (const key of Object.keys(body)) {
+    if (AUDIT_CANDIDATE_FIELD_SKIP.has(key) || key.startsWith('_')) continue;
+    const oldVal = previous[key];
+    const newVal = refreshed[key];
+    if (!valuesDiffer(oldVal, newVal)) continue;
+    changes.push({
+      field: key,
+      oldValue: clampAuditValue(oldVal),
+      newValue: clampAuditValue(newVal),
+    });
+  }
+  return changes;
 };
 
 /** Until DB migration runs (add_job_candidate_screening_rejection.sql), skip rejection columns */
@@ -130,6 +182,32 @@ const getBearerTokenFromRequest = (req) => {
   if (lower.startsWith('bearer ')) return s.slice(7).trim();
   return s;
 };
+
+/**
+ * Job hint + acting staff user for `{job_*}` / `{recruiter_*}` in welcome templates.
+ */
+function welcomePlaceholderContextFromRequest(req) {
+  const body = req.body || {};
+  const rawJob =
+    body.jobId ??
+    body.job_id ??
+    body.linkedJobId ??
+    body.linked_job_id ??
+    body.primaryJobId ??
+    body.primary_job_id ??
+    null;
+  const jobId =
+    rawJob != null && String(rawJob).trim() ? String(rawJob).trim() : null;
+  const u = req.user;
+  let recruiter = null;
+  if (u && typeof u === 'object') {
+    const name = String(u.name || '').trim();
+    const email = String(u.email || '').trim();
+    const phone = String(u.phone || '').trim();
+    if (name || email || phone) recruiter = { name, email, phone };
+  }
+  return { jobId, recruiter };
+}
 
 /**
  * Tenant UUID for client-scoped welcome templates when staff is authenticated.
@@ -1525,7 +1603,10 @@ const create = async (req, res) => {
     const enrichedAfter = await candidateService.getById(candidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome) {
-      messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, { clientId: welcomeClientId });
+      messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, {
+        clientId: welcomeClientId,
+        ...welcomePlaceholderContextFromRequest(req),
+      });
     }
     res.status(201).json(enrichedAfter);
   } catch (err) {
@@ -1720,7 +1801,10 @@ const createFromAi = async (req, res) => {
     const enrichedCandidate = await candidateService.getById(createdCandidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome) {
-      messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, { clientId: welcomeClientId });
+      messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, {
+        clientId: welcomeClientId,
+        ...welcomePlaceholderContextFromRequest(req),
+      });
     }
     res.status(201).json({ candidate: enrichedCandidate, parsed: aiResult });
   } catch (err) {
@@ -1847,9 +1931,61 @@ const update = async (req, res) => {
         params: { comment: String(body.internalNotes).slice(0, 400) },
       });
     }
+    // Audit: 'סטטוס השתנה' — candidate profile status (e.g. רשימה / פרופיל)
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'status') &&
+      String(body.status ?? '').trim() &&
+      valuesDiffer(previous?.status, body.status)
+    ) {
+      systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CANDIDATE_STATUS,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidateLabel,
+        params: {
+          candidate: candidateLabel || candidate.id,
+          status: String(body.status).trim(),
+        },
+      });
+    }
 
-    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
+    // `refreshCandidateDataStatusAfterSave` forces «חסר נתונים» when mandatory fields/tags are missing,
+    // which would erase recruiter-set workflow statuses (e.g. «עבר בדיקה ראשונית») right after a PUT.
+    // Skip when this request is explicitly about profile status: value changed, or a minimal status patch
+    // (bulk modal / API: only `status` and optional `statusExplanation`).
+    const bodyKeys = Object.keys(body).filter((k) => k && !String(k).startsWith('_'));
+    const statusOnlyPatch =
+      bodyKeys.length > 0 &&
+      bodyKeys.every((k) => k === 'status' || k === 'statusExplanation');
+    const statusExplicitlyChanged =
+      Object.prototype.hasOwnProperty.call(body, 'status') &&
+      String(body.status ?? '').trim() !== '' &&
+      valuesDiffer(previous?.status, body.status);
+    const skipCompletenessRefresh =
+      statusExplicitlyChanged ||
+      (statusOnlyPatch && Object.prototype.hasOwnProperty.call(body, 'status'));
+    if (!skipCompletenessRefresh) {
+      await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
+    }
     const refreshed = await candidateService.getById(candidate.id);
+
+    const fieldChanges = buildCandidateUpdateAuditChanges(previous, refreshed, body);
+    if (fieldChanges.length) {
+      const labels = fieldChanges.map((c) => c.field).slice(0, 24);
+      const more =
+        fieldChanges.length > labels.length ? ` (+${fieldChanges.length - labels.length})` : '';
+      auditLogger.log(req, {
+        level: 'info',
+        action: 'update',
+        description: `עודכנו שדות בפרופיל המועמד: ${labels.join(', ')}${more}`,
+        entityType: 'Candidate',
+        entityId: String(candidate.id),
+        entityName: String(candidateLabel || refreshed.fullName || '').slice(0, 255) || null,
+        changes: fieldChanges,
+        metadata: { candidateProfileSave: true, changedFieldCount: fieldChanges.length },
+      });
+    }
+
     res.json(refreshed);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
@@ -1937,6 +2073,7 @@ const createUploadUrl = async (req, res) => {
         messageTemplateService.queueCandidateWelcomeEmail(candidateRow, {
           onlyIfNoResume: true,
           clientId: welcomeClientId,
+          ...welcomePlaceholderContextFromRequest(req),
         });
       }
     } catch (welcomeErr) {
@@ -2720,14 +2857,51 @@ const generateInternalOpinion = async (req, res) => {
   }
 };
 
+/** Create or update a job–candidate link (e.g. bulk “הוסף לסינון”) with optional filter notes/position in workflowMeta. */
+const linkCandidateToJob = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const body = req.body || {};
+    const jobId = body.jobId != null ? String(body.jobId).trim() : '';
+    if (!jobId) {
+      return res.status(400).json({ message: 'jobId is required' });
+    }
+    const filterPosition = body.filterPosition != null ? String(body.filterPosition).trim() : '';
+    const filterNotes = body.filterNotes != null ? String(body.filterNotes).trim() : '';
+    const workflowMetaPatch = {};
+    if (filterPosition) workflowMetaPatch.filterPosition = filterPosition;
+    if (filterNotes) workflowMetaPatch.filterNotes = filterNotes;
+
+    const source =
+      typeof body.source === 'string' && body.source.trim()
+        ? String(body.source).trim()
+        : 'bulk_job_filter';
+    const manualOverride = body.manualOverride === true || source === 'bulk_job_filter';
+
+    await jobCandidateService.associateCandidateWithJob({
+      jobId,
+      candidateId,
+      status: typeof body.status === 'string' && body.status.trim() ? body.status.trim() : 'חדש',
+      source,
+      workflowMetaPatch,
+      manualOverride,
+    });
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    console.error('[linkCandidateToJob]', err.message || err);
+    return res.status(err.status || 500).json({ message: err.message || 'Failed to link job' });
+  }
+};
+
 /** Explicit job–candidate links (job_candidates + jobs) for “התעניינות במשרה”. */
 const listLinkedJobs = async (req, res) => {
   try {
     const candidateId = req.params.id;
     const rows = await jobCandidateService.listForCandidate(candidateId);
+    const usable = rows.filter((r) => r.jobId && r.job && r.job.id);
     res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
-    res.json(rows);
+    res.json(usable);
   } catch (err) {
     console.error('[listLinkedJobs]', err.message || err);
     res.status(400).json({ message: err.message || 'Failed to list linked jobs' });
@@ -2770,7 +2944,13 @@ const patchJobLinkStatus = async (req, res) => {
     const prevStatus = jc.status;
     prevMeta.workflowUpdatedAt = new Date().toISOString();
     const newStatus = String(status).trim();
-    await jc.update({ status: newStatus, workflowMeta: prevMeta });
+    const updated = await jobCandidateStatusService.applyJobCandidateStatusChange({
+      jobCandidateId,
+      newStatus,
+      workflowMeta: prevMeta,
+      req,
+      source: 'patch',
+    });
 
     // Resolve a friendly candidate label for the audit description.
     let candidateLabel = null;
@@ -2819,10 +2999,40 @@ const patchJobLinkStatus = async (req, res) => {
     }
 
     res.set('Cache-Control', 'private, no-store');
-    return res.json(jc.get({ plain: true }));
+    return res.json(updated.get({ plain: true }));
   } catch (err) {
     console.error('[patchJobLinkStatus]', err.message || err);
     return res.status(500).json({ message: err.message || 'Failed to update job link status' });
+  }
+};
+
+const getScreeningPoolForCandidate = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const data = await screeningInclusionService.computeScreeningForCandidate(candidateId);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[getScreeningPoolForCandidate]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to load screening pool' });
+  }
+};
+
+const getScreeningPrecheck = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const jobId = req.query.jobId != null ? String(req.query.jobId).trim() : '';
+    if (!jobId) {
+      return res.status(400).json({ message: 'jobId query parameter is required' });
+    }
+    const data = await screeningInclusionService.precheckManualAdd(jobId, candidateId);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[getScreeningPrecheck]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to pre-check screening link' });
   }
 };
 
@@ -2884,10 +3094,22 @@ const getRelevantJobs = async (req, res) => {
       if (!job || seenJobIds.has(job.id) || rejectedJobIds.has(String(job.id))) continue;
       seenJobIds.add(job.id);
       const jobData = job.toJSON ? job.toJSON() : job;
+      const wm = jc.workflowMeta && typeof jc.workflowMeta === 'object' && !Array.isArray(jc.workflowMeta)
+        ? jc.workflowMeta
+        : {};
+      const fp = wm.filterPosition != null ? String(wm.filterPosition).trim() : '';
+      const fn = wm.filterNotes != null ? String(wm.filterNotes).trim() : '';
       results.push({
         job: jobData,
         matchPercentage: typeof jc.matchScore === 'number' ? jc.matchScore : defaultMatch,
         source: 'job_candidate',
+        jobLinkMeta:
+          fp || fn
+            ? {
+                filterPosition: fp || null,
+                filterNotes: fn || null,
+              }
+            : null,
       });
     }
 
@@ -2928,9 +3150,14 @@ const getRelevantJobs = async (req, res) => {
 
     // Sort full list by match percentage descending so order is always by relevance for this candidate
     results.sort((a, b) => (b.matchPercentage ?? 0) - (a.matchPercentage ?? 0));
-    const out = results
-      .slice(0, limit)
-      .map((r) => ({ ...r.job, matchPercentage: r.matchPercentage }));
+    const out = results.slice(0, limit).map((r) => {
+      const row = { ...r.job, matchPercentage: r.matchPercentage };
+      if (r.jobLinkMeta) {
+        if (r.jobLinkMeta.filterPosition) row.filterPosition = r.jobLinkMeta.filterPosition;
+        if (r.jobLinkMeta.filterNotes) row.filterNotes = r.jobLinkMeta.filterNotes;
+      }
+      return row;
+    });
 
     res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
     res.set('Pragma', 'no-cache');
@@ -3217,7 +3444,10 @@ module.exports = {
   fetchResumeBinaryForMail,
   buildParsedUpdates,
   generateInternalOpinion,
+  getScreeningPoolForCandidate,
+  getScreeningPrecheck,
   getRelevantJobs,
+  linkCandidateToJob,
   listLinkedJobs,
   patchJobLinkStatus,
   getScreeningData,

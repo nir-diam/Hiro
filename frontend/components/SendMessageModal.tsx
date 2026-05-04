@@ -16,6 +16,8 @@ import { fetchMessageTemplatesForCompose, type MessageTemplateDto } from '../ser
 import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
 import { sendNotificationEmail } from '../services/emailSendApi';
 import { logWhatsappComposeOpen } from '../services/messagingApi';
+import { applyMessageTemplatePlaceholders, loadMessagingPlaceholderValues } from '../services/messageTemplatePlaceholders';
+import { useAuth } from '../context/AuthContext';
 
 type MessageMode = 'whatsapp' | 'sms' | 'email';
 
@@ -27,6 +29,29 @@ function resolveRecipientEmail(candidateEmail?: string | null, candidatePhone?: 
     const p = String(candidatePhone || '').trim();
     if (p && EMAIL_RE.test(p)) return p.toLowerCase();
     return '';
+}
+
+/** Distinct valid emails from a comma/semicolon-separated list (bulk נמענים). */
+function collectRecipientEmailsFromBulkField(candidateEmail?: string | null, candidatePhone?: string): string[] {
+    const raw = String(candidateEmail || '').trim();
+    if (raw) {
+        const parts = raw
+            .split(/[,;\s\n]+/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const p of parts) {
+            if (!EMAIL_RE.test(p)) continue;
+            const low = p.toLowerCase();
+            if (seen.has(low)) continue;
+            seen.add(low);
+            out.push(low);
+        }
+        if (out.length) return out;
+    }
+    const one = resolveRecipientEmail(null, candidatePhone);
+    return one ? [one] : [];
 }
 
 function escapeHtml(s: string) {
@@ -145,9 +170,12 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [jobPickerOpen, setJobPickerOpen] = useState(false);
     const [jobSearchQuery, setJobSearchQuery] = useState('');
     const jobPickerRef = useRef<HTMLDivElement>(null);
+    const baseTemplateRef = useRef<{ subject: string; content: string } | null>(null);
+    const [placeholderValues, setPlaceholderValues] = useState<Record<string, string>>({});
 
     const titleId = useId();
     const config = modalConfig[mode];
+    const { user } = useAuth();
 
     /** Prefer prop from opener; fall back to URL e.g. #/candidates/:candidateId when modal is global. */
     const candidateRouteMatch = useMatch({ path: '/candidates/:candidateId', end: false });
@@ -209,6 +237,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setJobsError(null);
         setSubmitError(null);
         setIsSubmitting(false);
+        baseTemplateRef.current = null;
+        setPlaceholderValues({});
 
         let cancelled = false;
         (async () => {
@@ -248,21 +278,61 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         };
     }, [isOpen, mode]);
 
+    const selectedJobRow = useMemo(
+        () => (selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined),
+        [jobs, selectedJobId],
+    );
+
+    useEffect(() => {
+        if (!isOpen) return;
+        let cancelled = false;
+        void loadMessagingPlaceholderValues({
+            candidateId: resolvedCandidateId,
+            jobId: selectedJobId || null,
+            fallbackCandidateName: candidateName,
+            fallbackCandidatePhone: candidatePhone,
+            fallbackCandidateEmail: candidateEmail,
+            jobComposeRow: selectedJobRow,
+            recruiter: user,
+        }).then((vals) => {
+            if (!cancelled) setPlaceholderValues(vals as Record<string, string>);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        isOpen,
+        resolvedCandidateId,
+        selectedJobId,
+        candidateName,
+        candidatePhone,
+        candidateEmail,
+        selectedJobRow,
+        user,
+    ]);
+
     const applyTemplate = useCallback(
         (templateId: string) => {
             setSelectedTemplateId(templateId);
-            if (!templateId) return;
+            if (!templateId) {
+                baseTemplateRef.current = null;
+                setContent('');
+                if (mode === 'email') setSubject('');
+                return;
+            }
             const t = channelTemplates.find((x) => x.id === templateId);
             if (!t) return;
-            setContent(t.content || '');
-            if (mode === 'email') {
-                setSubject(t.subject || '');
-            }
+            baseTemplateRef.current = { subject: t.subject || '', content: t.content || '' };
         },
         [channelTemplates, mode],
     );
 
-    if (!isOpen) return null;
+    useEffect(() => {
+        const base = baseTemplateRef.current;
+        if (!base || !selectedTemplateId) return;
+        setSubject(applyMessageTemplatePlaceholders(base.subject, placeholderValues));
+        setContent(applyMessageTemplatePlaceholders(base.content, placeholderValues));
+    }, [placeholderValues, selectedTemplateId]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -277,7 +347,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         const selectedTpl = selectedTemplateId
             ? templates.find((t) => t.id === selectedTemplateId)
             : undefined;
-        const selectedJob = selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined;
+        const selectedJob = selectedJobRow;
 
         const templateAuditPlain = selectedTpl ? formatMessageTemplateAuditBlock(selectedTpl) : '';
         const jobValuePlain = selectedJob ? jobComposeRowLabel(selectedJob) : '';
@@ -326,13 +396,39 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
 
+        if (mode === 'sms') {
+            const phones = String(candidatePhone || '')
+                .split(/[;,\n]+/)
+                .map((s) => s.trim())
+                .filter(Boolean);
+            const digitsList = phones
+                .map((p) => p.replace(/\D/g, ''))
+                .filter((d) => d.length >= 9);
+            if (!digitsList.length) {
+                setSubmitError('אין מספר טלפון תקין ל־SMS');
+                return;
+            }
+            setIsSubmitting(true);
+            try {
+                const body = encodeURIComponent(textOut);
+                for (const digits of digitsList) {
+                    const url = `sms:${digits}?body=${body}`;
+                    window.open(url, '_blank', 'noopener,noreferrer');
+                }
+                onClose();
+            } finally {
+                setIsSubmitting(false);
+            }
+            return;
+        }
+
         if (mode !== 'email') {
             setSubmitError('שליחה דרך השרת זמינה כרגע רק למייל. השתמשו בערוץ המייל.');
             return;
         }
 
-        const toEmail = resolveRecipientEmail(candidateEmail, candidatePhone);
-        if (!toEmail) {
+        const toEmails = collectRecipientEmailsFromBulkField(candidateEmail, candidatePhone);
+        if (!toEmails.length) {
             setSubmitError('אין כתובת מייל לנמען. עדכנו מייל במועמד או באיש הקשר.');
             return;
         }
@@ -372,24 +468,27 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
         setIsSubmitting(true);
         try {
-            await sendNotificationEmail({
-                toEmail,
-                subject: subject.trim(),
-                text: textOut,
-                html,
-                isTask: false,
-                messageType: 'message',
-                taskPayload: {
-                    source: 'SendMessageModal',
-                    candidateId: resolvedCandidateId,
-                    candidateName,
-                    templateId: selectedTemplateId || null,
-                    jobId: selectedJobId || null,
-                    composeScope: composeScope,
-                    templateLabel: templateFooterLine || null,
-                    jobLabel: jobFooterLine || null,
-                },
-            });
+            for (const toEmail of toEmails) {
+                await sendNotificationEmail({
+                    toEmail,
+                    subject: subject.trim(),
+                    text: textOut,
+                    html,
+                    isTask: false,
+                    messageType: 'message',
+                    taskPayload: {
+                        source: 'SendMessageModal',
+                        candidateId: resolvedCandidateId,
+                        candidateName,
+                        bulkRecipientCount: toEmails.length,
+                        templateId: selectedTemplateId || null,
+                        jobId: selectedJobId || null,
+                        composeScope: composeScope,
+                        templateLabel: templateFooterLine || null,
+                        jobLabel: jobFooterLine || null,
+                    },
+                });
+            }
             onClose();
         } catch (err: unknown) {
             setSubmitError(err instanceof Error ? err.message : 'שליחת המייל נכשלה');
@@ -418,7 +517,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const templatesErrBlocksHints = !!(templatesError && !isSilentComposeFetchError(templatesError));
     const jobsErrBlocksHints = !!(jobsError && !isSilentComposeFetchError(jobsError));
-    const selectedJobRow = selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined;
+
+    if (!isOpen) return null;
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4" onClick={onClose}>
@@ -646,7 +746,9 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                     ? 'שולח…'
                                     : isSubmitting && mode === 'whatsapp'
                                       ? 'פותח…'
-                                      : config.buttonText}
+                                      : isSubmitting && mode === 'sms'
+                                        ? 'פותח…'
+                                        : config.buttonText}
                             </span>
                         </button>
                     </footer>

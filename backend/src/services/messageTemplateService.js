@@ -1,7 +1,9 @@
 const { Op } = require('sequelize');
 const MessageTemplate = require('../models/MessageTemplate');
 const Client = require('../models/Client');
+const Job = require('../models/Job');
 const emailService = require('./emailService');
+const jobCandidateService = require('./jobCandidateService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
@@ -264,11 +266,286 @@ const applyNumberedPlaceholders = (template, values) => {
   return out;
 };
 
+/** Same logical tokens as `frontend/services/messageTemplatePlaceholders.ts` — `{candidate_first_name}`, etc. */
+const MESSAGE_TEMPLATE_NAMED_KEYS = [
+  'candidate_first_name',
+  'candidate_last_name',
+  'candidate_phone',
+  'candidate_email',
+  'candidate_cv_link',
+  'candidate_id',
+  'job_referrals',
+  'company_name',
+  'client_name',
+  'contact_name',
+  'contact_phone',
+  'contact_email',
+  'job_title',
+  'job_description',
+  'job_requirements',
+  'recruiter_name',
+  'recruiter_email',
+  'recruiter_phone',
+  'send_date',
+  'privacy_policy_link',
+  'thank_you_page_link',
+];
+
+const escapeRegExp = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** Matches `{token}` or `{ token }` (ASCII braces only — trims spaces inside braces). */
+const placeholderTokenRegex = (key) =>
+  new RegExp(`\\{\\s*${escapeRegExp(key)}\\s*\\}`, 'g');
+
+/**
+ * Replace `{token}` for known keys; unknown `{foo}` left unchanged.
+ * @param {string} template
+ * @param {Record<string, string>} map
+ */
+const applyNamedPlaceholders = (template, map) => {
+  let out = String(template || '');
+  const safe = map && typeof map === 'object' ? map : {};
+  for (const key of MESSAGE_TEMPLATE_NAMED_KEYS) {
+    const re = placeholderTokenRegex(key);
+    const val = safe[key] != null ? String(safe[key]) : '';
+    out = out.replace(re, val);
+  }
+  return out;
+};
+
 const escapeHtml = (s) =>
   String(s || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+
+const escapeHtmlAttr = (s) =>
+  String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+/** Tokens rendered as `<a href>` in HTML bodies when URL is http(s). */
+const LINK_PLACEHOLDER_KEYS = new Set([
+  'candidate_cv_link',
+  'privacy_policy_link',
+  'thank_you_page_link',
+]);
+
+const LINK_LABEL_HE = {
+  candidate_cv_link: 'קורות חיים',
+  privacy_policy_link: 'מדיניות פרטיות',
+  thank_you_page_link: 'דף תודה',
+};
+
+const applyNumberedPlaceholdersHtml = (template, values) => {
+  let out = String(template || '');
+  const arr = Array.isArray(values) ? values : [];
+  for (let i = 0; i < arr.length; i += 1) {
+    out = out.replace(new RegExp(`\\{${i + 1}\\}`, 'g'), escapeHtml(String(arr[i] ?? '')));
+  }
+  return out;
+};
+
+/**
+ * Like `applyNamedPlaceholders` but escapes plain text; known URL tokens become clickable links.
+ */
+const applyNamedPlaceholdersHtml = (template, map) => {
+  let out = String(template || '');
+  const safe = map && typeof map === 'object' ? map : {};
+  for (const key of MESSAGE_TEMPLATE_NAMED_KEYS) {
+    const re = placeholderTokenRegex(key);
+    const val = safe[key] != null ? String(safe[key]) : '';
+    if (LINK_PLACEHOLDER_KEYS.has(key)) {
+      const url = val.trim();
+      const replacement =
+        url && /^https?:\/\//i.test(url)
+          ? `<a href="${escapeHtmlAttr(url)}">${LINK_LABEL_HE[key] || 'קישור'}</a>`
+          : escapeHtml(val);
+      out = out.replace(re, replacement);
+    } else {
+      out = out.replace(re, escapeHtml(val));
+    }
+  }
+  return out;
+};
+
+function splitFullName(fullName) {
+  const s = String(fullName || '').trim();
+  if (!s) return { first: '', last: '' };
+  const parts = s.split(/\s+/).filter(Boolean);
+  if (parts.length === 1) return { first: parts[0], last: '' };
+  return { first: parts[0], last: parts.slice(1).join(' ') };
+}
+
+function formatLinkedJobsSummary(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return '';
+  const lines = [];
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') continue;
+    const job = row.job && typeof row.job === 'object' ? row.job : {};
+    const title = String(job.title || '').trim() || 'משרה';
+    const client = String(job.client || '').trim();
+    const status = String(row.status || '').trim();
+    const bit = [title, client ? `(${client})` : '', status ? `— ${status}` : ''].filter(Boolean).join(' ');
+    if (bit) lines.push(bit);
+  }
+  return lines.join('\n');
+}
+
+function formatRequirements(job) {
+  if (!job || typeof job !== 'object') return '';
+  const req = job.requirements;
+  if (Array.isArray(req)) {
+    return req.map((x) => String(x ?? '').trim()).filter(Boolean).join('\n');
+  }
+  if (typeof req === 'string') return String(req).trim();
+  return '';
+}
+
+function firstContactFromJob(job) {
+  const raw = job && job.contacts;
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  const c = raw[0];
+  if (!c || typeof c !== 'object') return null;
+  return {
+    name: String(c.name || '').trim(),
+    phone: String(c.phone || c.mobile || c.telephone || '').trim(),
+    email: String(c.email || '').trim(),
+  };
+}
+
+function pickRecruiterDisplay(job) {
+  if (!job || typeof job !== 'object') return '';
+  return (
+    String(job.recruiter || '').trim() ||
+    String(job.recruitingCoordinator || '').trim() ||
+    String(job.accountManager || '').trim()
+  );
+}
+
+function firstEnvUrl(...keys) {
+  for (const key of keys) {
+    const v = String(process.env[key] || '').trim();
+    if (v) return v;
+  }
+  return '';
+}
+
+/**
+ * Build `{candidate_*}` etc. from a candidate row (Sequelize instance or plain).
+ * Uses linked `job_candidates` rows when present; optional `ctx.jobId` loads a job if there are no links yet.
+ * Optional `ctx.recruiter` fills `{recruiter_*}` (acting staff user — overrides job fields when set).
+ * @param {object} cand
+ * @param {{ jobId?: string|null; recruiter?: { name?: string; email?: string; phone?: string }|null }} [ctx]
+ * @returns {Promise<Record<string, string>>}
+ */
+async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
+  const plain =
+    cand && typeof cand.get === 'function'
+      ? cand.get({ plain: true })
+      : cand && typeof cand === 'object'
+        ? cand
+        : {};
+
+  const id = plain.id != null && String(plain.id).trim() ? String(plain.id).trim() : '';
+
+  const hintJobId =
+    ctx && ctx.jobId != null && String(ctx.jobId).trim() ? String(ctx.jobId).trim() : '';
+
+  const firstFromDb = String(plain.firstName ?? '').trim();
+  const lastFromDb = String(plain.lastName ?? '').trim();
+  const fullFromDb = String(plain.fullName ?? plain.name ?? '').trim();
+  const splitDb = fullFromDb ? splitFullName(fullFromDb) : { first: '', last: '' };
+
+  let links = [];
+  if (id) {
+    try {
+      links = await jobCandidateService.listForCandidate(id);
+    } catch (e) {
+      console.warn('[message-templates] linked jobs for named placeholders failed:', e?.message || e);
+    }
+  }
+
+  const usableLinks = links.filter((row) => row.job && row.job.id);
+
+  let primaryJob = null;
+  if (usableLinks.length) {
+    primaryJob = usableLinks[0].job;
+  } else if (hintJobId) {
+    try {
+      const row = await Job.findByPk(hintJobId);
+      primaryJob = row ? row.get({ plain: true }) : null;
+    } catch (e) {
+      console.warn('[message-templates] hint jobId load failed:', e?.message || e);
+    }
+  }
+
+  let jobReferrals = formatLinkedJobsSummary(usableLinks.length ? usableLinks : links);
+  if (!String(jobReferrals || '').trim() && primaryJob) {
+    jobReferrals = formatLinkedJobsSummary([{ job: primaryJob, status: '' }]);
+  }
+
+  const sendDate = new Intl.DateTimeFormat('he-IL', {
+    dateStyle: 'long',
+    timeZone: 'Asia/Jerusalem',
+  }).format(new Date());
+
+  const privacy = firstEnvUrl(
+    'PRIVACY_POLICY_LINK',
+    'PRIVACY_POLICY_URL',
+    'VITE_PRIVACY_POLICY_URL',
+  );
+  const thankYou = firstEnvUrl(
+    'THANK_YOU_PAGE_LINK',
+    'THANK_YOU_PAGE_URL',
+    'VITE_THANK_YOU_PAGE_URL',
+  );
+
+  const clientLabel = primaryJob ? String(primaryJob.client || '').trim() : '';
+  const contact = primaryJob ? firstContactFromJob(primaryJob) : null;
+
+  const base = {
+    candidate_first_name: firstFromDb || splitDb.first,
+    candidate_last_name: lastFromDb || splitDb.last,
+    candidate_phone: String(plain.phone ?? '').trim(),
+    candidate_email: String(plain.email ?? '').trim(),
+    candidate_cv_link: String(plain.resumeUrl ?? '').trim(),
+    /** National ID only — matches UI label "תעודת זהות" (`messageTemplatePlaceholders.ts`). */
+    candidate_id: String(plain.idNumber ?? '').trim(),
+    job_referrals: jobReferrals,
+    company_name: clientLabel,
+    client_name: clientLabel,
+    contact_name: contact ? contact.name : '',
+    contact_phone: contact ? contact.phone : '',
+    contact_email: contact ? contact.email : '',
+    job_title: primaryJob ? String(primaryJob.title || '').trim() : '',
+    job_description: primaryJob
+      ? String(primaryJob.description ?? primaryJob.PublicDescription ?? '').trim()
+      : '',
+    job_requirements: primaryJob ? formatRequirements(primaryJob) : '',
+    recruiter_name: pickRecruiterDisplay(primaryJob),
+    recruiter_email: '',
+    recruiter_phone: '',
+    send_date: sendDate,
+    privacy_policy_link: privacy,
+    thank_you_page_link: thankYou,
+  };
+
+  const rec = ctx && ctx.recruiter && typeof ctx.recruiter === 'object' ? ctx.recruiter : null;
+  if (rec) {
+    const n = String(rec.name ?? '').trim();
+    const e = String(rec.email ?? '').trim();
+    const p = String(rec.phone ?? '').trim();
+    if (n) base.recruiter_name = n;
+    if (e) base.recruiter_email = e;
+    if (p) base.recruiter_phone = p;
+  }
+
+  return base;
+}
 
 const findTemplateRowForSend = async (name, clientId) => {
   const key = String(name || '').trim();
@@ -303,12 +580,15 @@ const findTemplateRowForSend = async (name, clientId) => {
 
 /**
  * Load tenant template (if clientId + row exists) else admin; send via Hiro lane.
- * @param {{ templateKey: string; toEmail: string; placeholderValues?: string[]; fromEmail?: string | null; clientId?: string | null }} opts
+ * @param {{ name: string; toEmail: string; placeholderValues?: string[]; namedPlaceholders?: Record<string, string>|null; candidateRecord?: object|null; placeholderContext?: { jobId?: string|null; recruiter?: { name?: string; email?: string; phone?: string }|null }|null; fromEmail?: string|null; clientId?: string|null }} opts
  */
 const sendScopedTemplateEmail = async ({
   name,
   toEmail,
   placeholderValues = [],
+  namedPlaceholders = null,
+  candidateRecord = null,
+  placeholderContext = null,
   fromEmail = null,
   clientId = null,
 }) => {
@@ -342,8 +622,25 @@ const sendScopedTemplateEmail = async ({
   }
 
   const plain = row.get({ plain: true });
-  const subject = applyNumberedPlaceholders(plain.subject, placeholderValues);
-  const body = applyNumberedPlaceholders(plain.body, placeholderValues);
+
+  let namedMap = {};
+  if (candidateRecord) {
+    namedMap = await buildNamedPlaceholdersFromCandidate(
+      candidateRecord,
+      placeholderContext && typeof placeholderContext === 'object' ? placeholderContext : {},
+    );
+  }
+  if (namedPlaceholders && typeof namedPlaceholders === 'object') {
+    namedMap = { ...namedMap, ...namedPlaceholders };
+  }
+
+  let subject = applyNumberedPlaceholders(plain.subject, placeholderValues);
+  let body = applyNumberedPlaceholders(plain.body, placeholderValues);
+  subject = applyNamedPlaceholders(subject, namedMap);
+  body = applyNamedPlaceholders(body, namedMap);
+
+  let bodyHtml = applyNumberedPlaceholdersHtml(plain.body, placeholderValues);
+  bodyHtml = applyNamedPlaceholdersHtml(bodyHtml, namedMap);
 
   const scopeTag = plain.scope === 'client' ? `client:${plain.clientId}` : 'admin';
   console.log(`[message-templates] send ${scopeTag} key="${key}" → ${toEmail} subject="${subject.slice(0, 60)}…"`);
@@ -352,7 +649,7 @@ const sendScopedTemplateEmail = async ({
     toEmail: String(toEmail).trim(),
     subject,
     text: body,
-    html: `<div dir="rtl" style="white-space:pre-wrap;font-family:sans-serif;">${escapeHtml(body).replace(
+    html: `<div dir="rtl" style="white-space:pre-wrap;font-family:sans-serif;">${bodyHtml.replace(
       /\n/g,
       '<br/>',
     )}</div>`,
@@ -447,6 +744,12 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
     name: welcomeKey,
     toEmail: String(email).trim(),
     placeholderValues: [displayName, dateStr],
+    candidateRecord: record,
+    placeholderContext: {
+      jobId: options.jobId != null && String(options.jobId).trim() ? String(options.jobId).trim() : null,
+      recruiter:
+        options.recruiter && typeof options.recruiter === 'object' ? options.recruiter : null,
+    },
     clientId,
   }).catch((err) => {
     console.error('[message-templates] welcome email failed', err?.message || err);
@@ -470,6 +773,8 @@ module.exports = {
   findByPkWithClient,
   getByKeyOrFail,
   applyNumberedPlaceholders,
+  applyNamedPlaceholders,
+  buildNamedPlaceholdersFromCandidate,
   sendScopedTemplateEmail,
   sendScopedTemplateEmailOptional,
   sendAdminTemplateEmail,

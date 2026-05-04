@@ -46,6 +46,8 @@ export const useUIState = () => {
         tags: [],
         internalTags: [],
         matchScore: 0,
+        phone: '',
+        email: '',
     });
 
     const openSummaryDrawer = (candidateInput: Candidate | number) => {

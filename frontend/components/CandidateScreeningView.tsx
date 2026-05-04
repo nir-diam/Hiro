@@ -35,6 +35,13 @@ interface ScreeningJob {
   screeningQuestions: { question: string; answer: string }[];
   /** Job JSONB contacts from API when present */
   contactsFromJob?: { id?: string; name: string; role?: string; email?: string }[];
+  /** From job_candidates.workflowMeta when linked via bulk filter / screening */
+  filterPosition?: string;
+  filterNotes?: string;
+  /** 1 = explicit application/link, 2 = manual override, 3 = interest match only */
+  screeningPath?: 1 | 2 | 3;
+  /** Present when job appears in pool but fails inclusion rules — card is visible but not selectable. */
+  excludedReasons?: string[];
 }
 
 interface SendModalContact {
@@ -49,10 +56,14 @@ const AIMatchScore: React.FC<{ score: number }> = ({ score }) => {
     const bgColor = score > 85 ? 'bg-accent-100/70' : score > 70 ? 'bg-primary-100/70' : 'bg-red-100/70';
 
     return (
-        <div className={`flex items-center justify-center gap-1.5 text-sm font-bold px-2.5 py-1 rounded-full ${bgColor} ${scoreColor}`}>
+        <button
+            type="button"
+            className={`match-score-popup-trigger flex items-center justify-center gap-1.5 text-sm font-bold px-2.5 py-1 rounded-full ${bgColor} ${scoreColor} hover:ring-2 hover:ring-offset-1 hover:ring-accent-400 transition-all cursor-pointer`}
+            onClick={(e) => e.stopPropagation()}
+        >
             <SparklesIcon className="w-4 h-4" />
             <span>{score}%</span>
-        </div>
+        </button>
     );
 };
 
@@ -64,7 +75,7 @@ const emptyResumeDefaults = {
   education: undefined as string[] | undefined,
 };
 
-function buildResumeDataFromCandidate(candidate?: {
+export function buildResumeDataFromCandidate(candidate?: {
   fullName?: string;
   title?: string;
   professionalSummary?: string;
@@ -178,6 +189,8 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
       })
       .filter((x) => Boolean(x.name));
   }
+  const fp = typeof raw.filterPosition === 'string' ? raw.filterPosition.trim() : '';
+  const fn = typeof raw.filterNotes === 'string' ? raw.filterNotes.trim() : '';
   return {
     id: raw.id,
     company: raw.client ?? raw.company ?? '',
@@ -189,6 +202,8 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
     requirements: reqList,
     screeningQuestions: screeningList,
     contactsFromJob,
+    filterPosition: fp || undefined,
+    filterNotes: fn || undefined,
   };
 }
 
@@ -275,19 +290,29 @@ const CandidateScreeningView: React.FC<{
       }
       setJobsLoading(true);
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
       if (token) headers.Authorization = `Bearer ${token}`;
-      fetch(`${apiBase}/api/candidates/${candidateId}/relevant-jobs?limit=5`, {
+      fetch(`${apiBase}/api/candidates/${candidateId}/screening-pool`, {
         headers,
         cache: 'no-store',
       })
-        .then((res) => (res.ok ? res.json() : []))
-        .then((data: any[]) => {
-          if (Array.isArray(data)) {
-            setJobs(data.map(mapApiJobToScreeningJob));
-          }
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error('pool'))))
+        .then((data: { included?: any[]; excluded?: any[] }) => {
+          const inc = Array.isArray(data?.included) ? data.included : [];
+          const exc = Array.isArray(data?.excluded) ? data.excluded : [];
+          const includedList = inc.map((row: any) => ({
+            ...mapApiJobToScreeningJob(row.job || {}),
+            screeningPath: row.path === 2 ? 2 : row.path === 1 ? 1 : row.path === 3 ? 3 : undefined,
+          }));
+          const excludedList = exc.map((row: any) => ({
+            ...mapApiJobToScreeningJob(row.job || {}),
+            excludedReasons: Array.isArray(row.reasons) ? row.reasons : [],
+          }));
+          setJobs([...includedList, ...excludedList]);
         })
-        .catch(() => setJobs([]))
+        .catch(() => {
+          setJobs([]);
+        })
         .finally(() => setJobsLoading(false));
     }, [candidateId]);
 
@@ -569,14 +594,12 @@ const CandidateScreeningView: React.FC<{
     }, []);
 
     const handleSelectJob = (jobId: number | string) => {
-        setSelectedJobs(prev =>
-            prev.includes(jobId) ? prev.filter(id => id !== jobId) : [...prev, jobId]
-        );
+        setSelectedJobs((prev) => (prev.includes(jobId) ? prev.filter((id) => id !== jobId) : [...prev, jobId]));
     };
 
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.checked) {
-            setSelectedJobs(jobs.map(j => j.id));
+            setSelectedJobs(jobs.map((j) => j.id));
         } else {
             setSelectedJobs([]);
         }
@@ -898,7 +921,10 @@ const CandidateScreeningView: React.FC<{
     const sendCvSendDisabled =
       sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail || (!sendAttachOriginalCv && !sendAttachSystemPdf);
 
-    const allSelected = useMemo(() => jobs.length > 0 && selectedJobs.length === jobs.length, [jobs, selectedJobs]);
+    const allSelected = useMemo(
+      () => jobs.length > 0 && selectedJobs.length === jobs.length,
+      [jobs, selectedJobs],
+    );
 
     const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').slice(0, 2);
 
@@ -950,7 +976,7 @@ const CandidateScreeningView: React.FC<{
                                 checked={allSelected}
                                 onChange={handleSelectAll}
                                 id="select-all-jobs"
-                                disabled={jobsLoading}
+                                disabled={jobsLoading || jobs.length === 0}
                             />
                             <label htmlFor="select-all-jobs" className="text-sm text-text-muted cursor-pointer">בחר הכל</label>
                         </div>
@@ -960,11 +986,13 @@ const CandidateScreeningView: React.FC<{
                         {jobsLoading ? (
                             <div className="flex flex-col items-center justify-center min-h-[200px] gap-4 text-text-muted">
                                 <div className="w-10 h-10 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" aria-hidden />
-                                <p className="text-sm font-medium">טוען משרות רלוונטיות...</p>
+                                <p className="text-sm font-medium">{t('screening.loading_pool')}</p>
                             </div>
                         ) : (
                         <>
-                        {jobs.map(job => (
+                        {jobs.map((job) => {
+                            const jobExcluded = !!(job.excludedReasons && job.excludedReasons.length);
+                            return (
                             <div key={job.id} className={`border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'}`}>
                                 {/* Job Summary */}
                                 <div
@@ -977,14 +1005,53 @@ const CandidateScreeningView: React.FC<{
                                             className="h-5 w-5 rounded border-border-default text-primary-600 focus:ring-primary-500"
                                             checked={selectedJobs.includes(job.id)}
                                             onChange={() => handleSelectJob(job.id)}
+                                            disabled={jobsLoading}
                                         />
                                     </div>
                                     
                                     <div className="flex-1 min-w-0">
                                         <div className="flex justify-between items-start mb-1">
                                              <div>
-                                                <p className="font-bold text-text-default text-base leading-tight">{job.title}</p>
+                                                <p className="font-bold text-text-default text-base leading-tight flex flex-wrap items-center gap-2">
+                                                    {job.title}
+                                                    {job.screeningPath === 2 ? (
+                                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 border border-purple-200">
+                                                            {t('screening.path_badge_2')}
+                                                        </span>
+                                                    ) : job.screeningPath === 1 ? (
+                                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-900 border border-emerald-200">
+                                                            {t('screening.path_badge_1')}
+                                                        </span>
+                                                    ) : job.screeningPath === 3 ? (
+                                                        <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-900 border border-sky-200">
+                                                            {t('screening.path_badge_3')}
+                                                        </span>
+                                                    ) : null}
+                                                </p>
                                                 <p className="text-sm text-text-muted">{job.company}</p>
+                                                {jobExcluded ? (
+                                                    <p className="text-xs text-amber-900/90 mt-1.5 leading-snug font-medium">
+                                                        {(job.excludedReasons || [])
+                                                            .map((code) => t(`screening.warn.${code}`))
+                                                            .join(' · ')}
+                                                    </p>
+                                                ) : null}
+                                                {(job.filterPosition || job.filterNotes) ? (
+                                                    <div className="mt-2 rounded-lg border border-amber-200/90 bg-amber-50/70 px-2.5 py-1.5 text-[11px] leading-snug text-text-default space-y-1">
+                                                        {job.filterPosition ? (
+                                                            <p>
+                                                                <span className="font-bold text-amber-900/80">{t('candidates.screening_filter_position')}: </span>
+                                                                {job.filterPosition}
+                                                            </p>
+                                                        ) : null}
+                                                        {job.filterNotes ? (
+                                                            <p>
+                                                                <span className="font-bold text-amber-900/80">{t('candidates.screening_filter_notes')}: </span>
+                                                                {job.filterNotes}
+                                                            </p>
+                                                        ) : null}
+                                                    </div>
+                                                ) : null}
                                              </div>
                                              <AIMatchScore score={job.aiMatchScore} />
                                         </div>
@@ -1088,7 +1155,8 @@ const CandidateScreeningView: React.FC<{
                                     </div>
                                 )}
                             </div>
-                        ))}
+                            );
+                        })}
                         </>
                         )}
                     </div>

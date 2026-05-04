@@ -1,14 +1,17 @@
 
-import React, { useState, useEffect, useRef, useMemo, useCallback, useId } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
+import React, { useState, useEffect, useRef, useMemo, useCallback, useId, useLayoutEffect } from 'react';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { buildCandidateFullName } from '../utils/candidateName';
 import { computeAgeFromBirth } from '../utils/ageFromBirth';
+import { fetchRecruitmentSources } from '../services/recruitmentSourcesApi';
+import { createPortal } from 'react-dom';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
   <button onClick={onClick} title={title} className={`w-10 h-10 flex items-center justify-center rounded-lg transition-colors relative z-20 ${className || 'bg-primary-100/70 text-primary-600 hover:bg-primary-200'}`}>
@@ -606,6 +609,13 @@ const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => {
     return 'skill';
 };
 
+function formatRecruitmentSourceDisplayDate(value: unknown): string {
+    if (value == null || value === '') return '—';
+    const d = new Date(String(value));
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' });
+}
+
 const CandidateProfile: React.FC<CandidateProfileProps> = ({
   candidateData,
   onMatchJobsClick,
@@ -633,6 +643,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   approveCorrectionsLoading = false,
 }) => {
   const { t } = useLanguage();
+  const { user } = useAuth();
   const summaryId = useId();
   const jobMatchesCount =
     typeof candidateData.jobMatchesCount === 'number'
@@ -693,6 +704,124 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       return token ? { Authorization: `Bearer ${token}` } : {};
   };
+  const recruitmentClientId = user?.clientId ?? null;
+  const [recruitmentSources, setRecruitmentSources] = useState<{ id: string; name: string }[]>([]);
+
+  const recruitmentSourceSelectValue = useMemo(() => {
+      if (candidateData.recruitmentSourceId) return String(candidateData.recruitmentSourceId);
+      const name = String(candidateData.source || '').trim();
+      if (!name) return '';
+      const match = recruitmentSources.find((s) => s.name === name);
+      return match ? match.id : '';
+  }, [candidateData.recruitmentSourceId, candidateData.source, recruitmentSources]);
+
+  const recruitmentSourceDisplayName = useMemo(() => {
+      if (recruitmentSourceSelectValue) {
+          const row = recruitmentSources.find((s) => s.id === recruitmentSourceSelectValue);
+          if (row) return row.name;
+      }
+      return String(candidateData.source || '').trim();
+  }, [recruitmentSourceSelectValue, recruitmentSources, candidateData.source]);
+
+  const [rsComboOpen, setRsComboOpen] = useState(false);
+  const [rsComboSearch, setRsComboSearch] = useState('');
+  const rsComboRef = useRef<HTMLDivElement>(null);
+  const rsComboTriggerRef = useRef<HTMLButtonElement>(null);
+  const rsComboPanelRef = useRef<HTMLDivElement>(null);
+  const rsComboSearchInputRef = useRef<HTMLInputElement>(null);
+  const [rsComboPopover, setRsComboPopover] = useState<{
+      top: number;
+      left: number;
+      width: number;
+      listMaxHeight: number;
+  } | null>(null);
+
+  const filteredRecruitmentSources = useMemo(() => {
+      const q = rsComboSearch.trim().toLowerCase();
+      if (!q) return recruitmentSources;
+      return recruitmentSources.filter((s) => s.name.toLowerCase().includes(q));
+  }, [recruitmentSources, rsComboSearch]);
+
+  useEffect(() => {
+      if (!recruitmentClientId || !apiBase) {
+          setRecruitmentSources([]);
+          return;
+      }
+      let cancelled = false;
+      void fetchRecruitmentSources(recruitmentClientId)
+          .then((rows) => {
+              if (!cancelled) setRecruitmentSources(rows.map((r) => ({ id: r.id, name: r.name })));
+          })
+          .catch(() => {
+              if (!cancelled) setRecruitmentSources([]);
+          });
+      return () => {
+          cancelled = true;
+      };
+  }, [recruitmentClientId, apiBase]);
+
+  useLayoutEffect(() => {
+      if (!rsComboOpen) {
+          setRsComboPopover(null);
+          return;
+      }
+      const measure = () => {
+          const el = rsComboTriggerRef.current;
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const gap = 8;
+          const width = Math.max(r.width, 288);
+          const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+          const top = r.bottom + gap;
+          const availableBelow = window.innerHeight - top - 12;
+          const searchBlock = 48;
+          const listMax = Math.max(180, Math.min(480, availableBelow - searchBlock));
+          setRsComboPopover({ top, left, width, listMaxHeight: listMax });
+      };
+      measure();
+      window.addEventListener('resize', measure);
+      window.addEventListener('scroll', measure, true);
+      return () => {
+          window.removeEventListener('resize', measure);
+          window.removeEventListener('scroll', measure, true);
+      };
+  }, [rsComboOpen]);
+
+  useEffect(() => {
+      if (!rsComboOpen) return;
+      const onDoc = (e: MouseEvent) => {
+          const target = e.target as Node;
+          if (rsComboRef.current?.contains(target)) return;
+          if (rsComboPanelRef.current?.contains(target)) return;
+          setRsComboOpen(false);
+          setRsComboSearch('');
+      };
+      document.addEventListener('mousedown', onDoc);
+      return () => document.removeEventListener('mousedown', onDoc);
+  }, [rsComboOpen]);
+
+  useEffect(() => {
+      if (rsComboOpen) {
+          queueMicrotask(() => rsComboSearchInputRef.current?.focus());
+      } else {
+          setRsComboSearch('');
+      }
+  }, [rsComboOpen]);
+
+  const applyRecruitmentSource = useCallback(
+      (id: string | null) => {
+          const row = id ? recruitmentSources.find((s) => s.id === id) : null;
+          onFormChange({
+              ...candidateData,
+              recruitmentSourceId: id,
+              source: row?.name ?? '',
+          });
+          setRsComboOpen(false);
+          setRsComboSearch('');
+      },
+      [candidateData, onFormChange, recruitmentSources],
+  );
+
   const candidateId = candidateData.backendId || candidateData.id;
   const candidateListIndex = useMemo(() => {
     if (!candidateList?.length || !candidateId) return -1;
@@ -1514,39 +1643,129 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                               onFormChange({ ...candidateData, tags: filtered });
                           }}
                       />
+
+                      <div className="mt-4 rounded-2xl border border-border-default/90 bg-gradient-to-br from-bg-card via-bg-card to-bg-subtle/35 p-3 text-sm shadow-sm">
+                          <div className="-mx-1 flex flex-nowrap items-end gap-x-3 gap-y-0 overflow-x-auto overflow-y-visible px-1 pb-0.5 sm:gap-x-5">
+                              <div className="relative min-w-[10rem] flex-1" ref={rsComboRef}>
+                                  <div className="mb-1 flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-text-muted">
+                                      <BriefcaseIcon className="w-3.5 h-3.5 text-primary-500 shrink-0" />
+                                      <span>{t('profile.recruitment_source')}</span>
+                                  </div>
+                                  {recruitmentClientId ? (
+                                      <>
+                                          <button
+                                              ref={rsComboTriggerRef}
+                                              type="button"
+                                              aria-expanded={rsComboOpen}
+                                              aria-haspopup="listbox"
+                                              onClick={() => setRsComboOpen((o) => !o)}
+                                              className="flex w-full items-center justify-between gap-2 rounded-xl border border-border-default bg-bg-input px-3 py-2.5 text-right text-sm font-semibold text-text-default shadow-inner transition hover:border-primary-400/60 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-primary-500/25"
+                                          >
+                                              <span className="min-w-0 truncate">
+                                                  {recruitmentSourceDisplayName
+                                                      ? recruitmentSourceDisplayName
+                                                      : t('profile.recruitment_source_placeholder')}
+                                              </span>
+                                              <ChevronDownIcon
+                                                  className={`h-4 w-4 shrink-0 text-text-muted transition-transform ${rsComboOpen ? 'rotate-180' : ''}`}
+                                              />
+                                          </button>
+                                          {rsComboOpen &&
+                                              rsComboPopover &&
+                                              typeof document !== 'undefined' &&
+                                              createPortal(
+                                                  <div
+                                                      ref={rsComboPanelRef}
+                                                      role="listbox"
+                                                      dir="rtl"
+                                                      className="flex max-h-[min(85vh,calc(100vh-2rem))] flex-col overflow-hidden rounded-xl border border-border-default bg-bg-card shadow-2xl ring-1 ring-black/10 dark:ring-white/10"
+                                                      style={{
+                                                          position: 'fixed',
+                                                          top: rsComboPopover.top,
+                                                          left: rsComboPopover.left,
+                                                          width: rsComboPopover.width,
+                                                          maxHeight: rsComboPopover.listMaxHeight + 56,
+                                                          zIndex: 10050,
+                                                      }}
+                                                  >
+                                                      <div className="relative shrink-0 border-b border-border-subtle bg-bg-subtle/40 p-2">
+                                                          <MagnifyingGlassIcon className="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-text-muted" />
+                                                          <input
+                                                              ref={rsComboSearchInputRef}
+                                                              type="search"
+                                                              value={rsComboSearch}
+                                                              onChange={(e) => setRsComboSearch(e.target.value)}
+                                                              onKeyDown={(e) => {
+                                                                  if (e.key === 'Escape') {
+                                                                      setRsComboOpen(false);
+                                                                      setRsComboSearch('');
+                                                                  }
+                                                              }}
+                                                              placeholder={t('profile.recruitment_source_search')}
+                                                              className="w-full rounded-lg border border-border-default bg-bg-input py-2 pl-3 pr-9 text-sm text-text-default placeholder:text-text-muted focus:border-primary-500 focus:outline-none focus:ring-1 focus:ring-primary-500/30"
+                                                          />
+                                                      </div>
+                                                      <ul className="custom-scrollbar min-h-0 flex-1 overflow-y-auto py-1">
+                                                          <li>
+                                                              <button
+                                                                  type="button"
+                                                                  role="option"
+                                                                  onClick={() => applyRecruitmentSource(null)}
+                                                                  className={`w-full px-3 py-2 text-right text-sm transition hover:bg-primary-50 dark:hover:bg-primary-950/30 ${!recruitmentSourceSelectValue ? 'bg-primary-50/80 font-semibold text-primary-700 dark:bg-primary-900/20' : 'text-text-muted'}`}
+                                                              >
+                                                                  {t('profile.recruitment_source_placeholder')}
+                                                              </button>
+                                                          </li>
+                                                          {filteredRecruitmentSources.map((s) => (
+                                                              <li key={s.id}>
+                                                                  <button
+                                                                      type="button"
+                                                                      role="option"
+                                                                      onClick={() => applyRecruitmentSource(s.id)}
+                                                                      className={`w-full truncate px-3 py-2 text-right text-sm transition hover:bg-primary-50 dark:hover:bg-primary-950/30 ${recruitmentSourceSelectValue === s.id ? 'bg-primary-100/90 font-semibold text-primary-800 dark:bg-primary-900/25' : 'text-text-default'}`}
+                                                                  >
+                                                                      {s.name}
+                                                                  </button>
+                                                              </li>
+                                                          ))}
+                                                          {rsComboSearch.trim() && filteredRecruitmentSources.length === 0 && (
+                                                              <li className="px-3 py-4 text-center text-xs text-text-muted">
+                                                                  {t('profile.recruitment_source_no_results')}
+                                                              </li>
+                                                          )}
+                                                      </ul>
+                                                  </div>,
+                                                  document.body,
+                                              )}
+                                      </>
+                                  ) : (
+                                      <div className="rounded-xl border border-dashed border-border-default bg-bg-subtle/50 px-3 py-2.5 text-sm font-medium text-text-default">
+                                          {candidateData.source?.trim() || '—'}
+                                      </div>
+                                  )}
+                              </div>
+                              <div className="flex shrink-0 flex-row flex-nowrap items-end gap-x-4 whitespace-nowrap sm:gap-x-6">
+                                  <div className="min-w-[6.5rem] text-right">
+                                      <div className="text-[10px] font-bold uppercase tracking-wide text-text-muted">
+                                          {t('profile.recruitment_source_created')}
+                                      </div>
+                                      <div className="text-sm font-semibold tabular-nums text-text-default">
+                                          {formatRecruitmentSourceDisplayDate(candidateData.recruitmentSourceCreatedAt)}
+                                      </div>
+                                  </div>
+                                  <div className="min-w-[6.5rem] text-right">
+                                      <div className="text-[10px] font-bold uppercase tracking-wide text-text-muted">
+                                          {t('profile.recruitment_source_updated')}
+                                      </div>
+                                      <div className="text-sm font-semibold tabular-nums text-text-default">
+                                          {formatRecruitmentSourceDisplayDate(candidateData.recruitmentSourceUpdatedAt)}
+                                      </div>
+                                  </div>
+                              </div>
+                          </div>
+                      </div>
                       </div>
                       
-                      <div className="flex flex-wrap items-center justify-between gap-3 mt-6 pt-4 border-t border-border-default/50">
-                          {candidateData.phone && (
-                              <a
-                                  href={`tel:${candidateData.phone}`}
-                                  title={candidateData.phone}
-                                  className="w-10 h-10 flex items-center justify-center bg-white border border-border-default text-text-muted rounded-xl hover:text-primary-600 hover:border-primary-200 transition-all shadow-sm"
-                              >
-                                  <PhoneIcon className="w-5 h-5" />
-                              </a>
-                          )}
-                          <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}>
-                              <EnvelopeIcon className="w-5 h-5" />
-                          </SocialButton>
-                          <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}>
-                              <WhatsappIcon className="w-5 h-5" />
-                          </SocialButton>
-                          <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}>
-                              <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
-                          </SocialButton>
-                          <div className="h-6 w-px bg-border-default shrink-0" />
-                          <a
-                              href={candidateData.linkedInUrl || candidateData.linkedIn || '#'}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              title="LinkedIn Profile"
-                              className="w-10 h-10 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-xl hover:bg-[#0077b5]/20 transition-all shrink-0"
-                          >
-                              <LinkedInIcon className="w-5 h-5" />
-                          </a>
-                      </div>
-
                       {!hideActions && (
                           <>
                               <div className="flex flex-wrap items-center justify-start gap-3 mt-4">

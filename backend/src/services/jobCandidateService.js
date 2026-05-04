@@ -2,6 +2,8 @@ const { Op } = require('sequelize');
 const JobCandidate = require('../models/JobCandidate');
 const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
+const clientUsageSettingService = require('./clientUsageSettingService');
+const { resolveStatusGroup } = require('../utils/recruitmentStatusGroups');
 
 const candidateAttributes = [
   'id',
@@ -65,7 +67,8 @@ const listForCandidate = async (candidateId) => {
   if (!candidateId) return [];
   const records = await JobCandidate.findAll({
     where: { candidateId, jobId: { [Op.ne]: null } },
-    include: [{ model: Job, as: 'job', required: true }],
+    // Optional join: if a job row was deleted but job_candidates.job_id remains, still return the link row.
+    include: [{ model: Job, as: 'job', required: false }],
     order: [
       ['updatedAt', 'DESC'],
       ['createdAt', 'DESC'],
@@ -80,7 +83,12 @@ const listForCandidate = async (candidateId) => {
       candidateId: plain.candidateId,
       status: plain.status,
       source: plain.source,
+      manualOverride: Boolean(plain.manualOverride),
       workflowMeta: plain.workflowMeta && typeof plain.workflowMeta === 'object' ? plain.workflowMeta : {},
+      lastStatusGroup: plain.lastStatusGroup ?? null,
+      lastExitAt: plain.lastExitAt ?? null,
+      lastExitReason: plain.lastExitReason ?? null,
+      screeningEnteredAt: plain.screeningEnteredAt ?? null,
       updatedAt: plain.updatedAt,
       createdAt: plain.createdAt,
       job,
@@ -88,20 +96,62 @@ const listForCandidate = async (candidateId) => {
   });
 };
 
-const associateCandidateWithJob = async ({ jobId, candidateId, status, source }) => {
+const associateCandidateWithJob = async ({
+  jobId,
+  candidateId,
+  status,
+  source,
+  workflowMetaPatch,
+  manualOverride,
+} = {}) => {
   if (!candidateId) return null;
   const whereClause = jobId ? { jobId, candidateId } : { jobId: null, candidateId };
+  const patch =
+    workflowMetaPatch && typeof workflowMetaPatch === 'object' && !Array.isArray(workflowMetaPatch)
+      ? { ...workflowMetaPatch }
+      : {};
+  const wantManualOverride = manualOverride === true;
   const [record, created] = await JobCandidate.findOrCreate({
     where: whereClause,
-    defaults: { status: status || 'חדש', source },
+    defaults: {
+      status: status || 'חדש',
+      source: source || null,
+      workflowMeta: Object.keys(patch).length ? patch : {},
+      manualOverride: wantManualOverride,
+    },
   });
 
   if (!created) {
     const updates = {};
     if (status && record.status !== status) updates.status = status;
-    if (source && record.source !== source) updates.source = source;
+    if (source) updates.source = source;
+    if (wantManualOverride) updates.manualOverride = true;
+    if (Object.keys(patch).length) {
+      const prev =
+        record.workflowMeta && typeof record.workflowMeta === 'object' && !Array.isArray(record.workflowMeta)
+          ? { ...record.workflowMeta }
+          : {};
+      Object.assign(prev, patch);
+      updates.workflowMeta = prev;
+    }
     if (Object.keys(updates).length) {
       await record.update(updates);
+    }
+  }
+
+  await record.reload();
+
+  if (record.jobId) {
+    try {
+      const jobRow = await Job.findByPk(record.jobId, { attributes: ['client'] });
+      const clientId = await clientUsageSettingService.getClientIdForJobClientLabel(jobRow?.client);
+      const g = await resolveStatusGroup(clientId, record.status);
+      const plainRow = record.get ? record.get({ plain: true }) : record;
+      if (plainRow.lastStatusGroup !== g) {
+        await record.update({ lastStatusGroup: g });
+      }
+    } catch (_) {
+      /* ignore link meta sync failures */
     }
   }
 

@@ -22,6 +22,9 @@ export type ClientUsageSettingsDto = {
     googleLogin: string;
     initialScreeningLevel: string;
     returnMonths: number;
+    defaultJobValidityDays: number;
+    defaultJobReScreeningCooldownMonths: number;
+    defaultRequireOriginalCv: boolean;
     questionnaireSource: string;
     autoDisconnect: boolean;
     logoOnCv: boolean;

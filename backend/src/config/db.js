@@ -18,6 +18,7 @@ const connectDb = async () => {
   require('../models/Candidate');
   require('../models/Job');
   require('../models/JobCandidate');
+  require('../models/JobCandidateStatusEvent');
   require('../models/JobCandidateScreening');
   require('../models/MessageLog');
   require('../models/Organization');
@@ -48,12 +49,14 @@ const connectDb = async () => {
   require('../models/LoginEmailCode');
   require('../models/EventType');
   require('../models/RecruitmentStatus');
+  require('../models/RecruitmentSource');
 
   const User = require('../models/User');
   const Client = require('../models/Client');
   const MessageTemplate = require('../models/MessageTemplate');
   const ClientUsageSetting = require('../models/ClientUsageSetting');
   const RecruitmentStatus = require('../models/RecruitmentStatus');
+  const RecruitmentSource = require('../models/RecruitmentSource');
   User.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
   Client.hasMany(User, { foreignKey: 'clientId', as: 'members' });
   MessageTemplate.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
@@ -62,6 +65,8 @@ const connectDb = async () => {
   ClientUsageSetting.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
   Client.hasMany(RecruitmentStatus, { foreignKey: 'clientId', as: 'recruitmentStatuses' });
   RecruitmentStatus.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
+  Client.hasMany(RecruitmentSource, { foreignKey: 'clientId', as: 'recruitmentSources' });
+  RecruitmentSource.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 
   await sequelize.sync();
   console.log('PostgreSQL connected & models synced');

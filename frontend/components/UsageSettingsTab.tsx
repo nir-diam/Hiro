@@ -69,7 +69,9 @@ const initialSettings = {
     jobTypeValidityDays: 180,
     returnMonths: 3,
     questionnaireSource: 'חברה',
-    systemReferral: 'מערכת',
+    defaultJobValidityDays: 90,
+    defaultJobReScreeningCooldownMonths: 3,
+    defaultRequireOriginalCv: false,
     autoDisconnect: false,
     logoOnCv: true,
     sendOnlyOriginalCv: true,
@@ -95,7 +97,20 @@ function mergeUsageFromApi(
         googleLogin: data.googleLogin,
         initialScreeningLevel: data.initialScreeningLevel,
         returnMonths: data.returnMonths,
-        questionnaireSource: data.questionnaireSource,
+        questionnaireSource: data.questionnaireSource ?? prev.questionnaireSource,
+        defaultJobValidityDays:
+            data.defaultJobValidityDays !== undefined && data.defaultJobValidityDays !== null
+                ? Number(data.defaultJobValidityDays)
+                : prev.defaultJobValidityDays,
+        defaultJobReScreeningCooldownMonths:
+            data.defaultJobReScreeningCooldownMonths !== undefined &&
+            data.defaultJobReScreeningCooldownMonths !== null
+                ? Number(data.defaultJobReScreeningCooldownMonths)
+                : prev.defaultJobReScreeningCooldownMonths,
+        defaultRequireOriginalCv:
+            typeof data.defaultRequireOriginalCv === 'boolean'
+                ? data.defaultRequireOriginalCv
+                : prev.defaultRequireOriginalCv,
         autoDisconnect: data.autoDisconnect,
         logoOnCv: data.logoOnCv,
         candidateNoLocationToFix: data.candidateNoLocationToFix,
@@ -116,6 +131,12 @@ function toSavePayload(s: typeof initialSettings): ClientUsageSettingsDto {
         initialScreeningLevel: s.initialScreeningLevel,
         returnMonths: Number(s.returnMonths) || 0,
         questionnaireSource: s.questionnaireSource,
+        defaultJobValidityDays: Math.max(0, Math.min(20000, Number(s.defaultJobValidityDays) || 0)),
+        defaultJobReScreeningCooldownMonths: Math.max(
+            0,
+            Math.min(9999, Number(s.defaultJobReScreeningCooldownMonths) || 0),
+        ),
+        defaultRequireOriginalCv: Boolean(s.defaultRequireOriginalCv),
         autoDisconnect: s.autoDisconnect,
         logoOnCv: s.logoOnCv,
         candidateNoLocationToFix: s.candidateNoLocationToFix,
@@ -213,6 +234,13 @@ const UsageSettingsTab: React.FC<{ clientId: string | null }> = ({ clientId }) =
                         <SettingRow label={t('company_settings.initial_screening')}><FormSelect name="initialScreeningLevel" value={settings.initialScreeningLevel} onChange={handleChange}><option>טלפוני</option><option>פרונטלי</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.return_months')} infoKey="return_to_system"><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>
                         <SettingRow label={t('company_settings.questionnaire_source')}><FormSelect name="questionnaireSource" value={settings.questionnaireSource} onChange={handleChange}><option>חברה</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.default_job_validity_days')}>
+                            <FormInput name="defaultJobValidityDays" value={settings.defaultJobValidityDays} onChange={handleChange} type="number" />
+                        </SettingRow>
+                        <SettingRow label={t('company_settings.default_job_rescreening_months')}>
+                            <FormInput name="defaultJobReScreeningCooldownMonths" value={settings.defaultJobReScreeningCooldownMonths} onChange={handleChange} type="number" />
+                        </SettingRow>
+                        <CheckboxRow label={t('company_settings.default_require_original_cv_job')} name="defaultRequireOriginalCv" checked={settings.defaultRequireOriginalCv} onChange={handleChange} />
                     </div>
                 </div>
 

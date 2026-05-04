@@ -18,8 +18,9 @@ import {
     deleteClientMessageTemplate,
     type MessageTemplateDto,
 } from '../services/messageTemplatesApi';
+import { messageTemplateParameters } from '../services/messageTemplatePlaceholders';
 
-// --- TYPES ---
+export { messageTemplateParameters };
 interface Template {
     id: string;
     templateKey: string | null;
@@ -31,30 +32,6 @@ interface Template {
     channels: ('email' | 'sms' | 'whatsapp')[];
     isSystem: boolean;
 }
-
-export const messageTemplateParameters = [
-    { label: 'שם פרטי מועמד', value: '{candidate_first_name}' },
-    { label: 'שם משפחה מועמד', value: '{candidate_last_name}' },
-    { label: 'טלפון מועמד', value: '{candidate_phone}' },
-    { label: 'מייל מועמד', value: '{candidate_email}' },
-    { label: 'לינק קורות חיים', value: '{candidate_cv_link}' },
-    { label: 'תעודת זהות מועמד', value: '{candidate_id}' },
-    { label: 'משרות והפניות', value: '{job_referrals}' },
-    { label: 'שם חברה', value: '{company_name}' },
-    { label: 'שם חברה (לקוח)', value: '{client_name}' },
-    { label: 'שם איש קשר', value: '{contact_name}' },
-    { label: 'טלפון איש קשר', value: '{contact_phone}' },
-    { label: 'מייל איש קשר', value: '{contact_email}' },
-    { label: 'כותרת משרה', value: '{job_title}' },
-    { label: 'תיאור משרה', value: '{job_description}' },
-    { label: 'דרישות משרה', value: '{job_requirements}' },
-    { label: 'שם רכז', value: '{recruiter_name}' },
-    { label: 'מייל רכז', value: '{recruiter_email}' },
-    { label: 'טלפון רכז', value: '{recruiter_phone}' },
-    { label: 'תאריך שליחה', value: '{send_date}' },
-    { label: 'מדיניות הפרטיות', value: '{privacy_policy_link}' },
-    { label: 'כתובת דף תודה', value: '{thank_you_page_link}' },
-];
 
 function dtoToTemplate(row: MessageTemplateDto): Template {
     return {

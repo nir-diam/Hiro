@@ -16,6 +16,19 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import { useLanguage } from '../context/LanguageContext';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
+import type { PicklistValueRow } from '../services/picklistValuesApi';
+import {
+    DRIVING_LICENSE_FALLBACK,
+    DRIVING_LICENSE_PICKLIST_KEY,
+    fetchPicklistValuesByKey,
+    JOB_SCOPE_MULTI_FALLBACK,
+    JOB_SCOPE_PICKLIST_KEY,
+    MOBILITY_FALLBACK,
+    MOBILITY_PICKLIST_KEY,
+    picklistRowLabel,
+    sortDrivingLicensePicklistRows,
+} from '../services/picklistValuesApi';
+import { fetchClientUsageSettings } from '../services/usageSettingsApi';
 
 // --- TYPES ---
 type Priority = 'רגילה' | 'דחופה' | 'קריטית';
@@ -79,14 +92,109 @@ interface RecruitmentSource {
 
 // --- CONSTANTS ---
 const priorityOptions = ['רגילה', 'דחופה', 'קריטית'] as const;
-const jobTypeOptions = [
-    { id: 'משרה מלאה', name: 'משרה מלאה' },
-    { id: 'משרה חלקית', name: 'משרה חלקית' },
-    { id: 'משמרות', name: 'משמרות' },
-    { id: 'פרילנס', name: 'פרילנס' },
-    { id: 'זמנית', name: 'זמנית' },
-    { id: 'היברידי', name: 'היברידי' }
-];
+
+/** Map legacy job form labels to picklist `value` (PicklistCategory.key = job_scope). */
+const LEGACY_JOB_SCOPE_TO_PICKLIST_VALUE: Record<string, string> = {
+    'משרה מלאה': 'מלאה',
+    'משרה חלקית': 'משמרות',
+};
+
+function mapPicklistRowsToJobScopeOptions(
+    rows: { id: string; label: string; value: string; displayName: string | null }[],
+): { id: string; name: string }[] {
+    return rows.map((r) => ({
+        id: r.value,
+        name: picklistRowLabel(r),
+    }));
+}
+
+/** Map form driving-license picklist `value` → persisted `licenseType` (empty = לא נדרש). */
+function licenseTypeForJobPayload(formDrivingLicense: string, rows: PicklistValueRow[]): string {
+    const v = String(formDrivingLicense ?? '').trim();
+    const row = rows.find((r) => r.value === v);
+    const lbl = row != null ? picklistRowLabel(row).trim() : '';
+    const neutral =
+        v === '' ||
+        v === 'לא חשוב' ||
+        v === '-' ||
+        lbl === 'לא חשוב' ||
+        lbl === 'ללא' ||
+        (row != null &&
+            (row.value === 'לא חשוב' ||
+                row.value === '-' ||
+                picklistRowLabel(row).trim() === 'לא חשוב'));
+    if (neutral) return '';
+    return row?.value ?? v;
+}
+
+/** Map form mobility picklist `value` → persisted boolean `jobs.mobility`. */
+function mobilityBoolForJobPayload(formMobility: string, rows: PicklistValueRow[]): boolean {
+    const v = String(formMobility ?? '').trim();
+    if (v === 'חובה' || v === 'כן' || v === 'בעל/ת רכב') return true;
+    if (v === 'לא חשוב' || v === 'לא' || v === '-') return false;
+    const row = rows.find((r) => r.value === v);
+    if (!row) return ['כן', 'חובה', 'בעל/ת רכב'].includes(v);
+    const lbl = picklistRowLabel(row).trim();
+    if (row.value === 'כן' || lbl === 'כן') return true;
+    if (row.value === 'בעל/ת רכב' || lbl === 'בעל/ת רכב') return true;
+    if (row.value === 'חובה' || lbl === 'חובה') return true;
+    if (row.value === 'לא' || lbl === 'לא') return false;
+    if (row.value === '-' || lbl === 'לא חשוב') return false;
+    return false;
+}
+
+function remapDrivingLicenseFormValue(current: string, rows: PicklistValueRow[]): string {
+    if (!rows.length) return current;
+    const valid = new Set(rows.map((r) => r.value));
+    if (valid.has(current)) return current;
+    const lt = current === 'לא חשוב' ? '' : current;
+    if (!lt.trim()) {
+        const na =
+            rows.find((r) => r.value === '-' || picklistRowLabel(r) === 'ללא') ||
+            rows.find(
+                (r) =>
+                    r.value === 'לא חשוב' ||
+                    picklistRowLabel(r) === 'לא חשוב',
+            );
+        return na?.value ?? rows[0]!.value;
+    }
+    const byLabel = rows.find((r) => picklistRowLabel(r) === lt || r.label === lt);
+    return byLabel?.value ?? remapDrivingLicenseFormValue('', rows);
+}
+
+function remapMobilityFormValue(current: string, rows: PicklistValueRow[]): string {
+    if (!rows.length) return current;
+    const valid = new Set(rows.map((r) => r.value));
+    if (valid.has(current)) return current;
+    const asBool = current === 'חובה';
+    const req =
+        rows.find((r) => r.value === 'חובה' || picklistRowLabel(r) === 'חובה') ||
+        rows.find((r) => r.value === 'כן') ||
+        rows.find((r) => r.value === 'בעל/ת רכב');
+    const na =
+        rows.find((r) => r.value === 'לא חשוב' || picklistRowLabel(r) === 'לא חשוב') ||
+        rows.find((r) => r.value === 'לא') ||
+        rows.find((r) => r.value === '-');
+    if (asBool) return req?.value ?? rows.find((r) => r.value === 'כן')?.value ?? 'חובה';
+    return na?.value ?? rows[0]!.value;
+}
+
+function normalizeJobTypeToPicklistValues(
+    raw: string[],
+    options: { id: string }[],
+): string[] {
+    if (!options.length) return raw.length ? raw : ['מלאה'];
+    const valid = new Set(options.map((o) => o.id));
+    const mapped = raw.map((v) => {
+        if (valid.has(v)) return v;
+        const legacy = LEGACY_JOB_SCOPE_TO_PICKLIST_VALUE[v];
+        return legacy && valid.has(legacy) ? legacy : v;
+    });
+    const kept = mapped.filter((v) => valid.has(v));
+    if (kept.length > 0) return kept;
+    const first = options[0]?.id;
+    return first ? [first] : ['מלאה'];
+}
 const languageLevels = ['שפת אם', 'רמה גבוהה מאוד', 'טוב מאוד', 'בינוני', 'בסיסי'];
 
 const questionTypeOptions: { id: QuestionType; label: string; icon: any }[] = [
@@ -220,13 +328,142 @@ const SectionCard: React.FC<{ id: string; title: string; icon: React.ReactNode; 
     </div>
 );
 
+const JobScreeningEligibilityCard: React.FC<{
+    validityDays: number;
+    reScreeningCooldownMonths: number;
+    requireOriginalCv: boolean;
+    onValidityDaysChange: (n: number) => void;
+    onReScreeningCooldownMonthsChange: (n: number) => void;
+    onRequireOriginalCvChange: (v: boolean) => void;
+    orgDefaults?: { validityDays: number; cooldownMonths: number; requireOriginalCv: boolean } | null;
+}> = ({
+    validityDays,
+    reScreeningCooldownMonths,
+    requireOriginalCv,
+    onValidityDaysChange,
+    onReScreeningCooldownMonthsChange,
+    onRequireOriginalCvChange,
+    orgDefaults,
+}) => {
+    const { t } = useLanguage();
+    const tooltipPanel =
+        'absolute bottom-full left-1/2 -translate-x-1/2 mb-2.5 w-max max-w-[260px] p-3 bg-bg-card text-text-default text-xs rounded-xl pointer-events-none z-[100] shadow-[0_10px_40px_-10px_rgba(0,0,0,0.15)] border border-border-default flex flex-col items-center gap-1.5 origin-center text-center opacity-0 scale-95 invisible transition-all duration-200 group-hover/tooltip:opacity-100 group-hover/tooltip:visible group-hover/tooltip:scale-100';
+
+    const parseBoundedInt = (raw: string, min: number, max: number, fallback: number) => {
+        if (raw === '') return fallback;
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return fallback;
+        return Math.min(max, Math.max(min, Math.round(n)));
+    };
+
+    return (
+        <div className="mt-0 grid grid-cols-1 md:grid-cols-2 gap-6 bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+            {orgDefaults && (
+                <p className="md:col-span-2 text-xs text-text-muted leading-relaxed">
+                    {t('new_job.org_defaults_hint', {
+                        days: orgDefaults.validityDays,
+                        months: orgDefaults.cooldownMonths,
+                        cv: orgDefaults.requireOriginalCv
+                            ? t('new_job.org_defaults_cv_required')
+                            : t('new_job.org_defaults_cv_optional'),
+                    })}
+                </p>
+            )}
+            <div className="space-y-4">
+                <div>
+                    <div className="flex items-center gap-2 mb-1">
+                        <label className="block text-xs font-semibold text-text-default">{t('new_job.screening_validity_days')}</label>
+                        <div className="group/tooltip relative inline-flex">
+                            <InformationCircleIcon className="w-4 h-4 text-primary-500 cursor-help shrink-0" aria-hidden />
+                            <div className={tooltipPanel} role="tooltip">
+                                <div className="font-medium whitespace-pre-wrap text-text-default leading-relaxed">
+                                    {t('new_job.screening_validity_days_tooltip')}
+                                </div>
+                                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default rotate-45" />
+                            </div>
+                        </div>
+                    </div>
+                    <input
+                        min={0}
+                        max={20000}
+                        type="number"
+                        value={validityDays}
+                        onChange={(e) => onValidityDaysChange(parseBoundedInt(e.target.value, 0, 20000, validityDays))}
+                        className="w-full sm:w-32 bg-white border border-border-default text-text-default text-sm rounded-lg p-2.5 focus:ring-primary-500 focus:border-primary-500"
+                    />
+                </div>
+                <div>
+                    <div className="flex items-center gap-2 mb-1">
+                        <label className="block text-xs font-semibold text-text-default">{t('new_job.screening_cooldown_months')}</label>
+                        <div className="group/tooltip relative inline-flex">
+                            <InformationCircleIcon className="w-4 h-4 text-primary-500 cursor-help shrink-0" aria-hidden />
+                            <div className={tooltipPanel} role="tooltip">
+                                <div className="font-medium whitespace-pre-wrap text-text-default leading-relaxed">
+                                    {t('new_job.screening_cooldown_tooltip')}
+                                </div>
+                                <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default rotate-45" />
+                            </div>
+                        </div>
+                    </div>
+                    <input
+                        min={0}
+                        max={9999}
+                        type="number"
+                        value={reScreeningCooldownMonths}
+                        onChange={(e) =>
+                            onReScreeningCooldownMonthsChange(parseBoundedInt(e.target.value, 0, 9999, reScreeningCooldownMonths))
+                        }
+                        className="w-full sm:w-32 bg-white border border-border-default text-text-default text-sm rounded-lg p-2.5 focus:ring-primary-500 focus:border-primary-500"
+                    />
+                </div>
+            </div>
+            <div className="space-y-4 flex flex-col justify-center">
+                <label className="flex items-start gap-3 cursor-pointer group">
+                    <input
+                        type="checkbox"
+                        checked={requireOriginalCv}
+                        onChange={(e) => onRequireOriginalCvChange(e.target.checked)}
+                        className="mt-0.5 w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 transition-colors"
+                    />
+                    <div>
+                        <span className="text-sm font-semibold text-text-default group-hover:text-primary-700 transition">
+                            {t('new_job.screening_require_cv_title')}
+                        </span>
+                        <p className="text-xs text-text-muted mt-0.5">{t('new_job.screening_require_cv_hint')}</p>
+                    </div>
+                </label>
+            </div>
+        </div>
+    );
+};
+
 const TechnicalIdentifiers: React.FC<{
     jobId: string;
     postingCode: string;
     creationDate: string;
     uniqueEmail: string;
     onPostingCodeChange: (value: string) => void;
-}> = ({ jobId, postingCode, creationDate, uniqueEmail, onPostingCodeChange }) => {
+    validityDays: number;
+    reScreeningCooldownMonths: number;
+    requireOriginalCv: boolean;
+    onValidityDaysChange: (n: number) => void;
+    onReScreeningCooldownMonthsChange: (n: number) => void;
+    onRequireOriginalCvChange: (v: boolean) => void;
+    orgScreeningDefaults?: { validityDays: number; cooldownMonths: number; requireOriginalCv: boolean } | null;
+}> = ({
+    jobId,
+    postingCode,
+    creationDate,
+    uniqueEmail,
+    onPostingCodeChange,
+    validityDays,
+    reScreeningCooldownMonths,
+    requireOriginalCv,
+    onValidityDaysChange,
+    onReScreeningCooldownMonthsChange,
+    onRequireOriginalCvChange,
+    orgScreeningDefaults,
+}) => {
     const [isOpen, setIsOpen] = useState(false);
     const { t } = useLanguage();
 
@@ -242,45 +479,56 @@ const TechnicalIdentifiers: React.FC<{
             </button>
 
             {isOpen && (
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-4 gap-4 animate-fade-in">
-                    <div className="md:col-span-2">
-                        <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.unique_email')}</label>
-                        <input 
-                            type="text" 
-                            value={uniqueEmail} 
-                            readOnly 
-                            className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed"
-                        />
-                    </div>
-                     <div>
-                        <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.posting_code')}</label>
-                        <input 
-                            type="text" 
-                            value={postingCode} 
-                            onChange={(e) => onPostingCodeChange(e.target.value)}
-                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-center transition"
-                        />
-                    </div>
-                     <div className="grid grid-cols-2 gap-2">
-                        <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.job_id')}</label>
+                <div className="mt-4 space-y-4 animate-fade-in">
+                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <div className="md:col-span-2">
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.unique_email')}</label>
                             <input 
                                 type="text" 
-                                value={jobId} 
-                                disabled 
-                                className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
+                                value={uniqueEmail} 
+                                readOnly 
+                                className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed"
                             />
                         </div>
                         <div>
-                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.creation_date')}</label>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.posting_code')}</label>
                             <input 
                                 type="text" 
-                                value={creationDate} 
-                                disabled 
-                                className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
+                                value={postingCode} 
+                                onChange={(e) => onPostingCodeChange(e.target.value)}
+                                className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-center transition"
                             />
                         </div>
-                     </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.job_id')}</label>
+                                <input 
+                                    type="text" 
+                                    value={jobId} 
+                                    disabled 
+                                    className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.creation_date')}</label>
+                                <input 
+                                    type="text" 
+                                    value={creationDate} 
+                                    disabled 
+                                    className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed text-center" 
+                                />
+                            </div>
+                        </div>
+                    </div>
+                    <JobScreeningEligibilityCard
+                        validityDays={validityDays}
+                        reScreeningCooldownMonths={reScreeningCooldownMonths}
+                        requireOriginalCv={requireOriginalCv}
+                        onValidityDaysChange={onValidityDaysChange}
+                        onReScreeningCooldownMonthsChange={onReScreeningCooldownMonthsChange}
+                        onRequireOriginalCvChange={onRequireOriginalCvChange}
+                        orgDefaults={orgScreeningDefaults}
+                    />
                 </div>
             )}
         </div>
@@ -1248,7 +1496,7 @@ const initialJobState = {
     status: 'טיוטה', 
     priority: 'רגילה' as Priority, 
     healthProfile: 'standard', 
-    jobType: ['משרה מלאה'], 
+    jobType: ['מלאה'], 
     jobField: null as SelectedJobField | null,
     contacts: [] as string[],
     jobTitle: '', 
@@ -1257,7 +1505,7 @@ const initialJobState = {
     requirements: '',
     maritalStatus: 'לא חשוב', 
     mobility: 'לא חשוב', 
-    drivingLicense: 'לא חשוב', 
+    drivingLicense: '-', 
     gender: ['male', 'female'], 
     ageMin: 20, 
     ageMax: 65, 
@@ -1279,6 +1527,9 @@ const initialJobState = {
     assignedRecruiters: [] as string[],
     assignedAccountManagers: [] as string[],
     selectedTemplate: '',
+    validityDays: 60,
+    reScreeningCooldownMonths: 3,
+    requireOriginalCv: false,
 };
 
 const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = false, jobData, isEmbedded = false }) => {
@@ -1288,6 +1539,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
     const [formData, setFormData] = useState(initialJobState);
+    const [jobScopeOptions, setJobScopeOptions] = useState<{ id: string; name: string }[]>(() =>
+        mapPicklistRowsToJobScopeOptions(JOB_SCOPE_MULTI_FALLBACK),
+    );
+    const [drivingLicensePicklist, setDrivingLicensePicklist] = useState<PicklistValueRow[]>(() =>
+        sortDrivingLicensePicklistRows(DRIVING_LICENSE_FALLBACK),
+    );
+    const [mobilityPicklist, setMobilityPicklist] = useState<PicklistValueRow[]>(MOBILITY_FALLBACK);
     const [activeSection, setActiveSection] = useState('general-info');
     const [isClientConfirmed, setIsClientConfirmed] = useState(false);
     const [activeClients, setActiveClients] = useState<Array<{ id: string; label: string }>>([]);
@@ -1299,6 +1557,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     const [pastedJobText, setPastedJobText] = useState('');
+    const aiPasteAnalyzeUsedRef = useRef(false);
     const [isParsing, setIsParsing] = useState(false);
     const [isAIModalOpen, setIsAIModalOpen] = useState(false);
     const [parseSuccess, setParseSuccess] = useState(false);
@@ -1321,9 +1580,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const navRef = useRef<HTMLDivElement>(null);
     const formDataRef = useRef(formData);
     formDataRef.current = formData;
+    const drivingLicensePicklistRef = useRef<PicklistValueRow[]>(
+        sortDrivingLicensePicklistRows(DRIVING_LICENSE_FALLBACK),
+    );
+    const mobilityPicklistRef = useRef<PicklistValueRow[]>(MOBILITY_FALLBACK);
+    drivingLicensePicklistRef.current = drivingLicensePicklist;
+    mobilityPicklistRef.current = mobilityPicklist;
     const [distributionPeople, setDistributionPeople] = useState<JobDistributionOption[]>([]);
     const [distributionLoading, setDistributionLoading] = useState(false);
     const [distributionFetchError, setDistributionFetchError] = useState<string | null>(null);
+    const [orgScreeningDefaults, setOrgScreeningDefaults] = useState<{
+        validityDays: number;
+        cooldownMonths: number;
+        requireOriginalCv: boolean;
+    } | null>(null);
     const distributionPeopleRef = useRef<JobDistributionOption[]>([]);
     distributionPeopleRef.current = distributionPeople;
 
@@ -1387,7 +1657,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 status: jobData.status || prev.status,
                 priority: jobData.priority || prev.priority,
                 healthProfile: jobData.healthProfile || 'standard',
-                jobType: Array.isArray(jobData.jobType) ? jobData.jobType : (jobData.jobType ? [jobData.jobType] : ['משרה מלאה']),
+                jobType: Array.isArray(jobData.jobType)
+                    ? jobData.jobType
+                    : jobData.jobType
+                      ? [jobData.jobType]
+                      : ['מלאה'],
                 
                 // Hydrate questions if they exist in jobData, otherwise fallback to defaults
                 // Ensure defaults for new properties if missing
@@ -1412,6 +1686,16 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 postingCode: jobData.postingCode || prev.postingCode,
                 uniqueEmail: jobData.postingCode ? `humand+${jobData.postingCode}@app.hiro.co.il` : (jobData.uniqueEmail || prev.uniqueEmail),
                 creationDate: jobData.openDate ? new Date(jobData.openDate).toLocaleDateString('he-IL') : prev.creationDate,
+                validityDays:
+                    typeof jobData.validityDays === 'number' && Number.isFinite(jobData.validityDays)
+                        ? jobData.validityDays
+                        : prev.validityDays,
+                reScreeningCooldownMonths:
+                    typeof jobData.reScreeningCooldownMonths === 'number' && Number.isFinite(jobData.reScreeningCooldownMonths)
+                        ? jobData.reScreeningCooldownMonths
+                        : prev.reScreeningCooldownMonths,
+                requireOriginalCv:
+                    typeof jobData.requireOriginalCv === 'boolean' ? jobData.requireOriginalCv : prev.requireOriginalCv,
                 ...(contactsFromJob !== null ? { contacts: contactsFromJob } : {}),
              }));
              if (jobData.aiRawDescription) {
@@ -1420,6 +1704,76 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
              if (jobData.client) setIsClientConfirmed(true);
         }
     }, [isEditing, jobData]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!apiBase) return;
+        void fetchPicklistValuesByKey(apiBase, JOB_SCOPE_PICKLIST_KEY).then((rows) => {
+            if (cancelled) return;
+            const source = rows.length > 0 ? rows : JOB_SCOPE_MULTI_FALLBACK;
+            setJobScopeOptions(mapPicklistRowsToJobScopeOptions(source));
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!apiBase) return;
+        void fetchPicklistValuesByKey(apiBase, DRIVING_LICENSE_PICKLIST_KEY).then((rows) => {
+            if (cancelled) return;
+            setDrivingLicensePicklist(
+                sortDrivingLicensePicklistRows(rows.length > 0 ? rows : DRIVING_LICENSE_FALLBACK),
+            );
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
+        let cancelled = false;
+        if (!apiBase) return;
+        void fetchPicklistValuesByKey(apiBase, MOBILITY_PICKLIST_KEY).then((rows) => {
+            if (cancelled) return;
+            setMobilityPicklist(rows.length > 0 ? rows : MOBILITY_FALLBACK);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
+        if (drivingLicensePicklist.length === 0) return;
+        setFormData((prev) => {
+            const next = remapDrivingLicenseFormValue(prev.drivingLicense, drivingLicensePicklist);
+            return next === prev.drivingLicense ? prev : { ...prev, drivingLicense: next };
+        });
+    }, [drivingLicensePicklist]);
+
+    useEffect(() => {
+        if (mobilityPicklist.length === 0) return;
+        setFormData((prev) => {
+            const next = remapMobilityFormValue(prev.mobility, mobilityPicklist);
+            return next === prev.mobility ? prev : { ...prev, mobility: next };
+        });
+    }, [mobilityPicklist]);
+
+    /** Map stored jobType entries to picklist `value` strings when options load (create + edit). */
+    useEffect(() => {
+        if (jobScopeOptions.length === 0) return;
+        setFormData((prev) => {
+            const next = normalizeJobTypeToPicklistValues(prev.jobType, jobScopeOptions);
+            if (
+                next.length === prev.jobType.length &&
+                next.every((v, i) => v === prev.jobType[i])
+            ) {
+                return prev;
+            }
+            return { ...prev, jobType: next };
+        });
+    }, [jobScopeOptions]);
 
     useEffect(() => {
         let cancelled = false;
@@ -1476,6 +1830,29 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         if (!match || match.id.startsWith('legacy:')) return null;
         return match.id;
     }, [formData.clientName, activeClients]);
+
+    useEffect(() => {
+        if (!resolvedClientId) {
+            setOrgScreeningDefaults(null);
+            return;
+        }
+        let cancelled = false;
+        void fetchClientUsageSettings(resolvedClientId)
+            .then((u) => {
+                if (cancelled) return;
+                setOrgScreeningDefaults({
+                    validityDays: u.defaultJobValidityDays,
+                    cooldownMonths: u.defaultJobReScreeningCooldownMonths,
+                    requireOriginalCv: u.defaultRequireOriginalCv,
+                });
+            })
+            .catch(() => {
+                if (!cancelled) setOrgScreeningDefaults(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [resolvedClientId]);
 
     const distributionListBlockedReason = useMemo(() => {
         if (!apiBase) return 'אין כתובת API (VITE_API_BASE) — לא ניתן לטעון לקוחות.';
@@ -1852,6 +2229,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             setAiFilledFields(filled);
             setParseSummaryData({ filled: filledList, missing: missingList });
 
+            aiPasteAnalyzeUsedRef.current = true;
             setParseSuccess(true);
             setTimeout(() => {
                 setParseSuccess(false);
@@ -2227,10 +2605,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             city: firstCity,
             region: (data.regionLabel || '').trim(),
             gender: genderValue,
-            mobility: data.mobility === 'חובה',
-            licenseType: data.drivingLicense === 'לא חשוב' ? '' : data.drivingLicense,
+            mobility: mobilityBoolForJobPayload(data.mobility, mobilityPicklistRef.current),
+            licenseType: licenseTypeForJobPayload(data.drivingLicense, drivingLicensePicklistRef.current),
             postingCode: data.postingCode,
-            validityDays: 30,
+            validityDays: (() => {
+                const n = Number(data.validityDays);
+                if (!Number.isFinite(n)) return 60;
+                return Math.min(20000, Math.max(0, Math.round(n)));
+            })(),
+            reScreeningCooldownMonths: (() => {
+                const n = Number(data.reScreeningCooldownMonths);
+                if (!Number.isFinite(n)) return 3;
+                return Math.min(9999, Math.max(0, Math.round(n)));
+            })(),
+            requireOriginalCv: Boolean(data.requireOriginalCv),
             recruitingCoordinator: recruiterName,
             accountManager: accountManagerName,
             salaryMin: data.salaryMin,
@@ -2254,6 +2642,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             internalNotes: data.internalNotes,
             aiRawDescription: pastedJobText || undefined,
             uniqueEmail: data.uniqueEmail,
+            /** Server strips this; triggers audit_logs after Job.create with real job id */
+            aiPasteAnalyzeUsed: aiPasteAnalyzeUsedRef.current === true,
             contacts: contactObjects,
             recruitmentSources: (data.recruitmentSources || []).map((source: { id: string; name: string; status: string; alertDays: number | null }) => ({
                 id: source.id,
@@ -2297,6 +2687,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             }
             const createdJob = await res.json();
             setSaveMessage('המשרה נוצרה בהצלחה');
+            aiPasteAnalyzeUsedRef.current = false;
             onSave(createdJob);
             return createdJob;
         } catch (err) {
@@ -2608,7 +2999,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                        <div className="lg:col-span-1">
                            <MultiSelect
                                label={t('new_job.job_scope')}
-                               options={jobTypeOptions}
+                               options={jobScopeOptions}
                                selectedIds={formData.jobType} 
                                onChange={(ids) => setFormData(prev => ({ ...prev, jobType: ids }))}
                                placeholder="בחר היקף משרה..."
@@ -2625,6 +3016,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         uniqueEmail={`humand+${formData.postingCode}@app.hiro.co.il`}
                         creationDate={formData.creationDate}
                         onPostingCodeChange={(value) => setFormData(prev => ({ ...prev, postingCode: value, uniqueEmail: `humand+${value}@app.hiro.co.il` }))}
+                        validityDays={formData.validityDays}
+                        reScreeningCooldownMonths={formData.reScreeningCooldownMonths}
+                        requireOriginalCv={formData.requireOriginalCv}
+                        onValidityDaysChange={(n) => setFormData((prev) => ({ ...prev, validityDays: n }))}
+                        onReScreeningCooldownMonthsChange={(n) => setFormData((prev) => ({ ...prev, reScreeningCooldownMonths: n }))}
+                        onRequireOriginalCvChange={(v) => setFormData((prev) => ({ ...prev, requireOriginalCv: v }))}
+                        orgScreeningDefaults={orgScreeningDefaults}
                     />
                 </SectionCard>
 
@@ -2853,13 +3251,21 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                      <div>
                                         <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('form.driving_license')}</label>
                                         <select name="drivingLicense" value={formData.drivingLicense} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 min-w-[150px]">
-                                            <option>לא חשוב</option><option>B</option><option>C</option>
+                                            {drivingLicensePicklist.map((row) => (
+                                                <option key={row.id} value={row.value}>
+                                                    {picklistRowLabel(row)}
+                                                </option>
+                                            ))}
                                         </select>
                                      </div>
                                      <div>
                                         <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('form.mobility')}</label>
                                         <select name="mobility" value={formData.mobility} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 min-w-[150px]">
-                                            <option>לא חשוב</option><option>חובה</option>
+                                            {mobilityPicklist.map((row) => (
+                                                <option key={row.id} value={row.value}>
+                                                    {picklistRowLabel(row)}
+                                                </option>
+                                            ))}
                                         </select>
                                      </div>
                                  </div>

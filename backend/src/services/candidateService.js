@@ -1,6 +1,7 @@
 const { Op, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const Candidate = require('../models/Candidate');
+const RecruitmentSource = require('../models/RecruitmentSource');
 const CandidateTag = require('../models/CandidateTag');
 const Tag = require('../models/Tag');
 const CandidateOrganization = require('../models/CandidateOrganization');
@@ -908,6 +909,54 @@ const update = async (id, payload) => {
     cleanPayload.jobScopes = strArr(cleanPayload.jobScopes) || [];
     if (cleanPayload.jobScopes.length) {
       cleanPayload.jobScope = cleanPayload.jobScopes[0];
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(cleanPayload, 'recruitmentSourceId')) {
+    const rid = cleanPayload.recruitmentSourceId;
+    if (rid === '' || rid === null || rid === undefined) {
+      cleanPayload.recruitmentSourceId = null;
+      if (!Object.prototype.hasOwnProperty.call(cleanPayload, 'source')) {
+        cleanPayload.source = '';
+      }
+    } else {
+      const rs = await RecruitmentSource.findByPk(rid);
+      if (!rs) {
+        const err = new Error('Invalid recruitment source');
+        err.status = 400;
+        throw err;
+      }
+      cleanPayload.source = rs.name;
+    }
+  }
+
+  const mergedSource = cleanPayload.source !== undefined ? cleanPayload.source : candidate.source;
+  const mergedRsId =
+    cleanPayload.recruitmentSourceId !== undefined
+      ? cleanPayload.recruitmentSourceId
+      : candidate.recruitmentSourceId;
+
+  if (
+    Object.prototype.hasOwnProperty.call(cleanPayload, 'source') ||
+    Object.prototype.hasOwnProperty.call(cleanPayload, 'recruitmentSourceId')
+  ) {
+    const srcTrim = String(mergedSource || '').trim();
+    const cleared = !srcTrim && !mergedRsId;
+    const changed =
+      String(candidate.source || '').trim() !== srcTrim ||
+      String(candidate.recruitmentSourceId || '') !== String(mergedRsId || '');
+
+    if (cleared) {
+      cleanPayload.recruitmentSourceId = null;
+      cleanPayload.recruitmentSourceCreatedAt = null;
+      cleanPayload.recruitmentSourceUpdatedAt = null;
+      cleanPayload.source = '';
+    } else if (changed) {
+      const now = new Date();
+      cleanPayload.recruitmentSourceUpdatedAt = now;
+      if (!candidate.recruitmentSourceCreatedAt) {
+        cleanPayload.recruitmentSourceCreatedAt = now;
+      }
     }
   }
 

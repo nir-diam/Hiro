@@ -32,6 +32,23 @@ const ClientUsageSetting = sequelize.define(
       allowNull: false,
       defaultValue: 3,
     },
+    defaultJobValidityDays: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 90,
+    },
+    // Sequelize underscored naming splits ReScreening → re_screening; migration uses rescreening (single token).
+    defaultJobReScreeningCooldownMonths: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 3,
+      field: 'default_job_rescreening_cooldown_months',
+    },
+    defaultRequireOriginalCv: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
     questionnaireSource: {
       type: DataTypes.STRING(128),
       allowNull: false,

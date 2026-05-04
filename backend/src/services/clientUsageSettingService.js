@@ -9,6 +9,9 @@ const DEFAULTS = {
   googleLogin: 'פעיל',
   initialScreeningLevel: 'טלפוני',
   returnMonths: 3,
+  defaultJobValidityDays: 90,
+  defaultJobReScreeningCooldownMonths: 3,
+  defaultRequireOriginalCv: false,
   questionnaireSource: 'חברה',
   autoDisconnect: false,
   logoOnCv: true,
@@ -30,6 +33,13 @@ const toDto = (row) => {
     initialScreeningLevel: plain.initialScreeningLevel ?? DEFAULTS.initialScreeningLevel,
     returnMonths:
       Number.isFinite(Number(plain.returnMonths)) ? Number(plain.returnMonths) : DEFAULTS.returnMonths,
+    defaultJobValidityDays: Number.isFinite(Number(plain.defaultJobValidityDays))
+      ? Number(plain.defaultJobValidityDays)
+      : DEFAULTS.defaultJobValidityDays,
+    defaultJobReScreeningCooldownMonths: Number.isFinite(Number(plain.defaultJobReScreeningCooldownMonths))
+      ? Number(plain.defaultJobReScreeningCooldownMonths)
+      : DEFAULTS.defaultJobReScreeningCooldownMonths,
+    defaultRequireOriginalCv: Boolean(plain.defaultRequireOriginalCv),
     questionnaireSource: plain.questionnaireSource ?? DEFAULTS.questionnaireSource,
     autoDisconnect: Boolean(plain.autoDisconnect),
     logoOnCv: plain.logoOnCv !== false,
@@ -91,6 +101,70 @@ const getReturnMonthsForClientLabel = async (label) => {
   return toDto(row).returnMonths;
 };
 
+/** Resolve Client UUID from Job.client label (name / displayName), or null */
+const getClientIdForJobClientLabel = async (label) => {
+  const trimmed = String(label || '').trim();
+  if (!trimmed) return null;
+  const labelN = trimmed.toLowerCase();
+
+  const client = await Client.findOne({
+    where: {
+      [Op.or]: [
+        sequelize.where(
+          sequelize.fn('LOWER', sequelize.fn('TRIM', sequelize.col('name'))),
+          labelN,
+        ),
+        sequelize.where(
+          sequelize.fn('LOWER', sequelize.fn('TRIM', sequelize.col('displayName'))),
+          labelN,
+        ),
+        { name: trimmed },
+        { displayName: trimmed },
+      ],
+    },
+    attributes: ['id'],
+  });
+  return client ? String(client.id) : null;
+};
+
+/**
+ * Effective screening-related job settings: job overrides win, then client usage defaults, then hard-coded fallbacks.
+ */
+const resolveScreeningDefaultsForJob = async (jobRow, clientIdOptional = null) => {
+  let clientId = clientIdOptional;
+  if (!clientId && jobRow?.client) {
+    clientId = await getClientIdForJobClientLabel(jobRow.client);
+  }
+
+  let usageDto = { ...DEFAULTS };
+  if (clientId) {
+    const row = await ClientUsageSetting.findByPk(clientId);
+    if (row) usageDto = { ...usageDto, ...toDto(row) };
+  }
+
+  const jobPlain = jobRow?.get ? jobRow.get({ plain: true }) : jobRow || {};
+
+  const validityDays = Number.isFinite(Number(jobPlain.validityDays))
+    ? Math.max(0, Math.min(20000, Number(jobPlain.validityDays)))
+    : Math.max(0, Math.min(20000, Number(usageDto.defaultJobValidityDays)));
+
+  const reScreeningCooldownMonths = Number.isFinite(Number(jobPlain.reScreeningCooldownMonths))
+    ? Math.max(0, Math.min(9999, Number(jobPlain.reScreeningCooldownMonths)))
+    : Math.max(0, Math.min(9999, Number(usageDto.defaultJobReScreeningCooldownMonths)));
+
+  const requireOriginalCv =
+    typeof jobPlain.requireOriginalCv === 'boolean'
+      ? jobPlain.requireOriginalCv
+      : Boolean(usageDto.defaultRequireOriginalCv);
+
+  return {
+    clientId,
+    validityDays,
+    reScreeningCooldownMonths,
+    requireOriginalCv,
+  };
+};
+
 /**
  * Prefer the logged-in staff user's client usage (reliable). Fall back to matching Job.client label.
  */
@@ -127,6 +201,13 @@ const upsert = async (clientId, body) => {
     returnMonths: Number.isFinite(Number(body.returnMonths))
       ? Math.max(0, Math.min(120, Number(body.returnMonths)))
       : DEFAULTS.returnMonths,
+    defaultJobValidityDays: Number.isFinite(Number(body.defaultJobValidityDays))
+      ? Math.max(0, Math.min(20000, Number(body.defaultJobValidityDays)))
+      : DEFAULTS.defaultJobValidityDays,
+    defaultJobReScreeningCooldownMonths: Number.isFinite(Number(body.defaultJobReScreeningCooldownMonths))
+      ? Math.max(0, Math.min(9999, Number(body.defaultJobReScreeningCooldownMonths)))
+      : DEFAULTS.defaultJobReScreeningCooldownMonths,
+    defaultRequireOriginalCv: Boolean(body.defaultRequireOriginalCv),
     questionnaireSource:
       typeof body.questionnaireSource === 'string'
         ? body.questionnaireSource
@@ -158,6 +239,8 @@ module.exports = {
   getByClientId,
   getAutoDisconnectForClient,
   getReturnMonthsForClientLabel,
+  getClientIdForJobClientLabel,
+  resolveScreeningDefaultsForJob,
   resolveReturnMonthsForJobRequest,
   upsert,
   toDto,

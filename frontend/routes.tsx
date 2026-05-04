@@ -1,6 +1,6 @@
 
 // ... (imports)
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { useRoutes, Navigate, useParams, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
 
@@ -199,6 +199,10 @@ const initialData = {
     salaryMax: 20000,
     internalNotes: '',
     candidateNotes: '',
+    source: '',
+    recruitmentSourceId: null as string | null,
+    recruitmentSourceCreatedAt: null as string | null,
+    recruitmentSourceUpdatedAt: null as string | null,
     professionalSummary: '',
     workExperience: [
         
@@ -245,6 +249,10 @@ const normalizeCandidatePayload = (payload: any) => {
         backendId: payload?.id,
         /** DB column is internalNotes; ignore legacy recruiterNotes if present */
         internalNotes: payload?.internalNotes ?? payload?.recruiterNotes ?? '',
+        source: payload?.source != null ? String(payload.source) : '',
+        recruitmentSourceId: payload?.recruitmentSourceId ?? null,
+        recruitmentSourceCreatedAt: payload?.recruitmentSourceCreatedAt ?? null,
+        recruitmentSourceUpdatedAt: payload?.recruitmentSourceUpdatedAt ?? null,
         drivingLicenses:
             drivingLicensesRaw.length > 0
                 ? drivingLicensesRaw.map((x: any) => String(x || '').trim()).filter(Boolean)
@@ -396,14 +404,6 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     }, [fetchCandidateList]);
 
     useEffect(() => {
-        return () => {
-            if (saveTimeoutRef.current) {
-                clearTimeout(saveTimeoutRef.current);
-            }
-        };
-    }, []);
-
-    useEffect(() => {
         const handleCandidateRefresh = (event: Event) => {
             const customEvent = event as CustomEvent;
             const detail = customEvent.detail;
@@ -436,7 +436,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         try {
             const response = await fetch(`${apiBase}/api/candidates/${urlId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
                 body: JSON.stringify(formData),
             });
             if (!response.ok) {
@@ -454,7 +454,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         } finally {
             setIsUpdatingCandidate(false);
         }
-    }, [apiBase, urlId, formData]);
+    }, [apiBase, urlId, formData, authHeaders]);
 
     const mockResumeData = {
         name: formData.fullName,
@@ -476,40 +476,6 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const handleInternalTagsChange = (newTags: string[]) => {
         setFormData(prev => ({ ...prev, internalTags: newTags }));
     };
-
-    const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const lastSavedRef = useRef<string | null>(null);
-
-    const triggerAutoSave = useCallback((nextData: any) => {
-        if (!nextData) return;
-        const payloadString = JSON.stringify(nextData);
-        if (lastSavedRef.current === payloadString) return;
-        if (saveTimeoutRef.current) {
-            clearTimeout(saveTimeoutRef.current);
-        }
-        saveTimeoutRef.current = setTimeout(async () => {
-            const targetId = urlId || nextData.backendId;
-            if (!targetId || !apiBase) return;
-            setIsUpdatingCandidate(true);
-            try {
-                const res = await fetch(`${apiBase}/api/candidates/${targetId}`, {
-                    method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(nextData),
-                });
-                if (!res.ok) {
-                    const errBody = await res.json().catch(() => null);
-                    throw new Error(errBody?.message || 'עדכון אוטומטי נכשל');
-                }
-                lastSavedRef.current = payloadString;
-                setCandidateUpdateMessage('השינויים נשמרו אוטומטית.');
-            } catch (error: any) {
-                setCandidateUpdateMessage(error?.message || 'עדכון אוטומטי נכשל.');
-            } finally {
-                setIsUpdatingCandidate(false);
-            }
-        }, 600);
-    }, [apiBase, urlId]);
 
     const handleApproveDataCorrections = useCallback(async () => {
         const id = String(formData.backendId || urlId || '');
@@ -540,14 +506,9 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
     const handleFormChange = (updatedData: any) => {
         if (typeof updatedData === 'function') {
-            setFormData((prev) => {
-                const next = updatedData(prev);
-                triggerAutoSave(next);
-                return next;
-            });
+            setFormData((prev) => updatedData(prev));
         } else {
             setFormData(updatedData);
-            triggerAutoSave(updatedData);
         }
     };
 
@@ -882,7 +843,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
     const element = useRoutes([
         { path: '/', element: <Navigate to="/dashboard" replace /> },
         { path: '/dashboard', element: <DashboardView /> },
-        { path: '/candidates', element: <CandidatesListView openSummaryDrawer={props.openSummaryDrawer} favorites={props.favorites} toggleFavorite={props.toggleFavorite} /> },
+        { path: '/candidates', element: <CandidatesListView openSummaryDrawer={props.openSummaryDrawer} favorites={props.favorites} toggleFavorite={props.toggleFavorite} openMessageModal={props.openMessageModal} /> },
         { path: '/candidates/new', element: <NewCandidateViewV2 /> },
         { path: '/candidates/:candidateId', element: <ProfilePageWrapper {...props} /> },
         { path: '/candidate-pool', element: <CandidatePoolView /> },

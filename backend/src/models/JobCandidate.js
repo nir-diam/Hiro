@@ -33,6 +33,15 @@ const JobCandidate = sequelize.define(
       allowNull: false,
       defaultValue: {},
     },
+    manualOverride: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    screeningEnteredAt: DataTypes.DATE,
+    lastStatusGroup: DataTypes.STRING(64),
+    lastExitAt: DataTypes.DATE,
+    lastExitReason: DataTypes.STRING(500),
   },
   {
     tableName: 'job_candidates',

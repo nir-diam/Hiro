@@ -1,7 +1,8 @@
 const apiBase = () => import.meta.env.VITE_API_BASE || '';
 
 function authHeaders(): HeadersInit {
-    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const raw = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const token = raw != null ? String(raw).trim() || null : null;
     const h: HeadersInit = { 'Content-Type': 'application/json' };
     if (token) (h as Record<string, string>).Authorization = `Bearer ${token}`;
     return h;

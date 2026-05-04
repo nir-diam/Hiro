@@ -9,6 +9,7 @@ const clientEventController = require('../controllers/clientEventController');
 const clientDocumentController = require('../controllers/clientDocumentController');
 const clientFinanceController = require('../controllers/clientFinanceController');
 const recruitmentStatusController = require('../controllers/recruitmentStatusController');
+const recruitmentSourceController = require('../controllers/recruitmentSourceController');
 
 const router = express.Router();
 
@@ -69,6 +70,31 @@ router.put(
   authMiddleware,
   attachDbUser,
   recruitmentStatusController.sync,
+);
+
+router.get(
+  '/:id/recruitment-sources',
+  authMiddleware,
+  attachDbUser,
+  recruitmentSourceController.list,
+);
+router.post(
+  '/:id/recruitment-sources',
+  authMiddleware,
+  attachDbUser,
+  recruitmentSourceController.create,
+);
+router.put(
+  '/:id/recruitment-sources/:sourceId',
+  authMiddleware,
+  attachDbUser,
+  recruitmentSourceController.update,
+);
+router.delete(
+  '/:id/recruitment-sources/:sourceId',
+  authMiddleware,
+  attachDbUser,
+  recruitmentSourceController.remove,
 );
 
 router.get('/:id', clientController.get);

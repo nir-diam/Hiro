@@ -29,6 +29,8 @@ const Job = sequelize.define(
     licenseType: DataTypes.STRING,
     postingCode: DataTypes.STRING,
     validityDays: DataTypes.INTEGER,
+    reScreeningCooldownMonths: DataTypes.INTEGER,
+    requireOriginalCv: DataTypes.BOOLEAN,
     recruitingCoordinator: DataTypes.STRING,
     accountManager: DataTypes.STRING,
     salaryMin: DataTypes.INTEGER,

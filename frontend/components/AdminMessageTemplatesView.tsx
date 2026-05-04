@@ -18,7 +18,8 @@ import {
     type MessageTemplateCatalogDto,
 } from '../services/messageTemplatesApi';
 import { fetchClientOptions, type ClientOptionDto } from '../services/usersApi';
-import { messageTemplateParameters, formatMessageTemplateDisplayDate } from './MessageTemplatesView';
+import { messageTemplateParameters } from '../services/messageTemplatePlaceholders';
+import { formatMessageTemplateDisplayDate } from './MessageTemplatesView';
 
 interface CatalogRow {
     id: string;

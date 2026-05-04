@@ -8,6 +8,7 @@ const ClientContact = require('../models/ClientContact');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
+const screeningInclusionService = require('../services/screeningInclusionService');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
 
@@ -51,6 +52,8 @@ const JOB_UPDATE_AUDIT_LABELS = {
   licenseType: 'רישיון נהיגה',
   postingCode: 'קוד משרה',
   validityDays: 'ימי תוקף',
+  reScreeningCooldownMonths: 'תקופת צינון לחזרה לתהליך (חודשים)',
+  requireOriginalCv: 'חובת קורות חיים מקורי לסינון',
   recruitingCoordinator: 'רכז גיוס',
   accountManager: 'אחראי חשבון',
   salaryMin: 'שכר מינ׳',
@@ -90,19 +93,6 @@ const SKIP_JOB_UPDATE_COMPARE_KEYS = new Set([
   'openDate',
 ]);
 
-const serializeAuditValue = (val, maxLen = 480) => {
-  if (val === undefined) return undefined;
-  if (val === null) return null;
-  if (typeof val === 'string') return val.length > maxLen ? `${val.slice(0, maxLen)}…` : val;
-  if (typeof val === 'number' || typeof val === 'boolean') return val;
-  try {
-    const s = JSON.stringify(val);
-    return s.length > maxLen ? `${s.slice(0, maxLen)}…` : s;
-  } catch {
-    return '[ערך]';
-  }
-};
-
 const collectJobFieldChangesForAudit = (prevPlain, nextPlain) => {
   const changeLines = [];
   const changes = [];
@@ -116,11 +106,8 @@ const collectJobFieldChangesForAudit = (prevPlain, nextPlain) => {
     if (!valuesDiffer(a, b)) continue;
     const label = JOB_UPDATE_AUDIT_LABELS[key];
     changeLines.push(label);
-    changes.push({
-      field: label,
-      oldValue: serializeAuditValue(a),
-      newValue: serializeAuditValue(b),
-    });
+    // Audit row lists only which fields changed — no long text / JSON blobs in changes[]
+    changes.push({ field: label });
   }
   return { changeLines, changes };
 };
@@ -228,6 +215,8 @@ const create = async (req, res) => {
     }
     const uniqueEmail = `humand+${postingCode}@app.hiro.co.il`;
     const payload = { ...req.body, postingCode, uniqueEmail };
+    const aiPasteAnalyzeUsed = Boolean(payload.aiPasteAnalyzeUsed);
+    delete payload.aiPasteAnalyzeUsed;
 
     // Normalize languages into skills (language-tag skills) before skills normalization
     if (Array.isArray(payload.languages) && payload.languages.length > 0) {
@@ -346,6 +335,20 @@ const create = async (req, res) => {
       });
     }
 
+    if (aiPasteAnalyzeUsed) {
+      auditLogger.log(req, {
+        level: 'info',
+        action: 'system',
+        description: 'ניתוח AI לטקסט מדביקה — הטופס מולא מהניתוח; נרשם לאחר יצירת המשרה',
+        entityType: 'Job',
+        entityId: String(job.id),
+        entityName: String(job.title || job.role || '').slice(0, 255),
+        metadata: {
+          newJobAiPasteAnalyze: true,
+        },
+      });
+    }
+
     res.status(201).json(job);
   } catch (err) {
     res.status(400).json({ message: err.message || 'Create failed' });
@@ -355,6 +358,7 @@ const create = async (req, res) => {
 const update = async (req, res) => {
   try {
     const payload = { ...req.body };
+    delete payload.aiPasteAnalyzeUsed;
 
     // Snapshot previous job state for change-detection-based audits.
     let previous = null;
@@ -642,6 +646,19 @@ const logSmartImportModalOpen = async (req, res) => {
   }
 };
 
+const getScreeningPoolForJob = async (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const data = await screeningInclusionService.computeScreeningForJob(jobId);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[jobController.getScreeningPoolForJob]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to load screening pool' });
+  }
+};
+
 module.exports = {
   list,
   listForCompose,
@@ -653,5 +670,6 @@ module.exports = {
   analyzeDescription,
   getReferralClientContacts,
   logSmartImportModalOpen,
+  getScreeningPoolForJob,
 };
 

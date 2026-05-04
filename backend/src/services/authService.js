@@ -170,11 +170,20 @@ const signup = async ({ email, password, name, role }) => {
   const token = issueToken(user);
 
   if (String(resolvedRole).toLowerCase() === 'candidate' && user.email) {
-    messageTemplateService.queueCandidateWelcomeEmail({
-      email: user.email,
-      name: user.name,
-      fullName: user.name,
-    });
+    messageTemplateService.queueCandidateWelcomeEmail(
+      {
+        email: user.email,
+        name: user.name,
+        fullName: user.name,
+      },
+      {
+        recruiter: {
+          name: String(user.name || '').trim(),
+          email: String(user.email || '').trim(),
+          phone: String(user.phone || '').trim(),
+        },
+      },
+    );
   }
 
   return { token, user };

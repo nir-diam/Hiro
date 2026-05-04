@@ -71,6 +71,29 @@ interface ScreeningCvReferralApiRow {
   notificationText?: string;
 }
 
+/** Expanded row: show DB plain body (`notificationText`) and legacy/combined `notes` when they differ. */
+function ReferralNotesSummary({ referral }: { referral: ActiveReferral }) {
+    const nt = referral.notificationText.trim();
+    const n = referral.notes.trim();
+    const primary = nt || n;
+    const secondary = nt && n && n !== nt ? n : '';
+    if (!primary && !secondary) {
+        return <span className="text-text-muted">—</span>;
+    }
+    return (
+        <>
+            {primary ? (
+                <p className="text-text-default leading-relaxed whitespace-pre-wrap">{primary}</p>
+            ) : null}
+            {secondary ? (
+                <p className="text-text-muted text-sm leading-relaxed whitespace-pre-wrap border-t border-border-subtle pt-2 mt-3">
+                    {secondary}
+                </p>
+            ) : null}
+        </>
+    );
+}
+
 function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): ActiveReferral {
   const rawStatus = String(row.status || '').trim();
   const status = (rawStatus !== '' ? rawStatus : 'חדש') as Status;
@@ -188,6 +211,12 @@ const ReferralCard: React.FC<{ referral: ActiveReferral; onToggleDetails: () => 
                     <ChevronDownIcon className={`w-3.5 h-3.5 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
                 </button>
             </div>
+            {isExpanded ? (
+                <div className="mt-4 pt-4 border-t border-border-subtle text-sm">
+                    <h4 className="font-bold text-text-default mb-2">הערות ותקציר:</h4>
+                    <ReferralNotesSummary referral={referral} />
+                </div>
+            ) : null}
         </div>
     );
 };
@@ -815,7 +844,7 @@ const ReferralsView: React.FC<{
                                                         <div className="flex-shrink-0 mt-1"><ClockIcon className="w-5 h-5 text-primary-500" /></div>
                                                         <div>
                                                             <h4 className="font-bold text-text-default mb-1">הערות ותקציר:</h4>
-                                                            <p className="text-text-muted leading-relaxed">{referral.notes}</p>
+                                                            <ReferralNotesSummary referral={referral} />
                                                         </div>
                                                     </div>
                                                 </td>

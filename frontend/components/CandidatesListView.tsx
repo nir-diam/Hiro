@@ -18,9 +18,36 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import TagSelectorModal, { type TagOption } from './TagSelectorModal';
+import BulkAddToFilterModal from './BulkAddToFilterModal';
+import ScreeningCollisionWarningModal, { type ScreeningWarningAgg } from './ScreeningCollisionWarningModal';
+import BulkReferModal, { type BulkReferSuccessSummary } from './BulkReferModal';
+import BulkChangeStatusModal from './BulkChangeStatusModal';
+import BulkAddToSavedSearchModal from './BulkAddToSavedSearchModal';
+import ChangeSourceModal from './ChangeSourceModal';
+import EventFormModal, { type Event as BulkCandidateEventFormData } from './EventFormModal';
+import type { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { deriveLocalCandidateId } from '../utils/candidateId';
 import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
+import {
+    CANDIDATES_EXPORT_FIELD_ORDER,
+    type CandidatesExportFieldKey,
+    buildCandidatesExportCsv,
+    exportRowFromCandidate,
+    triggerCsvDownload,
+} from '../utils/candidatesExportCsv';
+
+/** Match API max page size for candidate list export. */
+const CANDIDATES_EXPORT_PAGE_SIZE = 500;
+
+const eventApiHeaders = (withJson: boolean): Record<string, string> => {
+    const h: Record<string, string> = { Accept: 'application/json' };
+    if (withJson) h['Content-Type'] = 'application/json';
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    if (token) h.Authorization = `Bearer ${token}`;
+    return h;
+};
 
 /** Blue ring when an advanced filter differs from its default. */
 const advFieldModifiedClass = 'ring-2 ring-primary-500 rounded-xl';
@@ -110,6 +137,7 @@ export interface Candidate {
   location?: string;
   /** תאריך קליטה — מסונכרן מ-createdAt ב-API */
   createDate?: string;
+  email?: string;
 }
 
 export const candidatesData: Candidate[] = [
@@ -470,6 +498,7 @@ interface CandidatesListViewProps {
     openSummaryDrawer: (candidate: Candidate | number) => void;
     favorites: Set<number>;
     toggleFavorite: (id: number) => void;
+    openMessageModal: (config: MessageModalConfig) => void;
 }
 
 // --- NEW COMPONENT FOR MATCH SCORE POPUP ---
@@ -717,9 +746,14 @@ type ListViewSnapshotV1 = {
     showNeedsAttention: boolean;
     showFavoritesOnly: boolean;
     semanticListActive: boolean;
+    /** Full semantic-search row set before client-side advanced narrowing (optional). */
+    semanticBaselineCandidates?: Candidate[] | null;
     listSearchParams: ListSearchParamsState;
     languageFilters: { language: string; level: string }[];
     complexRules: ComplexFilterRule[];
+    /** Smart / semantic search free-text (purple panel). */
+    smartSearchQuery?: string;
+    isSmartSearchOpen?: boolean;
 };
 
 /** Restore list + advanced search after navigating to a candidate and back. */
@@ -759,6 +793,11 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
                 ? saved.totalCandidates
                 : saved.candidates.length;
 
+        const semanticBaselineCandidates =
+            Array.isArray(saved.semanticBaselineCandidates) && saved.semanticBaselineCandidates.length > 0
+                ? (saved.semanticBaselineCandidates as Candidate[])
+                : null;
+
         return {
             listSnapshotVersion: 3,
             candidates: saved.candidates as Candidate[],
@@ -771,9 +810,12 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
             showNeedsAttention: !!saved.showNeedsAttention,
             showFavoritesOnly: !!saved.showFavoritesOnly,
             semanticListActive: !!saved.semanticListActive,
+            semanticBaselineCandidates,
             listSearchParams,
             languageFilters,
             complexRules,
+            smartSearchQuery: typeof saved.smartSearchQuery === 'string' ? saved.smartSearchQuery : '',
+            isSmartSearchOpen: !!saved.isSmartSearchOpen,
         };
     } catch {
         return null;
@@ -827,6 +869,169 @@ function languageRowSortText(x: NonNullable<Candidate['languages']>[number]): st
     return name;
 }
 
+/** Parse numeric age from list row (matches server: plain integer string). */
+function candidateNumericAge(c: Candidate): number | null {
+    const t = String(c.age || '').trim();
+    if (/^\d+$/.test(t)) {
+        const n = parseInt(t, 10);
+        return Number.isFinite(n) ? n : null;
+    }
+    return null;
+}
+
+function candidateHasKnownParseableAge(c: Candidate): boolean {
+    return candidateNumericAge(c) != null;
+}
+
+/**
+ * Narrow the current list using the same dimensions as GET /api/candidates?adv=… (best-effort on list rows).
+ * Used when the user views semantic-search results and applies advanced filters without hitting the full DB.
+ */
+function filterCandidatesByAdvancedClient(
+    pool: Candidate[],
+    adv: AppliedAdvancedSearchPayload,
+    freeSearchTrimmed: string,
+    dataIncompleteOnly: boolean,
+): Candidate[] {
+    const search = freeSearchTrimmed.trim().toLowerCase();
+    return pool.filter((c) => {
+        if (dataIncompleteOnly && String(c.status || '').trim() !== 'חסר נתונים') {
+            return false;
+        }
+        if (search) {
+            const blob = [c.name, c.email, c.professionalSummary, c.title, c.phone]
+                .map((x) => String(x || '').toLowerCase())
+                .join('\n');
+            if (!blob.includes(search)) return false;
+        }
+
+        const g = adv.gender;
+        if (g === 'male') {
+            const ge = String(c.gender || '').toLowerCase();
+            if (!ge.includes('זכר') && !ge.includes('male')) return false;
+        } else if (g === 'female') {
+            const ge = String(c.gender || '').toLowerCase();
+            if (!ge.includes('נקב') && !ge.includes('female')) return false;
+        }
+
+        if (Array.isArray(adv.tags) && adv.tags.length) {
+            for (const tag of adv.tags) {
+                const t = String(tag || '').trim();
+                if (!t) continue;
+                const tagStr = [...c.tags, ...c.internalTags].join(' ').toLowerCase();
+                if (!tagStr.includes(t.toLowerCase())) return false;
+            }
+        }
+
+        if (Array.isArray(adv.locations) && adv.locations.length) {
+            const locBlob = `${c.location || ''} ${c.address || ''}`.toLowerCase();
+            const anyLoc = adv.locations.some((loc) => {
+                const v = String(loc?.value || '').trim().toLowerCase();
+                return v && locBlob.includes(v);
+            });
+            if (!anyLoc) return false;
+        }
+
+        if (adv.jobScopeAll === false && Array.isArray(adv.jobScopes) && adv.jobScopes.length) {
+            const scopes = new Set((c.jobScopes || []).map((s) => String(s).trim()));
+            const hit = adv.jobScopes.some((s) => scopes.has(String(s).trim()));
+            if (!hit) return false;
+        }
+
+        if (adv.lastUpdated && typeof adv.lastUpdated === 'object') {
+            const from = String(adv.lastUpdated.from || '').trim();
+            const to = String(adv.lastUpdated.to || '').trim();
+            const raw = c.lastActivity || c.createDate || '';
+            const d = raw ? new Date(raw) : null;
+            const timeOk = d != null && !Number.isNaN(d.getTime());
+            if (from) {
+                const fd = new Date(from);
+                if (timeOk && d! < fd) return false;
+            }
+            if (to) {
+                const td = new Date(`${to}T23:59:59`);
+                if (timeOk && d! > td) return false;
+            }
+        }
+
+        const roleRaw = String(adv.interestRole || '').trim().toLowerCase();
+        const fieldRaw = String(adv.interestField || '').trim().toLowerCase();
+        if (fieldRaw) {
+            const cf = String(c.field || '').trim().toLowerCase();
+            if (cf !== fieldRaw && !cf.includes(fieldRaw)) return false;
+        }
+        if (roleRaw) {
+            const hay = [c.title, c.matchAnalysis?.jobTitle, c.professionalSummary]
+                .map((x) => String(x || '').toLowerCase())
+                .join(' | ');
+            if (!hay.includes(roleRaw)) return false;
+        }
+
+        const amin = Number(adv.ageMin);
+        const amax = Number(adv.ageMax);
+        if (Number.isFinite(amin) && Number.isFinite(amax)) {
+            const known = candidateHasKnownParseableAge(c);
+            const n = candidateNumericAge(c);
+            const inR = n != null && n >= amin && n <= amax;
+            const includeUnknown = adv.includeUnknownAge !== false;
+            if (includeUnknown) {
+                if (known && !inR) return false;
+            } else if (!known || !inR) {
+                return false;
+            }
+        }
+
+        const smin = Number(adv.salaryMin);
+        const smax = Number(adv.salaryMax);
+        if (Number.isFinite(smin) && Number.isFinite(smax)) {
+            const hasSal = c.salaryMin != null || c.salaryMax != null;
+            const overlap =
+                hasSal &&
+                (c.salaryMin ?? 0) <= smax &&
+                (c.salaryMax ?? c.salaryMin ?? Number.MAX_SAFE_INTEGER) >= smin;
+            const includeUnknown = adv.includeUnknownSalary !== false;
+            if (includeUnknown) {
+                if (!overlap && hasSal) return false;
+            } else if (!overlap) {
+                return false;
+            }
+        }
+
+        if (adv.hasDegree === true) {
+            const tagStr = [...c.tags, ...c.internalTags].join(' ').toLowerCase();
+            const blob = `${tagStr} ${String(c.professionalSummary || '').toLowerCase()}`;
+            const deg =
+                blob.includes('תואר') ||
+                blob.includes('בוגר') ||
+                blob.includes('מוסמך') ||
+                blob.includes('דוקטור') ||
+                blob.includes('mba') ||
+                blob.includes('מ.א.');
+            if (!deg) return false;
+        }
+
+        if (Array.isArray(adv.languages) && adv.languages.length) {
+            const langs = (c.languages || []).map(languageRowSortText).join(' ').toLowerCase();
+            for (const lf of adv.languages) {
+                const lang = String(lf?.language || '').trim().toLowerCase();
+                if (!lang) continue;
+                if (!langs.includes(lang)) return false;
+            }
+        }
+
+        if (Array.isArray(adv.complexRules)) {
+            for (const rule of adv.complexRules) {
+                if (rule.field === 'source' && rule.textValue) {
+                    const tv = String(rule.textValue).trim().toLowerCase();
+                    if (!String(c.source || '').toLowerCase().includes(tv)) return false;
+                }
+            }
+        }
+
+        return true;
+    });
+}
+
 function candidateSortComparable(candidate: Candidate, key: keyof Candidate): string | number {
     const v = candidate[key];
     if (key === 'createDate') {
@@ -870,7 +1075,7 @@ function formatSalaryExpectationCell(c: Candidate): string {
     return `≤${fmt(max!)}`;
 }
 
-const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite }) => {
+const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite, openMessageModal }) => {
     /** Fresh read on each mount so returning from a candidate profile restores session-backed filters. */
     const listViewSnapshot = useMemo(() => loadListViewSnapshotFromSession(), []);
 
@@ -879,7 +1084,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [isRemoteLoading, setIsRemoteLoading] = useState(() => listViewSnapshot === null);
     const [hasInitiallyLoaded, setHasInitiallyLoaded] = useState(() => listViewSnapshot !== null);
     const [suspendListPolling, setSuspendListPolling] = useState(() => listViewSnapshot?.semanticListActive === true);
-    const [jobs, setJobs] = useState<{ id: string; title: string }[]>([]);
+    const [semanticBaselineCandidates, setSemanticBaselineCandidates] = useState<Candidate[] | null>(() => {
+        if (!listViewSnapshot?.semanticListActive) return null;
+        const b = listViewSnapshot.semanticBaselineCandidates;
+        if (Array.isArray(b) && b.length > 0) return b;
+        if (listViewSnapshot.candidates?.length) return [...listViewSnapshot.candidates];
+        return null;
+    });
+    const [jobs, setJobs] = useState<{ id: string; title: string; client?: string; status?: string }[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
     const [jobsError, setJobsError] = useState<string | null>(null);
     const [selectedJobId, setSelectedJobId] = useState('');
@@ -889,6 +1101,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [searchParamsFromUrl, setUrlSearchParams] = useSearchParams();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
     const { t } = useLanguage();
+    const { user } = useAuth();
 
     const [searchTerm, setSearchTerm] = useState(() => listViewSnapshot?.searchTerm ?? '');
     const skipSearchDebounceOnceRef = useRef(listViewSnapshot !== null);
@@ -975,9 +1188,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
     const [isBulkActionsMobileOpen, setIsBulkActionsMobileOpen] = useState(false);
-    const [isMoreActionsOpen, setIsMoreActionsOpen] = useState(false);
-    
+    const [isMoreActionsOpen, setIsMoreActionsOpen] = useState(true);
+    const [bulkReferOpen, setBulkReferOpen] = useState(false);
+    const [bulkStatusOpen, setBulkStatusOpen] = useState(false);
+    const [bulkFilterOpen, setBulkFilterOpen] = useState(false);
+    const [screeningCollisionOpen, setScreeningCollisionOpen] = useState(false);
+    const [screeningCollisionAgg, setScreeningCollisionAgg] = useState<ScreeningWarningAgg[]>([]);
+    const pendingBulkFilterRef = useRef<{ jobId: string; options?: { notes?: string; filterPosition?: string } } | null>(
+        null,
+    );
+    const [bulkSavedSearchOpen, setBulkSavedSearchOpen] = useState(false);
+    const [changeSourceOpen, setChangeSourceOpen] = useState(false);
+    const [bulkAddEventOpen, setBulkAddEventOpen] = useState(false);
+    const [isExportingCandidatesSearch, setIsExportingCandidatesSearch] = useState(false);
+
     const [activeMatchState, setActiveMatchState] = useState<{ id: number, top: number, left: number } | null>(null);
 
     const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>(null);
@@ -1089,8 +1315,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [searchTerm, showNeedsAttention, showFavoritesOnly, showIncompleteOnly, companyFilters, setUrlSearchParams]);
 
     // --- SMART SEARCH STATE ---
-    const [isSmartSearchOpen, setIsSmartSearchOpen] = useState(false);
-    const [smartSearchQuery, setSmartSearchQuery] = useState('');
+    const [isSmartSearchOpen, setIsSmartSearchOpen] = useState(() => !!listViewSnapshot?.isSmartSearchOpen);
+    const [smartSearchQuery, setSmartSearchQuery] = useState(
+        () => listViewSnapshot?.smartSearchQuery ?? '',
+    );
     const [isSmartSearching, setIsSmartSearching] = useState(false);
     const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{ id: number, x: number, y: number } | null>(null);
 
@@ -1139,6 +1367,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         salaryMax: c.salaryMax != null && c.salaryMax !== '' ? Number(c.salaryMax) : null,
         location: [c.location, c.address].map((x: unknown) => String(x || '').trim()).filter(Boolean).join(' · ') || '',
         createDate: c.createdAt != null && c.createdAt !== '' ? String(c.createdAt) : '',
+        email: c.email != null && c.email !== '' ? String(c.email) : '',
         };
     }, []);
 
@@ -1151,7 +1380,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             dataIncomplete?: boolean;
         }) => {
             if (!apiBase) return;
-            setSuspendListPolling(false);
             setIsRemoteLoading(true);
             try {
                 const params = new URLSearchParams({
@@ -1175,9 +1403,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         ? payload.rows
                         : [];
                 const mapped = list.map(mapCandidate);
+                setSemanticBaselineCandidates(null);
                 setCandidates(mapped);
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
             } catch (e) {
+                setSemanticBaselineCandidates(null);
                 setCandidates([]);
                 setTotalCandidates(0);
             } finally {
@@ -1209,6 +1439,166 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         complexRules,
         fetchCandidatesList,
         showIncompleteOnly,
+    ]);
+
+    const exportSearchHeaderLabels = useMemo(() => {
+        const o = {} as Record<CandidatesExportFieldKey, string>;
+        for (const k of CANDIDATES_EXPORT_FIELD_ORDER) {
+            o[k] = t(`candidates.export_col.${k}`);
+        }
+        return o;
+    }, [t]);
+
+    const handleExportSearchToExcel = useCallback(async () => {
+        if (!apiBase) {
+            setFeedbackMessage(t('candidates.export_search_no_api'));
+            return;
+        }
+        if (selectedIds.size === 0) {
+            setFeedbackMessage(t('candidates.export_selected_none'));
+            return;
+        }
+
+        const buildParams = (pageNum: number) => {
+            const params = new URLSearchParams({
+                page: String(pageNum),
+                limit: String(CANDIDATES_EXPORT_PAGE_SIZE),
+            });
+            const st = debouncedSearchTerm.trim();
+            if (st) params.set('search', st);
+            if (appliedAdvancedFilters != null) {
+                params.set(
+                    'adv',
+                    JSON.stringify(buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules)),
+                );
+            }
+            if (showIncompleteOnly) {
+                params.set('dataIncomplete', '1');
+            }
+            return params;
+        };
+
+        const parseListPayload = (payload: { data?: unknown[]; rows?: unknown[]; total?: number }) => {
+            const list = Array.isArray(payload?.data)
+                ? payload.data
+                : Array.isArray(payload?.rows)
+                  ? payload.rows
+                  : [];
+            const total = Number(payload?.total ?? list.length) || 0;
+            return { list, total };
+        };
+
+        const resolveFetchRouteId = (localId: number): string => {
+            const fromList = candidates.find((c) => c.id === localId);
+            if (fromList?.backendId && fromList.backendId.trim()) {
+                return fromList.backendId.trim();
+            }
+            return String(localId);
+        };
+
+        setIsExportingCandidatesSearch(true);
+        setFeedbackMessage(t('candidates.export_search_in_progress'));
+        try {
+            const idOrder = Array.from<number>(selectedIds);
+            let orderedRows: Record<string, unknown>[] = [];
+
+            if (suspendListPolling) {
+                const byId = new Map(candidates.map((c) => [c.id, c]));
+                const picked = idOrder.map((id) => byId.get(id)).filter((c): c is Candidate => c != null);
+                if (picked.length === 0) {
+                    setFeedbackMessage(t('candidates.export_search_empty'));
+                    return;
+                }
+                orderedRows = picked.map((c) => exportRowFromCandidate(c));
+            } else {
+                const want = new Set<number>(idOrder);
+                const byLocalId = new Map<number, Record<string, unknown>>();
+
+                const ingestChunk = (list: unknown[]) => {
+                    for (const r of list) {
+                        if (!r || typeof r !== 'object') continue;
+                        const raw = r as Record<string, unknown>;
+                        const c = mapCandidate(raw, 0);
+                        if (want.has(c.id)) {
+                            byLocalId.set(c.id, raw);
+                            want.delete(c.id);
+                        }
+                    }
+                };
+
+                const res1 = await fetch(`${apiBase}/api/candidates?${buildParams(1).toString()}`);
+                if (!res1.ok) throw new Error('failed');
+                const p1 = (await res1.json()) as { data?: unknown[]; rows?: unknown[]; total?: number };
+                const { list: firstList, total } = parseListPayload(p1);
+                if (!total) {
+                    setFeedbackMessage(t('candidates.export_search_empty'));
+                    return;
+                }
+                ingestChunk(firstList);
+                const pages = Math.ceil(total / CANDIDATES_EXPORT_PAGE_SIZE);
+                for (let p = 2; p <= pages && want.size > 0; p++) {
+                    const res = await fetch(`${apiBase}/api/candidates?${buildParams(p).toString()}`);
+                    if (!res.ok) throw new Error('failed');
+                    const payload = (await res.json()) as { data?: unknown[]; rows?: unknown[] };
+                    const { list } = parseListPayload({ ...payload, total });
+                    ingestChunk(list);
+                }
+
+                if (want.size > 0) {
+                    const stillMissing = idOrder.filter((id) => want.has(id));
+                    await Promise.all(
+                        stillMissing.map(async (localId) => {
+                            const routeId = resolveFetchRouteId(localId);
+                            try {
+                                const res = await fetch(
+                                    `${apiBase}/api/candidates/${encodeURIComponent(routeId)}`,
+                                    { cache: 'no-store' },
+                                );
+                                if (!res.ok) return;
+                                const data = await res.json();
+                                if (data && typeof data === 'object' && !Array.isArray(data)) {
+                                    byLocalId.set(localId, data as Record<string, unknown>);
+                                }
+                            } catch {
+                                /* skip */
+                            }
+                        }),
+                    );
+                }
+
+                orderedRows = idOrder
+                    .map((id) => byLocalId.get(id))
+                    .filter((row): row is Record<string, unknown> => row != null);
+
+                if (orderedRows.length === 0) {
+                    setFeedbackMessage(t('candidates.export_search_empty'));
+                    return;
+                }
+            }
+
+            const csv = buildCandidatesExportCsv(orderedRows, exportSearchHeaderLabels);
+            const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+            triggerCsvDownload(`candidates-export-${stamp}.csv`, csv);
+            setFeedbackMessage(t('candidates.export_search_done', { count: orderedRows.length }));
+        } catch {
+            setFeedbackMessage(t('candidates.export_search_failed'));
+        } finally {
+            setIsExportingCandidatesSearch(false);
+        }
+    }, [
+        apiBase,
+        debouncedSearchTerm,
+        appliedAdvancedFilters,
+        searchParams,
+        languageFilters,
+        complexRules,
+        showIncompleteOnly,
+        exportSearchHeaderLabels,
+        mapCandidate,
+        t,
+        selectedIds,
+        suspendListPolling,
+        candidates,
     ]);
 
     // Poll backend for updates every 10s on current page
@@ -1333,6 +1723,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             showNeedsAttention,
             showFavoritesOnly,
             semanticListActive: suspendListPolling,
+            semanticBaselineCandidates: suspendListPolling ? semanticBaselineCandidates : null,
+            smartSearchQuery,
+            isSmartSearchOpen,
         };
         try {
             sessionStorage.setItem(VIEW_STATE_KEY, JSON.stringify(stateToSave));
@@ -1354,6 +1747,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         showFavoritesOnly,
         hasInitiallyLoaded,
         suspendListPolling,
+        semanticBaselineCandidates,
+        smartSearchQuery,
+        isSmartSearchOpen,
     ]);
 
 
@@ -1409,10 +1805,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     };
 
     const toggleSelectionMode = () => {
-        setSelectionMode(!selectionMode);
+        const next = !selectionMode;
+        setSelectionMode(next);
         setSelectedIds(new Set());
         setIsBulkActionsMobileOpen(false);
-        setIsMoreActionsOpen(false);
+        setIsMoreActionsOpen(next);
+        setBulkReferOpen(false);
+        setBulkStatusOpen(false);
+        setBulkFilterOpen(false);
+        setBulkSavedSearchOpen(false);
+        setChangeSourceOpen(false);
+        setBulkAddEventOpen(false);
     };
 
     const getCandidateRouteId = useCallback((candidate: Candidate) => {
@@ -1433,13 +1836,368 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             return newSet;
         });
     };
-    
+
+    const bulkJobPickerOptions = useMemo(
+        () =>
+            jobs.map((j) => ({
+                id: j.id,
+                title: j.title,
+                subtitle: j.client?.trim() ? j.client : undefined,
+                status: j.status,
+            })),
+        [jobs],
+    );
+
+    const bulkSelectedBackendIds = useMemo(() => {
+        return candidates
+            .filter(c => selectedIds.has(c.id))
+            .map(c => getCandidateRouteId(c));
+    }, [candidates, selectedIds, getCandidateRouteId]);
+
+    const openBulkRefer = useCallback(() => {
+        setIsBulkActionsMobileOpen(false);
+        setBulkReferOpen(true);
+    }, []);
+
+    const openBulkChangeStatus = useCallback(() => {
+        setIsBulkActionsMobileOpen(false);
+        setBulkStatusOpen(true);
+    }, []);
+
+    const openBulkSendSms = useCallback(() => {
+        const list = candidates.filter((c) => selectedIds.has(c.id));
+        if (list.length === 0) return;
+        setIsBulkActionsMobileOpen(false);
+        const phones = list.map((c) => String(c.phone || '').trim()).filter(Boolean);
+        const label =
+            list.length === 1
+                ? list[0].name
+                : t('candidates.bulk_message_recipients', { count: list.length });
+        openMessageModal({
+            mode: 'sms',
+            candidateName: label,
+            candidatePhone: phones.join('; '),
+            candidateEmail: list.length === 1 ? list[0].email || null : null,
+            candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
+        });
+    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
+
+    const openBulkSendEmail = useCallback(() => {
+        const list = candidates.filter((c) => selectedIds.has(c.id));
+        if (list.length === 0) return;
+        setIsBulkActionsMobileOpen(false);
+        const label =
+            list.length === 1
+                ? list[0].name
+                : t('candidates.bulk_message_recipients', { count: list.length });
+        const emailField = list
+            .map((c) => String(c.email || '').trim())
+            .filter(Boolean)
+            .join(', ');
+        openMessageModal({
+            mode: 'email',
+            candidateName: label,
+            candidatePhone: list.map((c) => String(c.phone || '').trim()).filter(Boolean).join('; '),
+            candidateEmail: emailField,
+            candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
+        });
+    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
+
+    const openBulkFilter = useCallback(() => {
+        setIsBulkActionsMobileOpen(false);
+        setBulkFilterOpen(true);
+    }, []);
+
+    const openBulkSavedSearch = useCallback(() => {
+        setIsBulkActionsMobileOpen(false);
+        setBulkSavedSearchOpen(true);
+    }, []);
+
+    const openChangeSource = useCallback(() => {
+        setIsBulkActionsMobileOpen(false);
+        setChangeSourceOpen(true);
+    }, []);
+
+    const openBulkAddEvent = useCallback(() => {
+        setIsBulkActionsMobileOpen(false);
+        setBulkAddEventOpen(true);
+    }, []);
+
+    const handleBulkAddEventSave = useCallback(
+        async (eventData: Omit<BulkCandidateEventFormData, 'id' | 'status'> & { id?: string | number }) => {
+            if (eventData.id != null) return;
+            const ids = bulkSelectedBackendIds.map((id) => String(id).trim()).filter(Boolean);
+            if (!apiBase || ids.length === 0) {
+                setBulkAddEventOpen(false);
+                return;
+            }
+
+            const actorDisplayName =
+                (user?.name && String(user.name).trim()) ||
+                (user?.email && String(user.email).trim()) ||
+                'משתמש';
+
+            const selectedList = candidates.filter((c) => selectedIds.has(c.id));
+            const nameById = new Map(
+                selectedList.map((c) => [getCandidateRouteId(c), (c.name && c.name.trim()) || 'מועמד']),
+            );
+
+            let ok = 0;
+            let fail = 0;
+            await Promise.all(
+                ids.map(async (cid) => {
+                    const candidateName = nameById.get(cid) || 'מועמד';
+                    const linkedTo =
+                        eventData.linkedTo && eventData.linkedTo.length > 0
+                            ? eventData.linkedTo
+                            : [{ type: 'מועמד', name: candidateName }];
+                    try {
+                        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}/events`, {
+                            method: 'POST',
+                            headers: eventApiHeaders(true),
+                            body: JSON.stringify({
+                                type: eventData.type,
+                                date: eventData.date,
+                                description: eventData.description || '',
+                                status: 'עתידי',
+                                linkedTo,
+                                history: [
+                                    {
+                                        user: actorDisplayName,
+                                        timestamp: new Date().toISOString(),
+                                        summary: 'יצר את האירוע',
+                                    },
+                                ],
+                            }),
+                        });
+                        if (res.ok) ok += 1;
+                        else fail += 1;
+                    } catch {
+                        fail += 1;
+                    }
+                }),
+            );
+
+            setBulkAddEventOpen(false);
+            const total = ids.length;
+            if (fail === 0) {
+                setFeedbackMessage(t('candidates.bulk_events_recorded', { count: ok }));
+            } else {
+                setFeedbackMessage(t('candidates.bulk_events_partial', { ok, total, fail }));
+            }
+            setSelectedIds(new Set());
+        },
+        [
+            apiBase,
+            bulkSelectedBackendIds,
+            candidates,
+            selectedIds,
+            getCandidateRouteId,
+            t,
+            user?.email,
+            user?.name,
+        ],
+    );
+
+    const handleBulkReferSuccess = useCallback(
+        (summary: BulkReferSuccessSummary) => {
+            const { emailsSent, candidatesSucceeded, candidatesFailed, errors } = summary;
+            if (candidatesFailed > 0 || errors.length > 0) {
+                const base = t('candidates.bulk_refer_partial', {
+                    candidates: candidatesSucceeded,
+                    emails: emailsSent,
+                    failed: candidatesFailed,
+                });
+                const errPreview =
+                    errors.length > 0 ? ` ${errors.slice(0, 2).join('; ')}${errors.length > 2 ? '…' : ''}` : '';
+                setFeedbackMessage(base + errPreview);
+            } else {
+                setFeedbackMessage(
+                    t('candidates.bulk_refer_emails_done', {
+                        count: emailsSent,
+                        candidates: candidatesSucceeded,
+                    }),
+                );
+            }
+            setSelectedIds(new Set());
+        },
+        [t],
+    );
+
+    const runBulkFilterPosts = useCallback(
+        async (jobId: string, options?: { notes?: string; filterPosition?: string }) => {
+            const ids = bulkSelectedBackendIds.map((id) => String(id).trim()).filter(Boolean);
+            if (!apiBase || ids.length === 0 || !jobId.trim()) {
+                setBulkFilterOpen(false);
+                return;
+            }
+            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+            const headers: Record<string, string> = {
+                'Content-Type': 'application/json',
+                Accept: 'application/json',
+            };
+            if (token) headers.Authorization = `Bearer ${token}`;
+            const body = {
+                jobId: jobId.trim(),
+                filterNotes: options?.notes?.trim() || '',
+                filterPosition: options?.filterPosition?.trim() || '',
+            };
+            let ok = 0;
+            let fail = 0;
+            await Promise.all(
+                ids.map(async (cid) => {
+                    try {
+                        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}/linked-jobs`, {
+                            method: 'POST',
+                            headers,
+                            body: JSON.stringify(body),
+                        });
+                        if (res.ok) ok += 1;
+                        else fail += 1;
+                    } catch {
+                        fail += 1;
+                    }
+                }),
+            );
+            setBulkFilterOpen(false);
+            const total = ids.length;
+            if (fail === 0) {
+                setFeedbackMessage(t('candidates.bulk_filter_recorded', { count: ok }));
+            } else if (ok === 0) {
+                setFeedbackMessage(t('candidates.bulk_filter_failed', { count: total }));
+            } else {
+                setFeedbackMessage(t('candidates.bulk_filter_partial', { ok, total, fail }));
+            }
+            setSelectedIds(new Set());
+        },
+        [apiBase, bulkSelectedBackendIds, t],
+    );
+
+    const handleBulkFilterSave = useCallback(
+        async (jobId: string, options?: { notes?: string; filterPosition?: string }) => {
+            const ids = bulkSelectedBackendIds.map((id) => String(id).trim()).filter(Boolean);
+            if (!apiBase || ids.length === 0 || !jobId.trim()) {
+                setBulkFilterOpen(false);
+                return;
+            }
+            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+            const headers: Record<string, string> = {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            };
+            const agg: ScreeningWarningAgg[] = [];
+            for (const cid of ids) {
+                try {
+                    const res = await fetch(
+                        `${apiBase}/api/candidates/${encodeURIComponent(cid)}/screening-precheck?jobId=${encodeURIComponent(jobId.trim())}`,
+                        { headers, cache: 'no-store' },
+                    );
+                    if (!res.ok) continue;
+                    const j = (await res.json()) as { warnings?: ScreeningWarningAgg['warnings'] };
+                    if (Array.isArray(j.warnings) && j.warnings.length) {
+                        agg.push({ candidateId: cid, warnings: j.warnings });
+                    }
+                } catch {
+                    /* skip precheck failure — proceed without warning for this id */
+                }
+            }
+            if (agg.length > 0) {
+                pendingBulkFilterRef.current = { jobId, options };
+                setScreeningCollisionAgg(agg);
+                setScreeningCollisionOpen(true);
+                return;
+            }
+            await runBulkFilterPosts(jobId, options);
+        },
+        [apiBase, bulkSelectedBackendIds, runBulkFilterPosts],
+    );
+
+    const handleBulkSavedSearchSave = useCallback(
+        (searchId: number) => {
+            const search = savedSearches.find(s => s.id === searchId);
+            if (!search) return;
+            const prevParams =
+                search.searchParams && typeof search.searchParams === 'object' && !Array.isArray(search.searchParams)
+                    ? { ...search.searchParams }
+                    : {};
+            const rawPinned = (prevParams as Record<string, unknown>).bulkPinnedCandidateIds;
+            const prevPinned = Array.isArray(rawPinned) ? rawPinned.map(String) : [];
+            const merged = [...new Set([...prevPinned, ...bulkSelectedBackendIds])];
+            const alertConfig =
+                search.isAlert === true
+                    ? {
+                          isAlert: true as const,
+                          frequency: (search.frequency === 'weekly' ? 'weekly' : 'daily') as 'daily' | 'weekly',
+                          notificationMethods: (search.notificationMethods?.length
+                              ? search.notificationMethods
+                              : ['system']) as ('email' | 'system')[],
+                      }
+                    : undefined;
+            updateSearch(
+                search.id,
+                search.name,
+                search.isPublic,
+                { ...prevParams, bulkPinnedCandidateIds: merged },
+                search.additionalFilters,
+                search.languageFilters,
+                alertConfig,
+            );
+            setFeedbackMessage(t('candidates.bulk_saved_search_recorded', { count: bulkSelectedBackendIds.length }));
+            setSelectedIds(new Set());
+        },
+        [savedSearches, bulkSelectedBackendIds, updateSearch, t],
+    );
+
+    const handleBulkChangeSourceSave = useCallback(
+        async (sel: { name: string; id: string | null }) => {
+            if (!apiBase || bulkSelectedBackendIds.length === 0) return;
+            const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (token) headers.Authorization = `Bearer ${token}`;
+            const body =
+                sel.id != null
+                    ? { source: sel.name, recruitmentSourceId: sel.id }
+                    : { source: sel.name, recruitmentSourceId: null };
+            try {
+                await Promise.all(
+                    bulkSelectedBackendIds.map(async (cid) => {
+                        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(cid)}`, {
+                            method: 'PUT',
+                            headers,
+                            body: JSON.stringify(body),
+                        });
+                        if (!res.ok) {
+                            const errBody = await res.json().catch(() => ({}));
+                            throw new Error(typeof errBody?.message === 'string' ? errBody.message : res.statusText);
+                        }
+                    }),
+                );
+                setFeedbackMessage(t('candidates.bulk_source_recorded', { count: bulkSelectedBackendIds.length }));
+                setSelectedIds(new Set());
+                setChangeSourceOpen(false);
+                setSuspendListPolling(false);
+                void fetchCandidates();
+            } catch (e: unknown) {
+                setFeedbackMessage(e instanceof Error ? e.message : t('candidates.bulk_source_failed'));
+            }
+        },
+        [apiBase, bulkSelectedBackendIds, fetchCandidates, t],
+    );
+
+    const handleBulkStatusSuccess = useCallback(() => {
+        const n = bulkSelectedBackendIds.length;
+        setFeedbackMessage(t('candidates.bulk_status_done', { count: n }));
+        setSelectedIds(new Set());
+        setSuspendListPolling(false);
+        void fetchCandidates();
+    }, [bulkSelectedBackendIds, fetchCandidates, t]);
+
     useEffect(() => {
         if (feedbackMessage) {
-          const timer = setTimeout(() => {
-            setFeedbackMessage(null);
-          }, 3000);
-          return () => clearTimeout(timer);
+            const timer = setTimeout(() => {
+                setFeedbackMessage(null);
+            }, 3000);
+            return () => clearTimeout(timer);
         }
     }, [feedbackMessage]);
     
@@ -1516,15 +2274,27 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [searchParams.interestRole, searchParams.interestField]);
 
     const loadJobs = useCallback(async () => {
-        if (!apiBase) return;
         setJobsLoading(true);
         setJobsError(null);
         try {
-            const res = await fetch(`${apiBase}/api/jobs`);
+            const base = (apiBase || '').replace(/\/$/, '');
+            const url = base ? `${base}/api/jobs` : '/api/jobs';
+            const res = await fetch(url, { cache: 'no-store' });
             if (!res.ok) throw new Error('נכשל בטעינת המשרות');
             const data = await res.json();
-            const jobList = Array.isArray(data) ? data : Array.isArray(data?.rows) ? data.rows : [];
-            setJobs(jobList.map(job => ({ id: job.id, title: job.title || job.name || 'ללא שם' })));
+            const jobList = Array.isArray(data)
+                ? data
+                : Array.isArray(data?.rows)
+                  ? data.rows
+                  : Array.isArray(data?.data)
+                    ? data.data
+                    : [];
+            setJobs(jobList.map((job: any) => ({
+                id: job.id,
+                title: job.title || job.name || 'ללא שם',
+                client: job.client != null ? String(job.client) : '',
+                status: job.status != null ? String(job.status) : undefined,
+            })));
         } catch (err: any) {
             setJobsError(err.message);
         } finally {
@@ -1556,6 +2326,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
         setIsRemoteLoading(true);
         setIsSmartSearching(true);
+        setSuspendListPolling(true);
         try {
             const payloadQuery = [smartSearchQuery.trim(), job?.title].filter(Boolean).join(' | ');
             const res = await fetch(`${apiBase}/api/candidates/semantic-search`, {
@@ -1570,11 +2341,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 Array.isArray(data?.results) ? data.results :
                 Array.isArray(data?.data) ? data.data :
                 [];
-            setCandidates(list.map(mapCandidate));
-            setSuspendListPolling(true);
+            const mapped = list.map(mapCandidate);
+            setSemanticBaselineCandidates(mapped);
+            setCandidates(mapped);
             const label = job ? job.title : smartSearchQuery.trim();
             setFeedbackMessage(`מציג ${list.length} מועמדים דומים ל-${label}`);
         } catch (err: any) {
+            setSuspendListPolling(false);
+            setSemanticBaselineCandidates(null);
             alert(err.message || 'חיפוש חכם נכשל');
         } finally {
             setIsRemoteLoading(false);
@@ -1723,6 +2497,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         if (paginatedCandidates.length === 0) return false;
         return paginatedCandidates.every(c => selectedIds.has(c.id));
     }, [selectedIds, paginatedCandidates]);
+
+    useEffect(() => {
+        const el = selectAllCheckboxRef.current;
+        if (!el) return;
+        if (!selectionMode) {
+            el.indeterminate = false;
+            return;
+        }
+        const n = paginatedCandidates.length;
+        if (n === 0) {
+            el.indeterminate = false;
+            return;
+        }
+        const selectedOnPage = paginatedCandidates.filter(c => selectedIds.has(c.id)).length;
+        el.indeterminate = selectedOnPage > 0 && selectedOnPage < n;
+    }, [selectionMode, paginatedCandidates, selectedIds]);
     
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.checked) {
@@ -1765,13 +2555,30 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const handleShowResults = () => {
         const snapshot = buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules);
-        setSuspendListPolling(false);
         suppressNextListFetchEffectRef.current = true;
         setAppliedAdvancedFilters(snapshot);
         setPage(1);
         setIsAdvancedSearchOpen(false);
         pendingAdvancedSearchFeedback.current = true;
         setFeedbackMessage(null);
+
+        if (suspendListPolling) {
+            const pool =
+                semanticBaselineCandidates && semanticBaselineCandidates.length > 0
+                    ? semanticBaselineCandidates
+                    : candidates;
+            const filtered = filterCandidatesByAdvancedClient(
+                pool,
+                snapshot,
+                debouncedSearchTerm,
+                showIncompleteOnly,
+            );
+            setCandidates(filtered);
+            setTotalCandidates(filtered.length);
+            return;
+        }
+
+        setSuspendListPolling(false);
         void fetchCandidatesList({
             page: 1,
             limit: pageSize,
@@ -1792,6 +2599,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             return params;
         }, { replace: true });
         setSuspendListPolling(false);
+        setSemanticBaselineCandidates(null);
         suppressNextListFetchEffectRef.current = true;
         setAppliedAdvancedFilters(null);
         setPage(1);
@@ -1810,6 +2618,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setAppliedAdvancedFilters(null);
         setPage(1);
         setSuspendListPolling(false);
+        setSemanticBaselineCandidates(null);
+        setSmartSearchQuery('');
+        setIsSmartSearchOpen(false);
 
         // Reset saved view (so we don't restore old filters on next mount)
         try {
@@ -2457,9 +3268,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             <table className="w-full text-sm text-right min-w-[800px]">
                             <thead className="text-xs text-text-muted uppercase bg-bg-subtle">
                                 <tr>
-                                    {selectionMode && (
-                                        <th className="p-4 w-12">
-                                            <input type="checkbox" onChange={handleSelectAll} checked={areAllVisibleSelected} className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500" />
+                                    {selectionMode && paginatedCandidates.length > 0 && (
+                                        <th className="p-4 w-12 align-middle">
+                                            <input
+                                                ref={selectAllCheckboxRef}
+                                                type="checkbox"
+                                                onChange={handleSelectAll}
+                                                checked={areAllVisibleSelected}
+                                                className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                                                aria-label={t('actions.select_all_candidates')}
+                                            />
                                         </th>
                                     )}
                                     {columns.map((col, index) => (
@@ -2507,10 +3325,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
                             {paginatedCandidates.map(candidate => (
-                                <tr key={candidate.id} onClick={() => selectionMode ? handleSelect(candidate.id) : openSummaryDrawer(candidate)} className={`group transition-colors ${selectionMode ? 'cursor-pointer' : ''} ${selectedIds.has(candidate.id) ? 'bg-primary-50' : 'hover:bg-bg-hover'}`}>
-                                     {selectionMode && (
-                                        <td className="p-4">
-                                            <input type="checkbox" checked={selectedIds.has(candidate.id)} onChange={() => handleSelect(candidate.id)} onClick={e => e.stopPropagation()} className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500" />
+                                <tr key={candidate.id} onClick={() => (selectionMode ? handleSelect(candidate.id) : openSummaryDrawer(candidate))} className={`group transition-colors ${selectionMode ? 'cursor-pointer' : ''} ${selectedIds.has(candidate.id) ? 'bg-primary-50' : 'hover:bg-bg-hover'}`}>
+                                    {selectionMode && (
+                                        <td className="p-4 align-middle" onClick={e => e.stopPropagation()}>
+                                            <input
+                                                type="checkbox"
+                                                checked={selectedIds.has(candidate.id)}
+                                                onChange={() => handleSelect(candidate.id)}
+                                                className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                                                aria-label={t('actions.select_candidate_row')}
+                                            />
                                         </td>
                                     )}
                                     {columns.map(col => (
@@ -2542,8 +3366,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             return (
                                 <div key={candidate.id} onClick={() => selectionMode && handleSelect(candidate.id)} className={`relative rounded-lg transition-all ${selectionMode ? 'cursor-pointer' : ''} ${isSelected ? 'ring-2 ring-primary-500' : ''}`}>
                                     {selectionMode && (
-                                        <div className="absolute top-3 end-3 z-10 bg-bg-card/50 backdrop-blur-sm p-1 rounded-full">
-                                            <input type="checkbox" checked={isSelected} readOnly className="h-5 w-5 rounded-full border-2 border-white text-primary-600 focus:ring-primary-500 pointer-events-none" />
+                                        <div
+                                            className="absolute top-3 end-3 z-20 bg-bg-card/90 backdrop-blur-sm p-1 rounded-full shadow-sm border border-border-subtle"
+                                            onClick={e => e.stopPropagation()}
+                                            onKeyDown={e => e.stopPropagation()}
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onChange={() => handleSelect(candidate.id)}
+                                                className="h-5 w-5 rounded border-2 border-white text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                aria-label={t('actions.select_candidate_row')}
+                                            />
                                         </div>
                                     )}
                                     <CandidateCard 
@@ -2618,48 +3452,79 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     </div>
                 </div>
             )}
-             {selectedIds.size > 0 && (
+             {selectionMode && selectedIds.size > 0 && (
                 <div className="fixed bottom-0 start-0 end-0 z-40 p-4 pointer-events-none">
                     <div className="w-full max-w-5xl mx-auto pointer-events-auto">
                         <div className="hidden md:block bg-bg-card rounded-xl shadow-2xl border border-border-default px-4 py-2 animate-slide-up">
                             {isMoreActionsOpen && (
-                                <div className="flex items-center justify-between py-2 border-b border-border-default mb-2">
-                                     <span className="text-sm font-bold text-text-muted">{t('actions.more_actions')}:</span>
-                                     <div className="flex items-center gap-3">
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><WhatsappIcon className="w-5 h-5 text-green-600"/><span>שלח Whatsapp</span></button>
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><FolderIcon className="w-5 h-5"/><span>הוסף למאגר</span></button>
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><ArchiveBoxIcon className="w-5 h-5"/><span>ארכיון</span></button>
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><ArrowPathIcon className="w-5 h-5"/><span>שנה מקור</span></button>
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/><span>שלח SMS</span></button>
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"><EnvelopeIcon className="w-5 h-5"/><span>שלח מייל</span></button>
-                                        {/* NEW DOWNLOAD ACTION */}
-                                        <button className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600" onClick={() => alert(`מוריד ${selectedIds.size} מועמדים...`)}>
-                                            <DocumentArrowDownIcon className="w-5 h-5"/>
-                                            <span>הורד מועמדים</span>
+                                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between py-2 border-b border-border-default mb-2">
+                                    <span className="text-sm font-bold text-text-muted shrink-0">{t('actions.more_actions')}:</span>
+                                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:justify-end">
+                                       
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"
+                                            onClick={openBulkSavedSearch}
+                                        >
+                                            <FolderIcon className="w-5 h-5 shrink-0" />
+                                            <span>{t('actions.add_to_saved_search')}</span>
                                         </button>
-                                     </div>
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"
+                                            onClick={openChangeSource}
+                                        >
+                                            <ArrowPathIcon className="w-5 h-5 shrink-0" />
+                                            <span>{t('actions.change_source')}</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"
+                                            onClick={openBulkSendSms}
+                                        >
+                                            <ChatBubbleBottomCenterTextIcon className="w-5 h-5 shrink-0" />
+                                            <span>{t('profile.send_sms')}</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"
+                                            onClick={openBulkSendEmail}
+                                        >
+                                            <EnvelopeIcon className="w-5 h-5 shrink-0" />
+                                            <span>{t('actions.bulk_send_email')}</span>
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600 disabled:opacity-50 disabled:pointer-events-none"
+                                            disabled={isExportingCandidatesSearch}
+                                            onClick={() => void handleExportSearchToExcel()}
+                                        >
+                                            <DocumentArrowDownIcon className="w-5 h-5 shrink-0" />
+                                            <span>{t('actions.bulk_download_candidates')}</span>
+                                        </button>
+                                    </div>
                                 </div>
                             )}
-                             <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-4">
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                                <div className="flex flex-wrap items-center gap-4">
                                     <div className="flex items-center gap-2">
                                         <span className="text-sm font-bold">{t('actions.selected_count', { count: selectedIds.size })}</span>
-                                        <button onClick={() => setSelectedIds(new Set())} className="text-sm font-semibold text-primary-600 hover:underline">{t('actions.clear_selection')}</button>
+                                        <button type="button" onClick={() => setSelectedIds(new Set())} className="text-sm font-semibold text-primary-600 hover:underline">{t('actions.clear_selection')}</button>
                                     </div>
-                                    <div className="w-px h-6 bg-border-default" />
-                                    <button onClick={() => setIsMoreActionsOpen(!isMoreActionsOpen)} className="text-sm font-semibold text-primary-600 flex items-center gap-1">
+                                    <div className="hidden sm:block w-px h-6 bg-border-default" />
+                                    <button type="button" onClick={() => setIsMoreActionsOpen(!isMoreActionsOpen)} className="text-sm font-semibold text-primary-600 flex items-center gap-1">
                                         <span>{t('actions.more_actions')}</span>
-                                        {isMoreActionsOpen ? <ChevronUpIcon className="w-4 h-4"/> : <ChevronDownIcon className="w-4 h-4"/>}
+                                        {isMoreActionsOpen ? <ChevronUpIcon className="w-4 h-4 shrink-0" /> : <ChevronDownIcon className="w-4 h-4 shrink-0" />}
                                     </button>
                                 </div>
-                                <div className="flex items-center gap-2 font-semibold text-sm">
-                                    <span className="text-text-default">{t('actions.bulk_label')}</span>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.refer')}</button>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.add_to_filter')}</button>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.change_status')}</button>
-                                    <button className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover">{t('actions.add_event')}</button>
+                                <div className="flex flex-wrap items-center gap-2 font-semibold text-sm">
+                                    <span className="text-text-default whitespace-nowrap">{t('actions.bulk_label')}</span>
+                                    <button type="button" className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover whitespace-nowrap" onClick={openBulkRefer}>{t('actions.refer')}</button>
+                                    <button type="button" className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover whitespace-nowrap" onClick={openBulkFilter}>{t('actions.add_to_filter')}</button>
+                                    <button type="button" className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover whitespace-nowrap" onClick={openBulkChangeStatus}>{t('actions.change_status')}</button>
+                                    <button type="button" className="bg-bg-subtle text-text-default py-2 px-4 rounded-lg hover:bg-bg-hover whitespace-nowrap" onClick={openBulkAddEvent}>{t('actions.add_event')}</button>
                                 </div>
-                             </div>
+                            </div>
                         </div>
                          <div className="md:hidden">
                             <button onClick={() => setIsBulkActionsMobileOpen(true)} className="fixed bottom-6 end-6 bg-primary-600 text-white rounded-full shadow-lg h-16 w-16 flex flex-col items-center justify-center animate-fade-in">
@@ -2674,17 +3539,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             <button onClick={() => setIsBulkActionsMobileOpen(false)}><XMarkIcon className="w-6 h-6"/></button>
                                         </div>
                                         <div className="grid grid-cols-2 gap-3 text-center font-semibold">
-                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.refer')}</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.add_to_filter')}</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.change_status')}</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover">{t('actions.add_event')}</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><EnvelopeIcon className="w-5 h-5"/>שלח מייל</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/>שלח SMS</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover" onClick={openBulkRefer}>{t('actions.refer')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover" onClick={openBulkFilter}>{t('actions.add_to_filter')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSavedSearch}><FolderIcon className="w-4 h-4 shrink-0" />{t('actions.add_to_saved_search')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openChangeSource}><ArrowPathIcon className="w-4 h-4 shrink-0"/>{t('actions.change_source')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover" onClick={openBulkChangeStatus}>{t('actions.change_status')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover" onClick={openBulkAddEvent}>{t('actions.add_event')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSendEmail}><EnvelopeIcon className="w-5 h-5"/>{t('actions.bulk_send_email')}</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSendSms}><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/>{t('profile.send_sms')}</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><WhatsappIcon className="w-5 h-5"/>שלח Whatsapp</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><ArchiveBoxIcon className="w-5 h-5"/>ארכיון</button>
                                             {/* MOBILE DOWNLOAD ACTION */}
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={() => alert(`מוריד ${selectedIds.size} מועמדים...`)}>
-                                                <DocumentArrowDownIcon className="w-5 h-5"/>הורד מועמדים
+                                            <button
+                                                type="button"
+                                                className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5 disabled:opacity-50"
+                                                disabled={isExportingCandidatesSearch}
+                                                onClick={() => void handleExportSearchToExcel()}
+                                            >
+                                                <DocumentArrowDownIcon className="w-5 h-5"/>
+                                                {t('actions.bulk_download_candidates')}
                                             </button>
                                         </div>
                                     </div>
@@ -2694,7 +3567,68 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     </div>
                 </div>
             )}
-            
+
+            <BulkReferModal
+                isOpen={bulkReferOpen}
+                onClose={() => setBulkReferOpen(false)}
+                candidateBackendIds={bulkSelectedBackendIds}
+                selectedCount={selectedIds.size}
+                jobs={bulkJobPickerOptions}
+                onSuccess={handleBulkReferSuccess}
+            />
+            <BulkChangeStatusModal
+                isOpen={bulkStatusOpen}
+                onClose={() => setBulkStatusOpen(false)}
+                candidateIds={bulkSelectedBackendIds}
+                selectedCount={selectedIds.size}
+                onSuccess={handleBulkStatusSuccess}
+            />
+            <ScreeningCollisionWarningModal
+                isOpen={screeningCollisionOpen}
+                onClose={() => {
+                    setScreeningCollisionOpen(false);
+                    pendingBulkFilterRef.current = null;
+                }}
+                aggregate={screeningCollisionAgg}
+                onConfirm={() => {
+                    const p = pendingBulkFilterRef.current;
+                    pendingBulkFilterRef.current = null;
+                    setScreeningCollisionOpen(false);
+                    if (p) void runBulkFilterPosts(p.jobId, p.options);
+                }}
+            />
+            <BulkAddToFilterModal
+                isOpen={bulkFilterOpen}
+                onClose={() => setBulkFilterOpen(false)}
+                onSave={handleBulkFilterSave}
+                selectedCount={selectedIds.size}
+                jobs={bulkJobPickerOptions}
+                candidateBackendIds={bulkSelectedBackendIds}
+            />
+            <BulkAddToSavedSearchModal
+                isOpen={bulkSavedSearchOpen}
+                onClose={() => setBulkSavedSearchOpen(false)}
+                onSave={handleBulkSavedSearchSave}
+                selectedCount={selectedIds.size}
+            />
+            <ChangeSourceModal
+                clientId={user?.clientId ?? null}
+                isOpen={changeSourceOpen}
+                onClose={() => setChangeSourceOpen(false)}
+                onSave={handleBulkChangeSourceSave}
+                selectedCount={selectedIds.size}
+            />
+
+            <EventFormModal
+                isOpen={bulkAddEventOpen}
+                onClose={() => setBulkAddEventOpen(false)}
+                onSave={(ev) => {
+                    void handleBulkAddEventSave(ev);
+                }}
+                event={null}
+                context="candidate"
+            />
+
             <JobFieldSelector
                 value={selectedJobFieldForAdvancedSearch}
                 onChange={handleJobFieldSelect}

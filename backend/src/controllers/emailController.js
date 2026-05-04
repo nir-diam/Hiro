@@ -641,10 +641,11 @@ const processEmailUpload = async (record) => {
     const primarySynced = await candidateService.getById(candidate.id);
     await ensureOrganizationsFromExperience(primarySynced?.workExperience, candidate.id);
 
-    const association = await jobCandidateService.associateCandidateWithJob({
+    await jobCandidateService.associateCandidateWithJob({
       jobId: resolvedJob?.id || null,
       candidateId: candidate.id,
       source: 'email',
+      manualOverride: false,
     });
     console.log('[email] associated candidate with job', association?.id);
     await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
@@ -666,6 +667,7 @@ const processEmailUpload = async (record) => {
       try {
         messageTemplateService.queueCandidateWelcomeEmail(cand, {
           clientId: welcomeClientId,
+          jobId: resolvedJob?.id || null,
         });
       } catch (e) {
         console.warn('[email] welcome queue failed for', k, e?.message || e);
@@ -759,6 +761,7 @@ const processEmailUpload = async (record) => {
         jobId: resolvedJob?.id || null,
         candidateId: splitCand.id,
         source: 'email',
+        manualOverride: false,
       });
       const splitFresh = await candidateService.getById(splitCand.id);
       await ensureOrganizationsFromExperience(splitFresh?.workExperience, splitCand.id);
@@ -1447,11 +1450,19 @@ const jobTelephoneQuestionsToList = (raw) => {
 };
 
 /**
- * Fill missing screening-CV mail fields from DB (jobs + job_candidate_screening) so email/notification
- * always mirror what the UI shows even if the client payload omits long text.
+ * Fill missing screening-CV mail fields from DB (Job + optional JobCandidateScreening).
+ * When mergeCandidateScreeningFromDb is false, job fields still merge from Job; saved screening answers,
+ * telephone impression, and internal opinion on JobCandidateScreening are not pulled in.
+ * When skipAllDbMerge is true (bulk minimal referral), return the client block as-is — no Job/Screening reads.
  */
-const mergeScreeningCvPayloadFromDb = async (candidateId, rawBlock) => {
+const mergeScreeningCvPayloadFromDb = async (
+  candidateId,
+  rawBlock,
+  mergeCandidateScreeningFromDb = true,
+  skipAllDbMerge = false,
+) => {
   const block = { ...rawBlock };
+  if (skipAllDbMerge) return block;
   const jobIdRaw = block.jobId != null ? String(block.jobId).trim() : '';
   const candId = candidateId != null ? String(candidateId).trim() : '';
   if (!candId || !jobIdRaw) {
@@ -1461,15 +1472,22 @@ const mergeScreeningCvPayloadFromDb = async (candidateId, rawBlock) => {
   let jobRow;
   let screeningRow;
   try {
-    [jobRow, screeningRow] = await Promise.all([
-      Job.findByPk(jobIdRaw, {
+    if (mergeCandidateScreeningFromDb) {
+      [jobRow, screeningRow] = await Promise.all([
+        Job.findByPk(jobIdRaw, {
+          attributes: ['description', 'requirements', 'telephoneQuestions'],
+        }),
+        JobCandidateScreening.findOne({
+          where: { candidateId: candId, jobId: jobIdRaw },
+          attributes: ['screeningAnswers', 'telephoneImpression', 'internalOpinion'],
+        }),
+      ]);
+    } else {
+      jobRow = await Job.findByPk(jobIdRaw, {
         attributes: ['description', 'requirements', 'telephoneQuestions'],
-      }),
-      JobCandidateScreening.findOne({
-        where: { candidateId: candId, jobId: jobIdRaw },
-        attributes: ['screeningAnswers', 'telephoneImpression', 'internalOpinion'],
-      }),
-    ]);
+      });
+      screeningRow = null;
+    }
   } catch (e) {
     console.warn('[sendScreeningCv] mergeScreeningCvPayloadFromDb', e?.message || e);
     return block;
@@ -1664,6 +1682,77 @@ const buildCandidateContactSectionForScreeningMail = (cand) => {
   return { textBlock, htmlBlock };
 };
 
+/**
+ * Bulk referral template: CV attachment + candidate contact block only (no job description, requirements,
+ * screening Q&A, phone impression, or internal opinion from DB). Optional coordinator notes under «הערות נוספות».
+ */
+const buildMinimalCvReferralMailBodies = (
+  {
+    recipientName,
+    candLabel,
+    jobTitle,
+    company,
+    candContactHtml,
+    candContactText,
+    additionalNotesPlain,
+  },
+  coordinatorDisplayName,
+) => {
+  const dash = '—';
+  const greetingHtml = `<p dir="rtl">${recipientName ? `שלום ${escapeHtmlMail(recipientName)},` : 'שלום,'}</p>`;
+  const greetingText = recipientName ? `שלום ${recipientName},` : 'שלום,';
+
+  let introPlain = `מצורפים קורות החיים של ${candLabel}`;
+  let introHtmlInner = `מצורפים קורות החיים של <strong>${escapeHtmlMail(candLabel)}</strong>`;
+  if (jobTitle) {
+    introPlain += ` עבור המשרה ${jobTitle}`;
+    introHtmlInner += ` עבור המשרה <strong>${escapeHtmlMail(jobTitle)}</strong>`;
+  }
+  if (company) {
+    introPlain += ` בחברת ${company}`;
+    introHtmlInner += ` בחברת <strong>${escapeHtmlMail(company)}</strong>`;
+  }
+  introPlain += '.';
+  const introHtml = `<p dir="rtl">${introHtmlInner}.</p>`;
+
+  const notesPlain = additionalNotesPlain != null ? String(additionalNotesPlain).trim() : '';
+  const notesContentHtml = notesPlain
+    ? `<div dir="rtl" style="white-space:pre-wrap">${htmlFromPlainTextForMail(notesPlain)}</div>`
+    : `<p dir="rtl">${escapeHtmlMail(dash)}</p>`;
+
+  const coord = coordinatorDisplayName != null ? String(coordinatorDisplayName).trim() : '';
+
+  const sectionsHtml = [
+    `<p dir="rtl"><strong>סיכום חוות דעת</strong></p><p dir="rtl">${escapeHtmlMail(dash)}</p>`,
+    `<p dir="rtl"><strong>שאלות ותשובות</strong></p><p dir="rtl">${escapeHtmlMail(dash)}</p>`,
+    `<p dir="rtl"><strong>הערות נוספות</strong></p>${notesContentHtml}`,
+    `<p dir="rtl" style="margin-top:28px"><strong>חתימת הרכז</strong></p>`,
+    coord ? `<p dir="rtl">${escapeHtmlMail(coord)}</p>` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+
+  const sectionsText = [
+    '',
+    'סיכום חוות דעת',
+    dash,
+    '',
+    'שאלות ותשובות',
+    dash,
+    '',
+    'הערות נוספות',
+    notesPlain || dash,
+    '',
+    '',
+    'חתימת הרכז',
+    coord || '',
+  ].join('\n');
+
+  const htmlBody = [greetingHtml, introHtml, candContactHtml, sectionsHtml].join('\n');
+  const textBody = [greetingText, introPlain, '', candContactText, sectionsText].join('\n');
+  return { htmlBody, textBody };
+};
+
 /** Default workflow label for new screening_cv rows: first active status for the recruiter client (JWT clientId or users.client_id). */
 const defaultReferralWorkflowStatusForRecruiterClient = async (senderUserId, jwtClientId) => {
   const fallback = 'חדש';
@@ -1686,7 +1775,7 @@ const defaultReferralWorkflowStatusForRecruiterClient = async (senderUserId, jwt
   return name || fallback;
 };
 
-/** POST body: { candidateId, attachOriginalCv?, attachSystemCvPdf?, systemCvPdfBase64?, sends: [...] } */
+/** POST body: { candidateId, attachOriginalCv?, attachSystemCvPdf?, attachLastReferral?, minimalCvReferralBody?, systemCvPdfBase64?, sends: [...] } */
 const sendScreeningCv = async (req, res) => {
   try {
     const candidateIdRaw = req.body?.candidateId;
@@ -1698,6 +1787,13 @@ const sendScreeningCv = async (req, res) => {
     if (!Array.isArray(sends) || sends.length === 0) {
       return res.status(400).json({ message: 'sends must be a non-empty array' });
     }
+    const minimalCvReferralBody = Boolean(req.body?.minimalCvReferralBody);
+    const attachLastReferral =
+      minimalCvReferralBody
+        ? false
+        : req.body?.attachLastReferral === undefined || req.body?.attachLastReferral === null
+          ? true
+          : Boolean(req.body.attachLastReferral);
 
     const candidate = await Candidate.findByPk(candidateId, {
       attributes: ['id', 'fullName', 'resumeUrl', 'phone', 'email', 'address', 'location'],
@@ -1778,13 +1874,24 @@ const sendScreeningCv = async (req, res) => {
     const results = [];
     const candLabel = candidate.fullName || 'המועמד';
     const senderUserId = req?.user?.sub || req?.user?.id || null;
+    const coordinatorSignOff =
+      [req?.user?.fullName, req?.user?.name, req?.user?.email]
+        .map((x) => (x != null ? String(x).trim() : ''))
+        .find(Boolean) || '';
     const initialReferralWorkflowStatus = await defaultReferralWorkflowStatusForRecruiterClient(
       senderUserId,
       req.user?.clientId,
     );
+    /** For audit: one summary row per sends[] block (bulk refer has one block). */
+    const screeningSendSummaries = [];
 
     for (const rawBlock of sends) {
-      const block = await mergeScreeningCvPayloadFromDb(candidateId, rawBlock);
+      const block = await mergeScreeningCvPayloadFromDb(
+        candidateId,
+        rawBlock,
+        attachLastReferral && !minimalCvReferralBody,
+        minimalCvReferralBody,
+      );
       const jobId = block.jobId != null ? block.jobId : null;
       const jobTitle = typeof block.jobTitle === 'string' ? block.jobTitle.trim() : '';
       const company = typeof block.company === 'string' ? block.company.trim() : '';
@@ -1805,14 +1912,45 @@ const sendScreeningCv = async (req, res) => {
         continue;
       }
 
+      screeningSendSummaries.push({
+        jobId: jobId || null,
+        jobTitle: jobTitle || '',
+        company: company || '',
+        recipientCount: contactRows.length,
+      });
+
       const subject = `קורות חיים — ${candLabel} | ${jobTitle || 'משרה'}${company ? ` — ${company}` : ''}`;
       const toEmailCombined = contactRows.map((r) => r.email).join(', ');
 
-      const { detailsText, detailsHtml } = buildScreeningCvDetailsAppendix(block);
       const { textBlock: candContactText, htmlBlock: candContactHtml } =
         buildCandidateContactSectionForScreeningMail(candidate);
 
+      const additionalNotesPlain =
+        typeof block.additionalNotes === 'string' ? block.additionalNotes : '';
+
+      let detailsText = '';
+      let detailsHtml = '';
+      if (!minimalCvReferralBody) {
+        const appendix = buildScreeningCvDetailsAppendix(block);
+        detailsText = appendix.detailsText;
+        detailsHtml = appendix.detailsHtml;
+      }
+
       const buildBodies = ({ email, name }) => {
+        if (minimalCvReferralBody) {
+          return buildMinimalCvReferralMailBodies(
+            {
+              recipientName: name,
+              candLabel,
+              jobTitle,
+              company,
+              candContactHtml,
+              candContactText,
+              additionalNotesPlain,
+            },
+            coordinatorSignOff,
+          );
+        }
         const greeting = name ? `שלום ${escapeHtmlMail(name)},` : 'שלום,';
         const htmlParts = [
           `<p dir="rtl">${greeting}</p>`,
@@ -1923,19 +2061,38 @@ const sendScreeningCv = async (req, res) => {
       }
     }
 
-    // Audit: 'נשלח סטטוס מועמדים' — bulk candidate-status report dispatched
     if (results.length) {
-      const namesLabel = results
-        .map((r) => r.to)
-        .filter(Boolean)
-        .slice(0, 12)
+      const uniqJobIds = [...new Set(results.map((r) => r.jobId).filter(Boolean))];
+      const recipientEmails = [...new Set(results.map((r) => r.to).filter(Boolean))];
+      const titledSummaries = screeningSendSummaries.filter((s) => String(s.jobTitle || '').trim());
+      const jobTitlesHint = titledSummaries
+        .map((s) => String(s.jobTitle || '').trim())
+        .slice(0, 3)
         .join(', ');
-      systemEventEmitter.emit(req, {
-        ...SYSTEM_EVENTS.MAIL_STATUS_BULK,
-        entityType: 'Job',
-        entityId: candidateId,
-        entityName: candidate?.fullName || null,
-        params: { names: namesLabel || `${results.length} נמענים` },
+      const descriptionParts = [
+        'נשלח מייל סינון (קו״ח) ללקוח / הפניה',
+        candLabel ? `מועמד: ${candLabel}` : null,
+        jobTitlesHint ? `משרה: ${jobTitlesHint}${titledSummaries.length > 3 ? '…' : ''}` : null,
+        uniqJobIds.length ? `מזהי משרה: ${uniqJobIds.slice(0, 5).join(', ')}${uniqJobIds.length > 5 ? '…' : ''}` : null,
+        `${recipientEmails.length} נמענים · ${results.length} שליחות`,
+      ].filter(Boolean);
+      auditLogger.log(req, {
+        level: 'info',
+        action: 'system',
+        description: descriptionParts.join(' · ').slice(0, 4000),
+        entity: {
+          type: 'Candidate',
+          id: candidateId,
+          name: String(candLabel || '').slice(0, 500),
+        },
+        metadata: {
+          screeningCvEmail: true,
+          emailsDispatched: results.length,
+          jobIds: uniqJobIds,
+          recipientEmails: recipientEmails.slice(0, 40),
+          notificationMessageIds: [...new Set(results.map((r) => r.notificationMessageId).filter(Boolean))],
+          sends: screeningSendSummaries.slice(0, 20),
+        },
       });
     }
 
