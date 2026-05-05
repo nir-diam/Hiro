@@ -3,6 +3,56 @@ const Prompt = require('../models/Prompt');
 const { sendChat } = require('./geminiService');
 const cityService = require('./cityService');
 
+/** Normalize LLM output → UI/db-safe daily hours (matches candidate WorkingHoursInput). */
+const coercePreferredWorkingHoursFromJobAi = (raw) => {
+  if (raw == null || raw === '') return null;
+  const s = String(raw).trim();
+  if (!s || s === '-') return null;
+  if (s === 'גמיש' || s === 'ללא אילוצי שעות') return s;
+  const lower = s.toLowerCase();
+  if (
+    /גמישות|שעות גמישות|משמרות גמישות|ללא התחייבות לשעות|עבודה גמישה/i.test(s) ||
+    /\bflexible(\s+hours|\s+schedule)?\b/i.test(lower) ||
+    /\bvariable\s+hours\b/i.test(lower)
+  ) {
+    return 'גמיש';
+  }
+  const m = s.match(/(\d{1,2})\s*:\s*(\d{2})\s*[-–—]\s*(\d{1,2})\s*:\s*(\d{2})/);
+  if (m) {
+    const hh = (x) => String(Math.min(23, parseInt(x, 10))).padStart(2, '0');
+    const mm = (x) => String(Math.min(59, parseInt(x, 10))).padStart(2, '0');
+    return `${hh(m[1])}:${mm(m[2])}-${hh(m[3])}:${mm(m[4])}`;
+  }
+  return s.slice(0, 255);
+};
+
+/** Appended so models emit schedule even when DB prompt omits it (frontend embeds via internalNotes marker). */
+const JOB_ANALYZE_PREFERRED_HOURS_APPENDIX = `
+--- Required JSON field for job schedule (use null if not stated in the posting text) ---
+- "preferredWorkingHours": string|null — Preferred daily hours ONLY if explicit in the description.
+  Allowed when present: "גמיש", "ללא אילוצי שעות", or one 24h range "HH:mm-HH:mm" (zero-padded, e.g. "09:00-18:00").
+  Map "שעות גמישות", "flexible hours", etc. to "גמיש". Do not invent numeric ranges without evidence.
+`;
+
+const pickPreferredWorkingHoursRawFromParsed = (parsed) => {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const keys = [
+    'preferredWorkingHours',
+    'workingHours',
+    'workHours',
+    'dailyHours',
+    'dailyWorkingHours',
+    'jobWorkingHours',
+    'shiftHours',
+    'scheduleHours',
+  ];
+  for (const k of keys) {
+    const v = parsed[k];
+    if (v != null && String(v).trim()) return v;
+  }
+  return null;
+};
+
 /**
  * List jobs for table/UI — omits `events` (unbounded JSONB) so the query stays fast;
  * use getById or job events API for a single job’s journal.
@@ -63,7 +113,7 @@ const analyzeRawDescription = async (rawText) => {
     err.status = 500;
     throw err;
   }
-  const systemPrompt = promptRow.template.trim();
+  const systemPrompt = `${promptRow.template.trim()}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}`;
 
   // eslint-disable-next-line no-console
   console.log('[jobService.analyzeRawDescription] calling sendChat with prompt length', systemPrompt.length);
@@ -101,6 +151,9 @@ const analyzeRawDescription = async (rawText) => {
         : cleaned;
 
     parsed = JSON.parse(candidate);
+    const pwhRaw = pickPreferredWorkingHoursRawFromParsed(parsed);
+    const coerced = coercePreferredWorkingHoursFromJobAi(pwhRaw);
+    parsed.preferredWorkingHours = coerced;
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error('[jobService.analyzeRawDescription] Failed to parse AI JSON response:', rawResponse);

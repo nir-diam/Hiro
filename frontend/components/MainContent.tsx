@@ -27,6 +27,7 @@ import {
     picklistRowLabel,
     type PicklistValueRow,
 } from '../services/picklistValuesApi';
+import { WorkingHoursInput } from './WorkingHoursInput';
 
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; required?: boolean; type?: string; icon?: React.ReactNode }> = ({ label, name, value, onChange, required, type = "text", icon }) => {
     const id = useId();
@@ -498,6 +499,7 @@ const MainContent: React.FC<MainContentProps> = ({
                                 <option value="עבר בדיקה ראשונית">עבר בדיקה ראשונית</option>
                             </FormSelect>
                         )}
+
                         <FormInput label={t('form.phone')} name="phone" value={formData.phone} onChange={handleInputChange} required />
                         <FormInput label={t('form.email')} name="email" value={formData.email} onChange={handleInputChange} type="email" icon={<EnvelopeIcon className="w-4 h-4" />}/>
                         <FormInput label={t('form.address')} name="address" value={formData.address} onChange={handleInputChange} required icon={<MapPinIcon className="w-4 h-4" />} />
@@ -632,6 +634,18 @@ const MainContent: React.FC<MainContentProps> = ({
                                     🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).
                                 </option>
                             </FormSelect>
+                        </div>
+
+                        <div className="w-full max-w-lg">
+                            <WorkingHoursInput
+                                value={String(formData.preferredWorkingHours ?? 'גמיש')}
+                                onChange={(v) => {
+                                    updateFormPreserveScroll({ ...formData, preferredWorkingHours: v });
+                                    onImmediateSave?.({ preferredWorkingHours: v });
+                                }}
+                                label={t('form.working_hours')}
+                                timeRangeClassName="max-w-lg"
+                            />
                         </div>
                     </div>
                 </AccordionSection>

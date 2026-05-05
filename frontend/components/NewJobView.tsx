@@ -14,6 +14,7 @@ import TagSelectorModal, { TagOption as GlobalTagOption } from './TagSelectorMod
 import { GoogleGenAI, Type } from '@google/genai';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
+import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
 import type { PicklistValueRow } from '../services/picklistValuesApi';
@@ -219,6 +220,68 @@ const stripHtml = (html: string): string => {
     }
     return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 };
+
+/** Embed preferred daily hours in rich-text `internalNotes` (no separate jobs column). */
+function extractWorkingHoursFromNotes(notes: string): { cleaned: string; hours: string } {
+    let hours = 'גמיש';
+    const raw = String(notes || '');
+    const m = raw.match(/\[WORKING_HOURS\]\s*([^\n\r<]*)/i);
+    if (m?.[1]) {
+        const parsed = String(m[1]).trim();
+        if (parsed) hours = parsed;
+    }
+    const cleaned = raw.replace(/\s*\[WORKING_HOURS\][^\n\r]*/gi, '').trim();
+    return { cleaned, hours };
+}
+
+function mergeWorkingHoursIntoNotes(notes: string, hours: string): string {
+    const { cleaned } = extractWorkingHoursFromNotes(notes);
+    const flex = !hours || hours === 'גמיש' || hours === 'ללא אילוצי שעות';
+    if (flex) return cleaned;
+    const suffix = `\n[WORKING_HOURS] ${hours}`;
+    return cleaned ? `${cleaned}${suffix}` : suffix.trim();
+}
+
+/** Align AI job-analyze output with WorkingHoursInput / persisted internalNotes marker. */
+function coercePreferredWorkingHoursFromJobAi(raw: unknown): string | null {
+    if (raw == null || raw === '') return null;
+    const s = String(raw).trim();
+    if (!s || s === '-') return null;
+    if (s === 'גמיש' || s === 'ללא אילוצי שעות') return s;
+    const lower = s.toLowerCase();
+    if (
+        /גמישות|שעות גמישות|משמרות גמישות|ללא התחייבות לשעות|עבודה גמישה/i.test(s) ||
+        /\bflexible(\s+hours|\s+schedule)?\b/i.test(lower) ||
+        /\bvariable\s+hours\b/i.test(lower)
+    ) {
+        return 'גמיש';
+    }
+    const m = s.match(/(\d{1,2})\s*:\s*(\d{2})\s*[-–—]\s*(\d{1,2})\s*:\s*(\d{2})/);
+    if (m) {
+        const hh = (x: string) => String(Math.min(23, parseInt(x, 10))).padStart(2, '0');
+        const mm = (x: string) => String(Math.min(59, parseInt(x, 10))).padStart(2, '0');
+        return `${hh(m[1])}:${mm(m[2])}-${hh(m[3])}:${mm(m[4])}`;
+    }
+    return s.slice(0, 255);
+}
+
+function pickPreferredWorkingHoursFromExtracted(extracted: Record<string, unknown>): unknown {
+    const keys = [
+        'preferredWorkingHours',
+        'workingHours',
+        'workHours',
+        'dailyHours',
+        'dailyWorkingHours',
+        'jobWorkingHours',
+        'shiftHours',
+        'scheduleHours',
+    ];
+    for (const k of keys) {
+        const v = extracted[k];
+        if (v != null && String(v).trim() !== '') return v;
+    }
+    return null;
+}
 
 const LOCATION_SEP = ', ';
 
@@ -1513,6 +1576,7 @@ const initialJobState = {
     salaryMin: 8000, 
     salaryMax: 15000, 
     includeUnknownSalary: true,
+    preferredWorkingHours: 'גמיש',
     recruitmentSources: availableSources,
     languages: [] as LanguageRequirement[],
     skills: [] as JobSkill[], 
@@ -1651,7 +1715,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 requirements: Array.isArray(jobData.requirements)
                     ? jobData.requirements.map((r: string) => String(r).trim()).join('\n')
                     : jobData.requirements ?? prev.requirements,
-                internalNotes: jobData.internalNotes || '',
+                ...((() => {
+                    const notesRaw = jobData.internalNotes != null ? String(jobData.internalNotes) : '';
+                    const { cleaned, hours } = extractWorkingHoursFromNotes(notesRaw);
+                    return { internalNotes: cleaned, preferredWorkingHours: hours };
+                })()),
                 salaryMin: jobData.salaryMin || prev.salaryMin,
                 salaryMax: jobData.salaryMax || prev.salaryMax,
                 status: jobData.status || prev.status,
@@ -2037,6 +2105,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 publicDescription: raw.PublicDescription ?? raw.publicDescription ?? raw.public_description,
             };
 
+            const pwhFromAi = coercePreferredWorkingHoursFromJobAi(
+                pickPreferredWorkingHoursFromExtracted(extractedData as Record<string, unknown>),
+            );
+
             const filled = new Set<string>();
             const filledList: string[] = [];
             const missingList: string[] = [];
@@ -2047,6 +2119,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             if (extractedData.salaryMin || extractedData.salaryMax) { filled.add('salaryMin'); filled.add('salaryMax'); filledList.push('טווח שכר'); } else missingList.push('טווח שכר');
             if (extractedData.city) { filled.add('locations'); filledList.push('מיקום'); } else missingList.push('מיקום');
             if (extractedData.internalNotes) { filled.add('internalNotes'); filledList.push('הערות פנימיות'); } else missingList.push('הערות פנימיות');
+            if (pwhFromAi) {
+                filled.add('preferredWorkingHours');
+                filledList.push(t('form.working_hours'));
+            }
             if (Array.isArray(extractedData.languages) && extractedData.languages.length > 0) { filled.add('languages'); filledList.push('שפות'); } else missingList.push('שפות');
             if (extractedData.drivingLicense) { filled.add('drivingLicense'); filledList.push('רישיון נהיגה'); } else missingList.push('רישיון נהיגה');
             if (extractedData.mobility) { filled.add('mobility'); filledList.push('דרישות ניידות'); } else missingList.push('דרישות ניידות');
@@ -2208,7 +2284,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 jobTitle: extractedData.jobTitle || prev.jobTitle,
                 jobDescription: jobDescriptionFromAi ?? prev.jobDescription,
                 requirements: requirementsForForm !== undefined ? requirementsForForm : prev.requirements,
-                internalNotes: extractedData.internalNotes || prev.internalNotes,
+                internalNotes: mergeWorkingHoursIntoNotes(
+                    extractedData.internalNotes != null && String(extractedData.internalNotes).trim() !== ''
+                        ? String(extractedData.internalNotes)
+                        : prev.internalNotes,
+                    (pwhFromAi ?? prev.preferredWorkingHours) || 'גמיש',
+                ),
+                preferredWorkingHours: (pwhFromAi ?? prev.preferredWorkingHours) || 'גמיש',
                 salaryMin: typeof extractedData.salaryMin === 'number' ? extractedData.salaryMin : prev.salaryMin,
                 salaryMax: typeof extractedData.salaryMax === 'number' ? extractedData.salaryMax : prev.salaryMax,
                 locations: extractedData.city
@@ -2639,7 +2721,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             requirements,
             rating: typeof data.rating === 'number' ? data.rating : 0,
             healthProfile: data.healthProfile,
-            internalNotes: data.internalNotes,
+            internalNotes: mergeWorkingHoursIntoNotes(
+                data.internalNotes || '',
+                String(data.preferredWorkingHours || 'גמיש'),
+            ),
             aiRawDescription: pastedJobText || undefined,
             uniqueEmail: data.uniqueEmail,
             /** Server strips this; triggers audit_logs after Job.create with real job id */
@@ -3267,6 +3352,15 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                                 </option>
                                             ))}
                                         </select>
+                                     </div>
+                                     <div className={getInputClass('preferredWorkingHours', 'w-full min-w-[200px] max-w-md flex-grow')}>
+                                        <WorkingHoursInput
+                                            value={formData.preferredWorkingHours || 'גמיש'}
+                                            onChange={(v) =>
+                                                setFormData((prev) => ({ ...prev, preferredWorkingHours: v }))
+                                            }
+                                            label={t('form.working_hours')}
+                                        />
                                      </div>
                                  </div>
                              </div>

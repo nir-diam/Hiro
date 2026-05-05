@@ -29,7 +29,7 @@ const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
 const NotificationMessage = require('../models/NotificationMessage');
 const RecruitmentStatus = require('../models/RecruitmentStatus');
-const { Op, Sequelize } = require('sequelize');
+const { Op, Sequelize, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
@@ -43,6 +43,29 @@ const NOTIFICATION_TASK_UUID_RE =
 
 /** Inbox / task folder values; screening_cv rows typically store recruitment status `name` instead. */
 const INBOX_NOTIFICATION_STATUS_TOKENS = new Set(['unread', 'tasks', 'archived', 'deleted']);
+
+/**
+ * Count prior screening_cv notifications with same subject and candidateId (repeat הפניה).
+ */
+const countPriorScreeningCvSameCandidateSubject = async (subject, candidateId) => {
+  const sub = String(subject || '').trim();
+  const cid = String(candidateId || '').trim();
+  if (!sub || !cid) return 0;
+  const rows = await sequelize.query(
+    `
+    SELECT COUNT(*)::int AS c
+    FROM notification_messages
+    WHERE category = 'screening_cv'
+      AND subject = :subject
+      AND TRIM(COALESCE(metadata #>> '{taskPayload,candidateId}', '')) = TRIM(:candidateId)
+    `,
+    {
+      replacements: { subject: sub, candidateId: cid },
+      type: QueryTypes.SELECT,
+    },
+  );
+  return Number(rows[0]?.c || 0);
+};
 
 /** Staff app origin for deep links — no trailing slash (`PUBLIC_APP_URL` / `FRONTEND_URL`). */
 const publicStaffAppOrigin = () =>
@@ -1293,6 +1316,18 @@ const send = async (req, res) => {
       });
     };
 
+    let composeScreeningRepeatPriorCount = 0;
+    if (
+      typeof category === 'string' &&
+      category.trim() === 'screening_cv' &&
+      composeCandidateId
+    ) {
+      composeScreeningRepeatPriorCount = await countPriorScreeningCvSameCandidateSubject(
+        String(subject || ''),
+        composeCandidateId,
+      );
+    }
+
     const results = [];
 
     for (const emailCandidate of recipients) {
@@ -1327,6 +1362,12 @@ const send = async (req, res) => {
         status: normalizedMessageType === 'task' ? 'tasks' : 'unread',
         isTask: normalizedIsTask,
         assignee: assigneeField,
+        assigneeId: req?.user?.sub || req?.user?.id || null,
+        isRepeat:
+          typeof category === 'string' &&
+          category.trim() === 'screening_cv' &&
+          composeCandidateId &&
+          composeScreeningRepeatPriorCount > 0,
         category: typeof category === 'string' ? category : null,
         dueDate: typeof dueDate === 'string' ? dueDate : null,
         dueTime: typeof dueTime === 'string' ? dueTime : null,
@@ -1981,6 +2022,13 @@ const sendScreeningCv = async (req, res) => {
         firstBodies.textBody.trim() ||
         stripHtmlMail(firstBodies.htmlBody).trim() ||
         null;
+
+      const priorSameSubjectCandidate = await countPriorScreeningCvSameCandidateSubject(
+        subject,
+        candidate.id,
+      );
+      const isRepeatReferral = priorSameSubjectCandidate > 0;
+
       const savedMessage = await NotificationMessage.create({
         toEmail: toEmailCombined,
         subject,
@@ -1991,7 +2039,9 @@ const sendScreeningCv = async (req, res) => {
         isTask: false,
         assignee: contactRows[0].email,
         category: 'screening_cv',
-        senderUserId: req?.user?.sub || req?.user?.id || null,
+        senderUserId: senderUserId,
+        assigneeId: senderUserId,
+        isRepeat: isRepeatReferral,
         metadata: {
           deliveryStatus: 'pending',
           referralWorkflowStatus: initialReferralWorkflowStatus,
@@ -2239,6 +2289,7 @@ const SCREENING_REFERRAL_SORT_KEYS = new Set([
   'referralDate',
   'lastUpdatedBy',
   'source',
+  'isRepeat',
 ]);
 
 /**
@@ -2307,6 +2358,11 @@ const sortScreeningReferralRows = (list, sortKey, sortDir) => {
       const at = new Date(String(a.referralDate || 0)).getTime();
       const bt = new Date(String(b.referralDate || 0)).getTime();
       return (Number.isFinite(at) ? at : 0) - (Number.isFinite(bt) ? bt : 0);
+    }
+    if (key === 'isRepeat') {
+      const av = a.isRepeat === true ? 1 : 0;
+      const bv = b.isRepeat === true ? 1 : 0;
+      return av - bv;
     }
     const vKey = key === 'lastUpdatedBy' ? 'coordinator' : key;
     const av = String((a)[vKey] != null ? (a)[vKey] : '');
@@ -2450,6 +2506,7 @@ const listScreeningCvReferrals = async (req, res) => {
         candidateEmail: cand?.email ? String(cand.email).trim() : '',
         inviteCandidate: Boolean(meta.referralInviteCandidate),
         inviteClient: Boolean(meta.referralInviteClient),
+        isRepeat: plain.isRepeat === true,
         /** Plain body: `notification_messages.text`, or stripped HTML if text is empty. */
         notificationText: screeningCvNotificationPlainBodyFromPlain(plain),
       };
@@ -2923,6 +2980,8 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
   "email": string|null,
   "phone": string|null,
   "address": string|null,
+  "availability": string|null,
+  "preferredWorkingHours": string|null,
   "title": string|null,
   "professionalSummary": string|null,
   "skills": { "soft": string[], "technical": string[] },
@@ -2948,11 +3007,43 @@ Rules:
 - skills.soft = interpersonal/behavioral skills (e.g., תקשורת בין-אישית, עבודת צוות, מנהיגות, שירותיות, סדר וארגון, פתרון בעיות). Max 30.
 - skills.technical = tools/technologies/platforms/methods/certifications (e.g., Excel, SQL, Python, React, Jira, AWS, Docker). Max 30.
 - Prefer realistic date formats; if only year exists use YYYY-01 / YYYY-12.
+- Always include top-level "availability" and "preferredWorkingHours" (null when not stated); see the appended schedule rules at the end of this prompt.
 
 Output constraints:
 - Return STRICT JSON (double quotes, no trailing commas).
 - Do not wrap in \`\`\` fences.
 `;
+
+/** Same appendix as candidateController: forces preferredWorkingHours / availability into model output. */
+const CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX = `
+--- Backend-required JSON keys (add to the SAME single JSON object; use null when not stated in the CV) ---
+- "availability": string|null — Notice period, start date, or employment readiness ONLY if explicitly written (e.g. מיידי, חודש התראה, זמין מ-…).
+- "preferredWorkingHours": string|null — Preferred daily work schedule ONLY if explicit. If absent in the CV, use null (do not guess).
+  When present, use ONE of: "גמיש", "ללא אילוצי שעות", or a single 24h range "HH:mm-HH:mm" with zero-padded hours (e.g. "09:00-18:00").
+  Map phrases like "שעות גמישות", "משמרות גמישות", "flexible hours" to "גמיש".
+`;
+
+const coercePreferredWorkingHoursFromAi = (raw) => {
+  if (raw == null || raw === '') return null;
+  const s = String(raw).trim();
+  if (!s || s === '-') return null;
+  if (s === 'גמיש' || s === 'ללא אילוצי שעות') return s;
+  const lower = s.toLowerCase();
+  if (
+    /גמישות|שעות גמישות|משמרות גמישות|ללא התחייבות לשעות|עבודה גמישה/i.test(s) ||
+    /\bflexible(\s+hours|\s+schedule)?\b/i.test(lower) ||
+    /\bvariable\s+hours\b/i.test(lower)
+  ) {
+    return 'גמיש';
+  }
+  const m = s.match(/(\d{1,2})\s*:\s*(\d{2})\s*[-–—]\s*(\d{1,2})\s*:\s*(\d{2})/);
+  if (m) {
+    const hh = (x) => String(Math.min(23, parseInt(x, 10))).padStart(2, '0');
+    const mm = (x) => String(Math.min(59, parseInt(x, 10))).padStart(2, '0');
+    return `${hh(m[1])}:${mm(m[2])}-${hh(m[3])}:${mm(m[4])}`;
+  }
+  return s.slice(0, 255);
+};
 
 let resumePromptCache = null;
 const getResumePromptTemplate = async () => {
@@ -2966,6 +3057,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[emailController] cv_parsing prompt missing', err.message || err);
@@ -3012,11 +3104,19 @@ const deriveCandidateFieldsFromResume = async (text) => {
     tags = Array.from(new Set([...softSkills, ...techSkills])).slice(0, 50);
   }
 
+  const pwhFromAi = coercePreferredWorkingHoursFromAi(aiResult.preferredWorkingHours);
+  const availabilityFromAi =
+    aiResult.availability != null && String(aiResult.availability).trim() !== ''
+      ? String(aiResult.availability).trim()
+      : null;
+
   const aiFields = {
     fullName: aiResult.fullName || fallback.fullName || 'מועמד חדש',
     email: aiResult.email || fallback.email || null,
     phone: aiResult.phone || fallback.phone || null,
     address: aiResult.address || null,
+    ...(availabilityFromAi ? { availability: availabilityFromAi } : {}),
+    ...(pwhFromAi ? { preferredWorkingHours: pwhFromAi } : {}),
     title: aiResult.title || fallback.title || null,
     professionalSummary:
       aiResult.professionalSummary || fallback.professionalSummary || fallback.summary || null,

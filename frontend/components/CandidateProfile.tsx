@@ -1426,51 +1426,55 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                       ) : null}
                   </div>
                   <div className="w-full sm:mr-6 flex-1">
-                      <div className="flex items-center justify-center sm:justify-start flex-wrap mb-1 gap-3">
-                          <EditableField
-                              value={candidateData.firstName || ''}
-                              placeholder="שם פרטי"
-                              onSave={(val) =>
-                                  onFormChange({
-                                      ...candidateData,
-                                      firstName: val,
-                                      fullName: buildCandidateFullName(val, candidateData.lastName),
-                                  })
-                              }
-                              className="text-3xl font-extrabold text-text-default tracking-tight"
-                          />
-                          <EditableField
-                              value={candidateData.lastName || ''}
-                              placeholder="שם משפחה"
-                              onSave={(val) =>
-                                  onFormChange({
-                                      ...candidateData,
-                                      lastName: val,
-                                      fullName: buildCandidateFullName(candidateData.firstName, val),
-                                  })
-                              }
-                              className="text-3xl font-extrabold text-text-default tracking-tight"
-                          />
-                          <div className="flex items-center text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1">
-                                <EditableField
-                                    value={displayAge}
-                                    placeholder="גיל"
-                                    onSave={(val) => onFormChange({ ...candidateData, age: val })}
-                                    className="font-semibold min-w-[40px]"
-                                />
-                                <span className="mx-1.5">•</span>
-                                <MapPinIcon className="w-3.5 h-3.5 ml-1" />
-                                <EditableField
-                                    value={candidateData.address || ''}
-                                    placeholder="מיקום"
-                                    onSave={(val) => onFormChange({ ...candidateData, address: val })}
-                                    className="min-w-[80px]"
-                                />
+                      <div className="rounded-2xl border border-border-default/80 bg-bg-card/70 backdrop-blur-sm p-4 mb-3 shadow-sm">
+                          <h3 className="text-xs font-bold text-text-muted uppercase tracking-wide mb-3">
+                              {t('section.personal_details')}
+                          </h3>
+                          <div className="flex items-center justify-center sm:justify-start flex-wrap gap-3 mb-3">
+                              <EditableField
+                                  value={candidateData.firstName || ''}
+                                  placeholder="שם פרטי"
+                                  onSave={(val) =>
+                                      onFormChange({
+                                          ...candidateData,
+                                          firstName: val,
+                                          fullName: buildCandidateFullName(val, candidateData.lastName),
+                                      })
+                                  }
+                                  className="text-3xl font-extrabold text-text-default tracking-tight"
+                              />
+                              <EditableField
+                                  value={candidateData.lastName || ''}
+                                  placeholder="שם משפחה"
+                                  onSave={(val) =>
+                                      onFormChange({
+                                          ...candidateData,
+                                          lastName: val,
+                                          fullName: buildCandidateFullName(candidateData.firstName, val),
+                                      })
+                                  }
+                                  className="text-3xl font-extrabold text-text-default tracking-tight"
+                              />
+                              <div className="flex items-center text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1">
+                                  <EditableField
+                                      value={displayAge}
+                                      placeholder="גיל"
+                                      onSave={(val) => onFormChange({ ...candidateData, age: val })}
+                                      className="font-semibold min-w-[40px]"
+                                  />
+                                  <span className="mx-1.5">•</span>
+                                  <MapPinIcon className="w-3.5 h-3.5 ml-1" />
+                                  <EditableField
+                                      value={candidateData.address || ''}
+                                      placeholder="מיקום"
+                                      onSave={(val) => onFormChange({ ...candidateData, address: val })}
+                                      className="min-w-[80px]"
+                                  />
+                              </div>
                           </div>
+                        
                       </div>
 
-               
-                      
                       <div className="mb-3">
                           <EditableField 
                               value={candidateData.title || ''} 

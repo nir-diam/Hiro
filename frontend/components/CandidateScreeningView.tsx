@@ -18,6 +18,11 @@ import ResumeViewer from './ResumeViewer';
 import { InternalOpinionEditorModal, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
 import { useLanguage } from '../context/LanguageContext';
 import { buildParsedScreeningCvHtmlForPdf, renderScreeningCvHtmlToPdfBase64 } from '../utils/screeningCvPdfExport';
+import type { LocationItem } from './LocationSelector';
+import {
+    buildJobLocationDisplayModel,
+    type JobLocationDisplayModel,
+} from '../utils/jobLocationDisplay';
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -28,6 +33,8 @@ interface ScreeningJob {
   company: string;
   title: string;
   location: string;
+  /** When API returns structured locations (radius row), compact summary matches Studio. */
+  locations?: LocationItem[];
   salary: string;
   aiMatchScore: number;
   description: string;
@@ -42,7 +49,187 @@ interface ScreeningJob {
   screeningPath?: 1 | 2 | 3;
   /** Present when job appears in pool but fails inclusion rules — card is visible but not selectable. */
   excludedReasons?: string[];
+  /** Per-rule pass/fail from screening engine (localized labels client-side). */
+  evaluationChecks?: ScreeningEvalCheck[];
+  /** Job owner's client UUID — keys into presentationByClientId for status-group colors. */
+  screeningClientId?: string | null;
 }
+
+interface ScreeningPresentationColors {
+  rejectColor: string;
+  processColor: string;
+  acceptColor: string;
+}
+
+interface ScreeningEvalCheck {
+  code: string;
+  ok: boolean;
+  category?: string;
+  meta?: { until?: string; lastExitReason?: string | null } | null;
+}
+
+function pickEvalCheckLineColor(check: ScreeningEvalCheck, pres: ScreeningPresentationColors): string {
+  if (!check.ok) return pres.rejectColor;
+  const cat = check.category || '';
+  if (cat === 'workflow' || cat === 'freshness') return pres.processColor;
+  return pres.acceptColor;
+}
+
+function formatEvalCheckLabel(
+  t: (key: string, opts?: Record<string, string>) => string,
+  check: ScreeningEvalCheck,
+): string {
+  if (!check.ok && check.code === 'cooldown_clear') {
+    if (check.meta?.until) {
+      let untilLabel = check.meta.until;
+      try {
+        untilLabel = new Date(check.meta.until).toLocaleDateString();
+      } catch {
+        /* keep ISO */
+      }
+      const base = t('screening.cooldown_until', { until: untilLabel });
+      const reason = check.meta.lastExitReason ? String(check.meta.lastExitReason).trim() : '';
+      return reason ? `${base} (${reason})` : base;
+    }
+    return t('screening.warn.cooldown');
+  }
+  const passKey = `screening.pass.${check.code}`;
+  const warnKey = `screening.warn.${check.code}`;
+  return check.ok ? t(passKey) : t(warnKey);
+}
+
+const DEFAULT_SCREENING_PRESENTATION: ScreeningPresentationColors = {
+  rejectColor: '#b91c1c',
+  processColor: '#ca8a04',
+  acceptColor: '#15803d',
+};
+
+/** Compact location line for screening cards (avoids huge comma-separated city lists). */
+const ScreeningJobLocationLine: React.FC<{
+  model: JobLocationDisplayModel;
+  t: (key: string, opts?: Record<string, string | number>) => string;
+}> = ({ model, t }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  if (model.kind === 'empty') return null;
+
+  const toggle = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded((x) => !x);
+  };
+
+  if (model.kind === 'inline') {
+    return (
+      <span className="flex items-start gap-1 min-w-0">
+        <MapPinIcon className="w-3 h-3 flex-shrink-0 mt-0.5" />
+        <span className="min-w-0 break-words">{model.cities.join(', ')}</span>
+      </span>
+    );
+  }
+
+  if (model.kind === 'radius') {
+    return (
+      <div className="flex flex-col gap-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="flex items-start gap-1 min-w-0">
+            <MapPinIcon className="w-3 h-3 flex-shrink-0 mt-0.5" />
+            <span className="font-medium text-text-default break-words">
+              {t('screening.location.radius_line', { center: model.center, km: model.km })}
+            </span>
+          </span>
+          {model.cities.length > 0 ? (
+            <button
+              type="button"
+              className="text-xs font-semibold text-primary-600 hover:text-primary-800 underline decoration-primary-300 underline-offset-2 whitespace-nowrap"
+              onClick={toggle}
+            >
+              {expanded
+                ? t('screening.location.hide_settlements')
+                : t('screening.location.show_settlements', { count: model.cities.length })}
+            </button>
+          ) : null}
+        </div>
+        {expanded && model.cities.length > 0 ? (
+          <div className="mr-5 max-h-28 overflow-y-auto rounded-md border border-border-default/80 bg-bg-subtle/50 px-2 py-1.5 text-[11px] leading-snug text-text-muted">
+            {model.cities.join(', ')}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-1 min-w-0">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        <span className="flex items-start gap-1 min-w-0">
+          <MapPinIcon className="w-3 h-3 flex-shrink-0 mt-0.5" />
+          <span className="font-medium text-text-default break-words">
+            {t('screening.location.center_and_more', {
+              center: model.firstCity,
+              count: model.extraCount,
+            })}
+          </span>
+        </span>
+        <button
+          type="button"
+          className="text-xs font-semibold text-primary-600 hover:text-primary-800 underline decoration-primary-300 underline-offset-2 whitespace-nowrap"
+          onClick={toggle}
+        >
+          {expanded
+            ? t('screening.location.hide_settlements')
+            : t('screening.location.show_settlements', { count: model.cities.length })}
+        </button>
+      </div>
+      {expanded ? (
+        <div className="mr-5 max-h-28 overflow-y-auto rounded-md border border-border-default/80 bg-bg-subtle/50 px-2 py-1.5 text-[11px] leading-snug text-text-muted">
+          {model.cities.join(', ')}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+const ScreeningEvaluationChecklist: React.FC<{
+  job: ScreeningJob;
+  presentationMap: Record<string, ScreeningPresentationColors>;
+  t: (key: string, opts?: Record<string, string>) => string;
+}> = ({ job, presentationMap, t }) => {
+  const checks = job.evaluationChecks;
+  const cid = job.screeningClientId ? String(job.screeningClientId).trim() : '';
+  const pres =
+    cid && presentationMap[cid] ? presentationMap[cid] : DEFAULT_SCREENING_PRESENTATION;
+
+  if (!checks?.length) {
+    if (!job.excludedReasons?.length) return null;
+    return (
+      <p className="text-xs mt-1.5 leading-snug font-medium" style={{ color: pres.rejectColor }}>
+        {job.excludedReasons.map((code) => t(`screening.warn.${code}`)).join(' · ')}
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2 rounded-lg border border-border-default/80 bg-bg-subtle/40 px-2 py-2 space-y-1">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-text-muted mb-0.5">
+        {t('screening.checklist.title')}
+      </p>
+      {checks.map((ch, idx) => {
+        const color = pickEvalCheckLineColor(ch, pres);
+        const label = formatEvalCheckLabel(t, ch);
+        return (
+          <div key={`${ch.code}-${idx}`} className="flex items-start gap-2 text-xs leading-snug">
+            <span className="flex-shrink-0 mt-0.5 font-bold" style={{ color }} aria-hidden>
+              {ch.ok ? '✓' : '✗'}
+            </span>
+            <span className="font-medium min-w-0 break-words" style={{ color }}>
+              {label}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+};
 
 interface SendModalContact {
   id: string;
@@ -191,11 +378,13 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
   }
   const fp = typeof raw.filterPosition === 'string' ? raw.filterPosition.trim() : '';
   const fn = typeof raw.filterNotes === 'string' ? raw.filterNotes.trim() : '';
+  const locArr = Array.isArray(raw.locations) ? (raw.locations as LocationItem[]) : undefined;
   return {
     id: raw.id,
     company: raw.client ?? raw.company ?? '',
     title: raw.title ?? '',
     location: raw.location ?? raw.city ?? '',
+    locations: locArr,
     salary: raw.salaryMin && raw.salaryMax ? `${raw.salaryMin}-${raw.salaryMax}k ₪` : (raw.salary ?? ''),
     aiMatchScore: typeof raw.matchPercentage === 'number' ? raw.matchPercentage : 0,
     description: raw.description ?? '',
@@ -256,6 +445,9 @@ const CandidateScreeningView: React.FC<{
 }> = ({ onBack, candidateId, candidate }) => {
     const { t } = useLanguage();
     const [jobs, setJobs] = useState<ScreeningJob[]>([]);
+    const [presentationByClientId, setPresentationByClientId] = useState<
+      Record<string, ScreeningPresentationColors>
+    >({});
     const [selectedJobs, setSelectedJobs] = useState<(number | string)[]>([]);
     const [expandedJobId, setExpandedJobId] = useState<number | string | null>(null);
     const [jobsLoading, setJobsLoading] = useState(false);
@@ -289,6 +481,7 @@ const CandidateScreeningView: React.FC<{
         return;
       }
       setJobsLoading(true);
+      setPresentationByClientId({});
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
       if (token) headers.Authorization = `Bearer ${token}`;
@@ -297,16 +490,36 @@ const CandidateScreeningView: React.FC<{
         cache: 'no-store',
       })
         .then((res) => (res.ok ? res.json() : Promise.reject(new Error('pool'))))
-        .then((data: { included?: any[]; excluded?: any[] }) => {
+        .then(
+          (data: {
+            included?: any[];
+            excluded?: any[];
+            presentationByClientId?: Record<string, ScreeningPresentationColors>;
+          }) => {
           const inc = Array.isArray(data?.included) ? data.included : [];
           const exc = Array.isArray(data?.excluded) ? data.excluded : [];
+          const presRaw = data?.presentationByClientId;
+          if (presRaw && typeof presRaw === 'object') {
+            setPresentationByClientId({ ...presRaw });
+          } else {
+            setPresentationByClientId({});
+          }
+          const mapChecks = (row: any) =>
+            Array.isArray(row.evaluationChecks) ? row.evaluationChecks : undefined;
+          const clientFromRow = (row: any) =>
+            row.clientId != null && String(row.clientId).trim() ? String(row.clientId).trim() : null;
+
           const includedList = inc.map((row: any) => ({
             ...mapApiJobToScreeningJob(row.job || {}),
             screeningPath: row.path === 2 ? 2 : row.path === 1 ? 1 : row.path === 3 ? 3 : undefined,
+            evaluationChecks: mapChecks(row),
+            screeningClientId: clientFromRow(row),
           }));
           const excludedList = exc.map((row: any) => ({
             ...mapApiJobToScreeningJob(row.job || {}),
             excludedReasons: Array.isArray(row.reasons) ? row.reasons : [],
+            evaluationChecks: mapChecks(row),
+            screeningClientId: clientFromRow(row),
           }));
           setJobs([...includedList, ...excludedList]);
         })
@@ -991,7 +1204,10 @@ const CandidateScreeningView: React.FC<{
                         ) : (
                         <>
                         {jobs.map((job) => {
-                            const jobExcluded = !!(job.excludedReasons && job.excludedReasons.length);
+                            const locationModel = buildJobLocationDisplayModel({
+                              location: job.location,
+                              locations: job.locations,
+                            });
                             return (
                             <div key={job.id} className={`border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'}`}>
                                 {/* Job Summary */}
@@ -1029,13 +1245,11 @@ const CandidateScreeningView: React.FC<{
                                                     ) : null}
                                                 </p>
                                                 <p className="text-sm text-text-muted">{job.company}</p>
-                                                {jobExcluded ? (
-                                                    <p className="text-xs text-amber-900/90 mt-1.5 leading-snug font-medium">
-                                                        {(job.excludedReasons || [])
-                                                            .map((code) => t(`screening.warn.${code}`))
-                                                            .join(' · ')}
-                                                    </p>
-                                                ) : null}
+                                                <ScreeningEvaluationChecklist
+                                                  job={job}
+                                                  presentationMap={presentationByClientId}
+                                                  t={t}
+                                                />
                                                 {(job.filterPosition || job.filterNotes) ? (
                                                     <div className="mt-2 rounded-lg border border-amber-200/90 bg-amber-50/70 px-2.5 py-1.5 text-[11px] leading-snug text-text-default space-y-1">
                                                         {job.filterPosition ? (
@@ -1056,9 +1270,13 @@ const CandidateScreeningView: React.FC<{
                                              <AIMatchScore score={job.aiMatchScore} />
                                         </div>
                                         
-                                        <div className="flex items-center gap-3 text-xs text-text-subtle mt-2">
-                                             <span className="flex items-center gap-1"><MapPinIcon className="w-3 h-3" /> {job.location}</span>
-                                             <span>•</span>
+                                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-subtle mt-2">
+                                             {locationModel.kind !== 'empty' ? (
+                                               <>
+                                                 <ScreeningJobLocationLine model={locationModel} t={t} />
+                                                 <span aria-hidden className="select-none text-text-subtle">•</span>
+                                               </>
+                                             ) : null}
                                              <span className="font-medium text-text-default">{job.salary}</span>
                                         </div>
                                     </div>

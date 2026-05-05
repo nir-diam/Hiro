@@ -427,6 +427,7 @@ const LIST_GRID_ATTRIBUTES = [
   'preferredWorkModels',
   'jobScopes',
   'availability',
+  'preferredWorkingHours',
   'physicalWork',
   'birthYear',
   'birthMonth',
@@ -463,6 +464,32 @@ const LIST_GRID_ATTRIBUTES = [
 const pushBind = (binds, val) => {
   binds.push(val);
   return binds.length;
+};
+
+/** Persist daily-hours preference (גמיש / ללא אילוצי שעות / HH:mm-HH:mm) on `preferredWorkingHours`. */
+const normalizePreferredWorkingHoursInPayload = (payload) => {
+  if (!payload || typeof payload !== 'object') return;
+  if (!Object.prototype.hasOwnProperty.call(payload, 'preferredWorkingHours')) return;
+  const raw = payload.preferredWorkingHours;
+  if (raw === undefined) {
+    delete payload.preferredWorkingHours;
+    return;
+  }
+  if (raw === null || raw === '') {
+    payload.preferredWorkingHours = null;
+    return;
+  }
+  const s = String(raw).trim();
+  if (!s) {
+    payload.preferredWorkingHours = null;
+    return;
+  }
+  if (s === 'גמיש' || s === 'ללא אילוצי שעות') {
+    payload.preferredWorkingHours = s;
+    return;
+  }
+  const rangeOk = /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(s);
+  payload.preferredWorkingHours = rangeOk ? s : s.slice(0, 255);
 };
 
 /** Normalize typography so job catalog text matches candidate CV text (e.g. גרשיים vs ASCII "). */
@@ -664,6 +691,18 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       }
     }
 
+    /** Preferred daily hours: `preferredWorkingHours` column; fallback to legacy values still stored on `availability`. */
+    const whRaw = String(advanced.workingHours || '').trim();
+    const whFlexible =
+      !whRaw || whRaw === 'גמיש' || whRaw === 'ללא אילוצי שעות';
+    if (whRaw && !whFlexible) {
+      const nEq = pushBind(binds, whRaw);
+      const nLike = pushBind(binds, `%${whRaw}%`);
+      fragments.push(
+        `((NULLIF(TRIM(COALESCE("preferredWorkingHours", '')), '') IS NOT NULL AND (TRIM(COALESCE("preferredWorkingHours", '')) = $${nEq} OR "preferredWorkingHours" ILIKE $${nLike})) OR (NULLIF(TRIM(COALESCE("preferredWorkingHours", '')), '') IS NULL AND NULLIF(TRIM(COALESCE(availability::text, '')), '') IS NOT NULL AND (TRIM(COALESCE(availability::text, '')) = $${nEq} OR availability ILIKE $${nLike})))`,
+      );
+    }
+
     if (Array.isArray(advanced.complexRules)) {
       for (const rule of advanced.complexRules) {
         if (rule.field === 'source' && rule.textValue) {
@@ -846,6 +885,7 @@ const create = async (payload) => {
   }
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;
+  normalizePreferredWorkingHoursInPayload(cleanPayload);
   syncCandidateNameForCreate(cleanPayload);
   return Candidate.create(cleanPayload);
 };
@@ -959,6 +999,8 @@ const update = async (id, payload) => {
       }
     }
   }
+
+  normalizePreferredWorkingHoursInPayload(cleanPayload);
 
   syncCandidateNameForUpdate(cleanPayload, candidate);
 

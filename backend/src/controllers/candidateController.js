@@ -647,7 +647,32 @@ const maritalStatusFromAi = (ai) => {
   return null;
 };
 
-/** Map LLM keys (drivingLicense / drivingLicenses, mobility) onto Candidate fields. Omits empty / placeholder "-". */
+/**
+ * Map LLM output → DB-safe `preferredWorkingHours` (see candidateService.normalizePreferredWorkingHoursInPayload).
+ * Returns null when unknown / empty.
+ */
+const coercePreferredWorkingHoursFromAi = (raw) => {
+  if (raw == null || raw === '') return null;
+  let s = String(raw).trim();
+  if (!s || s === '-') return null;
+  if (s === 'גמיש' || s === 'ללא אילוצי שעות') return s;
+  const lower = s.toLowerCase();
+  if (
+    /גמישות|שעות גמישות|משמרות גמישות|ללא התחייבות לשעות|עבודה גמישה/i.test(s) ||
+    /\bflexible(\s+hours|\s+schedule)?\b/i.test(lower) ||
+    /\bvariable\s+hours\b/i.test(lower)
+  ) {
+    return 'גמיש';
+  }
+  const m = s.match(/(\d{1,2})\s*:\s*(\d{2})\s*[-–—]\s*(\d{1,2})\s*:\s*(\d{2})/);
+  if (m) {
+    const hh = (x) => String(Math.min(23, parseInt(x, 10))).padStart(2, '0');
+    const mm = (x) => String(Math.min(59, parseInt(x, 10))).padStart(2, '0');
+    return `${hh(m[1])}:${mm(m[2])}-${hh(m[3])}:${mm(m[4])}`;
+  }
+  return s.slice(0, 255);
+};
+
 const normalizeMobilityDrivingFromAi = (ai) => {
   if (!ai || typeof ai !== 'object') return {};
   const out = {};
@@ -707,6 +732,9 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
     'title',
     'professionalSummary',
   ].forEach(mergeStr);
+
+  const pwh = coercePreferredWorkingHoursFromAi(ai.preferredWorkingHours ?? fb.preferredWorkingHours);
+  if (pwh) out.preferredWorkingHours = pwh;
 
   const ms = maritalStatusFromAi(ai);
   if (ms) out.maritalStatus = ms;
@@ -1053,6 +1081,8 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
   "email": string|null,
   "phone": string|null,
   "address": string|null,
+  "availability": string|null,
+  "preferredWorkingHours": string|null,
   "title": string|null,
   "professionalSummary": string|null,
   "skills": { "soft": string[], "technical": string[] },
@@ -1087,10 +1117,20 @@ Rules:
 - skills.soft = interpersonal/behavioral skills (e.g., תקשורת בין-אישית, עבודת צוות, מנהיגות, שירותיות, סדר וארגון, פתרון בעיות). Max 30.
 - skills.technical = tools/technologies/platforms/methods/certifications (e.g., Excel, SQL, Python, React, Salesforce, Google Ads, Power BI, Jira, AWS, Docker). Max 30.
 - Prefer realistic date formats; if only year exists use YYYY-01 / YYYY-12.
+- Always include top-level "availability" and "preferredWorkingHours" (null when not stated); see the appended schedule rules at the end of this prompt.
 
 Output constraints:
 - Return STRICT JSON (double quotes, no trailing commas).
 - Do not wrap in \`\`\` fences.
+`;
+
+/** Appended to DB cv_parsing template so schedule fields are emitted even when the stored prompt omits them from its example schema. */
+const CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX = `
+--- Backend-required JSON keys (add to the SAME single JSON object; use null when not stated in the CV) ---
+- "availability": string|null — Notice period, start date, or employment readiness ONLY if explicitly written (e.g. מיידי, חודש התראה, זמין מ-…).
+- "preferredWorkingHours": string|null — Preferred daily work schedule ONLY if explicit. If absent in the CV, use null (do not guess).
+  When present, use ONE of: "גמיש", "ללא אילוצי שעות", or a single 24h range "HH:mm-HH:mm" with zero-padded hours (e.g. "09:00-18:00").
+  Map phrases like "שעות גמישות", "משמרות גמישות", "flexible hours" to "גמיש".
 `;
 
 /** Sequelize attribute type → short label for LLM context */
@@ -1146,6 +1186,7 @@ const buildResumeResponseSchema = () => ({
     'birthYear', 'birthMonth', 'birthDay', 'age',
     'maritalStatus', 'gender',
     'mobility', 'drivingLicenses',
+    'availability', 'preferredWorkingHours',
     'title', 'professionalSummary',
     'skills', 'tags', 'languages', 'workExperience', 'education',
     'industryAnalysis',
@@ -1155,6 +1196,7 @@ const buildResumeResponseSchema = () => ({
     'birthYear', 'birthMonth', 'birthDay', 'age',
     'maritalStatus', 'gender',
     'mobility', 'drivingLicenses',
+    'availability', 'preferredWorkingHours',
     'title', 'professionalSummary',
     'skills', 'tags', 'languages', 'workExperience', 'education',
   ],
@@ -1176,6 +1218,12 @@ const buildResumeResponseSchema = () => ({
       type: 'array',
       items: { type: 'string' },
       description: 'Allowed driving-license codes. Up to 10 items.',
+    },
+    availability:        { type: 'string', nullable: true, description: 'Notice period / start availability if stated in CV' },
+    preferredWorkingHours: {
+      type: 'string',
+      nullable: true,
+      description: 'גמיש | ללא אילוצי שעות | HH:mm-HH:mm when explicit in CV; otherwise null',
     },
     title:               { type: 'string', nullable: true },
     professionalSummary: { type: 'string', nullable: true, description: '2-3 short lines, ≤ 600 chars, no fluff' },
@@ -1299,6 +1347,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);

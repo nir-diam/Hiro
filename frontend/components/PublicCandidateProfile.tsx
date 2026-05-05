@@ -1,10 +1,12 @@
 
-import React from 'react';
+import React, { useState } from 'react';
 import { 
     MapPinIcon, BriefcaseIcon, EnvelopeIcon, PhoneIcon, ArrowDownTrayIcon, 
-    CheckCircleIcon, CalendarDaysIcon, ShareIcon, BuildingOffice2Icon,
+    CheckCircleIcon, ShareIcon, BuildingOffice2Icon,
     AcademicCapIcon, LanguageIcon, SparklesIcon, HiroLogotype
 } from './Icons';
+import { WorkingHoursInput } from './WorkingHoursInput';
+import { useLanguage } from '../context/LanguageContext';
 
 // Mock Data for Public View
 const candidateData = {
@@ -43,6 +45,8 @@ const ExperienceItem: React.FC<{ role: string; company: string; period: string; 
 );
 
 const PublicCandidateProfile: React.FC = () => {
+    const { t } = useLanguage();
+    const [workingHours, setWorkingHours] = useState('גמיש');
     const handleShare = () => {
         if (navigator.share) {
             navigator.share({
@@ -93,17 +97,6 @@ const PublicCandidateProfile: React.FC = () => {
                     </div>
                     <h1 className="text-2xl sm:text-4xl font-extrabold text-white mt-2 sm:mt-4 mb-1 sm:mb-2">{candidateData.name}</h1>
                     <p className="text-lg sm:text-xl text-primary-100 font-medium mb-4 sm:mb-6">{candidateData.title}</p>
-                    
-                    <div className="flex flex-wrap justify-center gap-2 sm:gap-3 text-xs sm:text-sm text-white/90 font-medium">
-                        <div className="flex items-center gap-1.5 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm">
-                            <MapPinIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                            {candidateData.location}
-                        </div>
-                        <div className="flex items-center gap-1.5 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm">
-                            <BriefcaseIcon className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-                            זמינות מיידית
-                        </div>
-                    </div>
                 </div>
             </div>
 
@@ -114,6 +107,29 @@ const PublicCandidateProfile: React.FC = () => {
                     {/* Left Sidebar (Desktop) / Top (Mobile) */}
                     <div className="lg:col-span-1 space-y-6">
                         
+                        <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6">
+                            <h3 className="font-bold text-text-default mb-4">{t('section.personal_details')}</h3>
+                            <div className="flex flex-wrap gap-2 mb-4 text-sm text-text-muted">
+                                <div className="flex items-center gap-1.5 rounded-lg border border-border-default bg-bg-subtle px-3 py-2 font-medium text-text-default">
+                                    <MapPinIcon className="h-4 w-4 shrink-0 text-primary-600" />
+                                    <span>{candidateData.location}</span>
+                                </div>
+                                <div className="flex items-center gap-1.5 rounded-lg border border-border-default bg-bg-subtle px-3 py-2 font-medium text-text-default">
+                                    <BriefcaseIcon className="h-4 w-4 shrink-0 text-primary-600" />
+                                    <span>
+                                        {workingHours === 'גמיש' || workingHours === 'ללא אילוצי שעות' || !workingHours
+                                            ? 'שעות עבודה גמישות'
+                                            : workingHours}
+                                    </span>
+                                </div>
+                            </div>
+                            <WorkingHoursInput
+                                value={workingHours}
+                                onChange={setWorkingHours}
+                                label={t('form.working_hours')}
+                            />
+                        </div>
+
                         {/* Contact Card */}
                         <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6">
                             <h3 className="font-bold text-text-default mb-4">פרטי התקשרות</h3>

@@ -190,6 +190,7 @@ const initialData = {
     jobScope: '',
     jobScopes: [] as string[],
     availability: '',
+    preferredWorkingHours: 'גמיש',
     physicalWork: '',
     preferredWorkModels: [] as string[],
     drivingLicenses: [] as string[],
@@ -272,6 +273,32 @@ const normalizeCandidatePayload = (payload: any) => {
                   ? [jobScopeSingle.trim()]
                   : [],
     };
+
+    const rawAvail = String(out.availability ?? '').trim();
+    const pwIncoming =
+        out.preferredWorkingHours != null ? String(out.preferredWorkingHours).trim() : '';
+    const isRecruitmentEmoji = /^[🟢🟡🟠🔴]/.test(rawAvail);
+    const looksLikeDailyHours =
+        rawAvail === 'גמיש' ||
+        rawAvail === 'ללא אילוצי שעות' ||
+        /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(rawAvail);
+
+    if (isRecruitmentEmoji) {
+        out.availability = rawAvail;
+    } else if (looksLikeDailyHours && rawAvail !== '') {
+        out.availability = '';
+    } else {
+        out.availability = rawAvail;
+    }
+
+    if (pwIncoming !== '') {
+        out.preferredWorkingHours = pwIncoming;
+    } else if (looksLikeDailyHours && rawAvail !== '') {
+        out.preferredWorkingHours = rawAvail;
+    } else {
+        out.preferredWorkingHours = 'גמיש';
+    }
+
     syncCandidateNameFields(out as Record<string, unknown>);
     return out;
 };

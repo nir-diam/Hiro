@@ -233,6 +233,32 @@ const normalizeCandidateData = (data: any) => {
     if (copy.salaryMin !== undefined && copy.salaryMin !== null) copy.salaryMin = Number(copy.salaryMin) || 0;
     if (copy.salaryMax !== undefined && copy.salaryMax !== null) copy.salaryMax = Number(copy.salaryMax) || 0;
     if (!copy.profileName) copy.profileName = copy.title || 'פרופיל';
+
+    const rawAvail = String(copy.availability ?? '').trim();
+    const pwIncoming =
+        copy.preferredWorkingHours != null ? String(copy.preferredWorkingHours).trim() : '';
+    const isRecruitmentEmoji = /^[🟢🟡🟠🔴]/.test(rawAvail);
+    const looksLikeDailyHours =
+        rawAvail === 'גמיש' ||
+        rawAvail === 'ללא אילוצי שעות' ||
+        /^\d{2}:\d{2}-\d{2}:\d{2}$/.test(rawAvail);
+
+    if (isRecruitmentEmoji) {
+        copy.availability = rawAvail;
+    } else if (looksLikeDailyHours && rawAvail !== '') {
+        copy.availability = '';
+    } else {
+        copy.availability = rawAvail;
+    }
+
+    if (pwIncoming !== '') {
+        copy.preferredWorkingHours = pwIncoming;
+    } else if (looksLikeDailyHours && rawAvail !== '') {
+        copy.preferredWorkingHours = rawAvail;
+    } else {
+        copy.preferredWorkingHours = 'גמיש';
+    }
+
     syncCandidateNameFields(copy);
     return copy;
 };
@@ -335,6 +361,7 @@ const EMPTY_CANDIDATE_FORM: Record<string, any> = {
     jobScope: '',
     jobScopes: [] as string[],
     availability: '',
+    preferredWorkingHours: 'גמיש',
     physicalWork: '',
     preferredWorkModels: [] as string[],
     internalNotes: '',

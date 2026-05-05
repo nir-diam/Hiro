@@ -32,6 +32,8 @@ const Candidate = sequelize.define(
     jobScope: DataTypes.STRING,
     /** מודל עבודה מועדף — ריבוי: בית / היברידי / משרד */
     preferredWorkModels: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    /** Preferred daily hours (`WorkingHoursInput`): גמיש or HH:mm-HH:mm; recruitment readiness stays in `availability`. */
+    preferredWorkingHours: DataTypes.STRING,
     availability: DataTypes.STRING,
     physicalWork: DataTypes.STRING,
     birthYear: DataTypes.STRING,

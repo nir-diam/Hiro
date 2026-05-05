@@ -15,6 +15,7 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import JobsAIAnalysisModal from './JobsAIAnalysisModal'; // New Import
+import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
 
 // --- TYPES ---
@@ -56,6 +57,8 @@ export interface Job {
   requirements: string[];
   rating: number; // 1-5 stars
   healthProfile: HealthProfile; 
+  /** Raw HTML notes from API — used for working-hours token filter. */
+  internalNotes?: string;
 }
 
 const statusStyles: { [key in JobStatus]: { text: string; bg: string; border: string; } } = {
@@ -95,6 +98,7 @@ const initialFilters = {
     companySizes: [] as string[],
     companySectors: [] as string[],
     jobScopes: [] as string[],
+    workingHours: 'גמיש',
 };
 
 // --- HELPER FUNCTIONS ---
@@ -879,6 +883,18 @@ const JobsView: React.FC = () => {
                 checkRange(job.salaryMin, job.salaryMax, filters.salaryMin, filters.salaryMax) &&
                 checkRange(job.ageMin, job.ageMax, filters.ageMin, filters.ageMax) &&
                 checkRange(job.openPositions, job.openPositions, filters.positionsMin, filters.positionsMax) &&
+                (() => {
+                    const wh = String(filters.workingHours || '').trim();
+                    if (!wh || wh === 'גמיש' || wh === 'ללא אילוצי שעות') return true;
+                    const hay = [
+                        job.description,
+                        String(job.internalNotes || ''),
+                        ...(Array.isArray(job.requirements) ? job.requirements : []).map((r) => String(r)),
+                    ]
+                        .join(' ')
+                        .toLowerCase();
+                    return hay.includes(wh.toLowerCase());
+                })() &&
                 matchesCompanyIndustry &&
                 matchesScope;
         });
@@ -1189,6 +1205,13 @@ const JobsView: React.FC = () => {
                             <FilterSelect label={t('jobs.col_account_manager')} name="accountManager" value={filters.accountManager} onChange={handleFilterChange} options={filterOptions.accountManagers} placeholder={t('filter.status_all')} />
                             <FilterInput label={t('jobs.col_id')} name="jobId" value={filters.jobId} onChange={handleFilterChange} />
                             <FilterInput label={t('jobs.col_posting_code')} name="postingCode" value={filters.postingCode} onChange={handleFilterChange} />
+                            <div className="col-span-2 lg:col-span-3 xl:col-span-2">
+                                <WorkingHoursInput
+                                    value={filters.workingHours}
+                                    onChange={(v) => setFilters((prev) => ({ ...prev, workingHours: v }))}
+                                    label={t('form.working_hours')}
+                                />
+                            </div>
                              <div className="lg:col-span-2">
                                 <label className="block text-xs font-bold text-text-muted mb-1.5 uppercase tracking-wide">{t('filter.job_scope')}</label>
                                 <div className="flex flex-wrap gap-2">

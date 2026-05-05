@@ -12,8 +12,8 @@ import JobDetailsDrawer from './JobDetailsDrawer';
 import { type Job } from './JobsView';
 import type { Candidate } from './CandidatesListView';
 import { useAuth } from '../context/AuthContext';
+import { useLanguage } from '../context/LanguageContext';
 
-// --- TYPES ---
 type ReferralStatus =
   | 'חדש'
   | 'בבדיקה'
@@ -71,6 +71,8 @@ interface Referral {
   inviteClient: boolean;
   /** Plain body from `notification_messages.text` for this screening send. */
   notificationText: string;
+  /** Prior referral with same subject existed for this candidate (`notification_messages.isRepeat`). */
+  isRepeat: boolean;
 }
 
 interface ReferralsReportViewProps {
@@ -125,6 +127,7 @@ interface ScreeningCvReferralApiRow {
   inviteCandidate?: boolean;
   inviteClient?: boolean;
   notificationText?: string;
+  isRepeat?: boolean;
 }
 
 /** Server aggregate stats (full filtered set, same filters as current page) */
@@ -205,6 +208,7 @@ function mapApiRowToReferral(row: ScreeningCvReferralApiRow): Referral {
     inviteCandidate: Boolean(row.inviteCandidate),
     inviteClient: Boolean(row.inviteClient),
     notificationText: row.notificationText != null ? String(row.notificationText) : '',
+    isRepeat: Boolean(row.isRepeat),
   };
 }
 
@@ -224,17 +228,6 @@ function referralToSummaryCandidate(r: Referral): Candidate {
     phone: r.candidatePhone || '',
   };
 }
-
-const allColumns: { id: keyof Referral | 'actions'; header: string }[] = [
-  { id: 'candidateName', header: 'שם המועמד' },
-  { id: 'clientName', header: 'שם הלקוח' },
-  { id: 'jobTitle', header: 'כותרת המשרה' },
-  { id: 'coordinator', header: 'רכז' },
-  { id: 'status', header: 'סטטוס' },
-  { id: 'referralDate', header: 'תאריך הפניה' },
-  { id: 'lastUpdatedBy', header: 'עודכן ע"י' },
-  { id: 'source', header: 'מקור' },
-];
 
 type ReferralsFilterMultiselectProps = {
   options: string[];
@@ -607,9 +600,25 @@ const userLabelsFromRows = (
 
 const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask, onOpenCandidateSummary }) => {
     const { user } = useAuth();
+    const { t } = useLanguage();
     const today = new Date();
     const thirtyDaysAgo = new Date(new Date().setDate(today.getDate() - 30));
     const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    const allColumns = useMemo(
+        (): { id: keyof Referral | 'actions'; header: string }[] => [
+            { id: 'candidateName', header: t('referrals_view.col_candidateName') },
+            { id: 'clientName', header: t('referrals_view.col_clientName') },
+            { id: 'jobTitle', header: t('referrals_view.col_jobTitle') },
+            { id: 'coordinator', header: t('referrals_view.col_coordinator') },
+            { id: 'status', header: t('referrals_view.col_status') },
+            { id: 'referralDate', header: t('referrals_view.col_referralDate') },
+            { id: 'lastUpdatedBy', header: t('referrals_view.col_lastUpdatedBy') },
+            { id: 'source', header: t('referrals_view.col_source') },
+            { id: 'isRepeat', header: t('referrals_view.col_isRepeat') },
+        ],
+        [t],
+    );
 
     // Data State
     const [referrals, setReferrals] = useState<Referral[]>([]);
@@ -1335,8 +1344,16 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                  return <span className="text-text-muted">{referral.coordinator}</span>;
              case 'lastUpdatedBy':
                  return <span className="text-text-muted">{referral.lastUpdatedBy}</span>;
-             case 'source':
-                 return <span className="text-text-muted">{referral.source}</span>;
+            case 'source':
+                return <span className="text-text-muted">{referral.source}</span>;
+            case 'isRepeat':
+                return referral.isRepeat ? (
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-full border bg-amber-50 text-amber-800 border-amber-200">
+                        {t('referrals_view.repeat_yes')}
+                    </span>
+                ) : (
+                    <span className="text-text-muted text-xs">{t('referrals_view.repeat_no')}</span>
+                );
             default:
                 return (referral as any)[columnId];
         }

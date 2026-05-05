@@ -3,6 +3,7 @@ const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const clientUsageSettingService = require('./clientUsageSettingService');
+const recruitmentStatusPresentationService = require('./recruitmentStatusPresentationService');
 const { resolveStatusGroup, canonicalizeStatusGroup } = require('../utils/recruitmentStatusGroups');
 
 /** Sources treated as explicit application / staff link */
@@ -137,6 +138,100 @@ function checkHardRequirements(candidate, job, settings) {
   return { ok: reasons.length === 0, reasons };
 }
 
+/**
+ * Hard-requirement rows only for constraints that exist on the job (so the UI does not list irrelevant checks).
+ */
+function buildApplicableHardChecks(candidate, job, settings, failedCodes) {
+  const checks = [];
+  const failed = new Set(failedCodes || []);
+  const skills = Array.isArray(job.skills) ? job.skills : [];
+  const hasMandatory = skills.some((s) => s && typeof s === 'object' && norm(s.mode) === 'mandatory');
+  const hasNegative = skills.some((s) => s && typeof s === 'object' && norm(s.mode) === 'negative');
+  if (hasMandatory) checks.push({ code: 'mandatory_skill', ok: !failed.has('mandatory_skill'), category: 'hard_requirements' });
+  if (hasNegative) checks.push({ code: 'negative_skill', ok: !failed.has('negative_skill'), category: 'hard_requirements' });
+  if (settings.requireOriginalCv) checks.push({ code: 'no_cv', ok: !failed.has('no_cv'), category: 'hard_requirements' });
+
+  const lic = job.licenseType ? String(job.licenseType).trim() : '';
+  if (lic && lic !== 'לא חשוב') checks.push({ code: 'license', ok: !failed.has('license'), category: 'hard_requirements' });
+
+  const amin = Number(job.ageMin);
+  const amax = Number(job.ageMax);
+  if (Number.isFinite(amin) || Number.isFinite(amax)) {
+    const age = parseCandidateAge(candidate);
+    if (age == null) checks.push({ code: 'age_unknown', ok: !failed.has('age_unknown'), category: 'hard_requirements' });
+    else {
+      if (Number.isFinite(amin)) checks.push({ code: 'age_min', ok: !failed.has('age_min'), category: 'hard_requirements' });
+      if (Number.isFinite(amax)) checks.push({ code: 'age_max', ok: !failed.has('age_max'), category: 'hard_requirements' });
+    }
+  }
+
+  const jlangs = Array.isArray(job.languages) ? job.languages : [];
+  const hasMandatoryLang = jlangs.some(
+    (jl) => jl && typeof jl === 'object' && (jl.mandatory === true || norm(jl.level) === 'mandatory'),
+  );
+  if (hasMandatoryLang) checks.push({ code: 'mandatory_language', ok: !failed.has('mandatory_language'), category: 'hard_requirements' });
+
+  return checks;
+}
+
+/**
+ * Full pass/fail checklist for screening UI (localized labels on the frontend).
+ */
+function computeEvaluationChecks(candidate, jc, job, settings, group) {
+  const checks = [];
+
+  const advancedBlocked = group === 'advanced' || group === 'hired';
+  checks.push({
+    code: 'already_advanced',
+    ok: !advancedBlocked,
+    category: 'workflow',
+  });
+
+  if (jc.manualOverride === true) {
+    checks.push({
+      code: 'manual_override_path',
+      ok: group === 'applied' || group === 'screening',
+      category: 'workflow',
+    });
+  }
+
+  const affinity = hasAffinity(jc, candidate, job);
+  checks.push({ code: 'affinity', ok: affinity, category: 'eligibility' });
+
+  const hard = checkHardRequirements(candidate, job, settings);
+  checks.push(...buildApplicableHardChecks(candidate, job, settings, hard.reasons));
+
+  checks.push({
+    code: 'profile_valid',
+    ok: withinValidity(candidate, settings.validityDays),
+    category: 'freshness',
+  });
+
+  if (jc.lastExitAt) {
+    const coolBad = cooldownActive(jc.lastExitAt, settings.reScreeningCooldownMonths);
+    checks.push({
+      code: 'cooldown_clear',
+      ok: !coolBad,
+      category: 'freshness',
+      meta: coolBad
+        ? {
+            until: cooldownUntilIso(jc.lastExitAt, settings.reScreeningCooldownMonths),
+            lastExitReason: jc.lastExitReason || null,
+          }
+        : null,
+    });
+  }
+
+  const statusOk = group === 'applied' || group === 'screening' || group === 'exit';
+  checks.push({
+    code: 'status_lane',
+    ok: statusOk,
+    category: 'workflow',
+  });
+
+  return checks;
+}
+
 function withinValidity(candidate, validityDays) {
   if (!Number.isFinite(validityDays) || validityDays <= 0) return true;
   const updated = candidate.updatedAt ? new Date(candidate.updatedAt) : null;
@@ -188,8 +283,8 @@ function buildScreeningJobPayload(job, candidate, jc) {
   };
 }
 
-async function evaluateLink(candidate, jc, job, settings, clientId) {
-  const group = await effectiveGroupForLink(jc, clientId);
+async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomputed = null) {
+  const group = groupPrecomputed != null ? groupPrecomputed : await effectiveGroupForLink(jc, clientId);
   const jobPayload = buildScreeningJobPayload(job, candidate, jc);
   const baseOut = {
     group,
@@ -257,12 +352,22 @@ async function computeScreeningForCandidate(candidateId) {
 
   const included = [];
   const excluded = [];
+  const presentationByClientId = {};
+  const candPlain = candidate.get({ plain: true });
+  const jcPlain = (row) => (row.get ? row.get({ plain: true }) : row);
 
   for (const jc of links) {
     const job = jc.job;
     const settings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
     const clientId = settings.clientId;
-    const ev = await evaluateLink(candidate, jc, job, settings, clientId);
+    if (clientId && !presentationByClientId[clientId]) {
+      presentationByClientId[clientId] =
+        await recruitmentStatusPresentationService.getScreeningPresentationForClient(clientId);
+    }
+
+    const group = await effectiveGroupForLink(jc, clientId);
+    const evaluationChecks = computeEvaluationChecks(candPlain, jcPlain(jc), job, settings, group);
+    const ev = await evaluateLink(candidate, jc, job, settings, clientId, group);
     const row = {
       job: ev.jobPayload,
       jobCandidateId: ev.jobCandidateId,
@@ -270,12 +375,14 @@ async function computeScreeningForCandidate(candidateId) {
       reasons: ev.reasons,
       meta: ev.meta || null,
       matchPercentage: ev.jobPayload.matchPercentage,
+      evaluationChecks,
+      clientId: clientId || null,
     };
     if (ev.include) included.push(row);
     else excluded.push(row);
   }
 
-  return { included, excluded };
+  return { included, excluded, presentationByClientId };
 }
 
 async function computeScreeningForJob(jobId) {
@@ -298,10 +405,19 @@ async function computeScreeningForJob(jobId) {
   const included = [];
   const excluded = [];
 
+  const presentationByClientId = {};
+  if (clientId && !presentationByClientId[clientId]) {
+    presentationByClientId[clientId] =
+      await recruitmentStatusPresentationService.getScreeningPresentationForClient(clientId);
+  }
+
   for (const jc of links) {
     const candidate = jc.candidate;
-    const ev = await evaluateLink(candidate, jc, job, settings, clientId);
     const candPlain = candidate.get ? candidate.get({ plain: true }) : candidate;
+    const jcP = jc.get ? jc.get({ plain: true }) : jc;
+    const group = await effectiveGroupForLink(jc, clientId);
+    const evaluationChecks = computeEvaluationChecks(candPlain, jcP, job, settings, group);
+    const ev = await evaluateLink(candidate, jc, job, settings, clientId, group);
     const row = {
       candidate: candPlain,
       jobCandidateId: ev.jobCandidateId,
@@ -310,12 +426,14 @@ async function computeScreeningForJob(jobId) {
       meta: ev.meta || null,
       matchPercentage:
         typeof candPlain.matchScore === 'number' ? candPlain.matchScore : ev.jobPayload?.matchPercentage ?? 85,
+      evaluationChecks,
+      clientId: clientId || null,
     };
     if (ev.include) included.push(row);
     else excluded.push(row);
   }
 
-  return { job: job.get({ plain: true }), included, excluded };
+  return { job: job.get({ plain: true }), included, excluded, presentationByClientId };
 }
 
 async function precheckManualAdd(jobId, candidateId) {
@@ -372,5 +490,6 @@ module.exports = {
   precheckManualAdd,
   checkHardRequirements,
   hasAffinity,
+  computeEvaluationChecks,
   APPLICATION_SOURCES,
 };

@@ -25,6 +25,7 @@ import BulkChangeStatusModal from './BulkChangeStatusModal';
 import BulkAddToSavedSearchModal from './BulkAddToSavedSearchModal';
 import ChangeSourceModal from './ChangeSourceModal';
 import EventFormModal, { type Event as BulkCandidateEventFormData } from './EventFormModal';
+import { WorkingHoursInput } from './WorkingHoursInput';
 import type { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
@@ -87,6 +88,8 @@ interface AppliedAdvancedSearchPayload {
     hasDegree: boolean;
     languages: { language: string; level: string }[];
     complexRules: { field: string; textValue?: string; value?: string; operator: string }[];
+    /** Matches `candidates.preferredWorkingHours` (fallback: legacy `availability`). Ignored when גמיש / empty. */
+    workingHours: string;
 }
 
 export interface Candidate {
@@ -138,6 +141,10 @@ export interface Candidate {
   /** תאריך קליטה — מסונכרן מ-createdAt ב-API */
   createDate?: string;
   email?: string;
+  /** Recruitment timeline (emoji options), maps to API `availability`. */
+  availability?: string;
+  /** Preferred daily hours (`WorkingHoursInput`), maps to API `preferredWorkingHours`. */
+  preferredWorkingHours?: string;
 }
 
 export const candidatesData: Candidate[] = [
@@ -644,6 +651,7 @@ type ListSearchParamsState = {
     industryExperience: string;
     lastUpdated: DateRange | null;
     interestDate: DateRange | null;
+    workingHours: string;
 };
 
 function createDefaultListSearchParams(): ListSearchParamsState {
@@ -669,6 +677,7 @@ function createDefaultListSearchParams(): ListSearchParamsState {
         industryExperience: '',
         lastUpdated: null,
         interestDate: null,
+        workingHours: 'גמיש',
     };
 }
 
@@ -691,6 +700,7 @@ function mergeListSearchParams(saved: Partial<ListSearchParamsState> | null | un
                 : base.gender,
         lastUpdated: saved.lastUpdated ?? base.lastUpdated,
         interestDate: saved.interestDate ?? base.interestDate,
+        workingHours: typeof saved.workingHours === 'string' ? saved.workingHours : base.workingHours,
         // Always on when hydrating from saved/session; user can uncheck for the current session only.
         includeUnknownAge: true,
         includeUnknownSalary: true,
@@ -731,6 +741,7 @@ function buildAdvancedPayloadFromPanel(
             value: r.value,
             operator: r.operator,
         })),
+        workingHours: String(searchParams.workingHours || 'גמיש').trim() || 'גמיש',
     };
 }
 
@@ -1019,6 +1030,13 @@ function filterCandidatesByAdvancedClient(
             }
         }
 
+        const whRaw = String(adv.workingHours || '').trim();
+        const whFlexible = !whRaw || whRaw === 'גמיש' || whRaw === 'ללא אילוצי שעות';
+        if (!whFlexible) {
+            const hoursBlob = String(c.preferredWorkingHours || c.availability || '').trim();
+            if (hoursBlob !== whRaw && !hoursBlob.includes(whRaw)) return false;
+        }
+
         if (Array.isArray(adv.complexRules)) {
             for (const rule of adv.complexRules) {
                 if (rule.field === 'source' && rule.textValue) {
@@ -1246,6 +1264,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 searchParams.internalSalaryMax !== d.internalSalaryMax,
             languages: languageFilters.length > 0,
             complexRules: complexRules.length > 0,
+            workingHours:
+                String(searchParams.workingHours || '').trim() !== String(advDefaults.workingHours || '').trim(),
         };
     }, [advDefaults, searchParams, languageFilters, complexRules]);
 
@@ -1368,6 +1388,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         location: [c.location, c.address].map((x: unknown) => String(x || '').trim()).filter(Boolean).join(' · ') || '',
         createDate: c.createdAt != null && c.createdAt !== '' ? String(c.createdAt) : '',
         email: c.email != null && c.email !== '' ? String(c.email) : '',
+        availability: c.availability != null && c.availability !== '' ? String(c.availability) : '',
+        preferredWorkingHours:
+            c.preferredWorkingHours != null && String(c.preferredWorkingHours).trim() !== ''
+                ? String(c.preferredWorkingHours).trim()
+                : '',
         };
     }, []);
 
@@ -3090,6 +3115,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                      <span className="flex items-center justify-center gap-1"><GenderMaleIcon className="w-3 h-3"/> {t('filter.gender_male')}</span>
                                 </button>
                             </div>
+                        </div>
+
+                        <div className={`lg:col-span-1 ${advFieldModified.workingHours ? advFieldModifiedClass : ''}`}>
+                            <WorkingHoursInput
+                                value={searchParams.workingHours || 'גמיש'}
+                                onChange={(v) => setSearchParams((prev) => ({ ...prev, workingHours: v }))}
+                                label={t('form.working_hours')}
+                            />
                         </div>
 
                         <div className="lg:col-span-1">

@@ -78,6 +78,17 @@ const NotificationMessage = sequelize.define(
       type: DataTypes.UUID,
       allowNull: true,
     },
+    /** Staff user assigned to this notification task / referral follow-up. */
+    assigneeId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+    },
+    /** True when the same referral (e.g. same subject) was already sent to this candidate. */
+    isRepeat: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
     metadata: {
       type: DataTypes.JSONB,
       allowNull: false,
@@ -91,5 +102,6 @@ const NotificationMessage = sequelize.define(
 
 const User = require('./User');
 NotificationMessage.belongsTo(User, { foreignKey: 'senderUserId', as: 'sender' });
+NotificationMessage.belongsTo(User, { foreignKey: 'assigneeId', as: 'assigneeUser' });
 
 module.exports = NotificationMessage;

@@ -40,6 +40,8 @@ interface ActiveReferral {
   candidateEmail: string;
   inviteCandidate: boolean;
   inviteClient: boolean;
+  /** Prior referral with same subject existed (`notification_messages.isRepeat`). */
+  isRepeat: boolean;
   /** Plain body from `notification_messages.text` for this screening send. */
   notificationText: string;
 }
@@ -68,6 +70,7 @@ interface ScreeningCvReferralApiRow {
   candidateEmail?: string;
   inviteCandidate?: boolean;
   inviteClient?: boolean;
+  isRepeat?: boolean;
   notificationText?: string;
 }
 
@@ -123,6 +126,7 @@ function mapScreeningCvRowToActiveReferral(row: ScreeningCvReferralApiRow): Acti
     candidateEmail: row.candidateEmail != null ? String(row.candidateEmail).trim() : '',
     inviteCandidate: Boolean(row.inviteCandidate),
     inviteClient: Boolean(row.inviteClient),
+    isRepeat: Boolean(row.isRepeat),
     notificationText: row.notificationText != null ? String(row.notificationText) : '',
   };
 }
@@ -242,10 +246,23 @@ const ReferralsView: React.FC<{
         { id: 'referralDate', header: t('referrals_view.col_referralDate') },
         { id: 'source', header: t('referrals_view.col_source') },
         { id: 'coordinator', header: t('referrals_view.col_coordinator') },
+        { id: 'isRepeat', header: t('referrals_view.col_isRepeat') },
     ], [t]);
 
     const defaultVisibleColumns = useMemo(() => allActiveColumns.map(c => c.id as string), [allActiveColumns]);
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
+    const [visibleColumns, setVisibleColumns] = useState<string[]>(() => defaultVisibleColumns);
+    const activeColumnIdsKey = useMemo(() => allActiveColumns.map((c) => c.id).join(','), [allActiveColumns]);
+
+    useEffect(() => {
+        setVisibleColumns((prev) => {
+            const order = allActiveColumns.map((c) => c.id as string);
+            const next = prev.filter((id) => order.includes(id));
+            for (const id of order) {
+                if (!next.includes(id)) next.push(id);
+            }
+            return next.length ? next : order;
+        });
+    }, [activeColumnIdsKey, allActiveColumns]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
@@ -420,8 +437,15 @@ const ReferralsView: React.FC<{
 
         if (activeSortConfig !== null) {
             items.sort((a, b) => {
-                if (a[activeSortConfig.key] < b[activeSortConfig.key]) return activeSortConfig.direction === 'asc' ? -1 : 1;
-                if (a[activeSortConfig.key] > b[activeSortConfig.key]) return activeSortConfig.direction === 'asc' ? 1 : -1;
+                const av = a[activeSortConfig.key];
+                const bv = b[activeSortConfig.key];
+                if (activeSortConfig.key === 'isRepeat') {
+                    const an = av === true ? 1 : 0;
+                    const bn = bv === true ? 1 : 0;
+                    return activeSortConfig.direction === 'asc' ? an - bn : bn - an;
+                }
+                if (av < bv) return activeSortConfig.direction === 'asc' ? -1 : 1;
+                if (av > bv) return activeSortConfig.direction === 'asc' ? 1 : -1;
                 return 0;
             });
         }
@@ -704,6 +728,14 @@ const ReferralsView: React.FC<{
                 );
             case 'candidateName': return <span className="font-bold text-text-default">{referral.candidateName}</span>;
             case 'referralDate': return <span className="text-text-muted text-sm">{new Date(referral.referralDate).toLocaleDateString('he-IL')}</span>;
+            case 'isRepeat':
+                return referral.isRepeat ? (
+                    <span className="text-[10px] font-bold px-2 py-1 rounded-full border bg-amber-50 text-amber-800 border-amber-200">
+                        {t('referrals_view.repeat_yes')}
+                    </span>
+                ) : (
+                    <span className="text-text-muted text-xs">{t('referrals_view.repeat_no')}</span>
+                );
             default: return (referral as any)[columnId];
         }
     };
