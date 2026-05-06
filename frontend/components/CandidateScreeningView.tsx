@@ -13,7 +13,11 @@ import {
     ExclamationTriangleIcon,
     XMarkIcon,
     PencilIcon,
+    PhoneIcon,
+    ClockIcon,
+    ArrowPathIcon,
 } from './Icons';
+import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import ResumeViewer from './ResumeViewer';
 import { InternalOpinionEditorModal, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
 import { useLanguage } from '../context/LanguageContext';
@@ -23,6 +27,9 @@ import {
     buildJobLocationDisplayModel,
     type JobLocationDisplayModel,
 } from '../utils/jobLocationDisplay';
+import { buildResumeDataFromCandidate } from '../utils/screeningResumeData';
+
+export { buildResumeDataFromCandidate };
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -208,27 +215,7 @@ const ScreeningEvaluationChecklist: React.FC<{
     );
   }
 
-  return (
-    <div className="mt-2 rounded-lg border border-border-default/80 bg-bg-subtle/40 px-2 py-2 space-y-1">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-text-muted mb-0.5">
-        {t('screening.checklist.title')}
-      </p>
-      {checks.map((ch, idx) => {
-        const color = pickEvalCheckLineColor(ch, pres);
-        const label = formatEvalCheckLabel(t, ch);
-        return (
-          <div key={`${ch.code}-${idx}`} className="flex items-start gap-2 text-xs leading-snug">
-            <span className="flex-shrink-0 mt-0.5 font-bold" style={{ color }} aria-hidden>
-              {ch.ok ? '✓' : '✗'}
-            </span>
-            <span className="font-medium min-w-0 break-words" style={{ color }}>
-              {label}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
+ 
 };
 
 interface SendModalContact {
@@ -238,7 +225,142 @@ interface SendModalContact {
   email?: string;
 }
 
-const AIMatchScore: React.FC<{ score: number }> = ({ score }) => {
+function screeningMetricLabelHe(code: string): string {
+  const map: Record<string, string> = {
+    already_advanced: 'שלב תהליך',
+    manual_override_path: 'קיצור דרך ידני',
+    affinity: 'הגשה / התאמת תחום',
+    mandatory_skill: 'כישורי חובה',
+    negative_skill: 'כישורים שליליים',
+    no_cv: 'קובץ קו״ח',
+    license: 'רישיון נהיגה',
+    age_unknown: 'גיל',
+    age_min: 'גיל מינימום',
+    age_max: 'גיל מקסימום',
+    mandatory_language: 'שפות חובה',
+    profile_valid: 'תוקף פרופיל',
+    cooldown_clear: 'צינון',
+    status_lane: 'סטטוס קישור',
+  };
+  return map[code] || code;
+}
+
+function screeningChecksToTagCategories(
+  job: ScreeningJob,
+  t: (key: string, opts?: Record<string, string>) => string,
+): TagMatchCategory[] {
+  const checks = job.evaluationChecks;
+  if (!checks?.length) return [];
+  return checks.map((ch) => ({
+    name: screeningMetricLabelHe(ch.code),
+    status: ch.ok ? 'match' : 'gap',
+    candidateTags: [formatEvalCheckLabel(t, ch)],
+  }));
+}
+
+const MatchScoreExplanation: React.FC<{
+  job: ScreeningJob;
+  t: (key: string, opts?: Record<string, string>) => string;
+  onClose: () => void;
+  onReanalyze: () => void;
+  analyzing: boolean;
+}> = ({ job, t, onClose, onReanalyze, analyzing }) => {
+  const checks = job.evaluationChecks || [];
+  const failed = checks.filter((c) => !c.ok);
+  const summary =
+    failed.length === 0
+      ? 'כל בדיקות הסינון האוטומטי עברו — המשרה כלולה במסלול הסינון.'
+      : `${failed.length} בדיקות דורשות תשומת לב לפני המשך טיפול במועמד.`;
+
+  return (
+    <div
+      className="match-score-popup-content absolute z-[100] top-[44px] left-0 md:left-auto md:right-0 w-[min(100vw-2rem,20rem)] bg-white rounded-2xl shadow-2xl border border-border-default overflow-visible animate-in fade-in zoom-in duration-200"
+      onClick={(e) => e.stopPropagation()}
+      dir="rtl"
+    >
+      <div className="absolute -top-2 left-8 w-4 h-4 bg-bg-subtle border-t border-l border-border-default rotate-45 z-0" />
+      <div className="relative z-10 bg-white rounded-2xl overflow-hidden">
+        <div className="p-3 border-b border-border-default flex items-center justify-between bg-bg-subtle/50">
+          <div className="flex items-center gap-2 min-w-0">
+            <SparklesIcon className="w-5 h-5 text-accent-600 shrink-0" />
+            <h3 className="font-bold text-text-default text-sm truncate">ניתוח התאמת סינון</h3>
+          </div>
+          <button type="button" onClick={onClose} className="p-1 hover:bg-bg-hover rounded-full shrink-0">
+            <XMarkIcon className="w-5 h-5 text-text-muted" />
+          </button>
+        </div>
+
+        <div className="p-3 space-y-3 max-h-[70vh] overflow-y-auto">
+          <div className="flex items-center justify-between bg-accent-50 p-2.5 rounded-xl border border-accent-100">
+            <span className="text-xs font-medium text-accent-900">ציון התאמה (מערכת)</span>
+            <span className="text-lg font-black text-accent-600">{job.aiMatchScore}%</span>
+          </div>
+
+          {checks.length === 0 ? (
+            <p className="text-xs text-text-muted leading-snug">
+              אין רשימת בדיקות מפורטת מהשרת — השתמשו ברשימת הסינון למטה בכרטיס.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <h4 className="text-[10px] font-bold text-text-muted uppercase tracking-wide">בדיקות</h4>
+              <div className="space-y-1.5">
+                {checks.map((ch, idx) => (
+                  <div key={`${ch.code}-${idx}`} className="flex items-start gap-2 p-2 rounded-lg hover:bg-bg-subtle/80">
+                    <div
+                      className={`mt-0.5 p-0.5 rounded-full shrink-0 ${ch.ok ? 'bg-green-100' : 'bg-red-100'}`}
+                    >
+                      {ch.ok ? (
+                        <CheckCircleIcon className="w-3.5 h-3.5 text-green-600" />
+                      ) : (
+                        <NoSymbolIcon className="w-3.5 h-3.5 text-red-600" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-bold text-text-muted">{screeningMetricLabelHe(ch.code)}</p>
+                      <p className="text-xs text-text-default leading-snug">{formatEvalCheckLabel(t, ch)}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="pt-2 border-t border-border-default">
+            <p className="text-xs text-text-muted leading-relaxed italic">&quot;{summary}&quot;</p>
+          </div>
+
+          <div className="pt-1 flex items-center justify-between text-[10px] text-text-muted">
+            <div className="flex items-center gap-1">
+              <ClockIcon className="w-3 h-3" />
+              <span>מבוסס נתוני משרה ומועמד עדכניים</span>
+            </div>
+            <button
+              type="button"
+              disabled={analyzing}
+              onClick={(e) => {
+                e.stopPropagation();
+                onReanalyze();
+              }}
+              className="flex items-center gap-1 text-primary-600 font-bold hover:underline disabled:opacity-50"
+            >
+              {analyzing ? (
+                <span className="w-3 h-3 border-2 border-primary-600 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <ArrowPathIcon className="w-3 h-3" />
+              )}
+              <span>חוות דעת AI</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const AIMatchScore: React.FC<{ score: number; onOpen?: (e: React.MouseEvent) => void }> = ({
+  score,
+  onOpen,
+}) => {
     const scoreColor = score > 85 ? 'text-accent-600' : score > 70 ? 'text-primary-600' : 'text-red-600';
     const bgColor = score > 85 ? 'bg-accent-100/70' : score > 70 ? 'bg-primary-100/70' : 'bg-red-100/70';
 
@@ -246,100 +368,16 @@ const AIMatchScore: React.FC<{ score: number }> = ({ score }) => {
         <button
             type="button"
             className={`match-score-popup-trigger flex items-center justify-center gap-1.5 text-sm font-bold px-2.5 py-1 rounded-full ${bgColor} ${scoreColor} hover:ring-2 hover:ring-offset-1 hover:ring-accent-400 transition-all cursor-pointer`}
-            onClick={(e) => e.stopPropagation()}
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpen?.(e);
+            }}
         >
             <SparklesIcon className="w-4 h-4" />
             <span>{score}%</span>
         </button>
     );
 };
-
-/** Empty fallbacks when the candidate has no field data yet. */
-const emptyResumeDefaults = {
-  name: '',
-  contact: '',
-  summary: '',
-  education: undefined as string[] | undefined,
-};
-
-export function buildResumeDataFromCandidate(candidate?: {
-  fullName?: string;
-  title?: string;
-  professionalSummary?: string;
-  workExperience?: any[];
-  education?: any[];
-  skills?: any;
-  email?: string;
-  phone?: string;
-  resumeUrl?: string;
-  resumeFileUrl?: string;
-  resumeText?: string;
-  resumeRaw?: string;
-  resume?: string;
-  parsedResumeText?: string;
-}, candidateId?: string) {
-  if (!candidate) {
-    return { ...emptyResumeDefaults, experience: [''], candidateId: candidateId || undefined };
-  }
-
-  const name = candidate.fullName?.trim() || emptyResumeDefaults.name;
-  const contactParts = [candidate.email, candidate.phone].filter(Boolean);
-  const contact =
-    contactParts.length > 0 ? contactParts.join(' | ') : emptyResumeDefaults.contact;
-
-  const summary =
-    (candidate.professionalSummary && candidate.professionalSummary.trim()) ||
-    (candidate.title && candidate.title.trim()) ||
-    emptyResumeDefaults.summary;
-
-  const experience = Array.isArray(candidate.workExperience) && candidate.workExperience.length > 0
-    ? candidate.workExperience.map((exp: any) => {
-        if (typeof exp === 'string') return exp;
-        const role = String(exp?.role || exp?.title || '').trim();
-        const company = String(exp?.company || exp?.organization || '').trim();
-        const years = String(exp?.years || exp?.period || exp?.date || '').trim();
-        const line1 = [role, company].filter(Boolean).join(', ');
-        const line2 = years ? `<br/>${years}` : '';
-        return `<b>${line1 || 'ניסיון תעסוקתי'}</b>${line2}`;
-      })
-    : [''];
-
-  const education =
-    Array.isArray(candidate.education) && candidate.education.length > 0
-      ? candidate.education.map((edu: any) => {
-          if (typeof edu === 'string') return edu;
-          const deg = String(edu?.degree || edu?.title || '').trim();
-          const inst = String(edu?.institution || edu?.school || '').trim();
-          const years = String(edu?.years || edu?.period || '').trim();
-          const line1 = [deg, inst].filter(Boolean).join(', ');
-          const line2 = years ? `<br/>${years}` : '';
-          return `<b>${line1 || 'השכלה'}</b>${line2}`;
-        })
-      : undefined;
-
-  const skills = candidate.skills;
-  const skillsText = Array.isArray(skills)
-    ? skills.map((s) => (typeof s === 'string' ? s : String(s?.name || s?.label || '').trim())).filter(Boolean).join(', ')
-    : (typeof skills === 'string' ? skills : '');
-
-  const raw =
-    candidate.resumeRaw ||
-    candidate.resumeText ||
-    candidate.parsedResumeText ||
-    candidate.resume ||
-    skillsText;
-
-  return {
-    name,
-    contact,
-    summary,
-    experience,
-    education,
-    raw,
-    resumeUrl: candidate.resumeUrl || candidate.resumeFileUrl || undefined,
-    candidateId: candidateId || undefined,
-  };
-}
 
 function jobContactStableId(x: any, index: number, jobId: string): string {
   const kind = x.kind === 'user' ? 'user' : x.kind === 'contact' ? 'contact' : null;
@@ -468,6 +506,8 @@ const CandidateScreeningView: React.FC<{
     const [sendCvSubmitting, setSendCvSubmitting] = useState(false);
     const [sendAttachOriginalCv, setSendAttachOriginalCv] = useState(true);
     const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
+    const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<number | string | null>(null);
+    const [selectedJobForTags, setSelectedJobForTags] = useState<ScreeningJob | null>(null);
     const resumeSendCvAfterOpinionRef = useRef(false);
     const saveTimeoutByJobRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const candidateResumeData = useMemo(
@@ -535,7 +575,24 @@ const CandidateScreeningView: React.FC<{
       setSendCvModalOpen(false);
       setSendModalJobIds([]);
       setSelectedContactsByJob({});
+      setActiveMatchScorePopup(null);
+      setSelectedJobForTags(null);
     }, [candidateId]);
+
+    useEffect(() => {
+      const handleClickOutside = (event: MouseEvent) => {
+        const target = event.target as Element;
+        if (
+          activeMatchScorePopup != null &&
+          !target.closest('.match-score-popup-trigger') &&
+          !target.closest('.match-score-popup-content')
+        ) {
+          setActiveMatchScorePopup(null);
+        }
+      };
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [activeMatchScorePopup]);
 
     useEffect(() => {
       if (!candidateId || !apiBase || jobs.length === 0) return;
@@ -807,15 +864,20 @@ const CandidateScreeningView: React.FC<{
     }, []);
 
     const handleSelectJob = (jobId: number | string) => {
-        setSelectedJobs((prev) => (prev.includes(jobId) ? prev.filter((id) => id !== jobId) : [...prev, jobId]));
+      const row = jobs.find((j) => j.id === jobId);
+      if (row?.excludedReasons?.length) return;
+      setSelectedJobs((prev) =>
+        prev.includes(jobId) ? prev.filter((id) => id !== jobId) : [...prev, jobId],
+      );
     };
 
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.checked) {
-            setSelectedJobs(jobs.map((j) => j.id));
-        } else {
-            setSelectedJobs([]);
-        }
+      const selectable = jobs.filter((j) => !(j.excludedReasons && j.excludedReasons.length));
+      if (e.target.checked) {
+        setSelectedJobs(selectable.map((j) => j.id));
+      } else {
+        setSelectedJobs([]);
+      }
     };
 
     const closeRejectModal = useCallback(() => {
@@ -1134,9 +1196,14 @@ const CandidateScreeningView: React.FC<{
     const sendCvSendDisabled =
       sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail || (!sendAttachOriginalCv && !sendAttachSystemPdf);
 
+    const selectableJobs = useMemo(
+      () => jobs.filter((j) => !(j.excludedReasons && j.excludedReasons.length)),
+      [jobs],
+    );
+
     const allSelected = useMemo(
-      () => jobs.length > 0 && selectedJobs.length === jobs.length,
-      [jobs, selectedJobs],
+      () => selectableJobs.length > 0 && selectableJobs.every((j) => selectedJobs.includes(j.id)),
+      [selectableJobs, selectedJobs],
     );
 
     const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').slice(0, 2);
@@ -1189,7 +1256,7 @@ const CandidateScreeningView: React.FC<{
                                 checked={allSelected}
                                 onChange={handleSelectAll}
                                 id="select-all-jobs"
-                                disabled={jobsLoading || jobs.length === 0}
+                                disabled={jobsLoading || selectableJobs.length === 0}
                             />
                             <label htmlFor="select-all-jobs" className="text-sm text-text-muted cursor-pointer">בחר הכל</label>
                         </div>
@@ -1208,8 +1275,12 @@ const CandidateScreeningView: React.FC<{
                               location: job.location,
                               locations: job.locations,
                             });
+                            const jobExcluded = !!(job.excludedReasons && job.excludedReasons.length);
+                            const showGapStrip =
+                              jobExcluded ||
+                              !!(job.evaluationChecks && job.evaluationChecks.some((c) => !c.ok));
                             return (
-                            <div key={job.id} className={`border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'}`}>
+                            <div key={job.id} className={`relative border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'} ${activeMatchScorePopup === job.id ? 'z-[55]' : ''}`}>
                                 {/* Job Summary */}
                                 <div
                                     className="flex items-start gap-3 p-3 cursor-pointer"
@@ -1221,13 +1292,13 @@ const CandidateScreeningView: React.FC<{
                                             className="h-5 w-5 rounded border-border-default text-primary-600 focus:ring-primary-500"
                                             checked={selectedJobs.includes(job.id)}
                                             onChange={() => handleSelectJob(job.id)}
-                                            disabled={jobsLoading}
+                                            disabled={jobsLoading || jobExcluded}
                                         />
                                     </div>
                                     
                                     <div className="flex-1 min-w-0">
-                                        <div className="flex justify-between items-start mb-1">
-                                             <div>
+                                        <div className="flex justify-between items-start mb-1 gap-2">
+                                             <div className="min-w-0 flex-1">
                                                 <p className="font-bold text-text-default text-base leading-tight flex flex-wrap items-center gap-2">
                                                     {job.title}
                                                     {job.screeningPath === 2 ? (
@@ -1267,7 +1338,28 @@ const CandidateScreeningView: React.FC<{
                                                     </div>
                                                 ) : null}
                                              </div>
-                                             <AIMatchScore score={job.aiMatchScore} />
+                                             <div className="relative shrink-0">
+                                                {activeMatchScorePopup === job.id ? (
+                                                    <MatchScoreExplanation
+                                                      job={job}
+                                                      t={t}
+                                                      onClose={() => setActiveMatchScorePopup(null)}
+                                                      onReanalyze={() => {
+                                                        void handleGenerateInternalOpinion(job);
+                                                        setActiveMatchScorePopup(null);
+                                                      }}
+                                                      analyzing={loadingOpinionForJobId === job.id}
+                                                    />
+                                                ) : null}
+                                                <AIMatchScore
+                                                  score={job.aiMatchScore}
+                                                  onOpen={() =>
+                                                    setActiveMatchScorePopup((prev) =>
+                                                      prev === job.id ? null : job.id,
+                                                    )
+                                                  }
+                                                />
+                                             </div>
                                         </div>
                                         
                                         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-subtle mt-2">
@@ -1279,6 +1371,62 @@ const CandidateScreeningView: React.FC<{
                                              ) : null}
                                              <span className="font-medium text-text-default">{job.salary}</span>
                                         </div>
+
+                                        {job.evaluationChecks && job.evaluationChecks.length > 0 ? (
+                                            <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 items-center">
+                                                {job.evaluationChecks.map((match, idx) => (
+                                                    <div key={`${match.code}-${idx}`} className="flex items-center gap-1.5 shrink-0">
+                                                        <span
+                                                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                                                match.ok ? 'bg-green-500' : 'bg-red-500'
+                                                            }`}
+                                                        />
+                                                        <span className="text-[11px] text-text-muted">
+                                                            {screeningMetricLabelHe(match.code)}:
+                                                        </span>
+                                                        <span
+                                                            className={`text-[11px] font-bold ${
+                                                                match.ok ? 'text-text-default' : 'text-red-700'
+                                                            }`}
+                                                        >
+                                                            {match.ok ? 'עומד' : 'לא עומד'}
+                                                        </span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        ) : null}
+
+                                        {showGapStrip ? (
+                                            <div
+                                                className="mt-3 flex items-center justify-between gap-2 bg-red-50 p-2.5 rounded-lg border border-red-100 cursor-pointer"
+                                                onClick={(e) => {
+                                                    e.stopPropagation();
+                                                    setSelectedJobForTags(job);
+                                                }}
+                                            >
+                                                <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                    <span className="font-bold text-red-600 text-[11px] shrink-0">
+                                                        פערי סינון:
+                                                    </span>
+                                                    <span className="text-red-700 text-[11px] truncate">
+                                                        {jobExcluded && job.excludedReasons?.length
+                                                            ? job.excludedReasons
+                                                                  .map((c) => t(`screening.warn.${c}`))
+                                                                  .join(' · ')
+                                                            : (job.evaluationChecks || [])
+                                                                  .filter((x) => !x.ok)
+                                                                  .map((x) => formatEvalCheckLabel(t, x))
+                                                                  .join(' · ') || '—'}
+                                                    </span>
+                                                </div>
+                                                <button
+                                                    type="button"
+                                                    className="text-[10px] font-bold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md bg-white border border-border-default shadow-sm shrink-0"
+                                                >
+                                                    פרטים
+                                                </button>
+                                            </div>
+                                        ) : null}
                                     </div>
                                      <div className="self-center pl-1">
                                         <ChevronDownIcon className={`w-5 h-5 text-text-muted transition-transform ${expandedJobId === job.id ? 'rotate-180' : ''}`} />
@@ -1322,7 +1470,9 @@ const CandidateScreeningView: React.FC<{
                                                 </div>
                                             </div>
                                             <div>
-                                                <h5 className="font-bold text-text-muted mb-1 text-xs uppercase"> התרשמות טלפונית
+                                                <h5 className="font-bold text-text-muted mb-1 text-xs uppercase flex items-center gap-1">
+                                                    <PhoneIcon className="w-3 h-3" />
+                                                    התרשמות טלפונית
                                                 </h5>
                                                 <textarea
                                                     rows={2}
@@ -1356,7 +1506,15 @@ const CandidateScreeningView: React.FC<{
                                                             <ArrowsPointingOutIcon className="w-3 h-3" />
                                                             ערוך והרחב
                                                         </button>
-                                                        <button type="button" className="text-[10px] font-bold text-red-600 hover:text-red-700 flex items-center gap-1 bg-red-50 px-2 py-1 rounded-md border border-red-100 transition-colors" title="דווח על אי-דיוק">
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleReportOpinionIssue();
+                                                            }}
+                                                            className="text-[10px] font-bold text-red-600 hover:text-red-700 flex items-center gap-1 bg-red-50 px-2 py-1 rounded-md border border-red-100 transition-colors"
+                                                            title="דווח על אי-דיוק"
+                                                        >
                                                             <ExclamationTriangleIcon className="w-3 h-3" />
                                                             דווח
                                                         </button>
@@ -1407,6 +1565,16 @@ const CandidateScreeningView: React.FC<{
                     <PaperAirplaneIcon className="w-5 h-5" />
                 </button>
             </div>
+
+            {selectedJobForTags ? (
+              <TagMatchPanel
+                isOpen
+                onClose={() => setSelectedJobForTags(null)}
+                title={selectedJobForTags.title}
+                subtitle={selectedJobForTags.company}
+                categories={screeningChecksToTagCategories(selectedJobForTags, t)}
+              />
+            ) : null}
 
             <InternalOpinionEditorModal
                 job={opinionEditJob}

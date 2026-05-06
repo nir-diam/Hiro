@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeftIcon, ChevronRightIcon, CheckCircleIcon, NoSymbolIcon, XMarkIcon } from './Icons';
 import ResumeViewer from './ResumeViewer';
 import JobDetailsDrawer from './JobDetailsDrawer';
-import { buildResumeDataFromCandidate } from './CandidateScreeningView';
+import { buildResumeDataFromCandidate } from '../utils/screeningResumeData';
 import { useLanguage } from '../context/LanguageContext';
 
 const apiBase = () => import.meta.env.VITE_API_BASE || '';
