@@ -1519,6 +1519,21 @@ const jobFieldFromCategoryRole = (category: string, role: string): SelectedJobFi
 const isJobFieldComplete = (jobField: SelectedJobField | null | undefined): boolean =>
     Boolean(jobField?.category?.trim() && jobField?.role?.trim());
 
+/** DB ENUM + UI label: פעילה in the form maps to פתוחה in the API (see Job model). */
+const jobStatusApiToForm = (status: string | undefined | null): string => {
+    const s = String(status ?? '').trim();
+    if (s === 'פתוחה') return 'פעילה';
+    if (s === 'טיוטה' || s === 'מוקפאת' || s === 'מאוישת') return s;
+    return 'טיוטה';
+};
+
+const jobStatusFormToApi = (status: string | undefined | null): string => {
+    const s = String(status ?? '').trim();
+    if (s === 'פעילה') return 'פתוחה';
+    if (s === 'טיוטה' || s === 'מוקפאת' || s === 'מאוישת' || s === 'פתוחה') return s;
+    return 'טיוטה';
+};
+
 const sections = [
     { id: 'general-info', titleKey: 'new_job.section_general', icon: <BriefcaseIcon className="w-5 h-5"/> },
     { id: 'description-content', titleKey: 'new_job.section_description', icon: <PencilIcon className="w-5 h-5"/> },
@@ -1556,6 +1571,8 @@ const initialJobState = {
     postingCode: defaultPostingCode, 
     uniqueEmail: defaultUniqueEmail,
     creationDate: new Date().toLocaleDateString('he-IL'),
+    /** ISO string for PUT payload; null = use "now" on create */
+    openDateIso: null as string | null,
     status: 'טיוטה', 
     priority: 'רגילה' as Priority, 
     healthProfile: 'standard', 
@@ -1722,7 +1739,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 })()),
                 salaryMin: jobData.salaryMin || prev.salaryMin,
                 salaryMax: jobData.salaryMax || prev.salaryMax,
-                status: jobData.status || prev.status,
+                status:
+                    jobData.status != null && String(jobData.status).trim() !== ''
+                        ? jobStatusApiToForm(String(jobData.status))
+                        : prev.status,
+                openDateIso: jobData.openDate
+                    ? new Date(jobData.openDate).toISOString()
+                    : prev.openDateIso,
                 priority: jobData.priority || prev.priority,
                 healthProfile: jobData.healthProfile || 'standard',
                 jobType: Array.isArray(jobData.jobType)
@@ -2708,11 +2731,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             ageMin: data.ageMin,
             ageMax: data.ageMax,
             openPositions: typeof data.openPositions === 'number' ? data.openPositions : 1,
-            status: data.status === 'פעילה' ? 'פתוחה' : data.status,
+            status: jobStatusFormToApi(data.status),
             associatedCandidates: 0,
             waitingForScreening: 0,
             activeProcess: 0,
-            openDate: new Date().toISOString(),
+            openDate: data.openDateIso || new Date().toISOString(),
             recruiter: recruiterName,
             location: locationString,
             jobType: Array.isArray(data.jobType) ? data.jobType : [data.jobType],
@@ -3077,7 +3100,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                        <div className="lg:col-span-1">
                            <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.status')}</label>
                             <select name="status" value={formData.status} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm">
-                                <option>טיוטה</option><option>פעילה</option><option>מוקפאת</option>
+                                <option value="טיוטה">טיוטה</option>
+                                <option value="פעילה">פעילה</option>
+                                <option value="מוקפאת">מוקפאת</option>
+                                <option value="מאוישת">מאוישת</option>
                             </select>
                        </div>
 

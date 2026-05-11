@@ -31,6 +31,7 @@ const auditLogRoutes = require('./routes/auditLogRoutes');
 const messagingRoutes = require('./routes/messagingRoutes');
 const referenceInfoRoutes = require('./routes/referenceInfoRoutes');
 const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateAdminRoutes } = require('./routes/messageTemplateRoutes');
+const matchingEngineRoutes = require('./routes/matchingEngineRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -70,6 +71,7 @@ app.use('/api/messaging', messagingRoutes);
 app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
+app.use('/api/admin/matching-engine', matchingEngineRoutes);
 
 const start = async () => {
   try {

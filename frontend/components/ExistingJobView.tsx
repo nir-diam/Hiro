@@ -2,14 +2,16 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
+import type { Candidate } from './CandidatesListView';
 import JobDetailsSidebar from './JobDetailsSidebar';
 import NewJobView from './NewJobView';
 import { 
     PencilIcon, ClockIcon, UserGroupIcon, ChevronDownIcon, SparklesIcon, 
     UserPlusIcon, ArrowLeftIcon, ChartBarIcon, FunnelIcon, ShareIcon,
-    CheckCircleIcon, ExclamationTriangleIcon, FireIcon, ChevronUpIcon
+    CheckCircleIcon, ExclamationTriangleIcon, FireIcon, ChevronUpIcon, SonarIcon
 } from './Icons';
 import JobCandidatesView from './JobCandidatesView';
+import JobSonarView from './JobSonarView';
 import JobEventsView, { getJobEventApiHeaders } from './JobEventsView';
 import PublishJobView from './PublishJobView';
 import { mockExistingJob, mockJobCandidates } from '../data/mockJobData';
@@ -64,12 +66,12 @@ const createJobEventFunctionDeclaration: FunctionDeclaration = {
 interface ExistingJobViewProps {
   onCancel: () => void;
   onSave: (jobData: any) => void;
-  openSummaryDrawer: (candidateId: number) => void;
+  openSummaryDrawer: (candidate: Candidate | number) => void;
 }
 
 const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, openSummaryDrawer }) => {
     const { t } = useLanguage();
-    const [mainView, setMainView] = useState<'edit' | 'events' | 'candidates' | 'publish'>('edit');
+    const [mainView, setMainView] = useState<'edit' | 'events' | 'candidates' | 'publish' | 'sonar'>('edit');
     const [isChatOpen, setIsChatOpen] = useState(false);
     const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
     const [isSidebarExpanded, setIsSidebarExpanded] = useState(window.innerWidth >= 1024);
@@ -424,6 +426,14 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                             <UserGroupIcon className="w-5 h-5" />
                             {t('job.tab_candidates')}
                         </button>
+                        <button
+                            type="button"
+                            onClick={() => setMainView('sonar')}
+                            className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'sonar' ? 'bg-accent-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
+                        >
+                            <SonarIcon className={`w-5 h-5 ${mainView === 'sonar' ? 'animate-pulse' : ''}`} />
+                            {t('job.tab_sonar')}
+                        </button>
                         <button 
                             onClick={() => setMainView('edit')}
                             className={`flex-1 py-2.5 px-4 rounded-lg font-bold text-sm transition-all flex items-center justify-center gap-2 ${mainView === 'edit' ? 'bg-primary-600 text-white shadow-md' : 'text-text-muted hover:bg-bg-hover'}`}
@@ -449,6 +459,9 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
 
                     <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm min-h-[600px]">
                         {mainView === 'candidates' && <JobCandidatesView openSummaryDrawer={openSummaryDrawer} jobId={jobDataState.id} />}
+                        {mainView === 'sonar' && (
+                            <JobSonarView jobId={jobDataState.id} job={jobDataState as Record<string, unknown>} openSummaryDrawer={openSummaryDrawer} />
+                        )}
                         {mainView === 'edit' && (
                             <div className="p-6">
                                 <NewJobView

@@ -1,11 +1,12 @@
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { TagIcon, WrenchScrewdriverIcon, UserGroupIcon } from './Icons';
+import { TagIcon, WrenchScrewdriverIcon, UserGroupIcon, BriefcaseIcon } from './Icons';
 
 const TAB_ITEMS = [
     { to: '/admin/tags/list', label: 'ניהול תגיות', icon: TagIcon },
     { to: '/admin/tags/corrections', label: 'תיקון תגיות', icon: WrenchScrewdriverIcon },
     { to: '/admin/tags/candidates', label: 'תגיות מועמדים', icon: UserGroupIcon },
+    { to: '/admin/tags/jobs', label: 'תגיות משרות', icon: BriefcaseIcon },
 ];
 
 const AdminTagsUnifiedView: React.FC = () => {

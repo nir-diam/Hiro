@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { 
     SparklesIcon, 
     TagIcon, 
@@ -14,8 +14,11 @@ import {
     UserGroupIcon,
     BuildingOffice2Icon,
     ShieldCheckIcon,
-    AdjustmentsHorizontalIcon,
-    BoltIcon
+    ScaleIcon,
+    FolderIcon,
+    XCircleIcon,
+    TrashIcon,
+    PlusIcon
 } from './Icons';
 
 interface WeightSetting {
@@ -26,20 +29,51 @@ interface WeightSetting {
     description: string;
 }
 
+const API_BASE        = import.meta.env.VITE_API_BASE || '';
+const API_CONFIG      = `${API_BASE}/api/admin/matching-engine/config`;
+const API_PRESETS     = `${API_BASE}/api/admin/matching-engine/presets`;
+const API_CLIENTS     = `${API_BASE}/api/clients`;
+
+const buildHeaders = (json = false): Record<string, string> => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const h: Record<string, string> = { Accept: 'application/json' };
+    if (json) h['Content-Type'] = 'application/json';
+    if (token) h.Authorization = `Bearer ${token}`;
+    return h;
+};
+
+interface DbPreset {
+    id: number;
+    configKey: string;
+    label: string;
+    description: string;
+    clientIds: string[];
+    config: Record<string, unknown>;
+    createdAt: string;
+}
+
+interface ClientOption {
+    id: string;
+    name: string;
+    displayName?: string;
+}
+
 const AdminMatchingEngineView: React.FC = () => {
+    const [isLoading, setIsLoading] = useState(true);
+
     // Main Algorithm Weights
     const [mainWeights, setMainWeights] = useState<WeightSetting[]>([
         { 
             id: 'vector', 
             label: 'חיפוש סמנטי (Vector)', 
-            value: 25, 
+            value: 20, 
             icon: <SparklesIcon className="w-5 h-5 text-purple-500" />,
             description: 'הבנת הקשר ומשמעות מעבר למילות מפתח מדויקות'
         },
         { 
             id: 'tags', 
             label: 'שכבת תגיות (Tags)', 
-            value: 40, 
+            value: 35, 
             icon: <TagIcon className="w-5 h-5 text-blue-500" />,
             description: 'דיוק לפי 9 קטגוריות הליבה המובנות'
         },
@@ -57,6 +91,21 @@ const AdminMatchingEngineView: React.FC = () => {
             icon: <BriefcaseIcon className="w-5 h-5 text-orange-500" />,
             description: 'איכות המעסיקים הקודמים והתאמה לתעשייה'
         },
+        { 
+            id: 'intent', 
+            label: 'זיקה למשרה (Intent)', 
+            value: 10, 
+            icon: <UserGroupIcon className="w-5 h-5 text-rose-500" />,
+            description: 'הגשה ספציפית למשרה או התעניינות בתחום משיק'
+        },
+    ]);
+
+    const [intentWeights, setIntentWeights] = useState<WeightSetting[]>([
+        { id: 'exact', label: 'אותה משרה בדיוק', value: 100, icon: <UserGroupIcon className="w-4 h-4" />, description: 'הגשה מפורשת למשרה זו' },
+        { id: 'role', label: 'אותו תפקיד (ROLE)', value: 80, icon: <BriefcaseIcon className="w-4 h-4" />, description: 'הגשה למשרה באותו טייטל' },
+        { id: 'cluster', label: 'אותו קלאסטר (CLUSTER)', value: 50, icon: <TagIcon className="w-4 h-4" />, description: 'הגשה לתפקיד קרוב סמנטית' },
+        { id: 'category', label: 'אותה קטגוריה (CATEGORY)', value: 20, icon: <FolderIcon className="w-4 h-4" />, description: 'הגשה לאותו תחום מקצועי כללי' },
+        { id: 'different', label: 'תחום אחר לגמרי', value: 0, icon: <XCircleIcon className="w-4 h-4" />, description: 'הגשה לתפקיד ללא הקשר' },
     ]);
 
     // Internal Tag Category Weights
@@ -81,9 +130,11 @@ const AdminMatchingEngineView: React.FC = () => {
 
     // Geo Regional Logic
     const [geoRegions, setGeoRegions] = useState([
-        { id: 'center', label: 'מרכז וגוש דן', grace: 15, penaltyPerKm: 2 },
-        { id: 'north_south', label: 'צפון / דרום / פריפריה', grace: 30, penaltyPerKm: 1 },
+        { id: 'center', label: 'מרכז, שרון וגוש דן', grace: 15, penaltyPerKm: 2 },
+        { id: 'shfela', label: 'השפלה', grace: 20, penaltyPerKm: 1.5 },
         { id: 'jerusalem', label: 'ירושלים והסביבה', grace: 20, penaltyPerKm: 1.5 },
+        { id: 'north', label: 'צפון', grace: 30, penaltyPerKm: 1 },
+        { id: 'south', label: 'דרום', grace: 30, penaltyPerKm: 1 },
     ]);
 
     const [missingGeoScore, setMissingGeoScore] = useState(50);
@@ -118,6 +169,7 @@ const AdminMatchingEngineView: React.FC = () => {
         region: 'center',
         tagSource: 'recruiter',
         vectorScore: 85,
+        intentType: 'exact',
         expectedSalary: 22000,
         offeredSalary: 20000,
         simSalaryDiffThreshold: 10,
@@ -141,105 +193,102 @@ const AdminMatchingEngineView: React.FC = () => {
 
     const runSimulation = async () => {
         setIsSimulating(true);
-        
-        // Prepare config from state
-        const config: any = {
-            mainWeights: {
-                vector: mainWeights.find(w => w.id === 'vector')?.value! / 100,
-                tags: mainWeights.find(w => w.id === 'tags')?.value! / 100,
-                geo: mainWeights.find(w => w.id === 'geo')?.value! / 100,
-                experience: isExperienceEnabled ? (mainWeights.find(w => w.id === 'experience')?.value! / 100) : 0
-            },
-            tagCategoryWeights: tagWeights.reduce((acc, w) => ({ ...acc, [w.id]: w.value }), {}),
-            tagSourceWeights: sourceWeights.reduce((acc, w) => ({ ...acc, [w.id]: w.value / 100 }), {}),
-            geoRegions: geoRegions.reduce((acc, r) => ({ 
-                ...acc, 
-                [r.id]: { grace: r.grace, penaltyPerKm: r.penaltyPerKm } 
-            }), {}),
-            missingGeoScore,
-            missingSalaryScore
-        };
 
-        // Advanced Simulation Logic:
-        // Use the manual performance sliders to calculate weighted totals
-        
-        // 1. Vector Score
-        const vectorScore = simCandidate.vectorScore;
+        // ── Raw layer weights (e.g. vector=20, tags=35 …) ──────────────────────
+        const vW  = mainWeights.find(w => w.id === 'vector')?.value    ?? 0;
+        const tW  = mainWeights.find(w => w.id === 'tags')?.value      ?? 0;
+        const gW  = mainWeights.find(w => w.id === 'geo')?.value       ?? 0;
+        const eW  = isExperienceEnabled
+                        ? (mainWeights.find(w => w.id === 'experience')?.value ?? 0)
+                        : 0;
+        const iW  = mainWeights.find(w => w.id === 'intent')?.value    ?? 0;
 
-        // 2. Tags Score (Weighted average of category scores based on tagWeights config)
+        // TotalCoreWeights — used as denominator so the formula always yields 0–100
+        const totalCoreWeights = vW + tW + gW + eW + iW;
+
+        // ── 1. Vector score ────────────────────────────────────────────────────
+        const vectorScore = simCandidate.vectorScore; // 0–100
+
+        // ── 2. Tags score — weighted average across tag categories ─────────────
         let totalTagWeighted = 0;
-        let totalTagWeight = 0;
+        let totalTagWeight   = 0;
         tagWeights.forEach(w => {
-            const score = simCandidate.tagScores[w.id] || 0;
+            const score = simCandidate.tagScores[w.id] ?? 0;
             totalTagWeighted += score * w.value;
-            totalTagWeight += w.value;
+            totalTagWeight   += w.value;
         });
-        const tagsScore = totalTagWeight > 0 ? totalTagWeighted / totalTagWeight : 0;
+        const tagsScore = totalTagWeight > 0 ? totalTagWeighted / totalTagWeight : 0; // 0–100
 
-        // 3. Geo Score (Calculated from distance slider)
+        // ── 3. Geo score — grace + per-km penalty ──────────────────────────────
         let geoScore = 0;
         if (simCandidate.missingAddress) {
-            geoScore = config.missingGeoScore;
+            geoScore = missingGeoScore;
         } else {
-            const region = geoRegions.find(r => r.id === simCandidate.region) || geoRegions[0];
+            const region = geoRegions.find(r => r.id === simCandidate.region) ?? geoRegions[0];
             if (simCandidate.distance <= region.grace) {
                 geoScore = 100;
             } else {
                 const excess = simCandidate.distance - region.grace;
-                geoScore = Math.max(0, 100 - (excess * region.penaltyPerKm));
+                geoScore = Math.max(0, 100 - excess * region.penaltyPerKm);
             }
         }
 
-        // 4. Experience Score (Now 100% Industry Match)
-        const expScore = simCandidate.industryMatch;
+        // ── 4. Experience score (industry match %) ─────────────────────────────
+        const expScore = simCandidate.industryMatch; // 0–100
 
-        // 5. Penalties
-        // 5a. Salary Penalty
+        // ── 5. Intent score (from intent-weight lookup) ────────────────────────
+        const intentScore = intentWeights.find(w => w.id === simCandidate.intentType)?.value ?? 0; // 0–100
+
+        // ── Core weighted score (normalised) ───────────────────────────────────
+        // Formula: Σ(score_i * weight_i) / TotalCoreWeights
+        const coreScore = totalCoreWeights > 0
+            ? (vectorScore * vW + tagsScore * tW + geoScore * gW + expScore * eW + intentScore * iW) / totalCoreWeights
+            : 0;
+
+        // ── 6. Salary penalty ──────────────────────────────────────────────────
         let salaryPenaltyPoints = 0;
         if (simCandidate.missingSalary) {
-            salaryPenaltyPoints = config.missingSalaryScore;
+            salaryPenaltyPoints = missingSalaryScore;
         } else if (simCandidate.expectedSalary > simCandidate.offeredSalary) {
-            const diffPercent = ((simCandidate.expectedSalary - simCandidate.offeredSalary) / simCandidate.offeredSalary) * 100;
-            if (diffPercent >= simCandidate.simSalaryDiffThreshold) {
-                const penaltyMultiplier = Math.floor(diffPercent / simCandidate.simSalaryDiffThreshold);
-                salaryPenaltyPoints = penaltyMultiplier * simCandidate.simSalaryPenalty;
+            const diffPct = ((simCandidate.expectedSalary - simCandidate.offeredSalary) / simCandidate.offeredSalary) * 100;
+            if (diffPct >= simCandidate.simSalaryDiffThreshold && simCandidate.simSalaryDiffThreshold > 0) {
+                salaryPenaltyPoints = Math.floor(diffPct / simCandidate.simSalaryDiffThreshold) * simCandidate.simSalaryPenalty;
             }
         }
 
-        // 5b. Age Gap Penalty
+        // ── 7. Age gap penalty ─────────────────────────────────────────────────
         let ageGapPenaltyPoints = 0;
         if (!simCandidate.ignoreAge) {
-            const parsedAgeMin = parseInt(simJob.ageMin);
-            const parsedAgeMax = parseInt(simJob.ageMax);
-            
-            if (!isNaN(parsedAgeMin) && simCandidate.age < parsedAgeMin) {
-                ageGapPenaltyPoints = (parsedAgeMin - simCandidate.age) * simCandidate.simAgeGapPenalty;
-            } else if (!isNaN(parsedAgeMax) && simCandidate.age > parsedAgeMax) {
-                ageGapPenaltyPoints = (simCandidate.age - parsedAgeMax) * simCandidate.simAgeGapPenalty;
+            const ageMin = parseInt(simJob.ageMin);
+            const ageMax = parseInt(simJob.ageMax);
+            if (!isNaN(ageMin) && simCandidate.age < ageMin) {
+                ageGapPenaltyPoints = (ageMin - simCandidate.age) * simCandidate.simAgeGapPenalty;
+            } else if (!isNaN(ageMax) && simCandidate.age > ageMax) {
+                ageGapPenaltyPoints = (simCandidate.age - ageMax) * simCandidate.simAgeGapPenalty;
             }
         }
 
-        // Final Weighted Score
-        const finalScore = Math.max(0, Math.round(
-            vectorScore * config.mainWeights.vector +
-            tagsScore * config.mainWeights.tags +
-            geoScore * config.mainWeights.geo +
-            expScore * config.mainWeights.experience
-        ) - salaryPenaltyPoints - ageGapPenaltyPoints);
+        // ── Final score ────────────────────────────────────────────────────────
+        const finalScore = Math.min(100, Math.max(0,
+            Math.round(coreScore) - salaryPenaltyPoints - ageGapPenaltyPoints
+        ));
 
         setTimeout(() => {
             setSimResult({
                 score: finalScore,
+                weights: { vW, tW, gW, eW, iW, totalCoreWeights },
                 candidate: { age: simCandidate.age, distance: simCandidate.distance },
                 breakdown: {
-                    vector: Math.round(vectorScore),
-                    tags: Math.round(tagsScore),
-                    geo: Math.round(geoScore),
-                    experience: Math.round(expScore),
-                    salaryPenalty: salaryPenaltyPoints,
-                    ageGapPenalty: ageGapPenaltyPoints,
-                    geoMissing: simCandidate.missingAddress,
-                    salaryMissing: simCandidate.missingSalary
+                    vector:       Math.round(vectorScore),
+                    tags:         Math.round(tagsScore),
+                    geo:          Math.round(geoScore),
+                    experience:   Math.round(expScore),
+                    intent:       Math.round(intentScore),
+                    coreScore:    Math.round(coreScore),
+                    salaryPenalty:    salaryPenaltyPoints,
+                    ageGapPenalty:    ageGapPenaltyPoints,
+                    geoMissing:       simCandidate.missingAddress,
+                    salaryMissing:    simCandidate.missingSalary,
                 }
             });
             setIsSimulating(false);
@@ -248,6 +297,87 @@ const AdminMatchingEngineView: React.FC = () => {
 
     const [isSaving, setIsSaving] = useState(false);
     const [showSuccess, setShowSuccess] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
+
+    // ── load saved config + presets + clients on mount ───────────────────────
+    useEffect(() => {
+        (async () => {
+            try {
+                const res = await fetch(API_CONFIG, { headers: buildHeaders() });
+                if (!res.ok) return;
+                const cfg = await res.json();
+
+                if (cfg.mainWeights)
+                    setMainWeights(prev => prev.map(w => ({ ...w, value: cfg.mainWeights[w.id] ?? w.value })));
+                if (cfg.intentWeights)
+                    setIntentWeights(prev => prev.map(w => ({ ...w, value: cfg.intentWeights[w.id] ?? w.value })));
+                if (cfg.tagWeights)
+                    setTagWeights(prev => prev.map(w => ({ ...w, value: cfg.tagWeights[w.id] ?? w.value })));
+                if (cfg.sourceWeights)
+                    setSourceWeights(prev => prev.map(w => ({ ...w, value: cfg.sourceWeights[w.id] ?? w.value })));
+                if (cfg.geoRegions)
+                    setGeoRegions(prev => prev.map(r => cfg.geoRegions[r.id]
+                        ? { ...r, grace: cfg.geoRegions[r.id].grace, penaltyPerKm: cfg.geoRegions[r.id].penaltyPerKm }
+                        : r
+                    ));
+                if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(cfg.missingGeoScore);
+                if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(cfg.missingSalaryScore);
+                if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold);
+                if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty);
+                if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty);
+                if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled);
+            } catch {
+                // silent — fall back to defaults
+            }
+
+            // load presets from DB — auto-apply the first one
+            try {
+                const pr = await fetch(API_PRESETS, { headers: buildHeaders() });
+                if (pr.ok) {
+                    const presets: DbPreset[] = await pr.json();
+                    setDbPresets(presets);
+                    if (presets.length > 0) {
+                        const first = presets[0];
+                        setActivePresetId(first.id);
+                        // Apply the preset's stored config immediately (overrides the global defaults)
+                        const cfg = first.config as Record<string, unknown>;
+                        const mw = cfg.mainWeights   as Record<string, number> | undefined;
+                        const tw = cfg.tagWeights    as Record<string, number> | undefined;
+                        const iw = cfg.intentWeights as Record<string, number> | undefined;
+                        const sw = cfg.sourceWeights as Record<string, number> | undefined;
+                        const gr = cfg.geoRegions    as Record<string, { grace: number; penaltyPerKm: number }> | undefined;
+                        if (mw) setMainWeights(prev   => prev.map(w => ({ ...w, value: mw[w.id] ?? w.value })));
+                        if (tw) setTagWeights(prev    => prev.map(w => ({ ...w, value: tw[w.id] ?? w.value })));
+                        if (iw) setIntentWeights(prev => prev.map(w => ({ ...w, value: iw[w.id] ?? w.value })));
+                        if (sw) setSourceWeights(prev => prev.map(w => ({ ...w, value: sw[w.id] ?? w.value })));
+                        if (gr) setGeoRegions(prev    => prev.map(r => gr[r.id] ? { ...r, ...gr[r.id] } : r));
+                        if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(cfg.missingGeoScore as number);
+                        if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(cfg.missingSalaryScore as number);
+                        if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold as number);
+                        if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty as number);
+                        if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty as number);
+                        if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled as boolean);
+                    }
+                }
+            } catch { /* silent */ }
+
+            // load clients for the multiselect
+            try {
+                const cl = await fetch(API_CLIENTS, { headers: buildHeaders() });
+                if (cl.ok) {
+                    const data = await cl.json();
+                    const list = Array.isArray(data) ? data : (data.data ?? []);
+                    setClients(list.map((c: Record<string, unknown>) => ({
+                        id:          String(c.id ?? ''),
+                        name:        String(c.name ?? ''),
+                        displayName: c.displayName ? String(c.displayName) : undefined,
+                    })));
+                }
+            } catch { /* silent */ }
+
+            setIsLoading(false);
+        })();
+    }, []);
 
     const handleMainWeightChange = (id: string, newValue: number) => {
         setMainWeights(prev => prev.map(w => w.id === id ? { ...w, value: newValue } : w));
@@ -257,6 +387,10 @@ const AdminMatchingEngineView: React.FC = () => {
         setTagWeights(prev => prev.map(w => w.id === id ? { ...w, value: newValue } : w));
     };
 
+    const handleIntentWeightChange = (id: string, newValue: number) => {
+        setIntentWeights(prev => prev.map(w => w.id === id ? { ...w, value: newValue } : w));
+    };
+
     const handleSourceWeightChange = (id: string, newValue: number) => {
         setSourceWeights(prev => prev.map(w => w.id === id ? { ...w, value: newValue } : w));
     };
@@ -264,39 +398,241 @@ const AdminMatchingEngineView: React.FC = () => {
     const activeMainWeights = mainWeights.filter(w => isExperienceEnabled || w.id !== 'experience');
     const totalMainWeight = activeMainWeights.reduce((sum, w) => sum + w.value, 0);
 
-    const handleSave = () => {
+    const handleSave = async () => {
         setIsSaving(true);
-        // Simulate API call
-        setTimeout(() => {
-            setIsSaving(false);
+        setSaveError(null);
+        try {
+            const payload = buildPayload();
+
+            // Always save global config
+            const res = await fetch(API_CONFIG, {
+                method: 'PUT',
+                headers: buildHeaders(true),
+                body: JSON.stringify(payload),
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+            // If a preset is active, also update it with the same payload
+            if (activePresetId) {
+                const presetRes = await fetch(`${API_PRESETS}/${activePresetId}`, {
+                    method: 'PUT',
+                    headers: buildHeaders(true),
+                    body: JSON.stringify({ config: payload }),
+                });
+                if (presetRes.ok) {
+                    const updated: DbPreset = await presetRes.json();
+                    setDbPresets(prev => prev.map(p => p.id === updated.id ? updated : p));
+                }
+            }
+
             setShowSuccess(true);
             setTimeout(() => setShowSuccess(false), 3000);
-        }, 1000);
+        } catch (err: unknown) {
+            setSaveError(err instanceof Error ? err.message : 'Save failed');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
-    const applyPreset = (preset: 'balanced' | 'skills' | 'experience') => {
-        const updates = {
-            balanced: {
-                main: { vector: 40, tags: 40, geo: 20 },
-                tags: { role: 100, seniority: 80, skill: 70, tool: 60, industry: 50, education: 40, language: 30, soft_skill: 20, certification: 20 }
-            },
-            skills: {
-                main: { vector: 45, tags: 45, geo: 10 },
-                tags: { role: 40, seniority: 20, skill: 100, tool: 100, industry: 0, education: 0, language: 20, soft_skill: 100, certification: 40 }
-            },
-            experience: {
-                main: { vector: 30, tags: 50, geo: 20 },
-                tags: { role: 100, seniority: 100, skill: 40, tool: 40, industry: 100, education: 80, language: 20, soft_skill: 10, certification: 60 }
+    // ── DB-backed presets ─────────────────────────────────────────────────────
+    const [dbPresets, setDbPresets] = useState<DbPreset[]>([]);
+    const [activePresetId, setActivePresetId] = useState<number | null>(null);
+    const [clients, setClients] = useState<ClientOption[]>([]);
+    const [showNewPresetModal, setShowNewPresetModal] = useState(false);
+    const [isSavingPreset, setIsSavingPreset] = useState(false);
+    const [newPresetName, setNewPresetName] = useState('');
+    const [newPresetDesc, setNewPresetDesc] = useState('');
+    const [newPresetClientIds, setNewPresetClientIds] = useState<string[]>([]);
+
+    // ── build payload for save ────────────────────────────────────────────────
+    const buildPayload = useCallback(() => ({
+        mainWeights:        mainWeights.reduce((acc, w)  => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
+        intentWeights:      intentWeights.reduce((acc, w) => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
+        tagWeights:         tagWeights.reduce((acc, w)   => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
+        sourceWeights:      sourceWeights.reduce((acc, w) => ({ ...acc, [w.id]: w.value }), {} as Record<string, number>),
+        geoRegions:         geoRegions.reduce((acc, r)   => ({ ...acc, [r.id]: { grace: r.grace, penaltyPerKm: r.penaltyPerKm } }), {} as Record<string, { grace: number; penaltyPerKm: number }>),
+        missingGeoScore,
+        missingSalaryScore,
+        salaryDiffThreshold,
+        salaryPenalty,
+        ageGapPenalty,
+        isExperienceEnabled,
+    }), [mainWeights, intentWeights, tagWeights, sourceWeights, geoRegions, missingGeoScore, missingSalaryScore, salaryDiffThreshold, salaryPenalty, ageGapPenalty, isExperienceEnabled]);
+
+    const handleSaveAsNewPresetClick = () => {
+        setNewPresetName('');
+        setNewPresetDesc('');
+        setNewPresetClientIds([]);
+        setShowNewPresetModal(true);
+    };
+
+    const confirmSaveNewPreset = async () => {
+        if (!newPresetName.trim() || isSavingPreset) return;
+        setIsSavingPreset(true);
+        try {
+            const res = await fetch(API_PRESETS, {
+                method: 'POST',
+                headers: buildHeaders(true),
+                body: JSON.stringify({
+                    label:       newPresetName.trim(),
+                    description: newPresetDesc.trim(),
+                    clientIds:   newPresetClientIds,
+                    config:      buildPayload(),
+                }),
+            });
+            if (res.ok) {
+                const created: DbPreset = await res.json();
+                setDbPresets(prev => [...prev, created]);
+                setShowNewPresetModal(false);
             }
-        };
-
-        const u = updates[preset];
-        setMainWeights(prev => prev.map(w => ({ ...w, value: u.main[w.id as keyof typeof u.main] ?? w.value })));
-        setTagWeights(prev => prev.map(w => ({ ...w, value: u.tags[w.id as keyof typeof u.tags] ?? w.value })));
+        } catch { /* silent */ }
+        finally { setIsSavingPreset(false); }
     };
+
+    const deleteDbPreset = async (id: number, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!window.confirm('האם אתה בטוח שברצונך למחוק תבנית זו?')) return;
+        setDbPresets(prev => prev.filter(p => p.id !== id));
+        if (activePresetId === id) setActivePresetId(null);
+        await fetch(`${API_PRESETS}/${id}`, { method: 'DELETE', headers: buildHeaders() }).catch(() => {});
+    };
+
+    const updateActivePreset = async () => {
+        if (!activePresetId) return;
+        const payload = buildPayload();
+        try {
+            const res = await fetch(`${API_PRESETS}/${activePresetId}`, {
+                method: 'PUT',
+                headers: { ...buildHeaders(), 'Content-Type': 'application/json' },
+                body: JSON.stringify({ config: payload }),
+            });
+            if (!res.ok) throw new Error('Failed');
+            const updated: DbPreset = await res.json();
+            setDbPresets(prev => prev.map(p => p.id === updated.id ? updated : p));
+        } catch {
+            alert('שגיאה בעדכון התבנית');
+        }
+    };
+
+    const applyDbPreset = useCallback((cfg: Record<string, unknown>) => {
+        const mw = cfg.mainWeights   as Record<string, number> | undefined;
+        const tw = cfg.tagWeights    as Record<string, number> | undefined;
+        const iw = cfg.intentWeights as Record<string, number> | undefined;
+        const sw = cfg.sourceWeights as Record<string, number> | undefined;
+        const gr = cfg.geoRegions    as Record<string, { grace: number; penaltyPerKm: number }> | undefined;
+
+        // Use explicit `w.id in obj` check so a value of 0 is applied correctly
+        if (mw) setMainWeights(prev   => prev.map(w => ({ ...w, value: w.id in mw ? Number(mw[w.id]) : w.value })));
+        if (tw) setTagWeights(prev    => prev.map(w => ({ ...w, value: w.id in tw ? Number(tw[w.id]) : w.value })));
+        if (iw) setIntentWeights(prev => prev.map(w => ({ ...w, value: w.id in iw ? Number(iw[w.id]) : w.value })));
+        if (sw) setSourceWeights(prev => prev.map(w => ({ ...w, value: w.id in sw ? Number(sw[w.id]) : w.value })));
+        if (gr) setGeoRegions(prev    => prev.map(r => r.id in gr ? { ...r, grace: Number(gr[r.id].grace), penaltyPerKm: Number(gr[r.id].penaltyPerKm) } : r));
+        if (cfg.missingGeoScore     !== undefined) setMissingGeoScore(Number(cfg.missingGeoScore));
+        if (cfg.missingSalaryScore  !== undefined) setMissingSalaryScore(Number(cfg.missingSalaryScore));
+        if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(Number(cfg.salaryDiffThreshold));
+        if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(Number(cfg.salaryPenalty));
+        if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(Number(cfg.ageGapPenalty));
+        if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(Boolean(cfg.isExperienceEnabled));
+    }, []);
+
+    const toggleClientId = (id: string) =>
+        setNewPresetClientIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+
+    if (isLoading) {
+        return (
+            <div className="flex items-center justify-center h-64 text-text-muted">
+                <ArrowPathIcon className="w-6 h-6 animate-spin mr-2" />
+                <span>Loading configuration...</span>
+            </div>
+        );
+    }
 
     return (
-        <div className="max-w-5xl mx-auto space-y-8 pb-20">
+        <div className="max-w-5xl mx-auto space-y-8 pb-20 relative">
+            {showNewPresetModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-6 animate-in fade-in zoom-in-95 duration-200">
+                        <div className="flex justify-between items-center mb-6">
+                            <h3 className="text-xl font-bold text-slate-800">שמור כגישה חדשה</h3>
+                            <button onClick={() => setShowNewPresetModal(false)} className="text-slate-400 hover:text-slate-600 transition-colors">
+                                <XCircleIcon className="w-6 h-6" />
+                            </button>
+                        </div>
+                        
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1">שם הגישה</label>
+                                <input 
+                                    type="text" 
+                                    value={newPresetName}
+                                    onChange={e => setNewPresetName(e.target.value)}
+                                    placeholder="למשל: התאמה לחברת סטארטאפ"
+                                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1">תיאור (אופציונלי)</label>
+                                <textarea 
+                                    value={newPresetDesc}
+                                    onChange={e => setNewPresetDesc(e.target.value)}
+                                    placeholder="פרט למי/מתי הגישה הזו מתאימה..."
+                                    className="w-full px-4 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 outline-none transition-all resize-none h-24"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-semibold text-slate-700 mb-1">
+                                    זמין ללקוחות (אופציונלי)
+                                    {newPresetClientIds.length > 0 && (
+                                        <span className="ml-2 text-xs font-medium bg-primary-100 text-primary-700 px-2 py-0.5 rounded-full">
+                                            {newPresetClientIds.length} נבחרו
+                                        </span>
+                                    )}
+                                </label>
+                                {clients.length === 0 ? (
+                                    <p className="text-xs text-slate-400 italic">טוען לקוחות...</p>
+                                ) : (
+                                    <div className="max-h-40 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100">
+                                        {clients.map(c => (
+                                            <label key={c.id} className="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={newPresetClientIds.includes(c.id)}
+                                                    onChange={() => toggleClientId(c.id)}
+                                                    className="rounded border-slate-300 text-primary-500 focus:ring-primary-500 w-4 h-4 shrink-0"
+                                                />
+                                                <span className="text-sm text-slate-700 truncate">
+                                                    {c.displayName || c.name}
+                                                </span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                )}
+                                <p className="text-xs text-slate-500 mt-1">
+                                    אם יושאר ריק, הגישה תהיה זמינה לכל הלקוחות.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="mt-8 flex justify-end gap-3">
+                            <button 
+                                onClick={() => setShowNewPresetModal(false)}
+                                className="px-5 py-2 text-slate-600 font-semibold hover:bg-slate-100 rounded-lg transition-colors"
+                            >
+                                ביטול
+                            </button>
+                            <button 
+                                onClick={confirmSaveNewPreset}
+                                disabled={!newPresetName.trim() || isSavingPreset}
+                                className="px-5 py-2 bg-primary-600 text-white font-semibold rounded-lg hover:bg-primary-700 shadow-md shadow-primary-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                            >
+                                {isSavingPreset && <ArrowPathIcon className="w-4 h-4 animate-spin" />}
+                                שמירת גישה
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
             <div className="flex items-center justify-between">
                 <div>
                     <h2 className="text-xl font-bold text-text-default">הגדרות מנוע התאמה (Matching Engine)</h2>
@@ -322,41 +658,103 @@ const AdminMatchingEngineView: React.FC = () => {
                     <span>ההגדרות נשמרו בהצלחה ועודכנו במנוע החישוב.</span>
                 </div>
             )}
+            {saveError && (
+                <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-xl flex items-center gap-3">
+                    <XCircleIcon className="w-5 h-5" />
+                    <span>שמירה נכשלה: {saveError}</span>
+                </div>
+            )}
 
             {/* Presets */}
             <div className="bg-white p-6 rounded-2xl border border-border-subtle shadow-sm">
-                <div className="flex items-center gap-2 mb-4">
-                    <SparklesIcon className="w-5 h-5 text-primary-500" />
-                    <h3 className="text-lg font-bold text-text-default">תבניות שקלול מוכנות</h3>
+                <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center gap-2">
+                        <SparklesIcon className="w-5 h-5 text-primary-500" />
+                        <h3 className="text-lg font-bold text-text-default">תבניות שקלול (גישות)</h3>
+                    </div>
+                    <button 
+                        onClick={handleSaveAsNewPresetClick} 
+                        className="text-sm font-bold text-primary-700 bg-primary-100/50 hover:bg-primary-100 px-4 py-2 rounded-lg transition-colors flex items-center gap-1.5"
+                    >
+                        <PlusIcon className="w-4 h-4" />
+                        שמור גישה נוכחית כחדשה
+                    </button>
                 </div>
+                {dbPresets.length === 0 && (
+                    <p className="text-sm text-text-muted italic py-2">אין גישות שמורות עדיין. שמור את ההגדרות הנוכחיות כגישה חדשה.</p>
+                )}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <button onClick={() => applyPreset('balanced')} className="p-4 rounded-xl border border-border-default bg-bg-subtle/30 hover:bg-primary-50 hover:border-primary-500 hover:ring-1 hover:ring-primary-500 transition-all text-right group">
-                        <div className="flex items-center gap-2 mb-2">
-                            <div className="p-2 bg-white rounded-lg shadow-sm group-hover:text-primary-600 text-text-muted transition-colors">
-                                <AdjustmentsHorizontalIcon className="w-5 h-5" />
+                    {dbPresets.map(preset => {
+                        const isActive = activePresetId === preset.id;
+                        return (
+                        <button
+                            key={preset.id}
+                            onClick={() => { applyDbPreset(preset.config); setActivePresetId(preset.id); }}
+                            className={`p-4 rounded-xl border transition-all text-right group relative flex flex-col items-start h-full
+                                ${isActive
+                                    ? 'border-purple-500 ring-2 ring-purple-500 bg-purple-50 shadow-md shadow-purple-200'
+                                    : 'border-purple-200 bg-purple-50/30 hover:bg-purple-50 hover:border-purple-500 hover:ring-1 hover:ring-purple-500'
+                                }`}
+                        >
+                            {isActive && (
+                                <span className="absolute top-2.5 right-2.5 bg-purple-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                    פעיל
+                                </span>
+                            )}
+                            <div className="absolute top-3 left-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <div
+                                    onClick={(e) => deleteDbPreset(preset.id, e)}
+                                    className="p-1.5 bg-white/80 hover:bg-red-50 text-slate-400 hover:text-red-500 rounded border border-transparent hover:border-red-200 transition-colors"
+                                    title="מחק גישה"
+                                >
+                                    <TrashIcon className="w-4 h-4" />
+                                </div>
                             </div>
-                            <h3 className="font-bold text-text-default">גישה מאוזנת (Balanced)</h3>
-                        </div>
-                        <p className="text-xs text-text-muted leading-relaxed">שילוב קלאסי של כישורים, ניסיון, והשכלה. מתאים לרוב המשרות הסטנדרטיות.</p>
-                    </button>
-                    <button onClick={() => applyPreset('skills')} className="p-4 rounded-xl border border-border-default bg-bg-subtle/30 hover:bg-emerald-50 hover:border-emerald-500 hover:ring-1 hover:ring-emerald-500 transition-all text-right group">
-                        <div className="flex items-center gap-2 mb-2">
-                            <div className="p-2 bg-white rounded-lg shadow-sm group-hover:text-emerald-600 text-text-muted transition-colors">
-                                <BoltIcon className="w-5 h-5" />
+                            <div className="flex items-center gap-2 mb-2 pr-8 w-full">
+                                <div className={`p-2 bg-white rounded-lg shadow-sm transition-colors shrink-0 ${isActive ? 'text-purple-600' : 'group-hover:text-purple-600 text-purple-400'}`}>
+                                    <TagIcon className="w-5 h-5" />
+                                </div>
+                                <h3 className="font-bold text-text-default truncate">{preset.label}</h3>
                             </div>
-                            <h3 className="font-bold text-text-default">מבוסס כישורים (Skills-Based)</h3>
-                        </div>
-                        <p className="text-xs text-text-muted leading-relaxed">התעלמות מגיל ומוסד לימודים. מיקוד נטו ביכולות, כלים, כישורים רכים והתאמה סמנטית.</p>
-                    </button>
-                    <button onClick={() => applyPreset('experience')} className="p-4 rounded-xl border border-border-default bg-bg-subtle/30 hover:bg-blue-50 hover:border-blue-500 hover:ring-1 hover:ring-blue-500 transition-all text-right group">
-                        <div className="flex items-center gap-2 mb-2">
-                            <div className="p-2 bg-white rounded-lg shadow-sm group-hover:text-blue-600 text-text-muted transition-colors">
-                                <BriefcaseIcon className="w-5 h-5" />
-                            </div>
-                            <h3 className="font-bold text-text-default">מבוסס ניסיון (Experience)</h3>
-                        </div>
-                        <p className="text-xs text-text-muted leading-relaxed">משקל גבוה לוותק, תפקידים קודמים, הלימה מדויקת לתעשייה והשכלה פורמלית.</p>
-                    </button>
+                            <p className="text-xs text-text-muted leading-relaxed mb-1 line-clamp-2">{preset.description || 'גישה מותאמת אישית'}</p>
+                            {/* Mini weight preview */}
+                            {(() => {
+                                const mw = preset.config?.mainWeights as Record<string, number> | undefined;
+                                if (!mw) return null;
+                                const keys = [
+                                    { id: 'vector', color: 'bg-purple-400', label: 'V' },
+                                    { id: 'tags',   color: 'bg-blue-400',   label: 'T' },
+                                    { id: 'geo',    color: 'bg-emerald-400', label: 'G' },
+                                    { id: 'experience', color: 'bg-orange-400', label: 'E' },
+                                    { id: 'intent', color: 'bg-rose-400',   label: 'I' },
+                                ];
+                                const total = keys.reduce((s, k) => s + (mw[k.id] ?? 0), 0) || 1;
+                                return (
+                                    <div className="w-full mt-1 mb-2">
+                                        <div className="flex h-2 rounded-full overflow-hidden bg-slate-100 w-full gap-px">
+                                            {keys.map(k => {
+                                                const pct = ((mw[k.id] ?? 0) / total) * 100;
+                                                if (pct === 0) return null;
+                                                return <div key={k.id} className={`${k.color} h-full`} style={{ width: `${pct}%` }} title={`${k.label}: ${mw[k.id]}%`} />;
+                                            })}
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                            {preset.clientIds && preset.clientIds.length > 0 && (
+                                <div className="flex flex-wrap gap-1 mt-auto">
+                                    {preset.clientIds.map(cid => {
+                                        const client = clients.find(c => c.id === cid);
+                                        return (
+                                            <span key={cid} className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium">
+                                                {client ? (client.displayName || client.name) : cid}
+                                            </span>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </button>
+                    );})}
                 </div>
             </div>
 
@@ -524,6 +922,36 @@ const AdminMatchingEngineView: React.FC = () => {
                             ערך גבוה יותר (למשל 100 בתפקיד) יגרום להתאמה בקטגוריה זו להשפיע יותר על הציון של שכבת התגיות.
                         </div>
                     </div>
+
+                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm">
+                        <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
+                            <UserGroupIcon className="w-5 h-5 text-rose-500" />
+                            שקלול פנימי של זיקה למשרה
+                        </h3>
+                        
+                        <div className="space-y-5">
+                            {intentWeights.map(weight => (
+                                <div key={weight.id} className="space-y-2">
+                                    <div className="flex items-center justify-between text-sm">
+                                        <div className="flex items-center gap-2 text-text-default font-medium">
+                                            {weight.icon}
+                                            {weight.label}
+                                        </div>
+                                        <span className="font-bold text-rose-600">{weight.value}</span>
+                                    </div>
+                                    <input 
+                                        type="range" 
+                                        min="0" 
+                                        max="100" 
+                                        value={weight.value}
+                                        onChange={(e) => handleIntentWeightChange(weight.id, parseInt(e.target.value))}
+                                        className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-rose-500"
+                                    />
+                                    <div className="text-[10px] text-text-muted mt-1 leading-tight">{weight.description}</div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -599,7 +1027,7 @@ const AdminMatchingEngineView: React.FC = () => {
 
                     <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm">
                         <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
-                            <AdjustmentsHorizontalIcon className="w-5 h-5 text-primary-500" />
+                            <ScaleIcon className="w-5 h-5 text-primary-500" />
                             קנס על פער בציפיות שכר
                         </h3>
                         
@@ -728,7 +1156,7 @@ const AdminMatchingEngineView: React.FC = () => {
                             רגישות מרחק לפי אזורים (ק"מ)
                         </h3>
                         
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
                             {geoRegions.map(region => (
                                 <div key={region.id} className="p-5 bg-bg-subtle rounded-2xl border border-border-subtle space-y-4">
                                     <div className="font-bold text-text-default border-b border-border-subtle pb-2">{region.label}</div>
@@ -878,8 +1306,10 @@ const AdminMatchingEngineView: React.FC = () => {
                                             onChange={(e) => setSimCandidate(prev => ({ ...prev, region: e.target.value }))}
                                             className={`w-full p-2.5 text-sm rounded-xl border border-border-default focus:ring-2 focus:ring-primary-500 outline-none font-medium transition-colors ${simCandidate.missingAddress ? 'bg-bg-subtle/50 text-text-muted cursor-not-allowed' : 'bg-bg-input hover:border-primary-300'}`}
                                         >
-                                            <option value="center">מרכז וגוש דן (רגישות גבוהה)</option>
-                                            <option value="north_south">צפון / דרום / פריפריה (רגישות נמוכה)</option>
+                                            <option value="center">מרכז, שרון וגוש דן (רגישות גבוהה)</option>
+                                            <option value="shfela">השפלה</option>
+                                            <option value="north">צפון</option>
+                                            <option value="south">דרום</option>
                                             <option value="jerusalem">ירושלים והסביבה</option>
                                         </select>
                                     </div>
@@ -917,7 +1347,7 @@ const AdminMatchingEngineView: React.FC = () => {
                         {/* Salary & Penalty Card */}
                         <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden">
                             <div className="bg-bg-subtle px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
-                                <AdjustmentsHorizontalIcon className="w-5 h-5 text-primary-500" />
+                                <ScaleIcon className="w-5 h-5 text-primary-500" />
                                 סימולציית שכר וקנסות
                             </div>
                             
@@ -1026,6 +1456,22 @@ const AdminMatchingEngineView: React.FC = () => {
                                             onChange={(e) => setSimCandidate(prev => ({ ...prev, vectorScore: parseInt(e.target.value) }))}
                                             className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-primary-500"
                                         />
+                                    </div>
+
+                                    <div>
+                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between">
+                                            <span>זיקה למשרה (Intent)</span>
+                                            <span className="text-primary-600 font-bold bg-primary-50 px-2 py-0.5 rounded-md">{intentWeights.find(w => w.id === simCandidate.intentType)?.value || 0}%</span>
+                                        </label>
+                                        <select
+                                            value={simCandidate.intentType}
+                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, intentType: e.target.value }))}
+                                            className="w-full bg-white border border-border-default text-text-default rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                                        >
+                                            {intentWeights.map(w => (
+                                                <option key={w.id} value={w.id}>{w.label} - משקל: {w.value}%</option>
+                                            ))}
+                                        </select>
                                     </div>
 
                                     {isExperienceEnabled && (
@@ -1163,6 +1609,17 @@ const AdminMatchingEngineView: React.FC = () => {
                                         </div>
                                     )}
 
+                                    {/* Intent */}
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between text-sm font-bold">
+                                            <span className="text-text-default flex items-center gap-2"><UserGroupIcon className="w-4 h-4 text-rose-500"/> שכבת זיקה (Intent)</span>
+                                            <span className="text-text-muted">{simResult.breakdown.intent}%</span>
+                                        </div>
+                                        <div className="h-2.5 bg-bg-subtle rounded-full overflow-hidden">
+                                            <div className="h-full bg-rose-500 rounded-full transition-all duration-1000" style={{ width: `${simResult.breakdown.intent}%` }}></div>
+                                        </div>
+                                    </div>
+
                                     {/* Age Gap Penalty */}
                                     {simResult.breakdown.ageGapPenalty > 0 && (
                                         <div className="space-y-2 pt-4 mt-2 border-t border-border-subtle">
@@ -1180,7 +1637,7 @@ const AdminMatchingEngineView: React.FC = () => {
                                     {simResult.breakdown.salaryPenalty > 0 && (
                                         <div className="space-y-2 pt-4 mt-2 border-t border-border-subtle">
                                             <div className="flex justify-between text-sm font-bold">
-                                <span className="text-rose-600 flex items-center gap-2"><AdjustmentsHorizontalIcon className="w-4 h-4"/> קנס פער שכר</span>
+                                                <span className="text-rose-600 flex items-center gap-2"><ScaleIcon className="w-4 h-4"/> קנס פער שכר</span>
                                                 <span className="text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">-{simResult.breakdown.salaryPenalty} נק'</span>
                                             </div>
                                             <div className="h-2.5 bg-rose-100 rounded-full overflow-hidden">
@@ -1207,34 +1664,86 @@ const AdminMatchingEngineView: React.FC = () => {
                 </div>
             </div>
 
-            {/* Simulation Preview (Simple Formula) */}
+            {/* Formula preview — live values */}
             <div className="mt-8 bg-white rounded-2xl border border-border-default p-6 shadow-sm">
                 <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
                     <ArrowPathIcon className="w-5 h-5 text-primary-500" />
-                    תצוגה מקדימה של נוסחת השקלול
+                    נוסחת השקלול הנוכחית (ערכים חיים)
                 </h3>
-                
-                <div className="bg-bg-subtle p-6 rounded-xl font-mono text-sm overflow-x-auto text-text-default">
-                    <div className="mb-4 text-text-muted">// נוסחת חישוב הציון הסופי (S_total)</div>
-                    <div className="flex flex-wrap items-center gap-2">
-                        <span className="text-primary-600 font-bold">S_total</span>
-                        <span>=</span>
-                        <span className="bg-purple-100 px-2 py-0.5 rounded text-purple-700">({mainWeights[0].value / 100} * S_vector)</span>
-                        <span>+</span>
-                        <span className="bg-blue-100 px-2 py-0.5 rounded text-blue-700">({mainWeights[1].value / 100} * S_tags)</span>
-                        <span>+</span>
-                        <span className="bg-emerald-100 px-2 py-0.5 rounded text-emerald-700">({mainWeights[2].value / 100} * S_geo)</span>
-                        <span>-</span>
-                        <span className="bg-rose-100 px-2 py-0.5 rounded text-rose-700">Penalty_salary</span>
-                        <span>-</span>
-                        <span className="bg-orange-100 px-2 py-0.5 rounded text-orange-700">Penalty_age</span>
-                    </div>
-                    
-                    <div className="mt-6 mb-2 text-text-muted">// פירוט שכבת התגיות (S_tags)</div>
-                    <div className="text-xs text-text-muted italic">
-                        S_tags = (Σ (Match_i * Confidence_i * CategoryWeight_i * SourceWeight_i)) / Σ (CategoryWeight_i * SourceWeight_i)
-                    </div>
-                </div>
+
+                {(() => {
+                    const vW = mainWeights.find(w => w.id === 'vector')?.value    ?? 0;
+                    const tW = mainWeights.find(w => w.id === 'tags')?.value      ?? 0;
+                    const gW = mainWeights.find(w => w.id === 'geo')?.value       ?? 0;
+                    const eW = isExperienceEnabled ? (mainWeights.find(w => w.id === 'experience')?.value ?? 0) : 0;
+                    const iW = mainWeights.find(w => w.id === 'intent')?.value    ?? 0;
+                    const total = vW + tW + gW + eW + iW;
+                    return (
+                        <div className="space-y-5">
+                            {/* Main formula */}
+                            <div className="bg-bg-subtle p-5 rounded-xl font-mono text-sm overflow-x-auto">
+                                <div className="text-text-muted mb-3 text-xs font-sans">// נוסחת חישוב הציון הסופי</div>
+                                <div className="flex flex-wrap items-center gap-2 mb-2">
+                                    <span className="text-primary-700 font-black">TotalW</span>
+                                    <span className="text-text-muted">=</span>
+                                    <span className="bg-purple-100  text-purple-700  px-2 py-0.5 rounded font-bold">{vW}</span>
+                                    <span className="text-text-muted">+</span>
+                                    <span className="bg-blue-100    text-blue-700    px-2 py-0.5 rounded font-bold">{tW}</span>
+                                    <span className="text-text-muted">+</span>
+                                    <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded font-bold">{gW}</span>
+                                    {eW > 0 && <><span className="text-text-muted">+</span><span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded font-bold">{eW}</span></>}
+                                    <span className="text-text-muted">+</span>
+                                    <span className="bg-rose-100    text-rose-700    px-2 py-0.5 rounded font-bold">{iW}</span>
+                                    <span className="text-text-muted">=</span>
+                                    <span className={`font-black text-base ${total === 100 ? 'text-emerald-600' : 'text-amber-600'}`}>{total}</span>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2 mt-4">
+                                    <span className="text-primary-700 font-black">S_core</span>
+                                    <span className="text-text-muted">=</span>
+                                    <span className="text-text-muted">(</span>
+                                    <span className="bg-purple-100  text-purple-700  px-2 py-0.5 rounded">S_vector × {vW}</span>
+                                    <span className="text-text-muted">+</span>
+                                    <span className="bg-blue-100    text-blue-700    px-2 py-0.5 rounded">S_tags × {tW}</span>
+                                    <span className="text-text-muted">+</span>
+                                    <span className="bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded">S_geo × {gW}</span>
+                                    {eW > 0 && <>
+                                        <span className="text-text-muted">+</span>
+                                        <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">S_exp × {eW}</span>
+                                    </>}
+                                    <span className="text-text-muted">+</span>
+                                    <span className="bg-rose-100    text-rose-700    px-2 py-0.5 rounded">S_intent × {iW}</span>
+                                    <span className="text-text-muted">) ÷</span>
+                                    <span className="font-bold">{total}</span>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2 mt-4">
+                                    <span className="text-primary-700 font-black">S_final</span>
+                                    <span className="text-text-muted">=</span>
+                                    <span>S_core</span>
+                                    <span className="text-text-muted">−</span>
+                                    <span className="bg-rose-100   text-rose-700   px-2 py-0.5 rounded">Penalty_salary</span>
+                                    <span className="text-text-muted">−</span>
+                                    <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">Penalty_age</span>
+                                    <span className="text-text-muted">(clamp 0–100)</span>
+                                </div>
+                            </div>
+
+                            {/* Tags sub-formula */}
+                            <div className="bg-bg-subtle p-5 rounded-xl font-mono text-xs overflow-x-auto text-text-muted">
+                                <div className="text-text-muted mb-2 font-sans text-xs">// פירוט שכבת תגיות</div>
+                                S_tags = ( Σ score_i × categoryWeight_i ) ÷ Σ categoryWeight_i
+                            </div>
+
+                            {total !== 100 && (
+                                <div className="flex items-center gap-2 text-amber-700 bg-amber-50 border border-amber-200 px-4 py-3 rounded-xl text-sm">
+                                    <InformationCircleIcon className="w-5 h-5 shrink-0" />
+                                    <span>סכום המשקלים הנוכחי הוא <strong>{total}</strong> (לא 100). הנוסחה מנרמלת אוטומטית לפי סך המשקלים — הציון עדיין תקין.</span>
+                                </div>
+                            )}
+                        </div>
+                    );
+                })()}
             </div>
         </div>
     );

@@ -50,6 +50,7 @@ const connectDb = async () => {
   require('../models/EventType');
   require('../models/RecruitmentStatus');
   require('../models/RecruitmentSource');
+  require('../models/MatchingEngineConfig');
 
   const User = require('../models/User');
   const Client = require('../models/Client');

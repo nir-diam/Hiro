@@ -12,6 +12,7 @@ router.post('/log-smart-import-open', authMiddleware, attachDbUser, jobControlle
 router.get('/:id/referral-client-contacts', authMiddleware, jobController.getReferralClientContacts);
 router.get('/:id/candidates', optionalAuth, jobController.getCandidates);
 router.get('/:id/screening-pool', authMiddleware, attachDbUser, jobController.getScreeningPoolForJob);
+router.post('/:id/sonar-scan', authMiddleware, attachDbUser, jobController.postJobSonarScan);
 router.get('/:id/events', authMiddleware, attachDbUser, jobEventController.list);
 router.post('/:id/events', authMiddleware, attachDbUser, jobEventController.create);
 router.put('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventController.update);

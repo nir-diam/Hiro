@@ -1,11 +1,18 @@
 
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { PencilIcon, ArrowDownTrayIcon, TrashIcon, ChevronDownIcon, ArrowUpTrayIcon, PinIcon, PaperClipIcon, EyeIcon, CodeBracketIcon, EnvelopeIcon } from './Icons';
 import OriginalResume from './OriginalResume';
 import IndustryExperienceSummary from './IndustryExperienceSummary';
 import IndustryExperienceModal from './IndustryExperienceModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { PrintableResume } from './CandidatePublicProfileView';
+import {
+    educationEntryToDisplayLine,
+    normalizeLanguagesForPrintRows,
+    stripResumeHtml,
+} from '../utils/printableResumeFormatting';
+import { downloadElementAsMultiPagePdf, sanitizePdfFilename } from '../utils/resumeViewerPdfExport';
 
 const TopTab: React.FC<{ title: string; isActive: boolean; onClick: () => void }> = ({ title, isActive, onClick }) => (
     <button 
@@ -28,10 +35,236 @@ interface ResumeData {
     education?: string[];
     raw?: string;
     candidateId?: string;
+    resumeUrl?: string;
+    tags?: any[];
+    languages?: any[];
+    title?: string;
+    workExperience?: any[];
+    professionalSummary?: string;
+}
+
+function parseContactForFallback(contact: string) {
+    const emailMatch = contact.match(/[^\s|<>]+@[^\s|<>]+\.[^\s|<>]+/);
+    const phoneMatch = contact.match(/[\d\-+\s()]{9,}/);
+    const email = emailMatch ? emailMatch[0].trim() : '';
+    let phone = phoneMatch ? phoneMatch[0].trim() : '';
+    if (!phone && contact && !email) phone = contact.trim();
+    return { email, phone };
+}
+
+function normalizeTagsForPrint(raw: unknown): string[] {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .map((tag: any) =>
+            typeof tag === 'string' ? stripResumeHtml(tag) : stripResumeHtml(String(tag?.value ?? tag?.name ?? '')),
+        )
+        .filter(Boolean);
+}
+
+function mapExperienceStrings(experience: string[]) {
+    return experience.map((exp) => {
+        const parts = exp.split(/<br\s*\/?>/i);
+        let titleLine = stripResumeHtml(parts[0] || '');
+        const descPart = stripResumeHtml(parts.slice(1).join('\n'));
+
+        let title = titleLine;
+        let company = '';
+        const atParts = titleLine.split(/\s+at\s+/i);
+        if (atParts.length >= 2) {
+            title = atParts[0]?.trim() || titleLine;
+            company = atParts.slice(1).join(' at ').trim();
+        } else {
+            const commaIdx = titleLine.lastIndexOf(',');
+            if (commaIdx > 0) {
+                title = titleLine.slice(0, commaIdx).trim();
+                company = titleLine.slice(commaIdx + 1).trim();
+            }
+        }
+
+        return { title, company, description: descPart, startDate: '', endDate: '' };
+    });
+}
+
+/** Strip leading "YYYY — …" / "MM/YYYY — …" ranges from description into a print chip label. */
+function extractLeadingDateRange(text: string): { display: string; rest: string } | null {
+    const t = text.trim();
+    if (!t) return null;
+
+    const mm = /^(\d{1,2}\/\d{4})\s*[-–—]\s*(\d{1,2}\/\d{4}|היום|כיום|נוכחי|כעת|הווה)\s+/u;
+    const m1 = t.match(mm);
+    if (m1) {
+        return { display: `${m1[1]} - ${m1[2]}`, rest: t.slice(m1[0].length).trim() };
+    }
+
+    const yr = /^(\d{4})\s*[-–—]\s*(היום|כיום|נוכחי|כעת|הווה|\d{4})\s+/u;
+    const m2 = t.match(yr);
+    if (m2) {
+        return { display: `${m2[1]} — ${m2[2]}`, rest: t.slice(m2[0].length).trim() };
+    }
+
+    return null;
+}
+
+function collectSkillTagStrings(skills: unknown): string[] {
+    if (!skills || typeof skills !== 'object') return [];
+    const out: string[] = [];
+    const o = skills as Record<string, unknown>;
+    for (const key of ['soft', 'technical', 'hard', 'other']) {
+        const arr = o[key];
+        if (!Array.isArray(arr)) continue;
+        arr.forEach((s) => {
+            const label =
+                typeof s === 'string' ? s : String((s as any)?.name || (s as any)?.label || '').trim();
+            if (label) out.push(label);
+        });
+    }
+    return out;
+}
+
+/** Normalize one experience row for PrintableResume (dates chip, company split, role aliases). */
+function normalizePrintExperience(raw: any): any {
+    if (!raw || typeof raw !== 'object') return raw;
+
+    let title = String(raw.title || raw.position || raw.role || '').trim();
+    let company = String(raw.company || raw.organization || raw.employer || '').trim();
+    let description = String(raw.description || raw.summary || '').trim();
+    let startDate = raw.startDate || raw.from || '';
+    let endDate = raw.endDate || raw.to || '';
+    let dateRangeLabel = typeof raw.dateRangeLabel === 'string' ? raw.dateRangeLabel.trim() : '';
+
+    const hasIsoDates =
+        String(startDate || '')
+            .trim()
+            .match(/^\d{4}-\d{2}/) ||
+        String(endDate || '')
+            .trim()
+            .match(/^\d{4}-\d{2}/);
+
+    if (!hasIsoDates && description && !dateRangeLabel) {
+        const extracted = extractLeadingDateRange(description);
+        if (extracted) {
+            dateRangeLabel = extracted.display;
+            description = extracted.rest;
+        }
+    }
+
+    if (!company && title) {
+        const be = title.match(/^(.+)\s+ב[-–]\s+(.+)$/u);
+        if (be) {
+            title = be[1].trim();
+            company = be[2].trim();
+        } else {
+            const commaIdx = title.lastIndexOf(',');
+            if (commaIdx > 0) {
+                const maybeCo = title.slice(commaIdx + 1).trim();
+                if (maybeCo.length > 0 && maybeCo.length <= 120) {
+                    company = maybeCo;
+                    title = title.slice(0, commaIdx).trim();
+                }
+            }
+        }
+    }
+
+    title = title.replace(/\s+at\s*$/i, '').trim();
+
+    return {
+        ...raw,
+        title,
+        company,
+        description,
+        startDate,
+        endDate,
+        dateRangeLabel,
+    };
+}
+
+function normalizePrintExperienceList(items: any[]): any[] {
+    if (!Array.isArray(items)) return [];
+    return items.map(normalizePrintExperience);
+}
+
+function mergeTagsForPrint(fd: any, rd: ResumeData): any[] {
+    const fromForm = fd?.tags?.length ? fd.tags : rd.tags;
+    if (Array.isArray(fromForm) && fromForm.length) return fromForm;
+
+    const fromSkills = collectSkillTagStrings(fd?.skills);
+    if (fromSkills.length) return fromSkills;
+
+    const domains = fd?.industryAnalysis?.smartTags?.domains;
+    if (Array.isArray(domains) && domains.length) return domains;
+
+    return [];
+}
+
+function buildPrintableResumePayload(fullData: any, rd: ResumeData): any {
+    const summaryPlain = stripResumeHtml(rd.summary || '');
+    const eduList = (rd.education || []).map((e, i) => ({
+        id: i,
+        value: educationEntryToDisplayLine(e),
+    }));
+
+    if (fullData && typeof fullData === 'object') {
+        const fd = fullData;
+        let workExp =
+            Array.isArray(fd.workExperience) && fd.workExperience.length
+                ? fd.workExperience
+                : mapExperienceStrings(rd.experience || []);
+        workExp = normalizePrintExperienceList(workExp);
+
+        const education =
+            Array.isArray(fd.education) && fd.education.length
+                ? fd.education
+                      .map((edu: any, i: number) => ({
+                          ...edu,
+                          value: educationEntryToDisplayLine(edu),
+                          id: edu?.id ?? i,
+                      }))
+                      .filter((edu: any) => edu.value)
+                : eduList;
+
+        const { email: cEmail, phone: cPhone } = parseContactForFallback(rd.contact || '');
+        const tagsSrc = mergeTagsForPrint(fd, rd);
+        const langSrc = fd.languages?.length ? fd.languages : rd.languages;
+        const prof =
+            fd.professionalSummary != null && String(fd.professionalSummary).trim()
+                ? stripResumeHtml(String(fd.professionalSummary))
+                : summaryPlain;
+
+        return {
+            ...fd,
+            fullName: fd.fullName || fd.name || rd.name,
+            phone: fd.phone || cPhone,
+            email: fd.email || cEmail,
+            title: fd.title ?? rd.title ?? '',
+            professionalSummary: prof,
+            workExperience: workExp,
+            education,
+            tags: normalizeTagsForPrint(tagsSrc),
+            languages: normalizeLanguagesForPrintRows(langSrc),
+            location: fd.location || fd.address || '',
+            firstName: fd.firstName,
+            lastName: fd.lastName,
+        };
+    }
+
+    const { email, phone } = parseContactForFallback(rd.contact || '');
+    return {
+        fullName: rd.name,
+        title: rd.title ?? '',
+        phone,
+        email,
+        professionalSummary: summaryPlain,
+        workExperience: normalizePrintExperienceList(mapExperienceStrings(rd.experience || [])),
+        education: eduList,
+        tags: normalizeTagsForPrint(mergeTagsForPrint(null, rd)),
+        languages: normalizeLanguagesForPrintRows(rd.languages),
+        location: '',
+    };
 }
 
 interface ResumeViewerProps {
     resumeData: ResumeData;
+    fullData?: any;
     resumeFileUrl?: string;
     onOpenMessageModal?: (config: MessageModalConfig) => void;
     className?: string;
@@ -52,6 +285,7 @@ interface EmailUploadRecord {
 
 const ResumeViewer: React.FC<ResumeViewerProps> = ({
   resumeData,
+  fullData,
   resumeFileUrl,
   onOpenMessageModal,
   className = "h-full",
@@ -71,6 +305,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const [isPinned, setIsPinned] = useState(false);
   const [copyButtonText, setCopyButtonText] = useState(t('resume.copy_cv'));
   const [uploading, setUploading] = useState(false);
+  const [parsedPdfDownloading, setParsedPdfDownloading] = useState(false);
+  const parsedResumeCaptureRef = useRef<HTMLDivElement>(null);
   const [latestEmail, setLatestEmail] = useState<EmailUploadRecord | null>(null);
   const uploadingLabel = t('resume.uploading') || 'טוען קובץ...';
 
@@ -99,7 +335,14 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const finalResumeData = resumeData
       ? { ...resumeData, resumeUrl: effectiveResumeUrl }
       : { name: '', contact: '', summary: '', experience: [], education: [], resumeUrl: effectiveResumeUrl };
-  
+
+  const printablePayload = useMemo(() => {
+      const rd = resumeData
+          ? { ...resumeData, resumeUrl: effectiveResumeUrl }
+          : { name: '', contact: '', summary: '', experience: [], education: [], resumeUrl: effectiveResumeUrl };
+      return buildPrintableResumePayload(fullData, rd);
+  }, [fullData, resumeData, effectiveResumeUrl]);
+
   const candidateIdentifier = candidateIdProp || resumeData.candidateId || null;
 
   const getAuthHeaders = () => {
@@ -198,6 +441,36 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
       setEmailViewMode(prev => prev === 'formatted' ? 'original' : 'formatted');
   };
 
+  const handleDownloadResume = async () => {
+      if (resumeViewMode === 'original') {
+          if (onDownloadResume) {
+              onDownloadResume();
+          } else if (effectiveResumeUrl) {
+              window.open(effectiveResumeUrl, '_blank');
+          } else {
+              alert(t('resume.no_file_download'));
+          }
+          return;
+      }
+
+      const host = parsedResumeCaptureRef.current;
+      if (!host) {
+          alert(t('resume.download_pdf_error'));
+          return;
+      }
+
+      setParsedPdfDownloading(true);
+      try {
+          const baseName = sanitizePdfFilename(finalResumeData.name || 'resume');
+          await downloadElementAsMultiPagePdf(host, `${baseName}_hir_resume.pdf`);
+      } catch (e) {
+          console.error('[ResumeViewer] parsed PDF export failed', e);
+          alert(t('resume.download_pdf_error'));
+      } finally {
+          setParsedPdfDownloading(false);
+      }
+  };
+
     const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -284,13 +557,34 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const docxViewerUrl = isDocxPreview ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(finalResumeData.resumeUrl)}` : '';
 
   const handleCopyResume = () => {
-    const textToCopy = [
+    let textToCopy: string;
+    if (resumeViewMode === 'parsed') {
+      const d = printablePayload;
+      const parts: string[] = [];
+      parts.push(d.fullName || finalResumeData.name);
+      const contactLine = [d.email, d.phone].filter(Boolean).join(' | ');
+      if (contactLine) parts.push(contactLine);
+      if (d.title) parts.push(String(d.title));
+      if (d.professionalSummary) parts.push(String(d.professionalSummary));
+      (d.workExperience || []).forEach((exp: any) => {
+        const head = [exp.title, exp.company].filter(Boolean).join(', ');
+        if (head) parts.push(head);
+        if (exp.description) parts.push(String(exp.description));
+      });
+      (d.education || []).forEach((edu: any) => {
+        const line = typeof edu === 'string' ? edu : edu?.value;
+        if (line) parts.push(String(line));
+      });
+      textToCopy = parts.join('\n\n');
+    } else {
+      textToCopy = [
         finalResumeData.name,
         finalResumeData.contact,
         finalResumeData.summary.replace(/<[^>]*>/g, ''),
-        ...finalResumeData.experience.map(item => item.replace(/<[^>]*>/g, ''))
-    ].join('\n\n');
-    
+        ...finalResumeData.experience.map((item) => item.replace(/<[^>]*>/g, '')),
+      ].join('\n\n');
+    }
+
     navigator.clipboard.writeText(textToCopy).then(() => {
         setCopyButtonText('הועתק!'); // Could be translated too if needed temporarily
         setTimeout(() => setCopyButtonText(t('resume.copy_cv')), 2000);
@@ -322,9 +616,6 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
         }
     }
   };
-
-    const safeSummary = finalResumeData.summary || '';
-    const highlightedSummary = safeSummary.replace(/עבודה עצמאית/g, `<span class="${tagsHighlighted ? 'bg-accent-100/70 px-1 rounded' : ''}">עבודה עצמאית</span>`);
 
     const emailFrom = latestEmail ? parseEmailAddress(latestEmail.from) : null;
     const emailTo = latestEmail ? parseEmailAddress(latestEmail.to) : null;
@@ -396,28 +687,28 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                             <span>{copyButtonText}</span>
                             <PaperClipIcon className="w-4 h-4 mr-1.5" />
                         </button>
-                        <button
-                          onClick={() => setTagsHighlighted(!tagsHighlighted)}
-                          className={`flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border ${
-                            tagsHighlighted 
-                              ? 'bg-primary-100 text-primary-700 border-primary-200' 
-                              : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
-                          }`}
-                        >
-                          <span>{t('resume.highlight_tags')}</span>
-                        </button>
+                        {resumeViewMode === 'original' && (
+                          <button
+                            onClick={() => setTagsHighlighted(!tagsHighlighted)}
+                            className={`flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border ${
+                              tagsHighlighted
+                                ? 'bg-primary-100 text-primary-700 border-primary-200'
+                                : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
+                            }`}
+                          >
+                            <span>{t('resume.highlight_tags')}</span>
+                          </button>
+                        )}
                     </div>
 
         <div className="flex items-center gap-1">
-                        <ActionButton title={t('resume.download')} onClick={() => {
-                            if (onDownloadResume) {
-                                onDownloadResume();
-                            } else if (effectiveResumeUrl) {
-                                window.open(effectiveResumeUrl, '_blank');
-                            } else {
-                                alert('אין קובץ להורדה.');
-                            }
-                        }}><ArrowDownTrayIcon className="w-5 h-5"/></ActionButton>
+                        <ActionButton
+                            title={t('resume.download')}
+                            disabled={parsedPdfDownloading}
+                            onClick={() => void handleDownloadResume()}
+                        >
+                            <ArrowDownTrayIcon className={`w-5 h-5 ${parsedPdfDownloading ? 'animate-pulse' : ''}`} />
+                        </ActionButton>
                         <ActionButton title={t('resume.upload')} onClick={() => uploadInputRef.current?.click()} disabled={uploading}>
                             <ArrowUpTrayIcon className="w-5 h-5"/>
                         </ActionButton>
@@ -445,45 +736,9 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                        <div className="p-6">
                           {resumeContentMode === 'resume' && (
                             resumeViewMode === 'parsed' ? (
-                                <div className="space-y-6 text-text-default text-base leading-relaxed max-w-4xl mx-auto">
-                                    <div className="border-b border-border-default pb-4 mb-4">
-                                        <h2 className="font-bold text-2xl text-text-default mb-1">{finalResumeData.name}</h2>
-                                        <p className="text-sm text-text-muted flex items-center gap-2">
-                                            <span className="bg-primary-50 text-primary-700 px-2 py-0.5 rounded">{finalResumeData.contact}</span>
-                                        </p>
-                                    </div>
-                                    
-                                    <div>
-                                        <h3 className="font-bold text-lg text-primary-700 mb-2 border-r-4 border-primary-500 pr-3">{t('section.summary')}</h3>
-                                        <div className="bg-bg-subtle/30 p-4 rounded-lg" dangerouslySetInnerHTML={{ __html: highlightedSummary }} />
-                                    </div>
-
-                                    <div>
-                                      <h3 className="font-bold text-lg text-primary-700 mb-4 border-r-4 border-primary-500 pr-3">{t('section.work_experience')}</h3>
-                                      <ul className="space-y-6">
-                                          {finalResumeData.experience.map((item, index) => (
-                                              <li key={index} className="relative pr-4 border-r border-border-default/50">
-                                                  <div className="absolute -right-1.5 top-2 w-3 h-3 rounded-full bg-primary-300 border-2 border-white"></div>
-                                                  <div dangerouslySetInnerHTML={{ __html: item }} />
-                                              </li>
-                                          ))}
-                                      </ul>
-                                    </div>
-
-                                    {finalResumeData.education && finalResumeData.education.length > 0 && (
-                                        <div>
-                                            <h3 className="font-bold text-lg text-primary-700 mb-4 border-r-4 border-primary-500 pr-3">{t('section.education')}</h3>
-                                            <ul className="space-y-3">
-                                                {finalResumeData.education.map((edu, idx) => (
-                                                    <li key={idx} className="relative pr-4 border-r border-border-default/50">
-                                                        <div className="absolute -right-1.5 top-2 w-3 h-3 rounded-full bg-secondary-300 border-2 border-white"></div>
-                                                        <div dangerouslySetInnerHTML={{ __html: edu }} />
-                                                    </li>
-                                                ))}
-                                            </ul>
-                                        </div>
-                                    )}
-                              </div>
+                                <div className="inline-block w-full min-w-0">
+                                    <PrintableResume data={printablePayload} className="" density="default" />
+                                </div>
                             ) : (
                                 finalResumeData.resumeUrl ? (
                                     <div className="flex flex-col gap-3 max-w-4xl mx-auto w-full">
@@ -508,7 +763,11 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                               <IndustryExperienceSummary 
                                   onBack={() => setResumeContentMode('resume')}
                                   onShowFullDetails={() => setIsIndustryModalOpen(true)} 
-                                  experiences={finalResumeData.experience.map((text) => ({ title: text }))}
+                                  experiences={
+                                      printablePayload.workExperience?.length
+                                          ? printablePayload.workExperience
+                                          : finalResumeData.experience.map((text) => ({ title: text }))
+                                  }
                               />
                           )}
                       </div>
@@ -589,13 +848,29 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
               .custom-scrollbar-modal::-webkit-scrollbar-thumb:hover { background: rgb(var(--color-text-subtle)); }
           `}</style>
       </div>
+      {activeTab === 'resume' && resumeViewMode === 'parsed' && (
+          <div
+              className="fixed pointer-events-none top-0 left-0 z-[-20] w-[210mm] max-w-[210mm] -translate-x-full"
+              aria-hidden
+          >
+              <div ref={parsedResumeCaptureRef} className="inline-block w-full">
+                  <PrintableResume data={printablePayload} density="compact" />
+              </div>
+          </div>
+      )}
       {isIndustryModalOpen && (
         <IndustryExperienceModal
           onClose={() => setIsIndustryModalOpen(false)}
-          experiences={finalResumeData.workExperience || finalResumeData.experience}
-          candidateName={finalResumeData.name}
-          candidateTitle={finalResumeData.title}
-          candidateSummary={finalResumeData.summary}
+          experiences={
+            printablePayload.workExperience?.length
+              ? printablePayload.workExperience
+              : finalResumeData.workExperience || finalResumeData.experience
+          }
+          candidateName={printablePayload.fullName || finalResumeData.name}
+          candidateTitle={printablePayload.title || finalResumeData.title}
+          candidateSummary={
+            printablePayload.professionalSummary || stripHtml(finalResumeData.summary || '')
+          }
         />
       )}
         <input

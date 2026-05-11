@@ -3105,10 +3105,12 @@ const deriveCandidateFieldsFromResume = async (text) => {
   }
 
   const pwhFromAi = coercePreferredWorkingHoursFromAi(aiResult.preferredWorkingHours);
-  const availabilityFromAi =
+  let availabilityFromAi =
     aiResult.availability != null && String(aiResult.availability).trim() !== ''
       ? String(aiResult.availability).trim()
       : null;
+
+  availabilityFromAi=null; //dont change it!
 
   const aiFields = {
     fullName: aiResult.fullName || fallback.fullName || 'מועמד חדש',

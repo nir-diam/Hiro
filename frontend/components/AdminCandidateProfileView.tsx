@@ -4,7 +4,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { 
     AvatarIcon, ArrowLeftIcon, PhoneIcon, MapPinIcon, EnvelopeIcon, 
     BriefcaseIcon, UserIcon, ClockIcon, DocumentTextIcon, 
-    TrashIcon, NoSymbolIcon, PencilIcon, CheckCircleIcon 
+    TrashIcon, NoSymbolIcon, PencilIcon, CheckCircleIcon,
+    InformationCircleIcon,
 } from './Icons';
 import ResumeViewer from './ResumeViewer';
 import ActivityLogModal from './ActivityLogModal'; // Reuse existing logs logic
@@ -38,6 +39,54 @@ const TabButton: React.FC<{ title: string; icon: React.ReactNode; isActive: bool
         <span>{title}</span>
     </button>
 );
+
+const TagMetricHelp: React.FC<{ label: string; ariaLabel: string; children: React.ReactNode }> = ({
+    label,
+    ariaLabel,
+    children,
+}) => {
+    const [open, setOpen] = useState(false);
+    const wrapRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const onDoc = (e: MouseEvent) => {
+            if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [open]);
+
+    return (
+        <div className="relative inline-flex items-center justify-center gap-1" ref={wrapRef}>
+            <span>{label}</span>
+            <button
+                type="button"
+                aria-label={ariaLabel}
+                aria-expanded={open}
+                onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setOpen((v) => !v);
+                }}
+                className="inline-flex shrink-0 rounded text-primary-600 hover:bg-primary-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400"
+            >
+                <InformationCircleIcon className="w-3.5 h-3.5" />
+            </button>
+            {open && (
+                <div
+                    dir="rtl"
+                    role="tooltip"
+                    className="absolute z-[60] top-full mt-1 end-0 min-w-[14rem] max-w-[18rem] rounded-lg border border-border-default bg-bg-card p-2.5 text-[10px] font-normal normal-case leading-snug text-text-default shadow-lg whitespace-normal"
+                >
+                    {children}
+                </div>
+            )}
+        </div>
+    );
+};
 
 const AdminCandidateProfileView: React.FC = () => {
     const { candidateId } = useParams<{ candidateId: string }>();
@@ -517,9 +566,63 @@ const AdminCandidateProfileView: React.FC = () => {
                                                     <th className="p-2">Context</th>
                                                     <th className="p-2">Current</th>
                                                     <th className="p-2">Summary</th>
-                                                    <th className="p-2">Confidence</th>
-                                                    <th className="p-2">Weight</th>
-                                                    <th className="p-2">Final Score</th>
+                                                    <th className="p-2">
+                                                        <TagMetricHelp
+                                                            label="Confidence"
+                                                            ariaLabel="הסבר על Confidence"
+                                                        >
+                                                            <p className="font-semibold text-text-default mb-1">Confidence (ביטחון)</p>
+                                                            <p className="mb-1">
+                                                                רמת הביטחון של המודל בזיהוי התגית במופע הזה (confidence_score).
+                                                            </p>
+                                                            <p className="mb-1">
+                                                                <span className="text-text-muted">טווח טיפוסי:</span> לרוב בין 0 ל־1 (לא חובה טכנית).
+                                                            </p>
+                                                            <p>
+                                                                <span className="text-text-muted">בחישוב הניקוד:</span> אם הערך חסר או לא מספר תקף — נחשב כ־TAG_MIN_CONFIDENCE (ברירת מחדל{' '}
+                                                                <span className="font-mono">0.5</span>). גורם הביטחון = confidence ÷ TAG_MIN_CONFIDENCE; אם confidence ≤ 0 או TAG_MIN_CONFIDENCE ≤ 0 → הגורם הוא{' '}
+                                                                <span className="font-mono">1</span>.
+                                                            </p>
+                                                        </TagMetricHelp>
+                                                    </th>
+                                                    <th className="p-2">
+                                                        <TagMetricHelp label="Weight" ariaLabel="הסבר על Weight">
+                                                            <p className="font-semibold text-text-default mb-1">Weight (משקל מבני)</p>
+                                                            <p className="mb-1">
+                                                                משקל התגית לפי סוג (raw_type), הקשר (context), והאם היא נוכחית ובסיכום הקורות (calculated_weight).
+                                                            </p>
+                                                            <p className="mb-1">
+                                                                <span className="text-text-muted">טווח טיפוסי:</span> משקל בסיס מהטבלה (בערך{' '}
+                                                                <span className="font-mono">0.5–1.0</span>) + חיזוקים: נוכחי (+TAG_CURRENT_BOOSTER, ברירת מחדל{' '}
+                                                                <span className="font-mono">0.4</span>), בסיכום (+TAG_SUMMARY_BOOSTER, ברירת מחדל{' '}
+                                                                <span className="font-mono">0.25</span>) → סכום גס בערך{' '}
+                                                                <span className="font-mono">0.5–~1.65</span>.
+                                                            </p>
+                                                            <p>
+                                                                <span className="text-text-muted">חישוב:</span> משקל בסיס לפי raw_type ו-context + (נוכחי ? חיזוק נוכחי : 0) + (בסיכום ? חיזוק סיכום : 0). לזוגות לא מוכרים — משקל בסיס ברירת מחדל{' '}
+                                                                <span className="font-mono">0.65</span>.
+                                                            </p>
+                                                        </TagMetricHelp>
+                                                    </th>
+                                                    <th className="p-2">
+                                                        <TagMetricHelp label="Final Score" ariaLabel="הסבר על Final Score">
+                                                            <p className="font-semibold text-text-default mb-1">Final Score (ציון סופי)</p>
+                                                            <p className="mb-1">
+                                                                ציון דירוג לשימוש במיון תגיות (final_score).
+                                                            </p>
+                                                            <p className="mb-1">
+                                                                <span className="text-text-muted">טווח טיפוסי:</span> תלוי במשקל ובגורם הביטחון; עם TAG_BASE_POINTS (ברירת מחדל{' '}
+                                                                <span className="font-mono">100</span>) טווח גס בערך{' '}
+                                                                <span className="font-mono">~50–~330</span> — לא גבול קשיח.
+                                                            </p>
+                                                            <p>
+                                                                <span className="text-text-muted">חישוב:</span> TAG_BASE_POINTS × calculated_weight × גורם הביטחון (כפי שמחושב מה־confidence למעלה).
+                                                            </p>
+                                                            <p className="mt-1 text-text-muted">
+                                                                עדכון ידני של משקל וציון סופי עלול לעקוף חישוב מחדש.
+                                                            </p>
+                                                        </TagMetricHelp>
+                                                    </th>
                                                     <th className="p-2">Actions</th>
                                                 </tr>
                                             </thead>
@@ -591,6 +694,7 @@ const AdminCandidateProfileView: React.FC = () => {
                                 raw: resumeText,
                                 candidateId: candidateIdentifier,
                             }} 
+                            fullData={candidate}
                             resumeFileUrl={resumeUrl}
                             className="h-full border-0 shadow-none" 
                         />

@@ -766,6 +766,7 @@ const NewCandidateViewV2: React.FC = () => {
                 />
                 <ResumeViewer
                     resumeData={resumeData}
+                    fullData={formData}
                     onUploadResume={uploadResumeFile}
                     onResumeUploaded={handleResumeUploaded}
                     candidateId={candidateId || aiCandidateId}

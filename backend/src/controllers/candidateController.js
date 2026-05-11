@@ -716,7 +716,7 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
     'location',
     'idNumber',
     'gender',
-    'availability',
+   // 'availability', do not change it!
     'physicalWork',
     'jobScope',
     'industry',
@@ -3470,6 +3470,127 @@ const listScreeningRejections = async (req, res) => {
   }
 };
 
+// ─── Job Matching (candidate → jobs) ────────────────────────────────────────
+
+const candidateJobMatchingService = require('../services/candidateJobMatchingService');
+
+/** POST /api/candidates/:id/job-matches */
+const getJobMatches = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const body = req.body || {};
+    const data = await candidateJobMatchingService.computeMatchesForCandidate(candidateId, {
+      limit: body.limit,
+      minScore: body.minScore,
+      statuses: body.statuses,
+      clientIds: body.clientIds,
+      cities: body.cities,
+      jobTypes: body.jobTypes,
+      useVector: body.useVector,
+    });
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[getJobMatches]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to compute job matches' });
+  }
+};
+
+/** POST /api/candidates/:id/jobs/:jobId/deep-insight */
+const getJobDeepInsight = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const jobId = req.params.jobId;
+
+    const candidate = await candidateService.getById(candidateId);
+    if (!candidate) {
+      return res.status(404).json({ message: 'Candidate not found' });
+    }
+
+    const Job = require('../models/Job');
+    const job = await Job.findByPk(jobId);
+    if (!job) {
+      return res.status(404).json({ message: 'Job not found' });
+    }
+    const jobPlain = job.get({ plain: true });
+
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ message: 'Gemini API key not configured' });
+    }
+
+    const promptService = require('../services/promptService');
+    let promptRow;
+    try {
+      promptRow = await promptService.getById('job_match_deep_insight');
+    } catch {
+      promptRow = null;
+    }
+
+    const defaultTemplate = `אתה מומחה גיוס בכיר. נתח בעברית את התאמת המועמד למשרה.
+החזר **Markdown** בלבד עם המבנה הבא (השתמש ב-###, - ו-**bold**):
+### סיכום התאמה
+(משפט אחד – ציון (%%) ורמת התאמה כללית)
+### יתרונות עיקריים
+- ...
+### פערים והמלצות
+- ...
+### המלצה
+(פסקה קצרה עם המלצה לגייס / לדחות / לשקול)
+
+---
+נתוני המועמד: {{candidate_summary}}
+נתוני המשרה: {{job_summary}}`;
+
+    const template = promptRow?.template || defaultTemplate;
+
+    const candidateSummary = [
+      `שם: ${candidate.fullName || 'לא צוין'}`,
+      `תפקיד: ${candidate.title || 'לא צוין'}`,
+      `ניסיון: ${JSON.stringify(candidate.workExperience || []).slice(0, 1500)}`,
+      `כישורים: ${JSON.stringify(candidate.skills || {}).slice(0, 800)}`,
+      `שפות: ${JSON.stringify(candidate.languages || []).slice(0, 200)}`,
+      `ציפיות שכר: ${candidate.salaryMin || '?'} – ${candidate.salaryMax || '?'} ₪`,
+      `היקף: ${candidate.jobScope || 'לא צוין'}`,
+      `ניידות: ${candidate.mobility || 'לא צוין'}`,
+      `רישיון: ${candidate.drivingLicense || 'לא צוין'}`,
+      `כתובת: ${candidate.address || 'לא צוין'}`,
+    ].join('\n');
+
+    const jobSummary = [
+      `כותרת: ${jobPlain.title || 'לא צוין'}`,
+      `לקוח: ${jobPlain.client || 'לא צוין'}`,
+      `עיר: ${jobPlain.city || 'לא צוין'}`,
+      `היקף: ${Array.isArray(jobPlain.jobType) ? jobPlain.jobType.join(', ') : (jobPlain.jobType || 'לא צוין')}`,
+      `שכר: ${jobPlain.salaryMin || '?'} – ${jobPlain.salaryMax || '?'} ₪`,
+      `תיאור: ${(jobPlain.description || '').slice(0, 1000)}`,
+      `דרישות: ${(Array.isArray(jobPlain.requirements) ? jobPlain.requirements.join('; ') : '').slice(0, 600)}`,
+      `כישורים נדרשים: ${JSON.stringify(jobPlain.skills || []).slice(0, 400)}`,
+    ].join('\n');
+
+    const systemPrompt = template
+      .replace(/\{\{candidate_summary\}\}/g, candidateSummary)
+      .replace(/\{\{job_summary\}\}/g, jobSummary);
+
+    const text = await sendChat({
+      apiKey,
+      systemPrompt,
+      history: [],
+      message: 'בצע ניתוח עומק עכשיו בפורמט Markdown.',
+    });
+
+    const markdown = text && text.trim() ? text.trim() : '> לא התקבלה תשובה מהמערכת.';
+    res.set('Cache-Control', 'private, no-store');
+    return res.json({ markdown });
+  } catch (err) {
+    console.error('[getJobDeepInsight]', err);
+    return res.status(err.status || 500).json({ message: err.message || 'Failed to generate deep insight' });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 module.exports = {
   list,
   listByWorkedAtCompany,
@@ -3504,6 +3625,8 @@ module.exports = {
   listScreeningRejections,
   buildCandidateModelSchemaJsonForPrompt,
   ensureOrganizationsFromExperience,
+  getJobMatches,
+  getJobDeepInsight,
 };
 
 

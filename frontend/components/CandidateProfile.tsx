@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, useId, useLayoutEffect } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon } from './Icons';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
@@ -19,7 +19,22 @@ const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, 
   </button>
 );
 
-const MAX_VISIBLE_TAGS = 5;
+function buildMissingProfileFieldLabels(
+    data: { field?: string; title?: string; address?: string; age?: string },
+    displayAge: string,
+): string[] {
+    const labels: string[] = [];
+    const field = String(data.field ?? '').trim();
+    const title = String(data.title ?? '').trim();
+    if (!field && !title) labels.push('תחום משרה');
+    else {
+        if (!field) labels.push('תחום משרה');
+        if (!title) labels.push('כותרת משרה');
+    }
+    if (!String(data.address ?? '').trim()) labels.push('כתובת');
+    if (!String(displayAge ?? '').trim() && !String(data.age ?? '').trim()) labels.push('גיל');
+    return labels;
+}
 
 const TAG_LINE_CONFIG: Array<{
     type: SmartTagType;
@@ -1344,31 +1359,18 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const isIncompleteProfile = String(candidateData.status || '').trim() === 'חסר נתונים';
   const statusExplanationTrimmed = String(candidateData.statusExplanation || '').trim();
+  const missingProfileLabels = buildMissingProfileFieldLabels(candidateData, displayAge);
+  const missingDetailsBannerLine =
+      missingProfileLabels.length > 0
+          ? `פרטים חסרים: ${missingProfileLabels.join(', ')}`
+          : statusExplanationTrimmed
+            ? `פרטים חסרים: ${statusExplanationTrimmed}`
+            : 'פרטים חסרים — השלימו את השדות החובה במערכת';
+
+  const showSaveFooter = Boolean(!hideActions && onSaveCandidate);
 
   return (
-      <div className="space-y-4">
-      {isIncompleteProfile && typeof onApproveDataCorrections === 'function' && (
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 border-amber-400 bg-amber-50 px-4 py-3 shadow-sm">
-              <div className="min-w-0 flex-1 space-y-2 text-right">
-                  <p className="text-sm font-semibold text-amber-950">
-                      פרופיל זה סומן כחסר נתונים. לאחר שהשלמתם את כל השדות החובה במערכת, לחצו להעברת המועמד לסטטוס &quot;פעיל&quot;.
-                  </p>
-                  {statusExplanationTrimmed ? (
-                      <p className="text-sm font-normal text-amber-900/90 whitespace-pre-wrap">
-                          {statusExplanationTrimmed}
-                      </p>
-                  ) : null}
-              </div>
-              <button
-                  type="button"
-                  disabled={approveCorrectionsLoading}
-                  onClick={() => void onApproveDataCorrections()}
-                  className="shrink-0 rounded-lg bg-amber-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-amber-700 disabled:opacity-50"
-              >
-                  {approveCorrectionsLoading ? 'מעביר…' : 'אישור תיקונים'}
-              </button>
-          </div>
-      )}
+      <div className={`space-y-4${showSaveFooter ? ' pb-28 md:pb-32' : ''}`}>
       <div className="flex justify-center gap-2">
           <button
             type="button"
@@ -1389,7 +1391,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       </div>
       {renderProfileSwitcher()}
 
-      <div className="candidate-profile-card bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border border-border-subtle">
+      <div className="candidate-profile-card flex flex-col bg-gradient-to-br from-primary-50/80 via-bg-card to-primary-50/40 rounded-2xl shadow-lg p-4 md:p-5 relative mb-6 border border-border-subtle">
          {/* Favorite Button */}
          <button 
             onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }} 
@@ -1430,32 +1432,58 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                           <h3 className="text-xs font-bold text-text-muted uppercase tracking-wide mb-3">
                               {t('section.personal_details')}
                           </h3>
-                          <div className="flex items-center justify-center sm:justify-start flex-wrap gap-3 mb-3">
-                              <EditableField
-                                  value={candidateData.firstName || ''}
-                                  placeholder="שם פרטי"
-                                  onSave={(val) =>
-                                      onFormChange({
-                                          ...candidateData,
-                                          firstName: val,
-                                          fullName: buildCandidateFullName(val, candidateData.lastName),
-                                      })
-                                  }
-                                  className="text-3xl font-extrabold text-text-default tracking-tight"
-                              />
-                              <EditableField
-                                  value={candidateData.lastName || ''}
-                                  placeholder="שם משפחה"
-                                  onSave={(val) =>
-                                      onFormChange({
-                                          ...candidateData,
-                                          lastName: val,
-                                          fullName: buildCandidateFullName(candidateData.firstName, val),
-                                      })
-                                  }
-                                  className="text-3xl font-extrabold text-text-default tracking-tight"
-                              />
-                              <div className="flex items-center text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1">
+                          <div className="flex flex-col gap-2 mb-3">
+                              <div className="flex flex-wrap items-center justify-center sm:justify-start gap-x-3 gap-y-2">
+                                  <EditableField
+                                      value={candidateData.firstName || ''}
+                                      placeholder="שם פרטי"
+                                      onSave={(val) =>
+                                          onFormChange({
+                                              ...candidateData,
+                                              firstName: val,
+                                              fullName: buildCandidateFullName(val, candidateData.lastName),
+                                          })
+                                      }
+                                      className="text-3xl font-extrabold text-text-default tracking-tight"
+                                  />
+                                  <EditableField
+                                      value={candidateData.lastName || ''}
+                                      placeholder="שם משפחה"
+                                      onSave={(val) =>
+                                          onFormChange({
+                                              ...candidateData,
+                                              lastName: val,
+                                              fullName: buildCandidateFullName(candidateData.firstName, val),
+                                          })
+                                      }
+                                      className="text-3xl font-extrabold text-text-default tracking-tight"
+                                  />
+                                  {isIncompleteProfile ? (
+                                      <div
+                                          className="sm:mr-3 flex flex-wrap items-center gap-2 px-2.5 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-lg border border-amber-200 shadow-sm shrink-0"
+                                          dir="rtl"
+                                      >
+                                          <ExclamationTriangleIcon className="w-4 h-4 shrink-0 text-amber-600" />
+                                          <span className="min-w-0 leading-snug max-w-[220px] sm:max-w-[280px]">
+                                              {missingDetailsBannerLine}
+                                          </span>
+                                          {typeof onApproveDataCorrections === 'function' ? (
+                                              <button
+                                                  type="button"
+                                                  disabled={approveCorrectionsLoading}
+                                                  onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      void onApproveDataCorrections();
+                                                  }}
+                                                  className="mr-2 shrink-0 bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 font-bold"
+                                              >
+                                                  {approveCorrectionsLoading ? 'מעביר…' : 'אישור פרטים'}
+                                              </button>
+                                          ) : null}
+                                      </div>
+                                  ) : null}
+                              </div>
+                              <div className="flex items-center justify-center sm:justify-start text-text-muted text-sm bg-bg-subtle/50 px-2 py-0.5 rounded-md border border-border-subtle gap-1 w-fit max-w-full">
                                   <EditableField
                                       value={displayAge}
                                       placeholder="גיל"
@@ -1463,7 +1491,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       className="font-semibold min-w-[40px]"
                                   />
                                   <span className="mx-1.5">•</span>
-                                  <MapPinIcon className="w-3.5 h-3.5 ml-1" />
+                                  <MapPinIcon className="w-3.5 h-3.5 ml-1 shrink-0" />
                                   <EditableField
                                       value={candidateData.address || ''}
                                       placeholder="מיקום"
@@ -1793,17 +1821,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                   <ClipboardDocumentListIcon className="w-5 h-5 text-text-muted" />
                                   <span>{t('profile.screen_candidate')}</span>
                               </button>
-                              {onSaveCandidate && (
-                                  <button
-                                      onClick={(e) => { e.stopPropagation(); onSaveCandidate(); }}
-                                      disabled={isSaving}
-                                      className="flex items-center justify-center gap-2 bg-primary-500 text-white font-bold py-2 px-4 rounded-xl hover:bg-primary-600 transition-all shadow-md disabled:opacity-60"
-                                  >
-                                      <span>{isSaving ? 'שומר/ת...' : 'שמירת פרטים'}</span>
-                                  </button>
-                              )}
                               </div>
-                              {saveStatusMessage && (
+                              {saveStatusMessage && !onSaveCandidate && (
                                   <p className="text-xs text-text-muted mt-2 w-full">{saveStatusMessage}</p>
                               )}
                           </>
@@ -1901,6 +1920,33 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             existingTags={Array.isArray(candidateData.tags) ? candidateData.tags : []}
             initialCategory={tagSelectorCategory}
         />
+
+        {showSaveFooter ? (
+            <div
+                className="fixed inset-x-0 bottom-0 z-[35] border-t border-border-default bg-bg-card/95 backdrop-blur-md shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.1)] pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+                role="region"
+                aria-label="שמירת פרטי מועמד"
+            >
+                <div className="mx-auto flex w-full max-w-7xl flex-col-reverse gap-3 px-3 md:px-6 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-1 text-xs text-text-muted">
+                        {saveStatusMessage ? <p>{saveStatusMessage}</p> : null}
+                    </div>
+                    <button
+                        type="button"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onSaveCandidate();
+                        }}
+                        disabled={isSaving}
+                        className={`shrink-0 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
+                            isSaving ? 'opacity-60 cursor-not-allowed' : ''
+                        }`}
+                    >
+                        {isSaving ? 'שומר/ת...' : 'שמירת פרטים'}
+                    </button>
+                </div>
+            </div>
+        ) : null}
     </div>
   );
 };

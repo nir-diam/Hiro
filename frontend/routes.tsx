@@ -73,6 +73,7 @@ import AdminCompanyCorrectionsView from './components/AdminCompanyCorrectionsVie
 import AdminTagsUnifiedView from './components/AdminTagsUnifiedView';
 import AdminTagsView from './components/AdminTagsView';
 import AdminCandidateTagsView from './components/AdminCandidateTagsView';
+import AdminJobTagsView from './components/AdminJobTagsView';
 import AdminJobFieldsView from './components/AdminJobFieldsView';
 import AdminCompaniesView from './components/AdminCompaniesView';
 import AdminPromptsView from './components/AdminPromptsView';
@@ -487,12 +488,14 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         name: formData.fullName,
         contact: `${formData.email} ${formData.phone}`,
         summary: formData.professionalSummary,
-        experience: formData.workExperience.map(exp => 
-             `<b>${exp.title}</b> ב-${exp.company} (${exp.companyField})<br/>${exp.startDate} - ${exp.endDate}<br/>${exp.description}`
-        )
-        ,
-    workExperience: formData.workExperience,
-            resumeUrl: formData.resumeUrl || '',
+        experience: Array.isArray(formData.workExperience)
+            ? formData.workExperience.map(
+                  (exp: any) =>
+                      `<b>${exp.title}</b> ב-${exp.company} (${exp.companyField})<br/>${exp.startDate} - ${exp.endDate}<br/>${exp.description}`,
+              )
+            : [],
+        workExperience: formData.workExperience,
+        resumeUrl: formData.resumeUrl || '',
         candidateId: formData.backendId,
     };
     
@@ -720,7 +723,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
     const renderContent = () => {
         if (props.isMatchingJobs) {
-            return <JobMatchingView onBack={() => props.handleSetActiveView('details')} candidateName={formData.fullName} />;
+            return <JobMatchingView onBack={() => props.handleSetActiveView('details')} candidateName={formData.fullName} candidateId={String(formData.backendId || formData.id || '')} />;
         }
         if (props.isScreening) {
             return (
@@ -752,6 +755,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                             />
                             <ResumeViewer
                                 resumeData={mockResumeData}
+                                fullData={formData}
                                 onOpenMessageModal={props.openMessageModal}
                                 candidateId={formData.backendId || urlId || null}
                             />
@@ -952,6 +956,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                         { path: 'list', element: <AdminTagsView /> },
                         { path: 'corrections', element: <AdminTagCorrectionsView /> },
                         { path: 'candidates', element: <AdminCandidateTagsView /> },
+                        { path: 'jobs', element: <AdminJobTagsView /> },
                     ],
                 },
                 { path: 'tag-corrections', element: <Navigate to="/admin/tags/corrections" replace /> },

@@ -227,7 +227,7 @@ export default function JobScreeningView() {
 
             <div className="flex-grow grid grid-cols-1 lg:grid-cols-2 gap-px bg-border-default overflow-y-auto">
                 <div className="bg-bg-card overflow-y-auto">
-                    <ResumeViewer resumeData={resumeData} />
+                    <ResumeViewer resumeData={resumeData} fullData={currentCandidate as any} />
                 </div>
 
                 <div className="bg-bg-card p-4 overflow-y-auto flex flex-col">

@@ -7,11 +7,13 @@ import {
     TrashIcon, ExclamationTriangleIcon,
     CalendarDaysIcon, EllipsisVerticalIcon,
     TableCellsIcon, Squares2X2Icon, BoltIcon, ChartBarIcon, GlobeAmericasIcon,
-    Cog6ToothIcon, UserIcon, MapPinIcon, BuildingOffice2Icon, ChevronDownIcon
+    Cog6ToothIcon, UserIcon, MapPinIcon, BuildingOffice2Icon, ChevronDownIcon,
+    TagIcon, ArrowPathIcon, PlusIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
+import TagSelectorModal, { type TagOption } from './TagSelectorModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה' | 'ממתין לאישור';
@@ -177,6 +179,433 @@ const AdminJobCard: React.FC<AdminJobCardProps> = ({ job, isSelected, onSelect, 
     );
 };
 
+// ─── JobSkillsTab ────────────────────────────────────────────────────────────
+
+interface JobSkillItem {
+  id?: string;
+  key?: string;
+  name: string;
+  mode: 'normal' | 'mandatory' | 'negative';
+  source?: string;
+  tagType?: string;
+  tag_reason?: string;
+  relevance_score?: number;
+  status?: string;
+}
+
+interface JobSkillRow {
+  jobId: string;
+  jobTitle: string;
+  client: string;
+  status: string;
+  skills: JobSkillItem[];
+}
+
+const TAG_TYPE_COLORS: Record<string, string> = {
+  role: 'bg-blue-50 text-blue-700 border-blue-200',
+  skill: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  industry: 'bg-purple-50 text-purple-700 border-purple-200',
+  tool: 'bg-amber-50 text-amber-700 border-amber-200',
+  certification: 'bg-orange-50 text-orange-700 border-orange-200',
+  language: 'bg-cyan-50 text-cyan-700 border-cyan-200',
+  seniority: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+  degree: 'bg-pink-50 text-pink-700 border-pink-200',
+  soft_skill: 'bg-rose-50 text-rose-700 border-rose-200',
+  soft: 'bg-rose-50 text-rose-700 border-rose-200',
+  default: 'bg-gray-100 text-gray-700 border-gray-200',
+};
+
+const MODE_STYLES: Record<string, string> = {
+  mandatory: 'ring-2 ring-emerald-400 ring-offset-1',
+  negative: 'ring-2 ring-red-400 ring-offset-1 opacity-75',
+  normal: '',
+};
+
+const MODE_LABELS: Record<string, string> = {
+  mandatory: 'Mandatory',
+  negative: 'Negative',
+  normal: 'Normal',
+};
+
+const tagColor = (type?: string) => TAG_TYPE_COLORS[type || ''] || TAG_TYPE_COLORS.default;
+
+const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
+  const navigate = useNavigate();
+  const [jobs, setJobs] = useState<JobSkillRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [searchTerm, setSearchTerm] = useState('');
+  const [statusFilter, setStatusFilter] = useState('');
+
+  const [editingJobId, setEditingJobId] = useState<string | null>(null);
+  const [editSkills, setEditSkills] = useState<JobSkillItem[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [tagModalOpen, setTagModalOpen] = useState(false);
+
+  const authHeaders = useCallback((): HeadersInit => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const h: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+    if (token) h.Authorization = `Bearer ${token}`;
+    return h;
+  }, []);
+
+  const load = useCallback(async () => {
+    if (!apiBase) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const jobsRes = await fetch(`${apiBase}/api/jobs`, { headers: authHeaders() });
+      if (!jobsRes.ok) throw new Error('Failed to load jobs');
+      const rawJobs: any[] = await jobsRes.json();
+      setJobs(
+        rawJobs
+          .filter((j) => Array.isArray(j.skills) && j.skills.length > 0)
+          .map((j) => ({
+            jobId: j.id,
+            jobTitle: j.title || '—',
+            client: j.client || '—',
+            status: j.status || '',
+            skills: j.skills as JobSkillItem[],
+          })),
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [apiBase, authHeaders]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const filtered = useMemo(() => {
+    const q = searchTerm.toLowerCase();
+    return jobs.filter((j) => {
+      if (statusFilter && j.status !== statusFilter) return false;
+      if (!q) return true;
+      if (j.jobTitle.toLowerCase().includes(q)) return true;
+      if (j.client.toLowerCase().includes(q)) return true;
+      if (j.skills.some((s) => (s.name || s.key || '').toLowerCase().includes(q))) return true;
+      return false;
+    });
+  }, [jobs, searchTerm, statusFilter]);
+
+  const openEdit = (row: JobSkillRow) => {
+    setEditingJobId(row.jobId);
+    setEditSkills(row.skills.map((s) => ({ ...s })));
+    setSaveError(null);
+  };
+
+  const closeEdit = () => {
+    setEditingJobId(null);
+    setEditSkills([]);
+    setSaveError(null);
+  };
+
+  const deleteSkill = (idx: number) =>
+    setEditSkills((prev) => prev.filter((_, i) => i !== idx));
+
+  const cycleMode = (idx: number) => {
+    const order: JobSkillItem['mode'][] = ['normal', 'mandatory', 'negative'];
+    setEditSkills((prev) =>
+      prev.map((s, i) => {
+        if (i !== idx) return s;
+        const next = order[(order.indexOf(s.mode) + 1) % order.length];
+        return { ...s, mode: next };
+      }),
+    );
+  };
+
+  const handleTagModalSave = (selected: TagOption[]) => {
+    setEditSkills((prev) => {
+      const next = [...prev];
+      for (const t of selected) {
+        const key = t.tagKey || t.nameHe;
+        if (next.some((s) => s.key === key || s.name === t.nameHe || s.id === t.id)) continue;
+        next.push({
+          id: t.id,
+          name: t.nameHe,
+          key: t.tagKey || t.nameHe,
+          mode: 'normal',
+          source: 'global',
+          tagType: t.rawType || t.category,
+        });
+      }
+      return next;
+    });
+  };
+
+  const saveSkills = async (jobId: string) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const res = await fetch(`${apiBase}/api/jobs/${jobId}`, {
+        method: 'PUT',
+        headers: authHeaders(),
+        body: JSON.stringify({ skills: editSkills }),
+      });
+      if (!res.ok) throw new Error((await res.text().catch(() => '')) || `HTTP ${res.status}`);
+      const updated = await res.json();
+      setJobs((prev) =>
+        prev.map((j) =>
+          j.jobId === jobId
+            ? { ...j, skills: (updated.skills || editSkills) as JobSkillItem[] }
+            : j,
+        ),
+      );
+      closeEdit();
+    } catch (e) {
+      setSaveError((e as Error).message || 'Save failed');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <div className="space-y-4">
+      {/* Toolbar */}
+      <div className="flex flex-col md:flex-row gap-3 items-center justify-between bg-bg-card p-4 rounded-2xl border border-border-default">
+        <div className="flex items-center gap-3 w-full md:w-auto">
+          <div className="relative flex-grow md:w-80">
+            <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="text"
+              placeholder="Search by job title, client or tag name..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full bg-bg-input border border-border-default rounded-xl py-2 pl-3 pr-9 text-sm focus:ring-2 focus:ring-primary-500 transition-all"
+            />
+          </div>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm min-w-[130px]"
+          >
+            <option value="">All statuses</option>
+            <option value="פתוחה">Open</option>
+            <option value="מוקפאת">Frozen</option>
+            <option value="מאוישת">Filled</option>
+            <option value="טיוטה">Draft</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-text-muted">
+            {filtered.length} jobs · {filtered.reduce((n, j) => n + j.skills.length, 0)} tags
+          </span>
+          <button
+            onClick={load}
+            disabled={loading}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl border border-border-default text-text-muted hover:bg-bg-subtle text-sm transition disabled:opacity-50"
+          >
+            <ArrowPathIcon className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-xl border border-red-200 bg-red-50 text-red-700 px-4 py-3 text-sm">{error}</div>
+      )}
+
+      {loading && jobs.length === 0 ? (
+        <div className="space-y-2">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="bg-bg-card rounded-xl border border-border-default p-4 animate-pulse flex gap-4">
+              <div className="h-4 bg-bg-subtle rounded w-1/5" />
+              <div className="h-4 bg-bg-subtle rounded w-1/6" />
+              <div className="flex-1 flex gap-2">
+                {[1, 2, 3].map((j) => <div key={j} className="h-6 bg-bg-subtle rounded-full w-20" />)}
+              </div>
+              <div className="h-8 bg-bg-subtle rounded-lg w-16" />
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="bg-bg-card rounded-2xl border border-border-default overflow-hidden shadow-sm">
+          <table className="w-full text-sm">
+            <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default">
+              <tr>
+                <th className="p-4 text-right w-56">Job</th>
+                <th className="p-4 text-right w-32">Client</th>
+                <th className="p-4 text-right w-24">Status</th>
+                <th className="p-4 text-right">Skills / Tags</th>
+                <th className="p-4 text-center w-20">Edit</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border-subtle">
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={5} className="py-16 text-center text-text-muted">
+                    <TagIcon className="w-10 h-10 mx-auto mb-3 text-text-subtle" />
+                    No jobs with skills found
+                  </td>
+                </tr>
+              )}
+              {filtered.map((row) => (
+                <React.Fragment key={row.jobId}>
+                  <tr className={`hover:bg-bg-hover transition-colors ${editingJobId === row.jobId ? 'bg-primary-50/20' : ''}`}>
+                    <td className="p-4">
+                      <button
+                        onClick={() => navigate(`/jobs/edit/${row.jobId}`)}
+                        className="font-semibold text-text-default hover:text-primary-600 hover:underline transition-colors text-left"
+                      >
+                        {row.jobTitle}
+                      </button>
+                    </td>
+                    <td className="p-4 text-text-muted text-xs">{row.client}</td>
+                    <td className="p-4">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                        row.status === 'פתוחה' ? 'bg-green-50 text-green-700 border-green-200' :
+                        row.status === 'מוקפאת' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                        'bg-gray-100 text-gray-600 border-gray-200'
+                      }`}>
+                        {row.status}
+                      </span>
+                    </td>
+                    <td className="p-4">
+                      <div className="flex flex-wrap gap-1.5">
+                        {row.skills.map((s, i) => (
+                          <span
+                            key={s.id || s.key || i}
+                            className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${tagColor(s.tagType)} ${MODE_STYLES[s.mode] || ''}`}
+                            title={`mode: ${s.mode}${s.source ? ` · source: ${s.source}` : ''}${s.tag_reason ? `\n${s.tag_reason}` : ''}`}
+                          >
+                            {s.name || s.key}
+                            {s.mode !== 'normal' && (
+                              <span className={`ml-1 text-[9px] font-bold ${s.mode === 'mandatory' ? 'text-emerald-600' : 'text-red-500'}`}>
+                                {s.mode === 'mandatory' ? '●' : '✕'}
+                              </span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </td>
+                    <td className="p-4 text-center">
+                      {editingJobId === row.jobId ? (
+                        <button onClick={closeEdit} className="text-xs text-text-muted hover:text-text-default px-2 py-1 rounded-lg hover:bg-bg-subtle transition font-semibold">
+                          Cancel
+                        </button>
+                      ) : (
+                        <button onClick={() => openEdit(row)} className="text-xs font-semibold text-primary-600 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition border border-primary-200">
+                          Edit
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+
+                  {editingJobId === row.jobId && (
+                    <tr className="bg-bg-subtle/30">
+                      <td colSpan={5} className="px-5 pb-5 pt-2">
+                        <div className="border border-primary-200 rounded-xl bg-bg-card p-4 space-y-4">
+                          <div className="flex items-center justify-between">
+                            <h4 className="font-bold text-text-default text-sm flex items-center gap-2">
+                              <TagIcon className="w-4 h-4 text-primary-500" />
+                              Edit tags for: <span className="text-primary-600">{row.jobTitle}</span>
+                            </h4>
+                            <span className="text-xs text-text-subtle">
+                              Click a tag name to cycle mode (Normal → Mandatory → Negative). Press × to remove.
+                            </span>
+                          </div>
+
+                          {/* Current skills */}
+                          <div>
+                            <p className="text-xs font-semibold text-text-muted mb-2 uppercase tracking-wide">Current tags ({editSkills.length})</p>
+                            <div className="flex flex-wrap gap-2 min-h-[40px] p-3 bg-bg-subtle rounded-lg border border-border-default">
+                              {editSkills.length === 0 && (
+                                <span className="text-xs text-text-subtle self-center">No tags — add from catalog below</span>
+                              )}
+                              {editSkills.map((s, idx) => (
+                                <div
+                                  key={s.id || s.key || idx}
+                                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border ${tagColor(s.tagType)} ${MODE_STYLES[s.mode] || ''}`}
+                                >
+                                  <button
+                                    onClick={() => cycleMode(idx)}
+                                    className="font-semibold hover:opacity-70 transition"
+                                    title={`Mode: ${MODE_LABELS[s.mode]} — click to change`}
+                                  >
+                                    {s.name || s.key}
+                                  </button>
+                                  <span className={`text-[10px] font-bold px-1 rounded ${
+                                    s.mode === 'mandatory' ? 'bg-emerald-100 text-emerald-700' :
+                                    s.mode === 'negative' ? 'bg-red-100 text-red-600' :
+                                    'bg-gray-100 text-gray-500'
+                                  }`}>
+                                    {MODE_LABELS[s.mode]}
+                                  </span>
+                                  <button
+                                    onClick={() => deleteSkill(idx)}
+                                    className="text-text-subtle hover:text-red-500 transition ml-0.5"
+                                    title="Remove"
+                                  >
+                                    <XMarkIcon className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+
+                          {/* Add tags via modal */}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => setTagModalOpen(true)}
+                              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl border-2 border-dashed border-primary-300 text-primary-600 hover:bg-primary-50 text-sm font-semibold transition-all"
+                            >
+                              <PlusIcon className="w-4 h-4" />
+                              Add tags from catalog
+                            </button>
+                            <span className="text-xs text-text-subtle">Browse and search all available tags</span>
+                          </div>
+
+                          {saveError && (
+                            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{saveError}</p>
+                          )}
+
+                          <div className="flex justify-end gap-2 pt-2 border-t border-border-subtle">
+                            <button onClick={closeEdit} className="px-4 py-2 text-sm font-semibold text-text-muted hover:bg-bg-subtle rounded-lg border border-border-default transition">
+                              Cancel
+                            </button>
+                            <button
+                              onClick={() => saveSkills(row.jobId)}
+                              disabled={saving}
+                              className="px-5 py-2 text-sm font-bold bg-primary-500 text-white rounded-lg hover:bg-primary-600 transition disabled:opacity-60 disabled:cursor-wait flex items-center gap-2"
+                            >
+                              {saving && (
+                                <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+                                </svg>
+                              )}
+                              Save changes
+                            </button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+
+    {/* Tag selector modal — opens when editing a job */}
+    <TagSelectorModal
+      isOpen={tagModalOpen}
+      onClose={() => setTagModalOpen(false)}
+      onSave={handleTagModalSave}
+      existingTags={editSkills.map((s) => s.name || s.key || '')}
+    />
+    </>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 const AdminJobsView: React.FC = () => {
     const navigate = useNavigate();
     const { t } = useLanguage();
@@ -187,7 +616,7 @@ const AdminJobsView: React.FC = () => {
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [activeContextTab, setActiveContextTab] = useState<'all' | 'public'>('all');
+    const [activeContextTab, setActiveContextTab] = useState<'all' | 'public' | 'tags'>('all');
     const [jobs, setJobs] = useState<any[]>([]);
     const [loadingJobs, setLoadingJobs] = useState(false);
     const loadJobs = useCallback(async () => {
@@ -519,10 +948,27 @@ const AdminJobsView: React.FC = () => {
                          <GlobeAmericasIcon className="w-5 h-5" />
                          לוח משרות (Public)
                       </button>
+                      <button
+                        onClick={() => setActiveContextTab('tags')}
+                        className={`py-3 px-1 inline-flex items-center gap-2 border-b-2 font-bold text-sm ${
+                           activeContextTab === 'tags'
+                            ? 'border-emerald-500 text-emerald-600'
+                            : 'border-transparent text-text-muted hover:text-text-default hover:border-gray-300'
+                        }`}
+                      >
+                         <TagIcon className="w-5 h-5" />
+                         תגיות לפי תפקיד
+                      </button>
                 </nav>
             </div>
 
-            {/* Main Layout: Toolbar Row + Grid */}
+            {/* Tags Tab — rendered outside the jobs card */}
+            {activeContextTab === 'tags' && (
+                <JobRoleTagsTab apiBase={apiBase} />
+            )}
+
+            {/* Main Layout: Toolbar Row + Grid — hidden when Tags tab is active */}
+            {activeContextTab !== 'tags' && (<>
             <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm z-20 relative space-y-4">
                 
                 {/* TOP ROW: Search & View Toggles & Advanced Button */}
@@ -765,6 +1211,7 @@ const AdminJobsView: React.FC = () => {
                     </div>
                 )}
             </div>
+            </>)}
             
             <JobFieldSelector
                 value={null}

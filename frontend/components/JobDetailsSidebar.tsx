@@ -3,6 +3,7 @@ import React, { useMemo } from 'react';
 import { ChartBarIcon, PencilIcon as PencilSquareIcon, ClipboardDocumentIcon, ArchiveBoxIcon, ArrowPathIcon, UserGroupIcon, ClockIcon, AvatarIcon, FunnelIcon, LinkIcon } from './Icons';
 import { mockJobCandidates } from '../data/mockJobData';
 import { useLanguage } from '../context/LanguageContext';
+import type { Candidate } from './CandidatesListView';
 
 const SidebarCard: React.FC<{ title: string; icon: React.ReactNode; children: React.ReactNode; editable?: boolean }> = ({ title, icon, children, editable = false }) => (
     <div className="bg-bg-card rounded-xl border border-border-default shadow-sm">
@@ -33,7 +34,7 @@ interface JobDetailsSidebarProps {
         openDate: string;
         associatedCandidates: number; 
     };
-    openSummaryDrawer: (candidateId: number) => void;
+    openSummaryDrawer: (candidate: Candidate | number) => void;
 }
 
 const JobDetailsSidebar: React.FC<JobDetailsSidebarProps> = ({ job, openSummaryDrawer }) => {

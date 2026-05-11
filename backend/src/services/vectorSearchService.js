@@ -113,7 +113,7 @@ const normalizeEmbedding = (emb) => {
   return [];
 };
 
-const searchCandidates = async ({ query, filters = {}, limit = 20 }) => {
+const searchCandidates = async ({ query, filters = {}, limit = 20, maxLimitCap = 20 }) => {
   console.log('[vectorSearch] start', { query, filters, limit });
   const qEmbedding = await embedText(query || '');
   console.log('[vectorSearch] query embedding length', qEmbedding.length);
@@ -130,8 +130,9 @@ const searchCandidates = async ({ query, filters = {}, limit = 20 }) => {
 
   console.log('[vectorSearch] filtered count', filtered.length);
 
-  // Cap max returned for sanity
-  const maxLimit = Math.min(limit || 20, 20);
+  // Cap max returned for sanity (Sonar may request a higher cap than default grid search)
+  const cap = Number.isFinite(maxLimitCap) && maxLimitCap > 0 ? maxLimitCap : 20;
+  const maxLimit = Math.min(limit || 20, cap);
   const queryWords = (query || '')
     .toLowerCase()
     .split(/\s+/)

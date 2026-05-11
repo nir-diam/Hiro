@@ -9,6 +9,7 @@ const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const screeningInclusionService = require('../services/screeningInclusionService');
+const jobSonarService = require('../services/jobSonarService');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
 
@@ -659,6 +660,19 @@ const getScreeningPoolForJob = async (req, res) => {
   }
 };
 
+const postJobSonarScan = async (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const data = await jobSonarService.runSonarScan(jobId, req.body || {});
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[jobController.postJobSonarScan]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Sonar scan failed' });
+  }
+};
+
 module.exports = {
   list,
   listForCompose,
@@ -671,5 +685,6 @@ module.exports = {
   getReferralClientContacts,
   logSmartImportModalOpen,
   getScreeningPoolForJob,
+  postJobSonarScan,
 };
 

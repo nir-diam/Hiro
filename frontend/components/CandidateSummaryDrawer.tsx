@@ -547,6 +547,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
                 <h3 className="text-xl font-bold text-text-default">קורות חיים</h3>
                 <ResumeViewer
                   resumeData={candidateResumeData}
+                  fullData={mergedCandidate}
                   resumeFileUrl={resumeUrl}
                   className="h-[600px]"
                   onDownloadResume={handleDownloadResume}

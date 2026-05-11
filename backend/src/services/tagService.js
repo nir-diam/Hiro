@@ -243,7 +243,10 @@ const list = async (options = {}) => {
   }
   if (Array.isArray(statuses) && statuses.length) {
     where.status = { [Op.in]: statuses };
-  } else {
+  } else if (!normalizedSearch) {
+    // Only hide pending tags on unfiltered/unscoped browsing.
+    // When a search term is provided, include all statuses so pending
+    // tags (e.g. freshly AI-detected) are discoverable.
     where.status = { [Op.ne]: 'pending' };
   }
 

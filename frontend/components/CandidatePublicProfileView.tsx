@@ -28,6 +28,7 @@ import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { SmartTagType, SmartTagData } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
+import { educationEntryToDisplayLine, normalizeLanguagesForPrintRows } from '../utils/printableResumeFormatting';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -755,109 +756,210 @@ const EditableField: React.FC<{
     );
 };
 
-const PrintableResume: React.FC<{ data: any; className?: string }> = ({ data, className }) => {
+function formatCvPrintDate(d?: string | null): string {
+    if (d == null || !String(d).trim()) return '';
+    const s = String(d).trim();
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10).split('-').reverse().join('/');
+    return s;
+}
+
+export const PrintableResume: React.FC<{
+    data: any;
+    className?: string;
+    hideCompanyLogo?: boolean;
+    /** Tighter typography for PDF capture (off-screen clone). On-screen ResumeViewer uses default + hidden compact for export. */
+    density?: 'default' | 'compact';
+}> = ({ data, className = '', hideCompanyLogo = false, density = 'default' }) => {
+    const displayName = buildCandidateFullName(data.firstName, data.lastName) || data.fullName || '';
+    const printLanguages = normalizeLanguagesForPrintRows(data.languages);
+    const compact = density === 'compact';
+
+    const rootPad = compact ? 'p-3' : 'p-10';
+    const headerBar = compact ? 'pb-1.5 mb-3' : 'pb-4 mb-6';
+    const h1Cls = compact ? 'text-xl font-extrabold text-gray-900 mb-0.5 break-words leading-tight' : 'text-4xl font-extrabold text-gray-900 mb-1 break-words';
+    const titleCls = compact ? 'text-sm text-primary-600 font-semibold leading-tight' : 'text-xl text-primary-600 font-semibold';
+    const brandCls = compact ? 'text-sm font-bold tracking-tight text-gray-800 mb-0.5 flex items-center gap-1' : 'text-xl font-bold tracking-tight text-gray-800 mb-1 flex items-center gap-2';
+    const brandMark = compact ? 'w-5 h-5 text-xs' : 'w-8 h-8';
+    const hiroCls = compact ? 'text-[8px] text-gray-400 font-medium tracking-wide' : 'text-[10px] text-gray-400 font-medium tracking-wide';
+    const contactBar = compact
+        ? 'flex flex-wrap gap-1.5 text-[11px] leading-tight text-gray-600 mb-3 items-center bg-gray-50 px-2 py-1.5 rounded [&_svg]:w-3 [&_svg]:h-3'
+        : 'flex flex-wrap gap-4 text-sm text-gray-600 mb-8 items-center bg-gray-50 p-3 rounded';
+    const secTitle = compact
+        ? 'text-xs font-bold text-gray-800 uppercase border-b border-gray-200 mb-1.5 pb-0.5 leading-tight'
+        : 'text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1';
+    /** תמצית מנהלים stays default-sized even in compact (PDF) so it stays readable. */
+    const executiveSummaryHeadingCls =
+        'text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1 flex items-center justify-between';
+    const executiveSummaryBodyCls =
+        'text-sm leading-relaxed text-gray-700 whitespace-pre-line text-justify';
+    const expSectionMb = compact ? 'mb-4' : 'mb-8';
+    const expStack = compact ? 'space-y-3' : 'space-y-6';
+    const expH4 = compact ? 'text-xs font-bold text-gray-900 leading-tight' : 'text-base font-bold text-gray-900';
+    const expDate = compact ? 'text-[9px] font-medium text-gray-500 bg-gray-100 px-1 py-0.5 rounded shrink-0' : 'text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded shrink-0';
+    const expCompany = compact ? 'text-[11px] font-semibold text-primary-700 mb-0.5 leading-tight' : 'text-sm font-semibold text-primary-700 mb-2';
+    const expDesc = compact ? 'text-[11px] text-gray-700 leading-tight whitespace-pre-line' : 'text-sm text-gray-700 leading-relaxed whitespace-pre-line';
+    const eduSec = compact ? 'mb-4 break-inside-avoid' : 'mb-8 break-inside-avoid';
+    const eduUl = compact ? 'space-y-1.5' : 'space-y-3';
+    const eduLi = compact ? 'text-[11px] leading-tight' : 'text-sm';
+    const grid2 = compact ? 'grid grid-cols-2 gap-4 break-inside-avoid' : 'grid grid-cols-2 gap-8 break-inside-avoid';
+    const skillTag = compact
+        ? 'bg-gray-100 text-gray-800 text-[9px] font-medium px-1 py-0.5 rounded border border-gray-200 leading-tight'
+        : 'bg-gray-100 text-gray-800 text-xs font-medium px-2.5 py-1 rounded border border-gray-200';
+    const langUl = compact ? 'space-y-0.5 text-[11px] leading-tight' : 'space-y-2 text-sm';
+
     return (
-        <div className={`bg-white text-gray-900 font-sans p-10 max-w-[210mm] mx-auto shadow-none print:shadow-none ${className}`}>
-             <style>{`
+        <div
+            className={`bg-white text-gray-900 font-sans ${rootPad} max-w-[210mm] mx-auto shadow-none print:shadow-none ${className}`}
+        >
+            <style>{`
                 @media print {
                     @page { margin: 1cm; size: A4; }
                     body { -webkit-print-color-adjust: exact; }
                 }
             `}</style>
-            
+
             {/* Header */}
-            <div className="border-b-2 border-gray-800 pb-4 mb-6">
-                <h1 className="text-4xl font-extrabold text-gray-900 mb-1">
-                    {buildCandidateFullName(data.firstName, data.lastName) || data.fullName}
-                </h1>
-                <h2 className="text-xl text-primary-600 font-semibold">{data.title}</h2>
+            <div className={`border-b-2 border-gray-800 ${headerBar} flex justify-between items-start`}>
+                <div className="min-w-0 pr-2">
+                    <h1 className={h1Cls}>{displayName}</h1>
+                    <h2 className={titleCls}>{data.title || ''}</h2>
+                </div>
+                <div className="flex flex-col items-start text-right pt-1 shrink-0">
+                    {!hideCompanyLogo && (
+                        <div className={brandCls}>
+                            <div
+                                className={`${brandMark} bg-primary-100 rounded flex items-center justify-center text-primary-700 font-serif`}
+                            >
+                                מ&quot;א
+                            </div>
+                            מימד אנושי
+                        </div>
+                    )}
+                    <div className={hiroCls}>
+                        נוצר באמצעות <span className="font-bold text-gray-500">HIRO</span>
+                    </div>
+                </div>
             </div>
 
             {/* Contact Info */}
-            <div className="flex flex-wrap gap-4 text-sm text-gray-600 mb-8 items-center bg-gray-50 p-3 rounded">
-                {data.phone && <div className="flex items-center gap-1"><PhoneIcon className="w-4 h-4"/><span>{data.phone}</span></div>}
-                {data.email && <div className="flex items-center gap-1"><EnvelopeIcon className="w-4 h-4"/><span>{data.email}</span></div>}
-                {data.location && <div className="flex items-center gap-1"><MapPinIcon className="w-4 h-4"/><span>{data.location}</span></div>}
+            <div className={contactBar}>
+                {data.phone && (
+                    <div className="flex items-center gap-1">
+                        <PhoneIcon className="w-4 h-4" />
+                        <span>{data.phone}</span>
+                    </div>
+                )}
+                {data.email && (
+                    <div className="flex items-center gap-1">
+                        <EnvelopeIcon className="w-4 h-4" />
+                        <span>{data.email}</span>
+                    </div>
+                )}
+                {data.location && (
+                    <div className="flex items-center gap-1">
+                        <MapPinIcon className="w-4 h-4" />
+                        <span>{data.location}</span>
+                    </div>
+                )}
             </div>
 
-            {/* Summary */}
+            {/* Summary — always default typography */}
             {data.professionalSummary && (
-                <section className="mb-8">
-                    <h3 className="text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1">תמצית מנהלים</h3>
-                    <p className="text-sm leading-relaxed text-gray-700 whitespace-pre-line text-justify">
-                        {data.professionalSummary}
-                    </p>
+                <section className="mb-6">
+                    <h3 className={executiveSummaryHeadingCls}>תמצית מנהלים</h3>
+                    <p className={executiveSummaryBodyCls}>{data.professionalSummary}</p>
                 </section>
             )}
 
             {/* Experience */}
             {data.workExperience && data.workExperience.length > 0 && (
-                <section className="mb-8">
-                    <h3 className="text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-4 pb-1">ניסיון תעסוקתי</h3>
-                    <div className="space-y-6">
-                        {data.workExperience.map((exp: any, index: number) => (
-                            <div key={index} className="break-inside-avoid">
-                                <div className="flex justify-between items-baseline mb-1">
-                                    <h4 className="text-base font-bold text-gray-900">{exp.title}</h4>
-                                    <span className="text-xs font-medium text-gray-500 bg-gray-100 px-2 py-0.5 rounded">
-                                        {exp.startDate} - {exp.endDate}
-                                    </span>
+                <section className={expSectionMb}>
+                    <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-4'}`}>ניסיון תעסוקתי</h3>
+                    <div className={expStack}>
+                        {data.workExperience.map((exp: any, index: number) => {
+                            const start = formatCvPrintDate(exp.startDate);
+                            const end = formatCvPrintDate(exp.endDate);
+                            const dateLabel =
+                                (typeof exp.dateRangeLabel === 'string' && exp.dateRangeLabel.trim()) ||
+                                [start, end].filter(Boolean).join(' — ');
+                            return (
+                                <div key={index} className="break-inside-avoid">
+                                    <div className="flex justify-between items-baseline mb-0.5">
+                                        <h4 className={expH4}>{exp.title}</h4>
+                                        {dateLabel ? (
+                                            <span dir="ltr" className={expDate}>
+                                                {dateLabel}
+                                            </span>
+                                        ) : null}
+                                    </div>
+                                    {exp.company ? <div className={expCompany}>{exp.company}</div> : null}
+                                    {exp.description ? <p className={expDesc}>{exp.description}</p> : null}
                                 </div>
-                                <div className="text-sm font-semibold text-primary-700 mb-2">{exp.company}</div>
-                                <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-line">
-                                    {exp.description}
-                                </p>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 </section>
             )}
 
             {/* Education */}
             {data.education && data.education.length > 0 && (
-                <section className="mb-8 break-inside-avoid">
-                    <h3 className="text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-4 pb-1">השכלה</h3>
-                    <ul className="space-y-3">
-                        {data.education.map((edu: any, index: number) => (
-                            <li key={index} className="text-sm">
-                                <span className="font-semibold block text-gray-900">{edu.value}</span>
-                            </li>
-                        ))}
+                <section className={eduSec}>
+                    <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-4'}`}>השכלה</h3>
+                    <ul className={eduUl}>
+                        {data.education.map((edu: any, index: number) => {
+                            const line = educationEntryToDisplayLine(edu);
+                            if (!line) return null;
+                            return (
+                                <li key={index} className={eduLi}>
+                                    <span className="font-semibold block text-gray-900">{line}</span>
+                                </li>
+                            );
+                        })}
                     </ul>
                 </section>
             )}
 
-             {/* Skills & Languages Grid */}
-            <div className="grid grid-cols-2 gap-8 break-inside-avoid">
-                 {/* Skills */}
-                {data.tags && data.tags.length > 0 && (
-                    <section>
-                        <h3 className="text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1">מיומנויות</h3>
-                        <div className="flex flex-wrap gap-2">
-                            {data.tags.map((tag: string, index: number) => (
-                                <span key={index} className="bg-gray-100 text-gray-800 text-xs font-medium px-2.5 py-1 rounded border border-gray-200">
-                                    {tag}
-                                </span>
-                            ))}
-                        </div>
-                    </section>
-                )}
+            {/* Skills & Languages Grid */}
+            {(data.tagDetails?.length > 0 || printLanguages.length > 0) && (
+                <div className={grid2}>
+                    {data.tags && data.tagDetails.length > 0 && (
+                        <section>
+                            <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>מיומנויות</h3>
+                            <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
+                                {data.tagDetails.map((tag: any, index: number) => {
+                                    const label =
+                                        typeof tag === 'string'
+                                            ? tag
+                                            : tag?.displayNameHe ?? tag?.nameHe ?? tag?.value ?? tag?.name ?? tag?.label ?? tag?.tagKey ?? '';
+                                    if (!label) return null;
+                                    return (
+                                        <span key={index} className={skillTag}>
+                                            {label}
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        </section>
+                    )}
 
-                {/* Languages */}
-                {data.languages && data.languages.length > 0 && (
-                    <section>
-                        <h3 className="text-lg font-bold text-gray-800 uppercase border-b border-gray-200 mb-3 pb-1">שפות</h3>
-                        <ul className="space-y-2 text-sm">
-                            {data.languages.map((lang: any, index: number) => (
-                                <li key={index} className="flex justify-between border-b border-gray-100 pb-1 last:border-0">
-                                    <span className="font-medium">{lang.name}</span>
-                                    <span className="text-gray-500">{lang.levelText || lang.level}</span>
-                                </li>
-                            ))}
-                        </ul>
-                    </section>
-                )}
-            </div>
+                    {printLanguages.length > 0 && (
+                        <section>
+                            <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>שפות</h3>
+                            <ul className={langUl}>
+                                {printLanguages.map((row, index: number) => (
+                                    <li
+                                        key={index}
+                                        className="flex justify-between border-b border-gray-100 pb-1 last:border-0 gap-2"
+                                    >
+                                        <span className="font-medium">{row.name}</span>
+                                        <span className="text-gray-500 shrink-0">{row.levelText}</span>
+                                    </li>
+                                ))}
+                            </ul>
+                        </section>
+                    )}
+                </div>
+            )}
         </div>
     );
 };

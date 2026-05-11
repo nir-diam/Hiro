@@ -26,10 +26,17 @@ import type { LocationItem } from './LocationSelector';
 import {
     buildJobLocationDisplayModel,
     type JobLocationDisplayModel,
+    splitJobLocationString,
 } from '../utils/jobLocationDisplay';
 import { buildResumeDataFromCandidate } from '../utils/screeningResumeData';
+import {
+    buildJobTagMatchCategories,
+    type ScreeningJobSkillRow,
+    type ScreeningJobLanguageRow,
+} from '../utils/jobTagMatchCategories';
 
 export { buildResumeDataFromCandidate };
+export type { ScreeningJobSkillRow, ScreeningJobLanguageRow };
 
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
@@ -40,12 +47,31 @@ interface ScreeningJob {
   company: string;
   title: string;
   location: string;
+  /** Primary city field from Job.city when present — merged into locality tokens for metrics. */
+  city?: string;
   /** When API returns structured locations (radius row), compact summary matches Studio. */
   locations?: LocationItem[];
   salary: string;
+  /** Monthly brackets in thousands ₪ — job expectations from Job.SalaryMin/SalaryMax */
+  salaryMin?: number;
+  salaryMax?: number;
+  jobType?: string | string[];
+  /** Job requirement fields used for metric tones (Sonar-aligned). */
+  gender?: string;
+  mobility?: boolean;
+  licenseType?: string;
+  ageMin?: number;
+  /** Internal HTML/text notes — may embed `[WORKING_HOURS] …` (see NewJobView). */
+  internalNotes?: string;
   aiMatchScore: number;
   description: string;
   requirements: string[];
+  /** Job taxonomy — affinity / screening payloads often rely on these. */
+  field?: string;
+  role?: string;
+  /** Structured tag rows from Job.skills — primary source for כישורי חובה / שליליים in screening. */
+  skills?: ScreeningJobSkillRow[];
+  languages?: ScreeningJobLanguageRow[];
   screeningQuestions: { question: string; answer: string }[];
   /** Job JSONB contacts from API when present */
   contactsFromJob?: { id?: string; name: string; role?: string; email?: string }[];
@@ -58,14 +84,8 @@ interface ScreeningJob {
   excludedReasons?: string[];
   /** Per-rule pass/fail from screening engine (localized labels client-side). */
   evaluationChecks?: ScreeningEvalCheck[];
-  /** Job owner's client UUID — keys into presentationByClientId for status-group colors. */
+  /** Job owner's client UUID when supplied by the screening pool (reserved). */
   screeningClientId?: string | null;
-}
-
-interface ScreeningPresentationColors {
-  rejectColor: string;
-  processColor: string;
-  acceptColor: string;
 }
 
 interface ScreeningEvalCheck {
@@ -73,13 +93,6 @@ interface ScreeningEvalCheck {
   ok: boolean;
   category?: string;
   meta?: { until?: string; lastExitReason?: string | null } | null;
-}
-
-function pickEvalCheckLineColor(check: ScreeningEvalCheck, pres: ScreeningPresentationColors): string {
-  if (!check.ok) return pres.rejectColor;
-  const cat = check.category || '';
-  if (cat === 'workflow' || cat === 'freshness') return pres.processColor;
-  return pres.acceptColor;
 }
 
 function formatEvalCheckLabel(
@@ -104,12 +117,6 @@ function formatEvalCheckLabel(
   const warnKey = `screening.warn.${check.code}`;
   return check.ok ? t(passKey) : t(warnKey);
 }
-
-const DEFAULT_SCREENING_PRESENTATION: ScreeningPresentationColors = {
-  rejectColor: '#b91c1c',
-  processColor: '#ca8a04',
-  acceptColor: '#15803d',
-};
 
 /** Compact location line for screening cards (avoids huge comma-separated city lists). */
 const ScreeningJobLocationLine: React.FC<{
@@ -196,28 +203,6 @@ const ScreeningJobLocationLine: React.FC<{
   );
 };
 
-const ScreeningEvaluationChecklist: React.FC<{
-  job: ScreeningJob;
-  presentationMap: Record<string, ScreeningPresentationColors>;
-  t: (key: string, opts?: Record<string, string>) => string;
-}> = ({ job, presentationMap, t }) => {
-  const checks = job.evaluationChecks;
-  const cid = job.screeningClientId ? String(job.screeningClientId).trim() : '';
-  const pres =
-    cid && presentationMap[cid] ? presentationMap[cid] : DEFAULT_SCREENING_PRESENTATION;
-
-  if (!checks?.length) {
-    if (!job.excludedReasons?.length) return null;
-    return (
-      <p className="text-xs mt-1.5 leading-snug font-medium" style={{ color: pres.rejectColor }}>
-        {job.excludedReasons.map((code) => t(`screening.warn.${code}`)).join(' · ')}
-      </p>
-    );
-  }
-
- 
-};
-
 interface SendModalContact {
   id: string;
   name: string;
@@ -245,17 +230,430 @@ function screeningMetricLabelHe(code: string): string {
   return map[code] || code;
 }
 
-function screeningChecksToTagCategories(
+type ScreeningCardMetricTone = 'good' | 'bad' | 'muted';
+
+function gapChipLabelsFromCategories(categories: TagMatchCategory[], max = 8): string[] {
+  const out: string[] = [];
+  for (const cat of categories) {
+    for (const ch of cat.chips) {
+      if (ch.state === 'gap') out.push(ch.label);
+    }
+  }
+  return out.slice(0, max);
+}
+
+function screeningCandLicenseSummary(c: Record<string, unknown>): string {
+  const dl = String(c.drivingLicense ?? '').trim();
+  if (dl) return dl;
+  const arr = Array.isArray(c.drivingLicenses) ? (c.drivingLicenses as unknown[]) : [];
+  return arr.map((x) => String(x ?? '').trim()).filter(Boolean).join(', ');
+}
+
+function screeningNormGenderBucket(raw: string): 'm' | 'f' | '' {
+  const x = raw.trim().toLowerCase();
+  if (!x) return '';
+  if (/זכר|^male$|^m$/i.test(x) || x === 'גבר') return 'm';
+  if (/נקבה|^female$|^f$/i.test(x) || x === 'אישה') return 'f';
+  return '';
+}
+
+/** Normalize place / requirement tokens for tolerant comparisons (RTL-safe). */
+function normalizeLocaleToken(s: string): string {
+  return s
+    .trim()
+    .toLowerCase()
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ');
+}
+
+function localeTokensRoughMatch(aRaw: string, bRaw: string): boolean {
+  const a = normalizeLocaleToken(aRaw);
+  const b = normalizeLocaleToken(bRaw);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.length >= 3 && b.length >= 3 && (a.includes(b) || b.includes(a))) return true;
+  return false;
+}
+
+/** Normalized locality tokens listed for the job (free-text + structured locations). */
+function normalizedJobCityTokens(job: ScreeningJob, model: JobLocationDisplayModel): Set<string> {
+  const out = new Set<string>();
+  const add = (raw: string) => {
+    const n = normalizeLocaleToken(raw);
+    if (n.length >= 2) out.add(n);
+  };
+  for (const seg of splitJobLocationString(job.location)) add(seg);
+  if (typeof job.city === 'string' && job.city.trim()) add(job.city);
+  if (model.kind === 'inline') for (const c of model.cities) add(c);
+  if (model.kind === 'compact') for (const c of model.cities) add(c);
+  if (model.kind === 'radius') {
+    add(model.center);
+    for (const c of model.cities) add(c);
+  }
+  return out;
+}
+
+function candidateCityMatchesJobLocations(candidateCity: string, jobTokens: Set<string>): boolean {
+  const cn = normalizeLocaleToken(candidateCity);
+  if (!cn || jobTokens.size === 0) return false;
+  for (const jt of jobTokens) {
+    if (localeTokensRoughMatch(cn, jt)) return true;
+  }
+  return false;
+}
+
+/** Picklist / JSON token → label string */
+function stringifyScopePickToken(x: unknown): string {
+  if (x == null) return '';
+  if (typeof x === 'string') return x.trim();
+  if (typeof x === 'number' && Number.isFinite(x)) return String(x);
+  if (typeof x === 'object') {
+    const o = x as { name?: unknown; label?: unknown; value?: unknown };
+    const n = String(o.name ?? o.label ?? o.value ?? '').trim();
+    if (n) return n;
+  }
+  return String(x).trim();
+}
+
+/** Job daily hours embedded in `internalNotes` as `[WORKING_HOURS] …` (NewJobView). */
+function extractJobWorkingHoursFromNotes(notes: string | undefined | null): string {
+  const raw = String(notes || '');
+  const m = raw.match(/\[WORKING_HOURS\]\s*([^\n\r<]*)/i);
+  if (m?.[1]) {
+    const parsed = String(m[1]).trim();
+    if (parsed) return parsed;
+  }
+  return '';
+}
+
+/** מועמד: שעות מועדפות + זמינות + מודלי עבודה מועדפים (להשוואה מול שעות המשרה). */
+function candidateHoursPreferenceStr(c: Record<string, unknown>): string {
+  const parts: string[] = [];
+  const wh = String(c.preferredWorkingHours ?? '').trim();
+  const av = String(c.availability ?? '').trim();
+  if (wh) parts.push(wh);
+  if (av) parts.push(av);
+  for (const x of Array.isArray(c.preferredWorkModels) ? c.preferredWorkModels : []) {
+    const s = stringifyScopePickToken(x);
+    if (s) parts.push(s);
+  }
+  const seen = new Set<string>();
+  return parts
+    .filter((x) => {
+      const k = normalizeLocaleToken(x);
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .join(', ');
+}
+
+function hoursPreferenceCompatible(candBlob: string, jobBlob: string): boolean {
+  const c = normalizeLocaleToken(candBlob);
+  const j = normalizeLocaleToken(jobBlob);
+  if (!c || !j) return false;
+  if (/גמיש|ללא אילוצי שעות|flexible|משמרות\s*גמיש|עבודה\s*גמישה/i.test(c)) return true;
+  if (/גמיש|ללא אילוצי שעות|flexible/i.test(j)) return true;
+  if (c === j) return true;
+  if (localeTokensRoughMatch(c, j)) return true;
+  if (c.length >= 4 && j.length >= 4 && (c.includes(j) || j.includes(c))) return true;
+  return false;
+}
+
+/** מועמד: רק jobScope + jobScopes (מול job.jobType). */
+function candidateJobScopesOnlyList(c: Record<string, unknown>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (raw: string) => {
+    const t = raw.trim();
+    if (!t) return;
+    const k = normalizeLocaleToken(t);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(t);
+  };
+  add(String(c.jobScope ?? ''));
+  for (const x of Array.isArray(c.jobScopes) ? c.jobScopes : []) add(stringifyScopePickToken(x));
+  return out;
+}
+
+function jobJobTypeOnlyList(job: ScreeningJob): string[] {
+  const jt = job.jobType;
+  const raw =
+    Array.isArray(jt)
+      ? jt.filter(Boolean).map(String).map((x) => x.trim()).filter(Boolean)
+      : String(jt ?? '')
+          .trim()
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const chunk of raw) {
+    const k = normalizeLocaleToken(chunk);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(chunk);
+  }
+  return out;
+}
+
+function normalizedDistinctTokens(strings: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of strings) {
+    const k = normalizeLocaleToken(raw);
+    if (k.length < 2 || seen.has(k)) continue;
+    seen.add(k);
+    out.push(raw.trim());
+  }
+  return out;
+}
+
+function tokenListsOverlap(candidateTokens: string[], jobTokens: string[]): boolean {
+  const A = normalizedDistinctTokens(candidateTokens);
+  const B = normalizedDistinctTokens(jobTokens);
+  if (A.length === 0 || B.length === 0) return false;
+  for (const a of A) {
+    for (const b of B) {
+      if (normalizeLocaleToken(a) === normalizeLocaleToken(b)) return true;
+      if (localeTokensRoughMatch(a, b)) return true;
+    }
+  }
+  return false;
+}
+
+function parseScreeningSalaryNum(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (raw != null && String(raw).trim()) {
+    const n = parseFloat(String(raw).replace(/[^\d.-]/g, ''));
+    if (Number.isFinite(n)) return n;
+  }
+  return undefined;
+}
+
+function salaryThousandsIntervalsOverlap(
+  cMin: number | undefined,
+  cMax: number | undefined,
+  jMin: number | undefined,
+  jMax: number | undefined,
+): boolean {
+  const candLo = cMin ?? cMax;
+  const candHi = cMax ?? cMin ?? candLo;
+  const jobLo = jMin ?? jMax;
+  const jobHi = jMax ?? jMin ?? jobLo;
+  if (
+    candLo == null ||
+    candHi == null ||
+    jobLo == null ||
+    jobHi == null ||
+    !Number.isFinite(candLo) ||
+    !Number.isFinite(candHi) ||
+    !Number.isFinite(jobLo) ||
+    !Number.isFinite(jobHi)
+  )
+    return false;
+  const loC = Math.min(candLo, candHi);
+  const hiC = Math.max(candLo, candHi);
+  const loJ = Math.min(jobLo, jobHi);
+  const hiJ = Math.max(jobLo, jobHi);
+  return loC <= hiJ && hiC >= loJ;
+}
+
+function toneJobVsCandidate(jobSpecifies: boolean, candHas: boolean, matches: boolean): ScreeningCardMetricTone {
+  if (!jobSpecifies) return 'muted';
+  if (!candHas) return 'bad';
+  return matches ? 'good' : 'bad';
+}
+
+function jobSpecifiesSalary(job: ScreeningJob): boolean {
+  const has = (v: unknown) => v != null && Number.isFinite(Number(v));
+  return has(job.salaryMin) || has(job.salaryMax);
+}
+
+function licensesCompatible(jobLic: string, candBlob: string): boolean {
+  const j = normalizeLocaleToken(jobLic);
+  if (!j || !candBlob.trim()) return false;
+  const chunks = candBlob
+    .split(/[,;/|]/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  const hay = normalizeLocaleToken(candBlob);
+  if (chunks.length <= 1) {
+    return localeTokensRoughMatch(hay, j) || hay.includes(j) || j.includes(hay);
+  }
+  for (const ch of chunks) {
+    const cn = normalizeLocaleToken(ch);
+    if (localeTokensRoughMatch(cn, j) || cn.includes(j) || j.includes(cn)) return true;
+  }
+  return false;
+}
+
+/** Candidate residence city only (never inferred from the job card). */
+function candidatePrimaryCityLine(c: Record<string, unknown>): string {
+  const emdash = '—';
+  const direct = String(c.city ?? (c as { addressCity?: unknown }).addressCity ?? '').trim();
+  if (direct) return direct;
+  const loc = String(c.location ?? c.address ?? '').trim();
+  if (loc) {
+    const parts = loc.split(/[,،]/).map((x) => x.trim()).filter(Boolean);
+    if (parts.length) return parts[0];
+    if (loc.length <= 48) return loc;
+    return `${loc.slice(0, 45)}…`;
+  }
+  return emdash;
+}
+
+function screeningJobSliceForMetrics(job: ScreeningJob): Record<string, unknown> {
+  return {
+    jobType: job.jobType,
+    salaryMin: job.salaryMin,
+    salaryMax: job.salaryMax,
+    gender: job.gender,
+    mobility: job.mobility,
+    licenseType: job.licenseType,
+  };
+}
+
+function buildScreeningCardMetricCells(
   job: ScreeningJob,
-  t: (key: string, opts?: Record<string, string>) => string,
-): TagMatchCategory[] {
-  const checks = job.evaluationChecks;
-  if (!checks?.length) return [];
-  return checks.map((ch) => ({
-    name: screeningMetricLabelHe(ch.code),
-    status: ch.ok ? 'match' : 'gap',
-    candidateTags: [formatEvalCheckLabel(t, ch)],
-  }));
+  candidate: Record<string, unknown>,
+  locationModel: JobLocationDisplayModel,
+  t: (key: string, opts?: Record<string, string | number>) => string,
+): { label: string; value: string; tone: ScreeningCardMetricTone }[] {
+  const jobRec = screeningJobSliceForMetrics(job);
+  const emdash = '—';
+
+  const vecPct = Math.max(0, Math.min(100, Math.round(Number(job.aiMatchScore) || 0)));
+  const vecTone: ScreeningCardMetricTone = vecPct >= 75 ? 'good' : 'muted';
+
+  const candScopeTokens = candidateJobScopesOnlyList(candidate);
+  const jobScopeTokens = jobJobTypeOnlyList(job);
+  const scopeVal = candScopeTokens.length ? candScopeTokens.join(', ') : emdash;
+  const scopeTone = toneJobVsCandidate(
+    jobScopeTokens.length > 0,
+    candScopeTokens.length > 0,
+    tokenListsOverlap(candScopeTokens, jobScopeTokens),
+  );
+
+  const jobHoursStr = extractJobWorkingHoursFromNotes(job.internalNotes);
+  const candHoursStr = candidateHoursPreferenceStr(candidate);
+  const hoursVal = candHoursStr || emdash;
+  const hoursTone = toneJobVsCandidate(
+    Boolean(jobHoursStr.trim()),
+    Boolean(candHoursStr.trim()),
+    hoursPreferenceCompatible(candHoursStr, jobHoursStr),
+  );
+
+  const cityVal = candidatePrimaryCityLine(candidate);
+  const jobLocTokens = normalizedJobCityTokens(job, locationModel);
+  const cityTone = toneJobVsCandidate(
+    jobLocTokens.size > 0,
+    cityVal !== emdash,
+    candidateCityMatchesJobLocations(cityVal, jobLocTokens),
+  );
+
+  const distanceVal = t('job.sonar.distance_na');
+
+  const ageVal = String(candidate.age ?? '').trim() || emdash;
+  const ageNum = parseInt(String(candidate.age ?? '').trim(), 10);
+  const amin = job.ageMin;
+  const amax = job.ageMax;
+  const ageJobSpecifies =
+    (typeof amin === 'number' && Number.isFinite(amin)) ||
+    (typeof amax === 'number' && Number.isFinite(amax));
+  const ageCandHas = Number.isFinite(ageNum);
+  let ageMatch = false;
+  if (ageJobSpecifies && ageCandHas) {
+    const belowMin = typeof amin === 'number' && Number.isFinite(amin) && ageNum < amin;
+    const aboveMax = typeof amax === 'number' && Number.isFinite(amax) && ageNum > amax;
+    ageMatch = !belowMin && !aboveMax;
+  }
+  const ageTone = toneJobVsCandidate(ageJobSpecifies, ageCandHas, ageMatch);
+
+  const genderVal = String(candidate.gender ?? '').trim() || emdash;
+  const jobGenderRaw = String(jobRec.gender ?? '').trim();
+  const genderJobSpecifies = Boolean(jobGenderRaw) && !/^לא\s*משנה/i.test(jobGenderRaw);
+  const genderCandHas = genderVal !== emdash;
+  const jb = genderJobSpecifies ? screeningNormGenderBucket(jobGenderRaw) : '';
+  const cb = genderCandHas ? screeningNormGenderBucket(genderVal) : '';
+  const genderMatch = Boolean(jb && cb && jb === cb);
+  const genderTone = toneJobVsCandidate(genderJobSpecifies, genderCandHas, genderMatch);
+
+  const mobilityStr = String(candidate.mobility ?? '').trim();
+  const mobilityVal = mobilityStr || emdash;
+  const mobilityJobSpecifies = jobRec.mobility === true;
+  const mobilityCandHas = mobilityStr.length > 0;
+  let mobilityMatch = false;
+  if (mobilityJobSpecifies && mobilityCandHas) {
+    const privateOk =
+      /רכב\s*פרטי|נהיגה\s*עצמית|פרטי|עם\s*רכב|מכונית\s*פרטית|נהג\s*עצמאי|private|own\s*car/i.test(
+        mobilityStr,
+      );
+    const publicOnly =
+      /ציבורית|תחבורה\s*ציבורית|^ציבורי$|אוטובוס|רכבת|קו\s*עירוני|public\s*transport|\bbus\b/i.test(
+        mobilityStr,
+      ) && !privateOk;
+    mobilityMatch = !publicOnly;
+  }
+  const mobilityTone = toneJobVsCandidate(mobilityJobSpecifies, mobilityCandHas, mobilityMatch);
+
+  const jobLic = String(jobRec.licenseType ?? '').trim();
+  const licRaw = screeningCandLicenseSummary(candidate);
+  const licVal = licRaw || emdash;
+  const licJobSpecifies = Boolean(jobLic);
+  const licCandHas = Boolean(licRaw);
+  const licMatch = licensesCompatible(jobLic, licRaw);
+  const licTone = toneJobVsCandidate(licJobSpecifies, licCandHas, licMatch);
+  const licDisplay =
+    licTone === 'bad' && !licCandHas ? t('job.sonar.license_none') : licVal;
+
+  const cSalMin = parseScreeningSalaryNum(candidate.salaryMin);
+  const cSalMax = parseScreeningSalaryNum(candidate.salaryMax);
+  const jSalMin = job.salaryMin;
+  const jSalMax = job.salaryMax;
+  const salJobSpecifies = jobSpecifiesSalary(job);
+  const salCandHas = cSalMin != null || cSalMax != null;
+  const salMatch = salaryThousandsIntervalsOverlap(cSalMin, cSalMax, jSalMin, jSalMax);
+  const salaryTone = toneJobVsCandidate(salJobSpecifies, salCandHas, salMatch);
+
+  let salaryVal = t('job.sonar.salary_unknown');
+  if (salCandHas) {
+    const bracket =
+      cSalMin != null && cSalMax != null && cSalMin !== cSalMax
+        ? `${cSalMin}-${cSalMax}k ₪`
+        : cSalMin != null
+          ? `${cSalMin}k ₪`
+          : `${cSalMax}k ₪`;
+    if (salJobSpecifies && salMatch) salaryVal = `${t('job.sonar.salary_fit')} (${bracket})`;
+    else if (salJobSpecifies && !salMatch) salaryVal = `${t('job.sonar.salary_above')} (${bracket})`;
+    else salaryVal = bracket;
+  }
+
+  return [
+    { label: t('job.sonar.metric_vector_value'), value: `${vecPct}%`, tone: vecTone },
+    { label: t('job.sonar.fl_scope'), value: scopeVal, tone: scopeTone },
+    { label: t('job.sonar.fl_hours'), value: hoursVal, tone: hoursTone },
+    { label: t('job.sonar.fl_city'), value: cityVal, tone: cityTone },
+    { label: t('job.sonar.fl_distance'), value: distanceVal, tone: 'muted' },
+    { label: t('job.sonar.fl_age'), value: ageVal, tone: ageTone },
+    { label: t('job.sonar.fl_gender'), value: genderVal, tone: genderTone },
+    { label: t('job.sonar.fl_mobility'), value: mobilityVal, tone: mobilityTone },
+    { label: t('job.sonar.fl_license'), value: licDisplay, tone: licTone },
+    { label: t('job.sonar.fl_salary'), value: salaryVal, tone: salaryTone },
+  ];
+}
+
+function screeningMetricDotClass(tone: ScreeningCardMetricTone): string {
+  if (tone === 'good') return 'bg-green-500';
+  if (tone === 'bad') return 'bg-red-500';
+  return 'bg-gray-300';
+}
+
+function screeningMetricValueClass(tone: ScreeningCardMetricTone): string {
+  if (tone === 'bad') return 'text-red-700';
+  if (tone === 'muted') return 'text-text-muted';
+  return 'text-text-default';
 }
 
 const MatchScoreExplanation: React.FC<{
@@ -417,16 +815,64 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
   const fp = typeof raw.filterPosition === 'string' ? raw.filterPosition.trim() : '';
   const fn = typeof raw.filterNotes === 'string' ? raw.filterNotes.trim() : '';
   const locArr = Array.isArray(raw.locations) ? (raw.locations as LocationItem[]) : undefined;
+  const skillsRaw = raw.skills;
+  const skillsArr = Array.isArray(skillsRaw) ? (skillsRaw as ScreeningJobSkillRow[]) : undefined;
+  const langRaw = raw.languages;
+  const langArr = Array.isArray(langRaw) ? (langRaw as ScreeningJobLanguageRow[]) : undefined;
+  const sminRaw = raw.salaryMin;
+  let salaryMinNum: number | undefined;
+  if (typeof sminRaw === 'number' && Number.isFinite(sminRaw)) salaryMinNum = sminRaw;
+  else if (sminRaw != null && String(sminRaw).trim()) {
+    const n = parseFloat(String(sminRaw).replace(/[^\d.-]/g, ''));
+    if (Number.isFinite(n)) salaryMinNum = n;
+  }
+  const smRaw = raw.salaryMax;
+  let salaryMaxNum: number | undefined;
+  if (typeof smRaw === 'number' && Number.isFinite(smRaw)) salaryMaxNum = smRaw;
+  else if (smRaw != null && String(smRaw).trim()) {
+    const n = parseFloat(String(smRaw).replace(/[^\d.-]/g, ''));
+    if (Number.isFinite(n)) salaryMaxNum = n;
+  }
+
   return {
     id: raw.id,
     company: raw.client ?? raw.company ?? '',
     title: raw.title ?? '',
     location: raw.location ?? raw.city ?? '',
+    city:
+      typeof raw.city === 'string' && raw.city.trim()
+        ? raw.city.trim()
+        : typeof raw.city === 'number'
+          ? String(raw.city)
+          : undefined,
     locations: locArr,
     salary: raw.salaryMin && raw.salaryMax ? `${raw.salaryMin}-${raw.salaryMax}k ₪` : (raw.salary ?? ''),
+    salaryMin: salaryMinNum,
+    salaryMax: salaryMaxNum,
+    jobType: raw.jobType,
+    gender:
+      typeof raw.gender === 'string'
+        ? raw.gender.trim()
+        : raw.gender != null && String(raw.gender).trim()
+          ? String(raw.gender).trim()
+          : undefined,
+    mobility: raw.mobility === true ? true : raw.mobility === false ? false : undefined,
+    licenseType:
+      typeof raw.licenseType === 'string'
+        ? raw.licenseType.trim()
+        : raw.licenseType != null && String(raw.licenseType).trim()
+          ? String(raw.licenseType).trim()
+          : undefined,
+    ageMin: typeof raw.ageMin === 'number' && Number.isFinite(raw.ageMin) ? raw.ageMin : undefined,
+    ageMax: typeof raw.ageMax === 'number' && Number.isFinite(raw.ageMax) ? raw.ageMax : undefined,
+    internalNotes: typeof raw.internalNotes === 'string' ? raw.internalNotes : undefined,
     aiMatchScore: typeof raw.matchPercentage === 'number' ? raw.matchPercentage : 0,
     description: raw.description ?? '',
     requirements: reqList,
+    field: typeof raw.field === 'string' && raw.field.trim() ? raw.field.trim() : undefined,
+    role: typeof raw.role === 'string' && raw.role.trim() ? raw.role.trim() : undefined,
+    skills: skillsArr,
+    languages: langArr,
     screeningQuestions: screeningList,
     contactsFromJob,
     filterPosition: fp || undefined,
@@ -483,9 +929,6 @@ const CandidateScreeningView: React.FC<{
 }> = ({ onBack, candidateId, candidate }) => {
     const { t } = useLanguage();
     const [jobs, setJobs] = useState<ScreeningJob[]>([]);
-    const [presentationByClientId, setPresentationByClientId] = useState<
-      Record<string, ScreeningPresentationColors>
-    >({});
     const [selectedJobs, setSelectedJobs] = useState<(number | string)[]>([]);
     const [expandedJobId, setExpandedJobId] = useState<number | string | null>(null);
     const [jobsLoading, setJobsLoading] = useState(false);
@@ -508,6 +951,10 @@ const CandidateScreeningView: React.FC<{
     const [sendAttachSystemPdf, setSendAttachSystemPdf] = useState(false);
     const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<number | string | null>(null);
     const [selectedJobForTags, setSelectedJobForTags] = useState<ScreeningJob | null>(null);
+    const [tagMatchCandidateSnapshot, setTagMatchCandidateSnapshot] = useState<Record<
+      string,
+      unknown
+    > | null>(null);
     const resumeSendCvAfterOpinionRef = useRef(false);
     const saveTimeoutByJobRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
     const candidateResumeData = useMemo(
@@ -515,13 +962,53 @@ const CandidateScreeningView: React.FC<{
       [candidate, candidateId]
     );
 
+    const candidateForTagMatch = useMemo(() => {
+      const base = (candidate ?? {}) as Record<string, unknown>;
+      const snap = tagMatchCandidateSnapshot;
+      const tagDetails =
+        snap && Array.isArray(snap.tagDetails) && snap.tagDetails.length > 0
+          ? snap.tagDetails
+          : base.tagDetails;
+      const tags =
+        snap && Array.isArray(snap.tags) && snap.tags.length > 0 ? snap.tags : base.tags;
+      return {
+        ...base,
+        ...(tagDetails !== undefined ? { tagDetails } : {}),
+        ...(tags !== undefined ? { tags } : {}),
+      };
+    }, [candidate, tagMatchCandidateSnapshot]);
+
+    useEffect(() => {
+      if (!selectedJobForTags || !candidateId || !apiBase) {
+        setTagMatchCandidateSnapshot(null);
+        return;
+      }
+      let cancelled = false;
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      fetch(`${apiBase}/api/candidates/${encodeURIComponent(String(candidateId))}`, {
+        headers,
+        cache: 'no-store',
+      })
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error('candidate'))))
+        .then((data: Record<string, unknown>) => {
+          if (!cancelled) setTagMatchCandidateSnapshot(data);
+        })
+        .catch(() => {
+          if (!cancelled) setTagMatchCandidateSnapshot(null);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }, [selectedJobForTags, candidateId, apiBase]);
+
     useEffect(() => {
       if (!candidateId || !apiBase) {
         setJobs([]);
         return;
       }
       setJobsLoading(true);
-      setPresentationByClientId({});
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json' };
       if (token) headers.Authorization = `Bearer ${token}`;
@@ -534,16 +1021,9 @@ const CandidateScreeningView: React.FC<{
           (data: {
             included?: any[];
             excluded?: any[];
-            presentationByClientId?: Record<string, ScreeningPresentationColors>;
           }) => {
           const inc = Array.isArray(data?.included) ? data.included : [];
           const exc = Array.isArray(data?.excluded) ? data.excluded : [];
-          const presRaw = data?.presentationByClientId;
-          if (presRaw && typeof presRaw === 'object') {
-            setPresentationByClientId({ ...presRaw });
-          } else {
-            setPresentationByClientId({});
-          }
           const mapChecks = (row: any) =>
             Array.isArray(row.evaluationChecks) ? row.evaluationChecks : undefined;
           const clientFromRow = (row: any) =>
@@ -1276,9 +1756,14 @@ const CandidateScreeningView: React.FC<{
                               locations: job.locations,
                             });
                             const jobExcluded = !!(job.excludedReasons && job.excludedReasons.length);
-                            const showGapStrip =
+                            const screeningGapStrip =
                               jobExcluded ||
                               !!(job.evaluationChecks && job.evaluationChecks.some((c) => !c.ok));
+                            const tagGaps = gapChipLabelsFromCategories(
+                              buildJobTagMatchCategories(job, candidateForTagMatch),
+                            );
+                            const tagAttention = tagGaps.length > 0;
+                            const stripAlert = screeningGapStrip || tagAttention;
                             return (
                             <div key={job.id} className={`relative border rounded-lg bg-bg-card transition-all ${expandedJobId === job.id ? 'border-primary-300 shadow-md' : 'border-border-default hover:border-primary-200'} ${activeMatchScorePopup === job.id ? 'z-[55]' : ''}`}>
                                 {/* Job Summary */}
@@ -1316,11 +1801,7 @@ const CandidateScreeningView: React.FC<{
                                                     ) : null}
                                                 </p>
                                                 <p className="text-sm text-text-muted">{job.company}</p>
-                                                <ScreeningEvaluationChecklist
-                                                  job={job}
-                                                  presentationMap={presentationByClientId}
-                                                  t={t}
-                                                />
+                                              
                                                 {(job.filterPosition || job.filterNotes) ? (
                                                     <div className="mt-2 rounded-lg border border-amber-200/90 bg-amber-50/70 px-2.5 py-1.5 text-[11px] leading-snug text-text-default space-y-1">
                                                         {job.filterPosition ? (
@@ -1362,7 +1843,7 @@ const CandidateScreeningView: React.FC<{
                                              </div>
                                         </div>
                                         
-                                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-subtle mt-2">
+                                        <div className="flex items-center gap-3 text-xs text-text-subtle mt-2 flex-wrap">
                                              {locationModel.kind !== 'empty' ? (
                                                <>
                                                  <ScreeningJobLocationLine model={locationModel} t={t} />
@@ -1372,61 +1853,85 @@ const CandidateScreeningView: React.FC<{
                                              <span className="font-medium text-text-default">{job.salary}</span>
                                         </div>
 
-                                        {job.evaluationChecks && job.evaluationChecks.length > 0 ? (
-                                            <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 items-center">
-                                                {job.evaluationChecks.map((match, idx) => (
-                                                    <div key={`${match.code}-${idx}`} className="flex items-center gap-1.5 shrink-0">
-                                                        <span
-                                                            className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                                                match.ok ? 'bg-green-500' : 'bg-red-500'
-                                                            }`}
-                                                        />
-                                                        <span className="text-[11px] text-text-muted">
-                                                            {screeningMetricLabelHe(match.code)}:
-                                                        </span>
-                                                        <span
-                                                            className={`text-[11px] font-bold ${
-                                                                match.ok ? 'text-text-default' : 'text-red-700'
-                                                            }`}
-                                                        >
-                                                            {match.ok ? 'עומד' : 'לא עומד'}
-                                                        </span>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        ) : null}
+                                        <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 items-center">
+                                            {buildScreeningCardMetricCells(
+                                              job,
+                                              candidateForTagMatch,
+                                              locationModel,
+                                              t,
+                                            ).map((m) => (
+                                              <div key={m.label} className="flex items-center gap-1.5 shrink-0">
+                                                <span
+                                                  className={`w-1.5 h-1.5 rounded-full shrink-0 ${screeningMetricDotClass(
+                                                    m.tone,
+                                                  )}`}
+                                                />
+                                                <span className="text-[11px] text-text-muted">{m.label}:</span>
+                                                <span
+                                                  className={`text-[11px] font-bold ${screeningMetricValueClass(
+                                                    m.tone,
+                                                  )}`}
+                                                >
+                                                  {m.value}
+                                                </span>
+                                              </div>
+                                            ))}
+                                        </div>
 
-                                        {showGapStrip ? (
-                                            <div
-                                                className="mt-3 flex items-center justify-between gap-2 bg-red-50 p-2.5 rounded-lg border border-red-100 cursor-pointer"
+                                        <div
+                                            className={`mt-3 flex items-center justify-between gap-2 p-2.5 rounded-lg border cursor-pointer ${
+                                                stripAlert
+                                                    ? 'bg-red-50 border-red-100'
+                                                    : 'bg-bg-subtle/40 border-border-default hover:border-primary-200/80'
+                                            }`}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedJobForTags(job);
+                                            }}
+                                        >
+                                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                {tagAttention ? (
+                                                    <>
+                                                        <span className="font-bold text-red-600 text-[11px] shrink-0">
+                                                            {t('job.sonar.gaps_tags_heading')}
+                                                        </span>
+                                                        <span className="text-red-700 text-[11px] truncate">
+                                                            {tagGaps.join(', ')}
+                                                        </span>
+                                                    </>
+                                                ) : screeningGapStrip ? (
+                                                    <>
+                                                        <span className="font-bold text-red-600 text-[11px] shrink-0">
+                                                            {t('screening.filter_gaps_heading')}
+                                                        </span>
+                                                        <span className="text-red-700 text-[11px] truncate">
+                                                            {jobExcluded && job.excludedReasons?.length
+                                                                ? job.excludedReasons
+                                                                      .map((c) => t(`screening.warn.${c}`))
+                                                                      .join(' · ')
+                                                                : (job.evaluationChecks || [])
+                                                                      .filter((x) => !x.ok)
+                                                                      .map((x) => formatEvalCheckLabel(t, x))
+                                                                      .join(' · ') || '—'}
+                                                        </span>
+                                                    </>
+                                                ) : (
+                                                    <span className="text-[11px] text-text-muted truncate">
+                                                        {t('screening.tag_strip_hint')}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <button
+                                                type="button"
+                                                className="text-[10px] font-bold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md bg-white border border-border-default shadow-sm shrink-0 hover:border-primary-200 transition-colors"
                                                 onClick={(e) => {
                                                     e.stopPropagation();
                                                     setSelectedJobForTags(job);
                                                 }}
                                             >
-                                                <div className="flex items-center gap-2 min-w-0 flex-1">
-                                                    <span className="font-bold text-red-600 text-[11px] shrink-0">
-                                                        פערי סינון:
-                                                    </span>
-                                                    <span className="text-red-700 text-[11px] truncate">
-                                                        {jobExcluded && job.excludedReasons?.length
-                                                            ? job.excludedReasons
-                                                                  .map((c) => t(`screening.warn.${c}`))
-                                                                  .join(' · ')
-                                                            : (job.evaluationChecks || [])
-                                                                  .filter((x) => !x.ok)
-                                                                  .map((x) => formatEvalCheckLabel(t, x))
-                                                                  .join(' · ') || '—'}
-                                                    </span>
-                                                </div>
-                                                <button
-                                                    type="button"
-                                                    className="text-[10px] font-bold text-text-muted hover:text-primary-600 px-3 py-1.5 rounded-md bg-white border border-border-default shadow-sm shrink-0"
-                                                >
-                                                    פרטים
-                                                </button>
-                                            </div>
-                                        ) : null}
+                                                {t('screening.tag_more_details')}
+                                            </button>
+                                        </div>
                                     </div>
                                      <div className="self-center pl-1">
                                         <ChevronDownIcon className={`w-5 h-5 text-text-muted transition-transform ${expandedJobId === job.id ? 'rotate-180' : ''}`} />
@@ -1541,7 +2046,12 @@ const CandidateScreeningView: React.FC<{
                 {/* Left Pane - CV */}
                 {/* Visually LEFT in RTL. Hidden on mobile. */}
                 <div className="hidden md:flex w-1/2 bg-bg-card overflow-hidden flex-col">
-                     <ResumeViewer resumeData={candidateResumeData} candidateId={candidateId || null} className="h-full border-none shadow-none rounded-none" />
+                     <ResumeViewer
+                       resumeData={candidateResumeData}
+                       fullData={candidate as any}
+                       candidateId={candidateId || null}
+                       className="h-full border-none shadow-none rounded-none"
+                     />
                 </div>
             </div>
 
@@ -1572,7 +2082,7 @@ const CandidateScreeningView: React.FC<{
                 onClose={() => setSelectedJobForTags(null)}
                 title={selectedJobForTags.title}
                 subtitle={selectedJobForTags.company}
-                categories={screeningChecksToTagCategories(selectedJobForTags, t)}
+                categories={buildJobTagMatchCategories(selectedJobForTags, candidateForTagMatch)}
               />
             ) : null}
 
