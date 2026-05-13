@@ -343,6 +343,7 @@ const resources = {
         'col.age': 'גיל',
         'col.salary_expectation': 'ציפיות שכר',
         'col.languages': 'שפות',
+        'col.last_submission_match': 'התאמה להגשה אחרונה',
 
         // Actions
         'actions.selected_count': '{{count}} נבחרו',
@@ -437,7 +438,7 @@ const resources = {
 
         // --- Candidate Navigation (Sub-Menu) ---
         'candidate_nav.details': 'פרטי המועמד',
-        'candidate_nav.jobs': 'התעניינות במשרות',
+        'candidate_nav.jobs': 'ניהול הגשות',
         'candidate_nav.referrals': 'הפניות',
         'candidate_nav.events': 'אירועים',
         'candidate_nav.documents': 'מסמכים',
@@ -493,7 +494,7 @@ const resources = {
         'form.last_name': 'שם משפחה',
         'form.status': 'סטטוס המועמד',
         'form.status_tip_aria': 'הסבר לסטטוס שנבחר',
-        'form.status_tip_empty': 'אין כרגע טקסט הסבר מהמערכת. הוא יופיע אוטומטית כשהסטטוס «חסר נתונים» מחושב לפי שדות חובה (או כשהנתונים מלאים וממתינים לאישור תיקונים).',
+        'form.status_tip_empty': 'אין כרגע טקסט הסבר מהמערכת. הוא יופיע אוטומטית כשהסטטוס «חסר נתונים» מחושב לפי שדות חובה.',
         'form.phone': 'טלפון',
         'form.email': 'דוא"ל',
         'form.address': 'כתובת',
@@ -594,6 +595,8 @@ const resources = {
         'job.sonar.metric_vector_value': 'ערך וקטורי',
         'job.sonar.fl_city': 'עיר',
         'job.sonar.distance_na': 'לא זמין',
+        'job.sonar.distance_km': '{{km}} ק"מ',
+        'job.sonar.distance_not_on_job': 'לא מוגדר במשרה',
         'job.sonar.salary_fit': 'תואם ליעד',
         'job.sonar.salary_above': 'מעל טווח',
         'job.sonar.salary_unknown': 'לא צוין',
@@ -608,6 +611,10 @@ const resources = {
         'job.sonar.pool_badge_tooltip': 'ממאגר המועמדים האישי',
         'job.sonar.legend_pool_strip': 'מאגר אישי',
         'job.sonar.legend_global_strip': 'מועמד מערכת גלובלית',
+        'job.sonar.legend_metric_ok': 'מתאים',
+        'job.sonar.legend_metric_bad': 'לא מתאים',
+        'job.sonar.legend_metric_na': 'לא מוגדר במשרה',
+        'job.sonar.affinity_gap': 'אין התאמה לתחום המשרה',
         'job.sonar.gaps_more_details': 'פרטים נוספים',
         'job.sonar.add_short': 'צרף',
         'job.sonar.ignore_tooltip': 'הסתר מועמד',
@@ -1740,6 +1747,7 @@ const resources = {
         'col.age': 'Age',
         'col.salary_expectation': 'Salary expectation',
         'col.languages': 'Languages',
+        'col.last_submission_match': 'Match on last submission',
 
          // Actions
         'actions.selected_count': '{{count}} Selected',
@@ -2016,6 +2024,8 @@ const resources = {
         'job.sonar.metric_vector_value': 'Vector score',
         'job.sonar.fl_city': 'City',
         'job.sonar.distance_na': 'N/A',
+        'job.sonar.distance_km': '{{km}} km',
+        'job.sonar.distance_not_on_job': 'Not set on job',
         'job.sonar.salary_fit': 'Within target',
         'job.sonar.salary_above': 'Above range',
         'job.sonar.salary_unknown': 'Not specified',
@@ -2030,6 +2040,10 @@ const resources = {
         'job.sonar.pool_badge_tooltip': 'From your personal candidate pool',
         'job.sonar.legend_pool_strip': 'Personal pool',
         'job.sonar.legend_global_strip': 'Global system candidate',
+        'job.sonar.legend_metric_ok': 'Match',
+        'job.sonar.legend_metric_bad': 'Mismatch',
+        'job.sonar.legend_metric_na': 'Not set on job',
+        'job.sonar.affinity_gap': 'No fit to job domain',
         'job.sonar.gaps_more_details': 'More details',
         'job.sonar.add_short': 'Add',
         'job.sonar.ignore_tooltip': 'Hide candidate',

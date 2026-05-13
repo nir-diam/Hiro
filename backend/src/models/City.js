@@ -40,6 +40,10 @@ const City = sequelize.define(
       type: DataTypes.STRING(50),
       allowNull: true,
     },
+    region: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+    },
   },
   {
     tableName: 'cities',

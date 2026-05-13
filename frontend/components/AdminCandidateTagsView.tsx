@@ -426,6 +426,7 @@ const AdminCandidateTagsView: React.FC = () => {
                                                 <th className="p-3">Weight</th>
                                                 <th className="p-3">Final</th>
                                                 <th className="p-3">Active</th>
+                                                <th className="p-3 whitespace-nowrap">תאריך יצירה</th>
                                                 <th className="p-3">Actions</th>
                                             </tr>
                                         </thead>
@@ -457,6 +458,18 @@ const AdminCandidateTagsView: React.FC = () => {
                                                             ) : (
                                                                 <span className="text-xs font-semibold text-text-muted">לא פעיל</span>
                                                             )}
+                                                        </td>
+                                                        <td
+                                                            className="py-2 px-2 text-xs text-text-muted whitespace-nowrap"
+                                                            title={
+                                                                tag.created_at || tag.createdAt
+                                                                    ? new Date(tag.created_at || tag.createdAt).toLocaleString()
+                                                                    : ''
+                                                            }
+                                                        >
+                                                            {tag.created_at || tag.createdAt
+                                                                ? new Date(tag.created_at || tag.createdAt).toLocaleDateString()
+                                                                : '—'}
                                                         </td>
                                                         <td className="py-2 px-2 flex flex-col gap-2">
                                                             <button

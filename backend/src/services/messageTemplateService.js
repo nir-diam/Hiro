@@ -4,6 +4,7 @@ const Client = require('../models/Client');
 const Job = require('../models/Job');
 const emailService = require('./emailService');
 const jobCandidateService = require('./jobCandidateService');
+const clientUsageSettingService = require('./clientUsageSettingService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
@@ -696,7 +697,16 @@ const sendAdminTemplateEmailOptional = async (opts) =>
 /**
  * Fire-and-forget welcome template: client row when `options.clientId` and a `welcome_email`
  * (or CANDIDATE_WELCOME_TEMPLATE_KEY) exists for that tenant; otherwise admin catalog.
- * @param {{ onlyIfNoResume?: boolean; clientId?: string | null; sendWelcomeEmail?: boolean }} options
+ *
+ * Gating order:
+ *   1. `options.sendWelcomeEmail === false` (per-request) → skip.
+ *   2. Missing record / email / onlyIfNoResume guards → skip.
+ *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) setting:
+ *        • flag `false` → skip
+ *        • flag `true`  → send
+ *        • unresolved (no clientId or lookup failure) → send (legacy fallthrough)
+ *
+ * @param {{ onlyIfNoResume?: boolean; clientId?: string | null; sendWelcomeEmail?: boolean; jobId?: string | null; recruiter?: object }} options
  */
 const queueCandidateWelcomeEmail = (record, options = {}) => {
   if (options.sendWelcomeEmail === false) {
@@ -733,27 +743,49 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
     String(process.env.CANDIDATE_WELCOME_TEMPLATE_KEY || '').trim() || 'welcome_email';
   const clientId = options.clientId || null;
 
-  console.log('[message-templates] welcome queued', {
-    candidateId: id,
-    to: String(email).trim(),
-    templateName: welcomeKey,
-    clientId: clientId || null,
-  });
+  // Gate on the client's autoThanksEmail setting + dispatch (kept fire-and-forget
+  // so callers don't need to await; matches the previous void semantics).
+  void (async () => {
+    if (clientId) {
+      const enabled = await clientUsageSettingService.getAutoThanksEmailForClient(clientId);
+      if (enabled === false) {
+        console.log('[message-templates] welcome skipped: autoThanksEmail disabled', {
+          candidateId: id,
+          clientId,
+        });
+        return;
+      }
+    }
 
-  void sendScopedTemplateEmailOptional({
-    name: welcomeKey,
-    toEmail: String(email).trim(),
-    placeholderValues: [displayName, dateStr],
-    candidateRecord: record,
-    placeholderContext: {
-      jobId: options.jobId != null && String(options.jobId).trim() ? String(options.jobId).trim() : null,
-      recruiter:
-        options.recruiter && typeof options.recruiter === 'object' ? options.recruiter : null,
-    },
-    clientId,
-  }).catch((err) => {
-    console.error('[message-templates] welcome email failed', err?.message || err);
-  });
+    console.log('[message-templates] welcome queued', {
+      candidateId: id,
+      to: String(email).trim(),
+      templateName: welcomeKey,
+      clientId: clientId || null,
+    });
+
+    try {
+      await sendScopedTemplateEmailOptional({
+        name: welcomeKey,
+        toEmail: String(email).trim(),
+        placeholderValues: [displayName, dateStr],
+        candidateRecord: record,
+        placeholderContext: {
+          jobId:
+            options.jobId != null && String(options.jobId).trim()
+              ? String(options.jobId).trim()
+              : null,
+          recruiter:
+            options.recruiter && typeof options.recruiter === 'object'
+              ? options.recruiter
+              : null,
+        },
+        clientId,
+      });
+    } catch (err) {
+      console.error('[message-templates] welcome email failed', err?.message || err);
+    }
+  })();
 };
 
 module.exports = {

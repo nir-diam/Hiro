@@ -18,6 +18,7 @@ interface SkillRow {
   tag_reason: string;
   relevance_score: number | null;
   status: string;
+  createdAt: string | null; // skill-level createdAt if present, otherwise job createdAt
 }
 
 interface EditForm {
@@ -84,13 +85,47 @@ const AdminJobTagsView: React.FC = () => {
   const [saving, setSaving]         = useState(false);
   const formRef = useRef<HTMLDivElement | null>(null);
 
+  // sort
+  type SortKey =
+    | 'jobTitle'
+    | 'client'
+    | 'key'
+    | 'name'
+    | 'mode'
+    | 'tagType'
+    | 'source'
+    | 'tag_reason'
+    | 'relevance_score'
+    | 'status'
+    | 'createdAt';
+  const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: 'asc' | 'desc' } | null>({
+    key: 'createdAt',
+    direction: 'desc',
+  });
+
+  const requestSort = (key: SortKey) => {
+    setSortConfig((prev) => {
+      if (prev && prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
+
+  const sortIndicator = (key: SortKey) =>
+    sortConfig?.key === key ? (
+      <span className="text-primary-500 font-bold ml-1">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+    ) : (
+      <span className="text-text-subtle/40 font-normal ml-1">↕</span>
+    );
+
   // ── debounce search ────────────────────────────────────────────────────────
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 300);
     return () => clearTimeout(t);
   }, [searchTerm]);
 
-  useEffect(() => { setPage(1); }, [debouncedSearch, modeFilter, pageSize]);
+  useEffect(() => { setPage(1); }, [debouncedSearch, modeFilter, pageSize, sortConfig]);
 
   // ── load jobs and flatten skills ───────────────────────────────────────────
   const load = useCallback(async () => {
@@ -104,6 +139,7 @@ const AdminJobTagsView: React.FC = () => {
       const rows: SkillRow[] = [];
       for (const job of jobs) {
         if (!Array.isArray(job.skills) || job.skills.length === 0) continue;
+        const jobCreatedAt = job.createdAt || job.created_at || null;
         job.skills.forEach((s: any, idx: number) => {
           rows.push({
             jobId:           String(job.id),
@@ -119,6 +155,7 @@ const AdminJobTagsView: React.FC = () => {
             tag_reason:      s.tag_reason || '',
             relevance_score: typeof s.relevance_score === 'number' ? s.relevance_score : null,
             status:          s.status || 'active',
+            createdAt:       s.createdAt || s.created_at || jobCreatedAt,
           });
         });
       }
@@ -161,10 +198,10 @@ const AdminJobTagsView: React.FC = () => {
     [tagOptions],
   );
 
-  // ── filter + paginate ──────────────────────────────────────────────────────
+  // ── filter + sort + paginate ───────────────────────────────────────────────
   const filtered = useMemo(() => {
     const q = debouncedSearch.toLowerCase();
-    return allRows.filter((r) => {
+    const list = allRows.filter((r) => {
       if (modeFilter !== 'all' && r.mode !== modeFilter) return false;
       if (!q) return true;
       return (
@@ -176,7 +213,32 @@ const AdminJobTagsView: React.FC = () => {
         r.source.toLowerCase().includes(q)
       );
     });
-  }, [allRows, debouncedSearch, modeFilter]);
+
+    if (!sortConfig) return list;
+
+    const dir = sortConfig.direction === 'asc' ? 1 : -1;
+    const compareValue = (row: SkillRow): string | number => {
+      const k = sortConfig.key;
+      if (k === 'relevance_score') {
+        return row.relevance_score == null ? Number.NEGATIVE_INFINITY : row.relevance_score;
+      }
+      if (k === 'createdAt') {
+        const t = row.createdAt ? Date.parse(row.createdAt) : NaN;
+        return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+      }
+      const v = (row as unknown as Record<string, unknown>)[k];
+      return typeof v === 'string' ? v.toLowerCase() : String(v ?? '').toLowerCase();
+    };
+
+    return [...list].sort((a, b) => {
+      const av = compareValue(a);
+      const bv = compareValue(b);
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return (av - bv) * dir;
+      }
+      return String(av).localeCompare(String(bv), 'he') * dir;
+    });
+  }, [allRows, debouncedSearch, modeFilter, sortConfig]);
 
   const total      = filtered.length;
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -499,16 +561,83 @@ const AdminJobTagsView: React.FC = () => {
               <table className="w-full text-sm text-right">
                 <thead className="bg-bg-subtle text-text-muted uppercase text-xs font-semibold border-b border-border-default">
                   <tr>
-                    <th className="p-3">משרה</th>
-                    <th className="p-3">לקוח</th>
-                    <th className="p-3">Tag Key</th>
-                    <th className="p-3">שם</th>
-                    <th className="p-3">Mode</th>
-                    <th className="p-3">Type</th>
-                    <th className="p-3">Source</th>
-                    <th className="p-3">Reason</th>
-                    <th className="p-3">Score</th>
-                    <th className="p-3">Status</th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('jobTitle')}
+                      aria-sort={sortConfig?.key === 'jobTitle' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">משרה{sortIndicator('jobTitle')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('client')}
+                      aria-sort={sortConfig?.key === 'client' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">לקוח{sortIndicator('client')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('key')}
+                      aria-sort={sortConfig?.key === 'key' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Tag Key{sortIndicator('key')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('name')}
+                      aria-sort={sortConfig?.key === 'name' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">שם{sortIndicator('name')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('mode')}
+                      aria-sort={sortConfig?.key === 'mode' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Mode{sortIndicator('mode')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('tagType')}
+                      aria-sort={sortConfig?.key === 'tagType' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Type{sortIndicator('tagType')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('source')}
+                      aria-sort={sortConfig?.key === 'source' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Source{sortIndicator('source')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('tag_reason')}
+                      aria-sort={sortConfig?.key === 'tag_reason' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Reason{sortIndicator('tag_reason')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('relevance_score')}
+                      aria-sort={sortConfig?.key === 'relevance_score' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Score{sortIndicator('relevance_score')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                      onClick={() => requestSort('status')}
+                      aria-sort={sortConfig?.key === 'status' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">Status{sortIndicator('status')}</span>
+                    </th>
+                    <th
+                      className="p-3 cursor-pointer hover:bg-bg-hover transition-colors select-none whitespace-nowrap"
+                      onClick={() => requestSort('createdAt')}
+                      aria-sort={sortConfig?.key === 'createdAt' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                    >
+                      <span className="inline-flex items-center">תאריך יצירה{sortIndicator('createdAt')}</span>
+                    </th>
                     <th className="p-3 text-center">פעולות</th>
                   </tr>
                 </thead>
@@ -544,6 +673,12 @@ const AdminJobTagsView: React.FC = () => {
                           ) : (
                             <span className="text-xs font-semibold text-text-muted">לא פעיל</span>
                           )}
+                        </td>
+                        <td
+                          className="py-2 px-3 text-xs text-text-muted whitespace-nowrap"
+                          title={row.createdAt ? new Date(row.createdAt).toLocaleString() : ''}
+                        >
+                          {row.createdAt ? new Date(row.createdAt).toLocaleDateString() : '—'}
                         </td>
                         <td className="py-2 px-3">
                           <div className="flex flex-col gap-1 items-center">

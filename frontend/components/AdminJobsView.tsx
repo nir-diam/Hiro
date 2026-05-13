@@ -199,6 +199,7 @@ interface JobSkillRow {
   client: string;
   status: string;
   skills: JobSkillItem[];
+  createdAt: string | null;
 }
 
 const TAG_TYPE_COLORS: Record<string, string> = {
@@ -244,6 +245,28 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [tagModalOpen, setTagModalOpen] = useState(false);
 
+  type SortKey = 'jobTitle' | 'client' | 'status' | 'skills' | 'createdAt';
+  const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: 'asc' | 'desc' } | null>({
+    key: 'createdAt',
+    direction: 'desc',
+  });
+
+  const requestSort = (key: SortKey) => {
+    setSortConfig((prev) => {
+      if (prev && prev.key === key) {
+        return { key, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { key, direction: 'asc' };
+    });
+  };
+
+  const sortIndicator = (key: SortKey) =>
+    sortConfig?.key === key ? (
+      <span className="text-primary-500 font-bold ml-1">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>
+    ) : (
+      <span className="text-text-subtle/40 font-normal ml-1">↕</span>
+    );
+
   const authHeaders = useCallback((): HeadersInit => {
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
     const h: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
@@ -268,6 +291,7 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
             client: j.client || '—',
             status: j.status || '',
             skills: j.skills as JobSkillItem[],
+            createdAt: j.createdAt || j.created_at || null,
           })),
       );
     } catch (e) {
@@ -281,7 +305,7 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
 
   const filtered = useMemo(() => {
     const q = searchTerm.toLowerCase();
-    return jobs.filter((j) => {
+    const list = jobs.filter((j) => {
       if (statusFilter && j.status !== statusFilter) return false;
       if (!q) return true;
       if (j.jobTitle.toLowerCase().includes(q)) return true;
@@ -289,7 +313,38 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
       if (j.skills.some((s) => (s.name || s.key || '').toLowerCase().includes(q))) return true;
       return false;
     });
-  }, [jobs, searchTerm, statusFilter]);
+
+    if (!sortConfig) return list;
+
+    const dir = sortConfig.direction === 'asc' ? 1 : -1;
+    const compareValue = (row: JobSkillRow): string | number => {
+      switch (sortConfig.key) {
+        case 'jobTitle':
+          return (row.jobTitle || '').toLowerCase();
+        case 'client':
+          return (row.client || '').toLowerCase();
+        case 'status':
+          return (row.status || '').toLowerCase();
+        case 'skills':
+          return row.skills.length;
+        case 'createdAt': {
+          const t = row.createdAt ? Date.parse(row.createdAt) : NaN;
+          return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+        }
+        default:
+          return '';
+      }
+    };
+
+    return [...list].sort((a, b) => {
+      const av = compareValue(a);
+      const bv = compareValue(b);
+      if (typeof av === 'number' && typeof bv === 'number') {
+        return (av - bv) * dir;
+      }
+      return String(av).localeCompare(String(bv), 'he') * dir;
+    });
+  }, [jobs, searchTerm, statusFilter, sortConfig]);
 
   const openEdit = (row: JobSkillRow) => {
     setEditingJobId(row.jobId);
@@ -427,17 +482,48 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
           <table className="w-full text-sm">
             <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default">
               <tr>
-                <th className="p-4 text-right w-56">Job</th>
-                <th className="p-4 text-right w-32">Client</th>
-                <th className="p-4 text-right w-24">Status</th>
-                <th className="p-4 text-right">Skills / Tags</th>
+                <th
+                  className="p-4 text-right w-56 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                  onClick={() => requestSort('jobTitle')}
+                  aria-sort={sortConfig?.key === 'jobTitle' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <div className="flex items-center gap-1">Job{sortIndicator('jobTitle')}</div>
+                </th>
+                <th
+                  className="p-4 text-right w-32 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                  onClick={() => requestSort('client')}
+                  aria-sort={sortConfig?.key === 'client' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <div className="flex items-center gap-1">Client{sortIndicator('client')}</div>
+                </th>
+                <th
+                  className="p-4 text-right w-24 cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                  onClick={() => requestSort('status')}
+                  aria-sort={sortConfig?.key === 'status' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <div className="flex items-center gap-1">Status{sortIndicator('status')}</div>
+                </th>
+                <th
+                  className="p-4 text-right cursor-pointer hover:bg-bg-hover transition-colors select-none"
+                  onClick={() => requestSort('skills')}
+                  aria-sort={sortConfig?.key === 'skills' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <div className="flex items-center gap-1">Skills / Tags{sortIndicator('skills')}</div>
+                </th>
+                <th
+                  className="p-4 text-right w-32 cursor-pointer hover:bg-bg-hover transition-colors select-none whitespace-nowrap"
+                  onClick={() => requestSort('createdAt')}
+                  aria-sort={sortConfig?.key === 'createdAt' ? (sortConfig.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <div className="flex items-center gap-1">Created{sortIndicator('createdAt')}</div>
+                </th>
                 <th className="p-4 text-center w-20">Edit</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle">
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="py-16 text-center text-text-muted">
+                  <td colSpan={6} className="py-16 text-center text-text-muted">
                     <TagIcon className="w-10 h-10 mx-auto mb-3 text-text-subtle" />
                     No jobs with skills found
                   </td>
@@ -482,6 +568,12 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
                         ))}
                       </div>
                     </td>
+                    <td
+                      className="p-4 text-text-muted text-xs whitespace-nowrap"
+                      title={row.createdAt ? new Date(row.createdAt).toLocaleString() : ''}
+                    >
+                      {row.createdAt ? new Date(row.createdAt).toLocaleDateString() : '—'}
+                    </td>
                     <td className="p-4 text-center">
                       {editingJobId === row.jobId ? (
                         <button onClick={closeEdit} className="text-xs text-text-muted hover:text-text-default px-2 py-1 rounded-lg hover:bg-bg-subtle transition font-semibold">
@@ -497,7 +589,7 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
 
                   {editingJobId === row.jobId && (
                     <tr className="bg-bg-subtle/30">
-                      <td colSpan={5} className="px-5 pb-5 pt-2">
+                      <td colSpan={6} className="px-5 pb-5 pt-2">
                         <div className="border border-primary-200 rounded-xl bg-bg-card p-4 space-y-4">
                           <div className="flex items-center justify-between">
                             <h4 className="font-bold text-text-default text-sm flex items-center gap-2">

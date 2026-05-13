@@ -922,11 +922,11 @@ export const PrintableResume: React.FC<{
             {/* Skills & Languages Grid */}
             {(data.tagDetails?.length > 0 || printLanguages.length > 0) && (
                 <div className={grid2}>
-                    {data.tags && data.tagDetails.length > 0 && (
+                    {data.tags && (data.tagDetails?.length ?? 0) > 0 && (
                         <section>
                             <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>מיומנויות</h3>
                             <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
-                                {data.tagDetails.map((tag: any, index: number) => {
+                                {(Array.isArray(data.tagDetails) ? data.tagDetails : []).map((tag: any, index: number) => {
                                     const label =
                                         typeof tag === 'string'
                                             ? tag

@@ -52,6 +52,15 @@ const CandidateTag = sequelize.define(
     },
     raw_type_reason: DataTypes.STRING,
     tag_reason: DataTypes.STRING,
+    /**
+     * Exact verbatim substring of the source CV/email text that justified this tag.
+     * Populated by the LLM via the `quote` (or legacy `evidence`) field. TEXT, not STRING,
+     * to accommodate long phrases up to a few hundred chars.
+     */
+    quote: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+    },
     is_active: {
       type: DataTypes.BOOLEAN,
       allowNull: false,

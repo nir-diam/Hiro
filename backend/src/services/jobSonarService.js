@@ -5,6 +5,8 @@ const candidateService = require('./candidateService');
 const { searchCandidates } = require('./vectorSearchService');
 const screeningInclusionService = require('./screeningInclusionService');
 const clientUsageSettingService = require('./clientUsageSettingService');
+const { computeFullMatchScore, getJobEmbedding } = require('./matchingScoreService');
+const { resolveEngineConfigForJob } = require('./matchingEngineService');
 
 function cosineToMatchPercent(score) {
   if (!Number.isFinite(score)) return 0;
@@ -119,6 +121,32 @@ async function runSonarScan(jobId, body = {}) {
     return true;
   };
 
+  // Load admin engine config + job embedding once (both are cached in-process)
+  let engineConfig = null;
+  let jobEmb = [];
+  try {
+    [engineConfig, jobEmb] = await Promise.all([
+      resolveEngineConfigForJob(jobPlain),
+      getJobEmbedding(jobPlain),
+    ]);
+  } catch (e) {
+    console.warn('[jobSonarService] engine config/embedding load skipped:', e.message || e);
+  }
+
+  /**
+   * Re-score a candidate plain object with the full matching engine.
+   * Falls back to the provided `fallbackPct` if scoring fails.
+   */
+  async function fullScore(candidatePlain, fallbackPct) {
+    if (!engineConfig) return { matchPct: fallbackPct, breakdown: null };
+    try {
+      const result = await computeFullMatchScore(candidatePlain, jobPlain, jobEmb, engineConfig, null);
+      return { matchPct: Math.round(result.finalScore), breakdown: result.breakdown };
+    } catch (e) {
+      return { matchPct: fallbackPct, breakdown: null };
+    }
+  }
+
   let ranked = [];
 
   if (useVector) {
@@ -135,14 +163,26 @@ async function runSonarScan(jobId, body = {}) {
       const id = row.id != null ? String(row.id) : '';
       if (!id || linkedSet.has(id) || rejectedSet.has(id)) continue;
       const sim = typeof row.similarity === 'number' ? row.similarity : -1;
-      const matchPct = cosineToMatchPercent(sim);
-      if (matchPct < minPct) continue;
+      const vectorPct = cosineToMatchPercent(sim);
+      // Cheap gate: drop only very weak embeddings; composite score can still qualify someone below this.
+      const vectorFloor = Math.min(55, Math.max(22, minPct - 28));
+      if (vectorPct < vectorFloor) continue;
       const { similarity: _sim, ...candidateRest } = row;
       if (!passesHardFilters(candidateRest)) continue;
+      const { matchPct, breakdown } = await fullScore(candidateRest, vectorPct);
+      const passesComposite = matchPct >= minPct;
+      const passesVector = vectorPct >= minPct;
+      // Inclusion: keep candidates that pass either the weighted engine OR raw vector floor —
+      // embeddings often beat tags/geo, so requiring composite ≥ threshold alone is too strict.
+      // BUT the headline score we display MUST be the weighted engine score so the UI never
+      // silently falls back to cosine similarity (which would hide low tag/geo/experience fit).
+      if (!passesComposite && !passesVector) continue;
       ranked.push({
         candidate: candidateRest,
         matchPercentage: matchPct,
+        engineMatchPct: matchPct,
         vectorSimilarity: sim,
+        scoreBreakdown: breakdown,
       });
     }
   } else {
@@ -150,13 +190,14 @@ async function runSonarScan(jobId, body = {}) {
     for (const c of all) {
       const id = c.id != null ? String(c.id) : '';
       if (!id || linkedSet.has(id) || rejectedSet.has(id)) continue;
-      const ms = typeof c.matchScore === 'number' ? c.matchScore : 0;
-      if (ms < minPct) continue;
       if (!passesHardFilters(c)) continue;
+      const { matchPct, breakdown } = await fullScore(c, typeof c.matchScore === 'number' ? c.matchScore : 0);
+      if (matchPct < minPct) continue;
       ranked.push({
         candidate: { ...c },
-        matchPercentage: ms,
+        matchPercentage: matchPct,
         vectorSimilarity: null,
+        scoreBreakdown: breakdown,
       });
     }
   }

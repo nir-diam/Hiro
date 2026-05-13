@@ -34,6 +34,24 @@ const JOB_ANALYZE_PREFERRED_HOURS_APPENDIX = `
   Map "שעות גמישות", "flexible hours", etc. to "גמיש". Do not invent numeric ranges without evidence.
 `;
 
+/**
+ * Forces the model to attach a verbatim source quote to every skill/tag.
+ * Distinct from `tag_reason` (which may be a short paraphrase): `quote` must be
+ * a literal substring of the input description, so we can highlight evidence in the UI.
+ */
+const JOB_ANALYZE_SKILL_QUOTE_APPENDIX = `
+--- Required additional field on EVERY object inside the "skills" array ---
+- "quote": string|null — The EXACT, verbatim substring copied character-by-character from the
+  input job description text that caused this tag to be created.
+  STRICT RULES:
+  * MUST be a literal substring of the input text — no paraphrase, no synonyms, no translation,
+    no punctuation/whitespace edits beyond trimming leading/trailing spaces.
+  * Pick the SHORTEST span that still proves the tag (typically a phrase or sentence). Hard cap ~240 characters.
+  * If the same evidence supports multiple tags, repeat the quote per tag — do NOT deduplicate.
+  * If the input text does not contain a verbatim phrase that justifies the tag, set "quote" to null.
+  * "quote" is REQUIRED on every skill object and is in ADDITION to "tag_reason".
+`;
+
 const pickPreferredWorkingHoursRawFromParsed = (parsed) => {
   if (!parsed || typeof parsed !== 'object') return null;
   const keys = [
@@ -113,7 +131,7 @@ const analyzeRawDescription = async (rawText) => {
     err.status = 500;
     throw err;
   }
-  const systemPrompt = `${promptRow.template.trim()}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}`;
+  const systemPrompt = `${promptRow.template.trim()}\n${JOB_ANALYZE_PREFERRED_HOURS_APPENDIX}\n${JOB_ANALYZE_SKILL_QUOTE_APPENDIX}`;
 
   // eslint-disable-next-line no-console
   console.log('[jobService.analyzeRawDescription] calling sendChat with prompt length', systemPrompt.length);

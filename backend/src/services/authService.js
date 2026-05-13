@@ -1,8 +1,10 @@
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { Op } = require('sequelize');
 const { OAuth2Client } = require('google-auth-library');
 const User = require('../models/User');
 const Client = require('../models/Client');
+const ClientContact = require('../models/ClientContact');
 const ClientUsageSetting = require('../models/ClientUsageSetting');
 const messageTemplateService = require('./messageTemplateService');
 const loginOtpService = require('./loginOtpService');
@@ -38,6 +40,44 @@ const loadUserWithClientUsage = async (userId) =>
       },
     ],
   });
+
+/**
+ * When `users.client_id` is null (legacy / mis-linked accounts), infer tenant for staff UI:
+ * single client in DB, or exactly one client tied to this email in `client_contacts`.
+ * Never guesses for super_admin, platform admin (admin without client), or candidates.
+ */
+const resolveEffectiveClientIdForUser = async (user) => {
+  const u = user?.get ? user.get({ plain: true }) : user;
+  if (!u) return null;
+  const direct = u.clientId != null && String(u.clientId).trim() ? String(u.clientId).trim() : null;
+  if (direct) return direct;
+  if (u.role === 'super_admin' || u.role === 'candidate') return null;
+  if (u.role === 'admin') return null;
+
+  try {
+    const rows = await Client.findAll({ attributes: ['id'], limit: 2 });
+    if (rows.length === 1) return String(rows[0].id);
+  } catch {
+    /* ignore */
+  }
+
+  const emailNorm = String(u.email || '').trim().toLowerCase();
+  if (!emailNorm) return null;
+
+  try {
+    const contacts = await ClientContact.findAll({
+      where: { email: { [Op.iLike]: emailNorm } },
+      attributes: ['clientId'],
+      limit: 50,
+    });
+    const ids = [...new Set(contacts.map((c) => String(c.clientId)).filter(Boolean))];
+    if (ids.length === 1) return ids[0];
+  } catch {
+    /* ignore */
+  }
+
+  return null;
+};
 
 const login = async ({ email, password, role }) => {
   const user = await User.findOne({ where: { email } });
@@ -240,5 +280,12 @@ const loginWithGoogle = async ({ credential, role }) => {
   return { token, user: fullUser || user };
 };
 
-module.exports = { login, loginWithGoogle, signup, verifyLoginCode, resendLoginCode };
+module.exports = {
+  login,
+  loginWithGoogle,
+  signup,
+  verifyLoginCode,
+  resendLoginCode,
+  resolveEffectiveClientIdForUser,
+};
 

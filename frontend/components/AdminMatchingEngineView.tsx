@@ -32,8 +32,16 @@ interface WeightSetting {
 const API_BASE        = import.meta.env.VITE_API_BASE || '';
 const API_CONFIG      = `${API_BASE}/api/admin/matching-engine/config`;
 const API_PRESETS     = `${API_BASE}/api/admin/matching-engine/presets`;
+const API_SIMULATE    = `${API_BASE}/api/admin/matching-engine/simulate`;
 const API_CLIENTS     = `${API_BASE}/api/clients`;
+const API_CANDIDATES  = `${API_BASE}/api/candidates`;
+const API_JOBS        = `${API_BASE}/api/jobs`;
 
+/**
+ * This screen talks only to admin matching-engine endpoints and `GET /api/clients` (labels for chips).
+ * It does not read or write `client_usage_settings` — the tenant’s chosen preset id
+ * (`matching_engine_preset_id`) is owned by Company Settings (usage-settings API), not the admin UI.
+ */
 const buildHeaders = (json = false): Record<string, string> => {
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
     const h: Record<string, string> = { Accept: 'application/json' };
@@ -147,152 +155,101 @@ const AdminMatchingEngineView: React.FC = () => {
     // Age Gap Penalty Settings
     const [ageGapPenalty, setAgeGapPenalty] = useState(2);
 
-    // Simulator State
-    const [simJob, setSimJob] = useState<{
-        ageMin: string;
-        ageMax: string;
-        industry: string;
-    }>({
-        ageMin: '25',
-        ageMax: '35',
-        industry: 'משאבי אנוש',
-    });
-
     const [isExperienceEnabled, setIsExperienceEnabled] = useState(true);
 
-    const [simCandidate, setSimCandidate] = useState({
-        age: 30,
-        ignoreAge: false,
-        distance: 10,
-        missingAddress: false,
-        missingSalary: false,
-        region: 'center',
-        tagSource: 'recruiter',
-        vectorScore: 85,
-        intentType: 'exact',
-        expectedSalary: 22000,
-        offeredSalary: 20000,
-        simSalaryDiffThreshold: 10,
-        simSalaryPenalty: 5,
-        simAgeGapPenalty: 2,
-        industryMatch: 80,
-        tagScores: {
-            role: 100,
-            seniority: 100,
-            skill: 70,
-            tool: 50,
-            industry: 80,
-            education: 0,
-            language: 0,
-            soft_skill: 0,
-            certification: 0
-        } as Record<string, number>
-    });
-    const [simResult, setSimResult] = useState<any>(null);
-    const [isSimulating, setIsSimulating] = useState(false);
+    // Simulator — real backend IDs
+    const [simCandidateId, setSimCandidateId] = useState('');
+    const [simJobId,       setSimJobId]       = useState('');
+    const [simResult,      setSimResult]      = useState<any>(null);
+    const [isSimulating,   setIsSimulating]   = useState(false);
+    const [simError,       setSimError]       = useState<string | null>(null);
+
+    // Search state for picking candidate / job
+    const [allCandidates,    setAllCandidates]    = useState<{id: string; name: string}[]>([]);
+    const [allJobs,          setAllJobs]          = useState<{id: string; title: string}[]>([]);
+    const [candidateFilter,  setCandidateFilter]  = useState('');
+    const [jobFilter,        setJobFilter]        = useState('');
+    const [isFetchingCandidates, setIsFetchingCandidates] = useState(false);
+    const [isFetchingJobs,       setIsFetchingJobs]       = useState(false);
+
+    useEffect(() => {
+        (async () => {
+            setIsFetchingCandidates(true);
+            try {
+                const res = await fetch(`${API_CANDIDATES}?limit=500&sort=fullName&direction=asc`, { headers: buildHeaders() });
+                if (res.ok) {
+                    const data = await res.json();
+                    const list = Array.isArray(data) ? data : (data.data ?? data.rows ?? []);
+                    const sorted = list
+                        .map((c: any) => ({ id: String(c.id), name: String(c.fullName || c.firstName || c.id) }))
+                        .sort((a: {name: string}, b: {name: string}) => a.name.localeCompare(b.name, 'he'));
+                    setAllCandidates(sorted);
+                }
+            } catch { /* silent */ }
+            finally { setIsFetchingCandidates(false); }
+        })();
+    }, []);
+
+    useEffect(() => {
+        (async () => {
+            setIsFetchingJobs(true);
+            try {
+                const res = await fetch(`${API_JOBS}?limit=500&sort=title&direction=asc`, { headers: buildHeaders() });
+                if (res.ok) {
+                    const data = await res.json();
+                    const list = Array.isArray(data) ? data : (data.data ?? data.rows ?? []);
+                    const sorted = list
+                        .map((j: any) => ({ id: String(j.id), title: String(j.title || j.id) }))
+                        .sort((a: {title: string}, b: {title: string}) => a.title.localeCompare(b.title, 'he'));
+                    setAllJobs(sorted);
+                }
+            } catch { /* silent */ }
+            finally { setIsFetchingJobs(false); }
+        })();
+    }, []);
+
+    const filteredCandidates = allCandidates.filter(c =>
+        !candidateFilter || c.name.toLowerCase().includes(candidateFilter.toLowerCase())
+    );
+    const filteredJobs = allJobs.filter(j =>
+        !jobFilter || j.title.toLowerCase().includes(jobFilter.toLowerCase())
+    );
 
     const runSimulation = async () => {
+        if (!simCandidateId || !simJobId) {
+            setSimError('יש לבחור מועמד ומשרה לפני הרצת הסימולציה');
+            return;
+        }
         setIsSimulating(true);
-
-        // ── Raw layer weights (e.g. vector=20, tags=35 …) ──────────────────────
-        const vW  = mainWeights.find(w => w.id === 'vector')?.value    ?? 0;
-        const tW  = mainWeights.find(w => w.id === 'tags')?.value      ?? 0;
-        const gW  = mainWeights.find(w => w.id === 'geo')?.value       ?? 0;
-        const eW  = isExperienceEnabled
-                        ? (mainWeights.find(w => w.id === 'experience')?.value ?? 0)
-                        : 0;
-        const iW  = mainWeights.find(w => w.id === 'intent')?.value    ?? 0;
-
-        // TotalCoreWeights — used as denominator so the formula always yields 0–100
-        const totalCoreWeights = vW + tW + gW + eW + iW;
-
-        // ── 1. Vector score ────────────────────────────────────────────────────
-        const vectorScore = simCandidate.vectorScore; // 0–100
-
-        // ── 2. Tags score — weighted average across tag categories ─────────────
-        let totalTagWeighted = 0;
-        let totalTagWeight   = 0;
-        tagWeights.forEach(w => {
-            const score = simCandidate.tagScores[w.id] ?? 0;
-            totalTagWeighted += score * w.value;
-            totalTagWeight   += w.value;
-        });
-        const tagsScore = totalTagWeight > 0 ? totalTagWeighted / totalTagWeight : 0; // 0–100
-
-        // ── 3. Geo score — grace + per-km penalty ──────────────────────────────
-        let geoScore = 0;
-        if (simCandidate.missingAddress) {
-            geoScore = missingGeoScore;
-        } else {
-            const region = geoRegions.find(r => r.id === simCandidate.region) ?? geoRegions[0];
-            if (simCandidate.distance <= region.grace) {
-                geoScore = 100;
-            } else {
-                const excess = simCandidate.distance - region.grace;
-                geoScore = Math.max(0, 100 - excess * region.penaltyPerKm);
-            }
-        }
-
-        // ── 4. Experience score (industry match %) ─────────────────────────────
-        const expScore = simCandidate.industryMatch; // 0–100
-
-        // ── 5. Intent score (from intent-weight lookup) ────────────────────────
-        const intentScore = intentWeights.find(w => w.id === simCandidate.intentType)?.value ?? 0; // 0–100
-
-        // ── Core weighted score (normalised) ───────────────────────────────────
-        // Formula: Σ(score_i * weight_i) / TotalCoreWeights
-        const coreScore = totalCoreWeights > 0
-            ? (vectorScore * vW + tagsScore * tW + geoScore * gW + expScore * eW + intentScore * iW) / totalCoreWeights
-            : 0;
-
-        // ── 6. Salary penalty ──────────────────────────────────────────────────
-        let salaryPenaltyPoints = 0;
-        if (simCandidate.missingSalary) {
-            salaryPenaltyPoints = missingSalaryScore;
-        } else if (simCandidate.expectedSalary > simCandidate.offeredSalary) {
-            const diffPct = ((simCandidate.expectedSalary - simCandidate.offeredSalary) / simCandidate.offeredSalary) * 100;
-            if (diffPct >= simCandidate.simSalaryDiffThreshold && simCandidate.simSalaryDiffThreshold > 0) {
-                salaryPenaltyPoints = Math.floor(diffPct / simCandidate.simSalaryDiffThreshold) * simCandidate.simSalaryPenalty;
-            }
-        }
-
-        // ── 7. Age gap penalty ─────────────────────────────────────────────────
-        let ageGapPenaltyPoints = 0;
-        if (!simCandidate.ignoreAge) {
-            const ageMin = parseInt(simJob.ageMin);
-            const ageMax = parseInt(simJob.ageMax);
-            if (!isNaN(ageMin) && simCandidate.age < ageMin) {
-                ageGapPenaltyPoints = (ageMin - simCandidate.age) * simCandidate.simAgeGapPenalty;
-            } else if (!isNaN(ageMax) && simCandidate.age > ageMax) {
-                ageGapPenaltyPoints = (simCandidate.age - ageMax) * simCandidate.simAgeGapPenalty;
-            }
-        }
-
-        // ── Final score ────────────────────────────────────────────────────────
-        const finalScore = Math.min(100, Math.max(0,
-            Math.round(coreScore) - salaryPenaltyPoints - ageGapPenaltyPoints
-        ));
-
-        setTimeout(() => {
-            setSimResult({
-                score: finalScore,
-                weights: { vW, tW, gW, eW, iW, totalCoreWeights },
-                candidate: { age: simCandidate.age, distance: simCandidate.distance },
-                breakdown: {
-                    vector:       Math.round(vectorScore),
-                    tags:         Math.round(tagsScore),
-                    geo:          Math.round(geoScore),
-                    experience:   Math.round(expScore),
-                    intent:       Math.round(intentScore),
-                    coreScore:    Math.round(coreScore),
-                    salaryPenalty:    salaryPenaltyPoints,
-                    ageGapPenalty:    ageGapPenaltyPoints,
-                    geoMissing:       simCandidate.missingAddress,
-                    salaryMissing:    simCandidate.missingSalary,
-                }
+        setSimError(null);
+        setSimResult(null);
+        try {
+            const res = await fetch(API_SIMULATE, {
+                method: 'POST',
+                headers: buildHeaders(true),
+                body: JSON.stringify({
+                    candidateId: simCandidateId,
+                    jobId:       simJobId,
+                    presetId:    activePresetId ?? undefined,
+                }),
             });
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                throw new Error(err.message || `HTTP ${res.status}`);
+            }
+            const data = await res.json();
+            // Normalise to the shape the results panel expects
+            setSimResult({
+                score:         data.finalScore,
+                candidateName: data.candidateName,
+                jobTitle:      data.jobTitle,
+                breakdown:     data.breakdown,
+            });
+        } catch (err: unknown) {
+            setSimError(err instanceof Error ? err.message : 'שגיאה בסימולציה');
+        } finally {
             setIsSimulating(false);
-        }, 300);
+        }
     };
 
     const [isSaving, setIsSaving] = useState(false);
@@ -1229,309 +1186,119 @@ const AdminMatchingEngineView: React.FC = () => {
                 </div>
 
                 <div className="p-6 lg:p-8 grid grid-cols-1 xl:grid-cols-2 gap-8 lg:gap-12 bg-bg-subtle/10">
-                    {/* Dynamic Simulator Inputs */}
-                    <div className="space-y-8">
-                        {/* Candidate Profile Card */}
+                    {/* Simulator Inputs — real data */}
+                    <div className="space-y-6">
+                        {simError && (
+                            <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 text-sm font-medium flex items-center gap-2">
+                                <XCircleIcon className="w-5 h-5 shrink-0" />
+                                {simError}
+                            </div>
+                        )}
+
+                        {/* Candidate picker */}
                         <div className="bg-white rounded-2xl border border-border-default shadow-sm">
                             <div className="bg-bg-subtle rounded-t-2xl px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
                                 <UserGroupIcon className="w-5 h-5 text-primary-500" />
-                                פרופיל מועמד ומשרה
+                                בחר מועמד
+                                {isFetchingCandidates && <ArrowPathIcon className="w-4 h-4 animate-spin text-text-muted mr-auto" />}
+                                {!isFetchingCandidates && allCandidates.length > 0 && (
+                                    <span className="mr-auto text-xs font-normal text-text-muted">{allCandidates.length} מועמדים</span>
+                                )}
+                            </div>
+                            <div className="p-4 space-y-2">
+                                <input
+                                    type="text"
+                                    placeholder="סנן לפי שם..."
+                                    value={candidateFilter}
+                                    onChange={e => setCandidateFilter(e.target.value)}
+                                    className="w-full border border-border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                                />
+                                <select
+                                    size={6}
+                                    value={simCandidateId}
+                                    onChange={e => { setSimCandidateId(e.target.value); setSimResult(null); }}
+                                    className="w-full border border-border-default rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white"
+                                >
+                                    <option value="" disabled>— בחר מועמד —</option>
+                                    {filteredCandidates.map(c => (
+                                        <option key={c.id} value={c.id}>{c.name}</option>
+                                    ))}
+                                </select>
+                                {simCandidateId && (
+                                    <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
+                                        <CheckCircleIcon className="w-4 h-4 shrink-0" />
+                                        <span className="font-bold truncate">
+                                            {allCandidates.find(c => c.id === simCandidateId)?.name || simCandidateId}
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Job picker */}
+                        <div className="bg-white rounded-2xl border border-border-default shadow-sm">
+                            <div className="bg-bg-subtle rounded-t-2xl px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
+                                <BriefcaseIcon className="w-5 h-5 text-orange-500" />
+                                בחר משרה
+                                {isFetchingJobs && <ArrowPathIcon className="w-4 h-4 animate-spin text-text-muted mr-auto" />}
+                                {!isFetchingJobs && allJobs.length > 0 && (
+                                    <span className="mr-auto text-xs font-normal text-text-muted">{allJobs.length} משרות</span>
+                                )}
+                            </div>
+                            <div className="p-4 space-y-2">
+                                <input
+                                    type="text"
+                                    placeholder="סנן לפי שם משרה..."
+                                    value={jobFilter}
+                                    onChange={e => setJobFilter(e.target.value)}
+                                    className="w-full border border-border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+                                />
+                                <select
+                                    size={6}
+                                    value={simJobId}
+                                    onChange={e => { setSimJobId(e.target.value); setSimResult(null); }}
+                                    className="w-full border border-border-default rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 bg-white"
+                                >
+                                    <option value="" disabled>— בחר משרה —</option>
+                                    {filteredJobs.map(j => (
+                                        <option key={j.id} value={j.id}>{j.title}</option>
+                                    ))}
+                                </select>
+                                {simJobId && (
+                                    <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
+                                        <CheckCircleIcon className="w-4 h-4 shrink-0" />
+                                        <span className="font-bold truncate">
+                                            {allJobs.find(j => j.id === simJobId)?.title || simJobId}
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+
+                        {/* Active preset indicator */}
+                        {activePresetId && (
+                            <div className="flex items-center gap-2 text-sm text-purple-700 bg-purple-50 border border-purple-200 rounded-xl px-4 py-3">
+                                <SparklesIcon className="w-4 h-4 shrink-0" />
+                                הסימולציה תרוץ עם הגישה הפעילה: <span className="font-bold">{dbPresets.find(p => p.id === activePresetId)?.label || activePresetId}</span>
+                            </div>
+                        )}
+
+                        {/* info note */}
+                        <div className="bg-white rounded-2xl border border-border-default shadow-sm">
+                            <div className="bg-bg-subtle rounded-t-2xl px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
+                                <InformationCircleIcon className="w-5 h-5 text-primary-500" />
+                                מידע
                             </div>
                             
-                            <div className="p-5 grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                <div className="space-y-5">
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between items-center">
-                                            <span>גיל המועמד</span>
-                                            <div className="flex items-center gap-2">
-                                                <label className="text-[10px] text-text-muted flex items-center gap-1 cursor-pointer">
-                                                    <input 
-                                                        type="checkbox" 
-                                                        checked={simCandidate.ignoreAge}
-                                                        onChange={(e) => setSimCandidate(prev => ({ ...prev, ignoreAge: e.target.checked }))}
-                                                        className="rounded border-border-default text-primary-500 focus:ring-primary-500 w-3 h-3"
-                                                    />
-                                                    התעלם (ללא דרישה)
-                                                </label>
-                                                {!simCandidate.ignoreAge && <span className="text-primary-600 bg-primary-50 px-2 py-0.5 rounded-md">{simCandidate.age}</span>}
-                                            </div>
-                                        </label>
-                                        <input 
-                                            type="range" min="18" max="70" value={simCandidate.age}
-                                            disabled={simCandidate.ignoreAge}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, age: parseInt(e.target.value) }))}
-                                            className={`w-full h-2 rounded-lg appearance-none accent-primary-500 ${simCandidate.ignoreAge ? 'bg-bg-subtle/50 cursor-not-allowed opacity-50' : 'bg-bg-subtle cursor-pointer'}`}
-                                        />
-                                        <div className="flex justify-between text-[10px] text-text-muted mt-1.5 font-medium">
-                                            <span>18</span>
-                                            <span>70</span>
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between items-center">
-                                            <span>מרחק מהמשרה (ק"מ)</span>
-                                            <div className="flex items-center gap-2">
-                                                <label className="text-[10px] text-text-muted flex items-center gap-1 cursor-pointer">
-                                                    <input 
-                                                        type="checkbox" 
-                                                        checked={simCandidate.missingAddress}
-                                                        onChange={(e) => setSimCandidate(prev => ({ ...prev, missingAddress: e.target.checked }))}
-                                                        className="rounded border-border-default text-primary-500 focus:ring-primary-500 w-3 h-3"
-                                                    />
-                                                    ללא כתובת
-                                                </label>
-                                                {!simCandidate.missingAddress && <span className="text-primary-600 bg-primary-50 px-2 py-0.5 rounded-md">{simCandidate.distance} ק"מ</span>}
-                                            </div>
-                                        </label>
-                                        <input 
-                                            type="range" min="0" max="100" value={simCandidate.distance}
-                                            disabled={simCandidate.missingAddress}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, distance: parseInt(e.target.value) }))}
-                                            className={`w-full h-2 rounded-lg appearance-none accent-primary-500 ${simCandidate.missingAddress ? 'bg-bg-subtle/50 cursor-not-allowed opacity-50' : 'bg-bg-subtle cursor-pointer'}`}
-                                        />
-                                        <div className="flex justify-between text-[10px] text-text-muted mt-1.5 font-medium">
-                                            <span>0</span>
-                                            <span>100</span>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="space-y-5">
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2">אזור המשרה (רגישות גיאוגרפית)</label>
-                                        <select 
-                                            value={simCandidate.region}
-                                            disabled={simCandidate.missingAddress}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, region: e.target.value }))}
-                                            className={`w-full p-2.5 text-sm rounded-xl border border-border-default focus:ring-2 focus:ring-primary-500 outline-none font-medium transition-colors ${simCandidate.missingAddress ? 'bg-bg-subtle/50 text-text-muted cursor-not-allowed' : 'bg-bg-input hover:border-primary-300'}`}
-                                        >
-                                            <option value="center">מרכז, שרון וגוש דן (רגישות גבוהה)</option>
-                                            <option value="shfela">השפלה</option>
-                                            <option value="north">צפון</option>
-                                            <option value="south">דרום</option>
-                                            <option value="jerusalem">ירושלים והסביבה</option>
-                                        </select>
-                                    </div>
-
-                                    <div className="p-4 bg-blue-50/50 rounded-xl border border-blue-100/50 space-y-3">
-                                        <div className="text-[11px] text-blue-800 font-bold uppercase flex items-center gap-1.5">
-                                            <BriefcaseIcon className="w-3.5 h-3.5" />
-                                            הגדרות המשרה בסימולציה
-                                        </div>
-                                        <div className="space-y-2.5">
-                                            <div className="flex items-center gap-2">
-                                                <label className="text-[11px] text-blue-800/80 font-medium w-24">טווח גילאים:</label>
-                                                <div className="flex items-center gap-1.5 flex-1 bg-white border border-blue-200 rounded-md px-3 py-1.5 text-sm text-blue-900 shadow-sm justify-center">
-                                                    <span>{simJob.ageMin}</span>
-                                                    <span className="text-blue-800/50 font-bold">-</span>
-                                                    <span>{simJob.ageMax}</span>
-                                                </div>
-                                            </div>
-                                            
-                                            <div className="flex items-center gap-2">
-                                                <label className="text-[11px] text-blue-800/80 font-medium w-24">תעשייה:</label>
-                                                <input 
-                                                    type="text" 
-                                                    value={simJob.industry} 
-                                                    onChange={e => setSimJob(prev => ({...prev, industry: e.target.value}))}
-                                                    className="flex-1 w-full bg-white border border-blue-200 rounded-md px-3 py-1.5 text-sm text-blue-900 focus:ring-2 focus:ring-blue-500 outline-none shadow-sm"
-                                                />
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
+                            <div className="p-5">
+                                <p className="text-sm text-text-muted">
+                                    הסימולציה מחשבת ציון התאמה אמיתי עבור המועמד והמשרה שנבחרו, תוך שימוש בכל 5 שכבות הניקוד
+                                    (סמנטי, תגיות, גיאוגרפיה, ניסיון וזיקה) על פי המשקלים הנוכחיים.
+                                </p>
                             </div>
                         </div>
+                    </div>{/* end left panel */}
 
-                        {/* Salary & Penalty Card */}
-                        <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden">
-                            <div className="bg-bg-subtle px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
-                                <ScaleIcon className="w-5 h-5 text-primary-500" />
-                                סימולציית שכר וקנסות
-                            </div>
-                            
-                            <div className="p-5 space-y-6">
-                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between items-center">
-                                            <span>ציפיות שכר (מועמד)</span>
-                                            <div className="flex items-center gap-2">
-                                                <label className="text-[10px] text-text-muted flex items-center gap-1 cursor-pointer">
-                                                    <input 
-                                                        type="checkbox" 
-                                                        checked={simCandidate.missingSalary}
-                                                        onChange={(e) => setSimCandidate(prev => ({ ...prev, missingSalary: e.target.checked }))}
-                                                        className="rounded border-border-default text-primary-500 focus:ring-primary-500 w-3 h-3"
-                                                    />
-                                                    ללא ציפיות שכר
-                                                </label>
-                                                {!simCandidate.missingSalary && <span className="text-primary-600 bg-primary-50 px-2 py-0.5 rounded-md font-bold">₪{simCandidate.expectedSalary.toLocaleString()}</span>}
-                                            </div>
-                                        </label>
-                                        <input 
-                                            type="range" min="10000" max="50000" step="1000" value={simCandidate.expectedSalary}
-                                            disabled={simCandidate.missingSalary}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, expectedSalary: parseInt(e.target.value) }))}
-                                            className={`w-full h-2 rounded-lg appearance-none accent-primary-500 ${simCandidate.missingSalary ? 'bg-bg-subtle/50 cursor-not-allowed opacity-50' : 'bg-bg-subtle cursor-pointer'}`}
-                                        />
-                                        <div className="flex justify-between text-[10px] text-text-muted mt-1.5 font-medium">
-                                            <span>10K</span>
-                                            <span>50K</span>
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between items-center">
-                                            <span>שכר מוצע (משרה)</span>
-                                            <span className="text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-md font-bold">₪{simCandidate.offeredSalary.toLocaleString()}</span>
-                                        </label>
-                                        <input 
-                                            type="range" min="10000" max="50000" step="1000" value={simCandidate.offeredSalary}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, offeredSalary: parseInt(e.target.value) }))}
-                                            className="w-full h-2 rounded-lg appearance-none accent-emerald-500 bg-bg-subtle cursor-pointer"
-                                        />
-                                        <div className="flex justify-between text-[10px] text-text-muted mt-1.5 font-medium">
-                                            <span>10K</span>
-                                            <span>50K</span>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div className="pt-5 border-t border-border-subtle grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                    <div className="p-4 bg-purple-50/50 rounded-xl border border-purple-100/50">
-                                        <label className="text-[10px] font-bold text-purple-900 block mb-3 flex justify-between items-center">
-                                            <span>סף פער שכר</span>
-                                            <span className="text-purple-700 font-black">{simCandidate.simSalaryDiffThreshold}%</span>
-                                        </label>
-                                        <input 
-                                            type="range" min="0" max="50" step="5" value={simCandidate.simSalaryDiffThreshold}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, simSalaryDiffThreshold: parseInt(e.target.value) }))}
-                                            className="w-full h-2 rounded-lg appearance-none accent-purple-500 bg-purple-200/50 cursor-pointer"
-                                        />
-                                    </div>
-                                    <div className="p-4 bg-rose-50/50 rounded-xl border border-rose-100/50">
-                                        <label className="text-[10px] font-bold text-rose-900 block mb-3 flex justify-between items-center">
-                                            <span>קנס פער שכר</span>
-                                            <span className="text-rose-700 font-black">-{simCandidate.simSalaryPenalty}</span>
-                                        </label>
-                                        <input 
-                                            type="range" min="0" max="20" value={simCandidate.simSalaryPenalty}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, simSalaryPenalty: parseInt(e.target.value) }))}
-                                            className="w-full h-2 rounded-lg appearance-none accent-rose-500 bg-rose-200/50 cursor-pointer"
-                                        />
-                                    </div>
-                                    <div className="p-4 bg-orange-50/50 rounded-xl border border-orange-100/50">
-                                        <label className="text-[10px] font-bold text-orange-900 block mb-3 flex justify-between items-center">
-                                            <span>קנס שנת חריגה (גיל)</span>
-                                            <span className="text-orange-700 font-black">-{simCandidate.simAgeGapPenalty}</span>
-                                        </label>
-                                        <input 
-                                            type="range" min="0" max="10" value={simCandidate.simAgeGapPenalty}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, simAgeGapPenalty: parseInt(e.target.value) }))}
-                                            className="w-full h-2 rounded-lg appearance-none accent-orange-500 bg-orange-200/50 cursor-pointer"
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Performance Card */}
-                        <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden">
-                            <div className="bg-bg-subtle px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
-                                <SparklesIcon className="w-5 h-5 text-primary-500" />
-                                ביצועי מועמד (0-100%)
-                            </div>
-                            
-                            <div className="p-5 space-y-8">
-                                {/* Main Sliders */}
-                                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between">
-                                            <span>התאמה סמנטית (Vector)</span>
-                                            <span className="text-primary-600 font-bold bg-primary-50 px-2 py-0.5 rounded-md">{simCandidate.vectorScore}%</span>
-                                        </label>
-                                        <input 
-                                            type="range" min="0" max="100" value={simCandidate.vectorScore}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, vectorScore: parseInt(e.target.value) }))}
-                                            className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-primary-500"
-                                        />
-                                    </div>
-
-                                    <div>
-                                        <label className="text-xs font-bold text-text-default block mb-2 flex justify-between">
-                                            <span>זיקה למשרה (Intent)</span>
-                                            <span className="text-primary-600 font-bold bg-primary-50 px-2 py-0.5 rounded-md">{intentWeights.find(w => w.id === simCandidate.intentType)?.value || 0}%</span>
-                                        </label>
-                                        <select
-                                            value={simCandidate.intentType}
-                                            onChange={(e) => setSimCandidate(prev => ({ ...prev, intentType: e.target.value }))}
-                                            className="w-full bg-white border border-border-default text-text-default rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
-                                        >
-                                            {intentWeights.map(w => (
-                                                <option key={w.id} value={w.id}>{w.label} - משקל: {w.value}%</option>
-                                            ))}
-                                        </select>
-                                    </div>
-
-                                    {isExperienceEnabled && (
-                                        <div>
-                                            <label className="text-xs font-bold text-text-default block mb-2 flex justify-between">
-                                                <span>הלימה לתעשייה (Experience)</span>
-                                                <span className="text-primary-600 font-bold bg-primary-50 px-2 py-0.5 rounded-md">{simCandidate.industryMatch}%</span>
-                                            </label>
-                                            <input 
-                                                type="range" min="0" max="100" value={simCandidate.industryMatch}
-                                                onChange={(e) => setSimCandidate(prev => ({ ...prev, industryMatch: parseInt(e.target.value) }))}
-                                                className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-primary-500"
-                                            />
-                                        </div>
-                                    )}
-                                </div>
-
-                                {/* Tag Sliders */}
-                                <div className="space-y-4 pt-5 border-t border-border-subtle/50">
-                                    <div className="text-[11px] font-bold text-text-muted uppercase tracking-wider">התאמה לפי סוגי תגיות:</div>
-                                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                                        {tagWeights.filter(w => w.value > 0).map(w => (
-                                            <div key={w.id} className="p-3.5 bg-bg-subtle/30 rounded-xl border border-border-subtle hover:border-primary-200 transition-colors">
-                                                <label className="text-xs font-bold text-text-default block mb-3 flex justify-between items-center">
-                                                    <span className="flex items-center gap-1.5">
-                                                        {w.icon}
-                                                        {w.label}
-                                                    </span>
-                                                    <span className="text-primary-600 font-black">{simCandidate.tagScores[w.id] || 0}%</span>
-                                                </label>
-                                                <input 
-                                                    type="range" min="0" max="100" value={simCandidate.tagScores[w.id] || 0}
-                                                    onChange={(e) => setSimCandidate(prev => ({ 
-                                                        ...prev, 
-                                                        tagScores: { ...prev.tagScores, [w.id]: parseInt(e.target.value) } 
-                                                    }))}
-                                                    className="w-full h-1.5 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-primary-500"
-                                                />
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div className="pt-2">
-                            <div className="text-sm font-bold text-text-default mb-3">תגיות המועמד בסימולציה:</div>
-                            <div className="flex flex-wrap gap-2">
-                                <span className="px-3 py-1.5 bg-blue-50 text-blue-700 rounded-lg text-xs border border-blue-100 font-medium flex items-center gap-1.5 shadow-sm">
-                                    <UserGroupIcon className="w-4 h-4" /> אדמיניסטרציה
-                                </span>
-                                <span className="px-3 py-1.5 bg-purple-50 text-purple-700 rounded-lg text-xs border border-purple-100 font-medium flex items-center gap-1.5 shadow-sm">
-                                    <SparklesIcon className="w-4 h-4" /> רכזת גיוס
-                                </span>
-                                <span className="px-3 py-1.5 bg-emerald-50 text-emerald-700 rounded-lg text-xs border border-emerald-100 font-medium flex items-center gap-1.5 shadow-sm">
-                                    <BuildingOffice2Icon className="w-4 h-4" /> כוח אדם
-                                </span>
-                            </div>
-                        </div>
-                    </div>
 
                     {/* Results Display */}
                     <div className="relative h-full min-h-[400px]">
@@ -1556,6 +1323,12 @@ const AdminMatchingEngineView: React.FC = () => {
                         {simResult && (
                             <div className="sticky top-6 space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500 bg-white p-8 rounded-3xl border border-border-default shadow-xl">
                                 <div className="flex flex-col items-center justify-center pb-8 border-b border-border-subtle">
+                                    {(simResult.candidateName || simResult.jobTitle) && (
+                                        <div className="text-center mb-3 space-y-0.5">
+                                            {simResult.candidateName && <div className="text-sm font-bold text-text-default">{simResult.candidateName}</div>}
+                                            {simResult.jobTitle && <div className="text-xs text-text-muted">{simResult.jobTitle}</div>}
+                                        </div>
+                                    )}
                                     <div className="text-sm font-bold text-text-muted uppercase tracking-widest mb-3">ציון התאמה סופי</div>
                                     <div className={`text-7xl font-black tracking-tighter ${simResult.score > 80 ? 'text-emerald-600' : simResult.score > 60 ? 'text-blue-600' : 'text-orange-600'}`}>
                                         {simResult.score}<span className="text-4xl opacity-50">%</span>
@@ -1652,10 +1425,12 @@ const AdminMatchingEngineView: React.FC = () => {
                                         <InformationCircleIcon className="w-5 h-5" /> ניתוח תוצאות:
                                     </div>
                                     <p className="opacity-90">
-                                        המועמד קיבל ציון גבוה בזכות התאמה חזקה בשכבת התגיות (במיוחד בקטגוריית "תפקיד" עם משקל 100). 
-                                        {simResult.breakdown.geoMissing && ` שים לב שהציון חושב עם ציון ברירת מחדל של ${missingGeoScore} ברכיב הגיאוגרפי עקב חוסר בכתובת.`}
-                                        {simResult.breakdown.salaryPenalty > 0 && <span className="font-bold text-rose-700 block mt-1"> המועמד ספג קנס של {simResult.breakdown.salaryPenalty} נקודות עקב {simResult.breakdown.salaryMissing ? 'חוסר בציפיות שכר' : 'פער בציפיות השכר'}.</span>}
-                                        {simResult.breakdown.ageGapPenalty > 0 && <span className="font-bold text-orange-700 block mt-1"> המועמד ספג קנס של {simResult.breakdown.ageGapPenalty} נקודות עקב חריגה מטווח הגילאים (גיל {simResult.candidate.age} מול דרישה ל-{simJob.ageMin}-{simJob.ageMax}).</span>}
+                                        ציון ההתאמה הסופי חושב על סמך נתוני המועמד והמשרה בפועל.
+                                        {simResult.breakdown.intentType && <span className="block mt-1">זיקה למשרה: <strong>{simResult.breakdown.intentType}</strong>.</span>}
+                                        {simResult.breakdown.candidateYears > 0 && <span className="block mt-1">שנות ניסיון המועמד: <strong>{simResult.breakdown.candidateYears}</strong>{simResult.breakdown.requiredYears > 0 ? ` (נדרש: ${simResult.breakdown.requiredYears})` : ''}.</span>}
+                                        {simResult.breakdown.geoMissing && <span className="font-bold text-amber-700 block mt-1"> ניקוד גיאוגרפי: ברירת מחדל (כתובת לא זמינה).</span>}
+                                        {simResult.breakdown.salaryPenalty > 0 && <span className="font-bold text-rose-700 block mt-1"> קנס פער שכר: {simResult.breakdown.salaryPenalty} נקודות.</span>}
+                                        {simResult.breakdown.ageGapPenalty > 0 && <span className="font-bold text-orange-700 block mt-1"> קנס חריגת גיל: {simResult.breakdown.ageGapPenalty} נקודות.</span>}
                                     </p>
                                 </div>
                             </div>

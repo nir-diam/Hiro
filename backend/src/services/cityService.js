@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const City = require('../models/City');
+const { getLocationSearchTerms } = require('../utils/locationSearchTerms');
 
 const getAll = async () => {
   return City.findAll({
@@ -24,36 +25,6 @@ const getBySearch = async (search) => {
     },
     order: [['cityName', 'ASC'], ['city', 'ASC']],
   });
-};
-
-/**
- * Return list of cities inside a radius (in km) from a chosen city.
- * Uses projected X/Y coordinates (pointx/pointy or pointX/pointY) and simple Euclidean distance.
- * @param {string} cityName - Center city name (matches city_name or city)
- * @param {number} radiusKm - Radius in kilometers
- * @returns {Promise<object[]>} Plain objects with distanceKm field
- */
-/** Strip region prefixes and split by separators to get candidate city names (e.g. "אזור חיפה" → ["חיפה"], "תל אביב - יפו" → ["תל אביב", "יפו"]). */
-const getLocationSearchTerms = (locationStr) => {
-  if (!locationStr || typeof locationStr !== 'string') return [];
-  let s = locationStr.trim();
-  if (!s) return [];
-
-  const terms = new Set([s]);
-
-  // Strip common prefixes: אזור, מחוז, גוש, נפת, etc.
-  const prefixRegex = /^(אזור|מחוז|גוש|נפת|נפה)\s+/i;
-  const afterPrefix = s.replace(prefixRegex, '').trim();
-  if (afterPrefix && afterPrefix !== s) {
-    terms.add(afterPrefix);
-    s = afterPrefix;
-  }
-
-  // Split by " - ", " – ", "-", "," and add each non-empty part
-  const parts = s.split(/\s*[-–,—]\s*|,/).map((p) => p.trim()).filter(Boolean);
-  parts.forEach((p) => terms.add(p));
-
-  return Array.from(terms);
 };
 
 /**
@@ -115,6 +86,13 @@ const resolveCityForJob = async (locationStr) => {
   return null;
 };
 
+/**
+ * Return list of cities inside a radius (in km) from a chosen city.
+ * Uses projected X/Y coordinates (pointx/pointy or pointX/pointY) and simple Euclidean distance.
+ * @param {string} cityName - Center city name (matches city_name or city)
+ * @param {number} radiusKm - Radius in kilometers
+ * @returns {Promise<object[]>} Plain objects with distanceKm field
+ */
 const getWithinRadius = async (cityName, radiusKm) => {
   if (!cityName || !radiusKm || Number.isNaN(radiusKm)) return [];
 
@@ -162,4 +140,5 @@ module.exports = {
   getBySearch,
   getWithinRadius,
   resolveCityForJob,
+  getLocationSearchTerms,
 };

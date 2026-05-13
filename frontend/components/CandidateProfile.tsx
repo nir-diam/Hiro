@@ -422,6 +422,8 @@ type CandidateTagDetail = {
     finalScore?: number;
     category?: string;
     evidence?: string | string[];
+    /** Exact verbatim substring of the source CV/email text that triggered the tag. */
+    quote?: string;
     rawTypeReason?: string;
     tagReason?: string;
     descriptionHe?: string;
@@ -447,7 +449,8 @@ const normalizeTagDetail = (d: any): CandidateTagDetail => ({
     confidenceScore: typeof (d?.confidenceScore ?? d?.confidence_score) === 'number' ? (d?.confidenceScore ?? d?.confidence_score) : undefined,
     finalScore: typeof (d?.finalScore ?? d?.final_score) === 'number' ? (d?.finalScore ?? d?.final_score) : undefined,
     category: d?.category,
-    evidence: d?.evidence,
+    evidence: d?.evidence ?? d?.quote,
+    quote: typeof (d?.quote ?? d?.evidence) === 'string' ? (d?.quote ?? d?.evidence) : undefined,
     rawTypeReason: d?.rawTypeReason ?? d?.raw_type_reason,
     tagReason: d?.tagReason ?? d?.tag_reason,
     descriptionHe: d?.descriptionHe ?? d?.description_he,
@@ -575,7 +578,9 @@ const buildTagTooltipPanel = (
         : typeof detail.evidence === 'string'
           ? [detail.evidence]
           : [];
-    const cvQuote = evidenceTokens.map((t) => String(t).trim()).find(Boolean);
+    const cvQuote =
+        (typeof detail.quote === 'string' && detail.quote.trim()) ||
+        evidenceTokens.map((t) => String(t).trim()).find(Boolean);
 
     const hierarchyParts = ['קורות חיים'];
     if (detail.category) hierarchyParts.push(detail.category);
@@ -974,16 +979,24 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             isInSummary: o.isInSummary ?? o.is_in_summary,
             confidenceScore: typeof (o.confidenceScore ?? o.confidence_score) === 'number' ? (o.confidenceScore ?? o.confidence_score) : undefined,
             finalScore: typeof (o.finalScore ?? o.final_score) === 'number' ? (o.finalScore ?? o.final_score) : undefined,
+            quote: typeof o.quote === 'string' ? o.quote : typeof o.evidence === 'string' ? o.evidence : undefined,
+            evidence: o.evidence ?? o.quote,
           };
         }
         const customTooltip = detail ? buildTagTooltipText(label, detail, candidateData.workExperience) : undefined;
+        const tooltipPanel: SmartTagTooltipPanel = detail
+          ? (buildTagTooltipPanel(label, detail, candidateData.workExperience) as SmartTagTooltipPanel)
+          : {
+              categoryLabel: 'כישורים רכים',
+              title: label,
+            };
         return {
           label,
           type: 'soft' as SmartTagType,
           isVerified: Boolean(detail?.isCurrent),
           isAiSuggested: false,
           customTooltip,
-          tooltipPanel: detail ? buildTagTooltipPanel(label, detail, candidateData.workExperience) : undefined,
+          tooltipPanel,
         } as SmartTagData;
       })
       .filter(Boolean) as SmartTagData[];

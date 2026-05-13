@@ -46,6 +46,8 @@ interface JobSkill {
     source: TagSource;
     tagType?: SmartTagType; // for same categories/colors as CandidateProfile
     tag_reason?: string;
+    /** Exact verbatim substring of the input description that justified this tag (LLM-extracted). */
+    quote?: string;
     relevance_score?: number;
     /** Original LLM mode e.g. advantage */
     aiMode?: string;
@@ -1048,13 +1050,25 @@ const SmartTag: React.FC<{
                 ? 'border-red-500'
                 : '';
 
-    const tooltipLines = [
-        titleText,
-        tag.aiMode ? `מצב מקור: ${tag.aiMode}` : null,
-        tag.relevance_score != null && tag.relevance_score !== undefined ? `ציון רלוונטיות: ${tag.relevance_score}/10` : null,
-        tag.tag_reason ? `נימוק: ${tag.tag_reason}` : null,
-        tag.source ? `מקור: ${tag.source}` : null,
-    ].filter(Boolean) as string[];
+    type TooltipLine =
+        | { kind: 'header'; text: string }
+        | { kind: 'meta'; text: string }
+        | { kind: 'quote'; text: string };
+
+    const tooltipLines: TooltipLine[] = [
+        { kind: 'header' as const, text: titleText },
+        tag.aiMode ? { kind: 'meta' as const, text: `מצב מקור: ${tag.aiMode}` } : null,
+        tag.relevance_score != null && tag.relevance_score !== undefined
+            ? { kind: 'meta' as const, text: `ציון רלוונטיות: ${tag.relevance_score}/10` }
+            : null,
+        tag.tag_reason ? { kind: 'meta' as const, text: `נימוק: ${tag.tag_reason}` } : null,
+        tag.quote ? { kind: 'quote' as const, text: tag.quote } : null,
+        tag.source ? { kind: 'meta' as const, text: `מקור: ${tag.source}` } : null,
+    ].filter((l): l is TooltipLine => Boolean(l));
+
+    const ariaLabel = tooltipLines
+        .map((l) => (l.kind === 'quote' ? `ציטוט מהתיאור: "${l.text}"` : l.text))
+        .join('. ');
 
     return (
         <div className="relative inline-flex group">
@@ -1062,7 +1076,7 @@ const SmartTag: React.FC<{
                 className={`inline-flex items-center justify-center gap-1.5 px-3 py-1 rounded-full text-xs transition-all cursor-pointer select-none border whitespace-nowrap hover:shadow-md ${styleByType} ${modeBorderClass}`}
                 onClick={() => onToggle(tag.id)}
                 title={tooltipLines.length ? undefined : `${titleText} - לחץ לשינוי מצב`}
-                aria-label={tooltipLines.length ? tooltipLines.join('. ') : undefined}
+                aria-label={tooltipLines.length ? ariaLabel : undefined}
             >
                 <span>{tag.name}</span>
                 <button
@@ -1075,14 +1089,38 @@ const SmartTag: React.FC<{
             </div>
             {tooltipLines.length > 0 && (
                 <div
-                    className="pointer-events-none absolute bottom-full left-1/2 z-[60] mb-2 w-max max-w-xs -translate-x-1/2 rounded-lg border border-border-default bg-bg-card px-3 py-2 text-[11px] text-text-default shadow-lg opacity-0 transition-opacity group-hover:opacity-100"
+                    className="pointer-events-none absolute bottom-full left-1/2 z-[60] mb-2 w-max max-w-sm -translate-x-1/2 rounded-lg border border-border-default bg-bg-card px-3 py-2 text-[11px] text-text-default shadow-lg opacity-0 transition-opacity group-hover:opacity-100"
                     dir="rtl"
                 >
-                    {tooltipLines.map((line, i) => (
-                        <p key={i} className={i === 0 ? 'font-bold text-text-muted' : 'mt-1 leading-snug'}>
-                            {line}
-                        </p>
-                    ))}
+                    {tooltipLines.map((line, i) => {
+                        if (line.kind === 'header') {
+                            return (
+                                <p key={i} className="font-bold text-text-muted">
+                                    {line.text}
+                                </p>
+                            );
+                        }
+                        if (line.kind === 'quote') {
+                            return (
+                                <div
+                                    key={i}
+                                    className="mt-2 border-r-2 border-primary-400 bg-primary-50/60 px-2 py-1 rounded-sm text-[11px] leading-snug text-text-default"
+                                >
+                                    <p className="text-[10px] font-bold uppercase tracking-wide text-primary-600 mb-0.5">
+                                        ציטוט מהתיאור
+                                    </p>
+                                    <p className="italic whitespace-pre-wrap break-words">
+                                        &ldquo;{line.text}&rdquo;
+                                    </p>
+                                </div>
+                            );
+                        }
+                        return (
+                            <p key={i} className="mt-1 leading-snug">
+                                {line.text}
+                            </p>
+                        );
+                    })}
                 </div>
             )}
         </div>
@@ -1697,6 +1735,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                       source: (s.source as TagSource) || 'manual',
                       tagType: (s.tagType === 'soft_skill' ? 'soft' : s.tagType) as SmartTagType | undefined,
                       tag_reason: typeof s.tag_reason === 'string' ? s.tag_reason : undefined,
+                      quote: typeof s.quote === 'string' && s.quote.trim() ? s.quote : undefined,
                       relevance_score:
                           typeof s.relevance_score === 'number'
                               ? s.relevance_score
@@ -2239,6 +2278,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                               ? Number(t.relevance_score)
                               : undefined;
                     const tagReason = typeof t.tag_reason === 'string' ? t.tag_reason : undefined;
+                    const tagQuote = typeof t.quote === 'string' && t.quote.trim() ? t.quote.trim() : undefined;
                     const aiModeStr = t.mode != null && t.mode !== '' ? String(t.mode) : undefined;
 
                     return {
@@ -2249,6 +2289,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         source: (t.source as TagSource) || 'manual',
                         tagType: baseTagType,
                         tag_reason: tagReason,
+                        quote: tagQuote,
                         relevance_score: Number.isFinite(relevanceScore as number) ? (relevanceScore as number) : undefined,
                         aiMode: aiModeStr,
                     } as JobSkill;

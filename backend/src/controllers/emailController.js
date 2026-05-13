@@ -34,6 +34,7 @@ const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
+const { embedCandidateAndSave } = require('../services/vectorSearchService');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
@@ -333,6 +334,35 @@ const downloadEmailFromS3 = async (bucket, key) => {
   return streamToBuffer(response.Body);
 };
 
+/**
+ * Email ingest keeps one Sequelize `candidate` instance while calling `candidateService.update` many times.
+ * Updates do not refresh that instance, so `candidate.fullName` can stay stale and audit_logs.entityName
+ * records the wrong person. Reload / re-read from DB before each system-event emit.
+ */
+async function resolveCandidateAuditDisplayName(candidateRef) {
+  if (!candidateRef?.id) return '—';
+  const id = candidateRef.id;
+  try {
+    if (typeof candidateRef.reload === 'function') {
+      await candidateRef.reload({ attributes: ['id', 'fullName'] });
+    }
+  } catch (_) {
+    // ignore reload errors
+  }
+  let name =
+    (typeof candidateRef.get === 'function' ? candidateRef.get('fullName') : null) ||
+    candidateRef.fullName ||
+    '';
+  const trimmed = String(name).trim();
+  if (trimmed) return trimmed;
+  try {
+    const row = await candidateService.getById(id);
+    return String(row?.fullName || '').trim() || '—';
+  } catch (_) {
+    return '—';
+  }
+}
+
 const processEmailUpload = async (record) => {
   console.log('[email] processing upload record', {
     id: record.id,
@@ -417,8 +447,16 @@ const processEmailUpload = async (record) => {
       }
     }
 
-    let candidate =
-      (await candidateService.findByEmail(fromEmail)) || (await candidateService.findByInboundFromEmail(fromEmail));
+    // Candidate row for this ingest:
+    // - `findByEmail(from)` = applicant's own mailbox matches their profile (safe reuse).
+    // - `findByInboundFromEmail(from)` = continuity when CV parsing changed `email` away from the envelope.
+    // For **job-directed** mail (posting code in To), inbound-only reuse is dangerous: recruiters often
+    // forward many applicants from one From address → everyone would merge into the first row, overwrite
+    // CV/AI fields, and only one job_candidates link would remain. Non-job ingest still allows inbound match.
+    let candidate = await candidateService.findByEmail(fromEmail);
+    if (!candidate && !resolvedJob?.id) {
+      candidate = await candidateService.findByInboundFromEmail(fromEmail);
+    }
     let candidateCreatedViaEmailIngest = false;
     if (!candidate) {
       const inferredName =
@@ -612,12 +650,14 @@ const processEmailUpload = async (record) => {
       }
       await candidateService.update(candidate.id, safeAi);
 
+      const auditNameAfterAi = await resolveCandidateAuditDisplayName(candidate);
+
       // Audit: 'פרסור ניתוח ועיבוד מידע' — AI parsed CV and applied auto updates
       await systemEventEmitter.emit(null, {
         ...SYSTEM_EVENTS.CV_PARSED,
         entityType: 'Candidate',
         entityId: candidate.id,
-        entityName: candidate.fullName,
+        entityName: auditNameAfterAi,
         params: { source: aiFields?.source || 'email' },
       });
 
@@ -627,13 +667,15 @@ const processEmailUpload = async (record) => {
           ...SYSTEM_EVENTS.CV_FIELD,
           entityType: 'Candidate',
           entityId: candidate.id,
-          entityName: candidate.fullName,
+          entityName: auditNameAfterAi,
           params: { job: safeAi.field },
         });
       }
     }
     if (aiTags.length) {
       await candidateTagService.syncTagsForCandidate(candidate.id, aiTags);
+
+      const auditNameAfterTags = await resolveCandidateAuditDisplayName(candidate);
 
       // Audit: 'הגדרת תגיות' — tags created/synced for candidate
       const tagsLabel = aiTags
@@ -645,7 +687,7 @@ const processEmailUpload = async (record) => {
         ...SYSTEM_EVENTS.CV_TAGS,
         entityType: 'Candidate',
         entityId: candidate.id,
-        entityName: candidate.fullName,
+        entityName: auditNameAfterTags,
         params: { tags: tagsLabel || `${aiTags.length} תגיות` },
       });
     }
@@ -664,13 +706,23 @@ const processEmailUpload = async (record) => {
     const primarySynced = await candidateService.getById(candidate.id);
     await ensureOrganizationsFromExperience(primarySynced?.workExperience, candidate.id);
 
-    await jobCandidateService.associateCandidateWithJob({
+    try {
+      await embedCandidateAndSave(candidate.id, combinedText || '');
+    } catch (embErr) {
+      console.warn('[email] embed primary candidate failed', candidate.id, embErr?.message || embErr);
+    }
+
+    const association = await jobCandidateService.associateCandidateWithJob({
       jobId: resolvedJob?.id || null,
       candidateId: candidate.id,
       source: 'email',
       manualOverride: false,
     });
-    console.log('[email] associated candidate with job', association?.id);
+    console.log('[email] associated candidate with job', {
+      jobCandidateId: association?.id ?? null,
+      jobId: resolvedJob?.id || null,
+      candidateId: candidate.id,
+    });
     await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
     await record.reload();
 
@@ -788,6 +840,11 @@ const processEmailUpload = async (record) => {
       });
       const splitFresh = await candidateService.getById(splitCand.id);
       await ensureOrganizationsFromExperience(splitFresh?.workExperience, splitCand.id);
+      try {
+        await embedCandidateAndSave(splitCand.id, tj || '');
+      } catch (embErr) {
+        console.warn('[email] embed split candidate failed', splitCand.id, embErr?.message || embErr);
+      }
       // Mirror row so GET /api/email-uploads/candidate/:id finds this mail for split candidates (same S3 object as primary).
       try {
         await EmailUpload.create({
@@ -2969,6 +3026,8 @@ Candidate tag schema (from backend/src/models/CandidateTag.js):
 - confidence_score (float)
 - calculated_weight (float)
 - final_score (float)
+- tag_reason (String) — short Hebrew explanation of why this tag was inferred (paraphrase allowed)
+- quote (TEXT) — EXACT verbatim substring of the input CV/email text that triggered this tag (no paraphrase)
 Use this schema as guidance when tagging professional skills or roles.
 `;
 
@@ -3023,6 +3082,21 @@ const CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX = `
   Map phrases like "שעות גמישות", "משמרות גמישות", "flexible hours" to "גמיש".
 `;
 
+/** Same appendix as candidateController: forces a verbatim `quote` on every candidate tag. */
+const CV_PARSING_TAG_QUOTE_APPENDIX = `
+--- Required additional field on EVERY object inside the "tags" array ---
+- "quote": string|null — The EXACT, verbatim substring copied character-by-character from the
+  input CV/email text that caused this tag to be created.
+  STRICT RULES:
+  * MUST be a literal substring of the input text — no paraphrase, no synonyms, no translation,
+    no punctuation/whitespace edits beyond trimming leading/trailing spaces.
+  * Pick the SHORTEST span that proves the tag (usually a phrase or short sentence). Hard cap ~240 characters.
+  * If the same evidence supports multiple tags, repeat the quote per tag — do NOT deduplicate.
+  * If the input does not contain a verbatim phrase that justifies the tag, set "quote" to null (very rare).
+  * "quote" is REQUIRED on every tag object and is IN ADDITION to "tag_reason" and the legacy "evidence" field.
+  * If you also emit the legacy "evidence" field, it MUST equal "quote" (same verbatim substring).
+`;
+
 const coercePreferredWorkingHoursFromAi = (raw) => {
   if (raw == null || raw === '') return null;
   const s = String(raw).trim();
@@ -3057,7 +3131,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}`;
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[emailController] cv_parsing prompt missing', err.message || err);

@@ -145,6 +145,14 @@ export interface Candidate {
   availability?: string;
   /** Preferred daily hours (`WorkingHoursInput`), maps to API `preferredWorkingHours`. */
   preferredWorkingHours?: string;
+  /** Latest explicit job_candidates row (by activity); enriched by list API for grid. */
+  lastJobSubmission?: {
+    jobId: string;
+    jobCandidateId: string;
+    jobTitle: string;
+    matchScore: number;
+    linkedAt?: string;
+  } | null;
 }
 
 export const candidatesData: Candidate[] = [
@@ -1050,8 +1058,15 @@ function filterCandidatesByAdvancedClient(
     });
 }
 
-function candidateSortComparable(candidate: Candidate, key: keyof Candidate): string | number {
-    const v = candidate[key];
+function candidateSortComparable(
+    candidate: Candidate,
+    key: keyof Candidate | 'lastSubmissionMatch',
+): string | number {
+    if (key === 'lastSubmissionMatch') {
+        const n = candidate.lastJobSubmission?.matchScore;
+        return n != null && Number.isFinite(n) ? n : -1;
+    }
+    const v = candidate[key as keyof Candidate];
     if (key === 'createDate') {
         const s = v != null ? String(v).trim() : '';
         if (!s) return 0;
@@ -1091,6 +1106,14 @@ function formatSalaryExpectationCell(c: Candidate): string {
     }
     if (min != null && Number.isFinite(min)) return `${fmt(min)}+`;
     return `≤${fmt(max!)}`;
+}
+
+/** 0–100 for list display, or null when the API did not send a usable score. */
+function clampListMatchPercent(raw: unknown): number | null {
+    if (raw == null || raw === '') return null;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) return null;
+    return Math.min(100, Math.max(0, Math.round(v)));
 }
 
 const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite, openMessageModal }) => {
@@ -1224,7 +1247,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const [activeMatchState, setActiveMatchState] = useState<{ id: number, top: number, left: number } | null>(null);
 
-    const [sortConfig, setSortConfig] = useState<{ key: keyof Candidate; direction: 'asc' | 'desc' } | null>(null);
+    const [sortConfig, setSortConfig] = useState<{
+        key: keyof Candidate | 'lastSubmissionMatch';
+        direction: 'asc' | 'desc';
+    } | null>(null);
     
     const [showNeedsAttention, setShowNeedsAttention] = useState(
         () => listViewSnapshot?.showNeedsAttention ?? false,
@@ -1347,6 +1373,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         const resolvedId = deriveLocalCandidateId(sourceId ?? idx + 1, idx + 1);
         const backendId = sourceId !== undefined && sourceId !== null ? String(sourceId) : undefined;
 
+        const ljCandidate =
+            c.lastJobSubmission &&
+            typeof c.lastJobSubmission === 'object' &&
+            c.lastJobSubmission.jobId != null &&
+            String(c.lastJobSubmission.jobId).trim() !== ''
+                ? c.lastJobSubmission
+                : null;
+
+        const apiMatch = clampListMatchPercent(c.matchScore);
+        const lastSubMatch = ljCandidate ? clampListMatchPercent(ljCandidate.matchScore) : null;
+        const profilePc = clampListMatchPercent(c.profileCompleteness);
+        const matchScore = apiMatch ?? lastSubMatch ?? profilePc ?? 0;
+
         return {
             id: resolvedId,
             backendId,
@@ -1358,7 +1397,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         source: c.source || c.sourceDetail || '',
         tags: Array.isArray(c.tags) ? c.tags : [],
         internalTags: Array.isArray(c.internalTags) ? c.internalTags : [],
-        matchScore: Number(c.profileCompleteness || c.matchScore || 0),
+        matchScore,
         address: c.address || '',
         phone: c.phone || '',
         industry:
@@ -1393,6 +1432,18 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             c.preferredWorkingHours != null && String(c.preferredWorkingHours).trim() !== ''
                 ? String(c.preferredWorkingHours).trim()
                 : '',
+        lastJobSubmission: ljCandidate
+                ? {
+                      jobId: String(ljCandidate.jobId),
+                      jobCandidateId: String(ljCandidate.jobCandidateId || ''),
+                      jobTitle: String(ljCandidate.jobTitle || '—'),
+                      matchScore: lastSubMatch ?? 0,
+                      linkedAt:
+                          ljCandidate.linkedAt != null && ljCandidate.linkedAt !== ''
+                              ? String(ljCandidate.linkedAt)
+                              : undefined,
+                  }
+                : null,
         };
     }, []);
 
@@ -1403,6 +1454,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             search: string;
             advanced: AppliedAdvancedSearchPayload | null;
             dataIncomplete?: boolean;
+            jobId?: string;
         }) => {
             if (!apiBase) return;
             setIsRemoteLoading(true);
@@ -1419,6 +1471,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 if (opts.dataIncomplete) {
                     params.set('dataIncomplete', '1');
                 }
+                const matchJobId = String(opts.jobId || '').trim();
+                if (matchJobId) params.set('jobId', matchJobId);
                 const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
                 if (!res.ok) throw new Error('failed to load');
                 const payload = await res.json();
@@ -1453,6 +1507,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     ? null
                     : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
             dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
         });
     }, [
         page,
@@ -1464,6 +1519,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         complexRules,
         fetchCandidatesList,
         showIncompleteOnly,
+        selectedJobId,
     ]);
 
     const exportSearchHeaderLabels = useMemo(() => {
@@ -1500,6 +1556,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             if (showIncompleteOnly) {
                 params.set('dataIncomplete', '1');
             }
+            const mj = selectedJobId.trim();
+            if (mj) params.set('jobId', mj);
             return params;
         };
 
@@ -1624,6 +1682,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         selectedIds,
         suspendListPolling,
         candidates,
+        selectedJobId,
     ]);
 
     // Poll backend for updates every 10s on current page
@@ -1647,6 +1706,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         ),
                     );
                 }
+                if (showIncompleteOnly) params.set('dataIncomplete', '1');
+                const pollJobId = selectedJobId.trim();
+                if (pollJobId) params.set('jobId', pollJobId);
                 const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, {
                     cache: 'no-store',
                 } as any);
@@ -1687,6 +1749,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         searchParams,
         languageFilters,
         complexRules,
+        showIncompleteOnly,
+        selectedJobId,
     ]);
 
     const goToPage = useCallback((target: number) => {
@@ -1805,11 +1869,36 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         { id: 'age', header: t('col.age') },
         { id: 'salaryMin', header: t('col.salary_expectation') },
         { id: 'languages', header: t('col.languages') },
+        { id: 'lastSubmissionMatch', header: t('col.last_submission_match') },
     ], [t]);
 
-    // Use a subset for default visibility
-    const defaultVisibleColumns = useMemo(() => ['name', 'matchScore', 'title', 'status', 'lastActivity', 'source'], []);
+    // Use a subset for default visibility (rest via Customize columns)
+    const defaultVisibleColumns = useMemo(
+        () => ['name', 'matchScore', 'title', 'status', 'lastActivity', 'source', 'lastSubmissionMatch'],
+        [],
+    );
     const [columns, setColumns] = useState(allColumns.filter(c => defaultVisibleColumns.includes(c.id)));
+
+    /** Ensure new columns appear once for sessions that still hold pre-change visibility in React state. */
+    const LAST_SUBMISSION_COLUMN_SEEN_KEY = 'hiro.candidates.column.lastSubmissionMatch.v1';
+    useEffect(() => {
+        if (typeof sessionStorage === 'undefined') return;
+        if (sessionStorage.getItem(LAST_SUBMISSION_COLUMN_SEEN_KEY)) return;
+        const addCol = allColumns.find((c) => c.id === 'lastSubmissionMatch');
+        if (!addCol) return;
+        setColumns((prev) => {
+            if (prev.some((c) => c.id === 'lastSubmissionMatch')) {
+                sessionStorage.setItem(LAST_SUBMISSION_COLUMN_SEEN_KEY, '1');
+                return prev;
+            }
+            sessionStorage.setItem(LAST_SUBMISSION_COLUMN_SEEN_KEY, '1');
+            const src = prev.findIndex((c) => c.id === 'source');
+            const next = [...prev];
+            if (src >= 0) next.splice(src + 1, 0, addCol);
+            else next.push(addCol);
+            return next;
+        });
+    }, [allColumns]);
 
     // Effect to update columns when language changes
     useEffect(() => {
@@ -1821,7 +1910,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [allColumns]);
 
     // ... (Keep existing sorting/filtering logic and handlers) ...
-     const requestSort = (key: keyof Candidate) => {
+     const requestSort = (key: keyof Candidate | 'lastSubmissionMatch') => {
         let direction: 'asc' | 'desc' = 'asc';
         if (sortConfig && sortConfig.key === key && sortConfig.direction === 'asc') {
             direction = 'desc';
@@ -2357,7 +2446,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             const res = await fetch(`${apiBase}/api/candidates/semantic-search`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: payloadQuery }),
+                body: JSON.stringify({
+                    query: payloadQuery,
+                    ...(selectedJobId.trim() ? { jobId: selectedJobId.trim() } : {}),
+                }),
             });
             if (!res.ok) throw new Error('חיפוש חכם נכשל');
             const data = await res.json();
@@ -2609,6 +2701,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             limit: pageSize,
             search: debouncedSearchTerm,
             advanced: snapshot,
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
         });
     };
 
@@ -2633,8 +2727,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             limit: pageSize,
             search: debouncedSearchTerm,
             advanced: null,
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
         });
-    }, [pageSize, debouncedSearchTerm, fetchCandidatesList, setUrlSearchParams]);
+    }, [pageSize, debouncedSearchTerm, fetchCandidatesList, setUrlSearchParams, showIncompleteOnly, selectedJobId]);
 
     const handleClearSearch = () => {
         // Clear free search
@@ -2663,6 +2759,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             limit: pageSize,
             search: '',
             advanced: null,
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
         });
     };
 
@@ -2749,19 +2847,29 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                          )}
                     </div>
                 );
-            case 'matchScore':
-                 return (
+            case 'matchScore': {
+                const filterJobId = selectedJobId.trim();
+                const lj = candidate.lastJobSubmission;
+                const jobFilterMismatch =
+                    Boolean(filterJobId) &&
+                    Boolean(lj?.jobId) &&
+                    String(filterJobId) !== String(lj.jobId);
+                const scoreTitle = jobFilterMismatch
+                    ? 'הציון מחושב להתאמה למשרה שבחרת במסנן. עמודת ההגשה האחרונה מציגה את המשרה האחרונה אליה הוגש המועמד, ויכולה להיות שונה. לחץ להסבר.'
+                    : 'לחץ להסבר';
+                return (
                     <div className="flex items-center justify-center">
-                         {/* CLICKABLE SCORE CIRCLE */}
-                        <button 
+                        <button
+                            type="button"
                             onClick={(e) => handleScoreClick(e, candidate.id)}
                             className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border-2 shadow-sm cursor-pointer hover:scale-105 transition-transform ${getScoreColorClass(candidate.matchScore)}`}
-                            title="לחץ להסבר"
+                            title={scoreTitle}
                         >
                             {candidate.matchScore}%
                         </button>
                     </div>
-                 );
+                );
+            }
             case 'tags':
                 return candidate.tags?.length
                     ? candidate.tags.join(', ')
@@ -2797,6 +2905,31 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 return formatIntakeDateCell(candidate.createDate);
             case 'lastActivity':
                 return formatCandidatePoolLastActive(candidate.lastActivity);
+            case 'lastSubmissionMatch': {
+                const sub = candidate.lastJobSubmission;
+                if (!sub?.jobId) {
+                    return <span className="text-text-subtle">—</span>;
+                }
+                return (
+                    <button
+                        type="button"
+                        className="group flex max-w-full cursor-pointer flex-col items-stretch gap-1 rounded-lg px-1 py-0.5 text-start transition-colors hover:bg-primary-50 sm:flex-row sm:items-center sm:gap-2"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (selectionMode) {
+                                handleSelect(candidate.id);
+                                return;
+                            }
+                            navigate(`/jobs/edit/${sub.jobId}`);
+                        }}
+                        title={sub.jobTitle}
+                    >
+                        <span className="min-w-0 truncate font-semibold text-primary-700 group-hover:text-primary-800">
+                            {sub.jobTitle}
+                        </span>
+                    </button>
+                );
+            }
             default:
                 return (candidate as any)[columnId];
         }
@@ -3317,7 +3450,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                         <th 
                                             key={col.id} 
                                             draggable 
-                                            onClick={() => requestSort(col.id as keyof Candidate)}
+                                            onClick={() => requestSort(col.id as keyof Candidate | 'lastSubmissionMatch')}
                                             onDragStart={() => handleDragStart(index, col.id)} 
                                             onDragEnter={() => handleDragEnter(index)} 
                                             onDragEnd={handleDragEnd} 

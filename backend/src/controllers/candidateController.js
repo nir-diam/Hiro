@@ -1089,6 +1089,7 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
  "tags": [{
     "name": string,
     "evidence": string,
+    "quote": string|null,
     "raw_type": "role" | "skill" | "tool" | "degree" | "methodology" | "seniority" | "industry" | "soft_skill",
     "context": "Core" | "Tool" | "Degree" | "Profile",
     "raw_type_reason": string|null,
@@ -1131,6 +1132,26 @@ const CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX = `
 - "preferredWorkingHours": string|null — Preferred daily work schedule ONLY if explicit. If absent in the CV, use null (do not guess).
   When present, use ONE of: "גמיש", "ללא אילוצי שעות", or a single 24h range "HH:mm-HH:mm" with zero-padded hours (e.g. "09:00-18:00").
   Map phrases like "שעות גמישות", "משמרות גמישות", "flexible hours" to "גמיש".
+`;
+
+/**
+ * Forces the model to attach a verbatim source quote to every candidate tag.
+ * Distinct from `tag_reason` (which may paraphrase) and `evidence` (the legacy
+ * field name): `quote` MUST be a literal substring of the input CV text,
+ * so the candidate profile can highlight which sentence triggered the tag.
+ */
+const CV_PARSING_TAG_QUOTE_APPENDIX = `
+--- Required additional field on EVERY object inside the "tags" array ---
+- "quote": string|null — The EXACT, verbatim substring copied character-by-character from the
+  input CV text that caused this tag to be created.
+  STRICT RULES:
+  * MUST be a literal substring of the input CV — no paraphrase, no synonyms, no translation,
+    no punctuation/whitespace edits beyond trimming leading/trailing spaces.
+  * Pick the SHORTEST span that proves the tag (usually a phrase or short sentence). Hard cap ~240 characters.
+  * If the same evidence supports multiple tags, repeat the quote per tag — do NOT deduplicate.
+  * If the CV does not contain a verbatim phrase that justifies the tag, set "quote" to null (very rare).
+  * "quote" is REQUIRED on every tag object and is IN ADDITION to "tag_reason" and the legacy "evidence" field.
+  * If you also emit the legacy "evidence" field, it MUST equal "quote" (same verbatim substring).
 `;
 
 /** Sequelize attribute type → short label for LLM context */
@@ -1240,10 +1261,11 @@ const buildResumeResponseSchema = () => ({
       description: '10-15 tags total (HARD CAP 15). 1-2 Role tags, exactly 1 Seniority, exactly 1 Industry.',
       items: {
         type: 'object',
-        required: ['name', 'evidence', 'raw_type', 'context'],
+        required: ['name', 'evidence', 'quote', 'raw_type', 'context'],
         properties: {
           name:             { type: 'string' },
-          evidence:         { type: 'string', description: 'Verbatim short snippet from the CV. ≤ 160 chars.' },
+          evidence:         { type: 'string', description: 'Verbatim short snippet from the CV. ≤ 160 chars. Same string as `quote`.' },
+          quote:            { type: 'string', nullable: true, description: 'EXACT verbatim substring of the CV text justifying this tag. ≤ 240 chars. Same as `evidence`. null only if no verbatim phrase exists.' },
           raw_type: {
             type: 'string',
             enum: ['role', 'skill', 'tool', 'degree', 'methodology', 'seniority', 'industry', 'soft_skill'],
@@ -1253,7 +1275,7 @@ const buildResumeResponseSchema = () => ({
             enum: ['Core', 'Tool', 'Degree', 'Profile'],
           },
           raw_type_reason:  { type: 'string', nullable: true, description: 'One Hebrew sentence, ≤ 160 chars.' },
-          tag_reason:       { type: 'string', nullable: true, description: 'One Hebrew sentence, ≤ 160 chars.' },
+          tag_reason:       { type: 'string', nullable: true, description: 'One Hebrew sentence explanation (paraphrase OK), ≤ 160 chars.' },
           is_current:       { type: 'boolean', nullable: true },
           confidence_score: { type: 'number',  nullable: true },
         },
@@ -1347,7 +1369,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}`;
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);
@@ -1488,11 +1510,16 @@ const list = async (req, res) => {
           ? { ...advanced, dataIncomplete: true }
           : { dataIncomplete: true };
     }
+    const jobIdRaw = req.query.jobId ?? req.query.job_id;
+    const matchJobId =
+      jobIdRaw != null && String(jobIdRaw).trim() !== '' ? String(jobIdRaw).trim() : null;
+
     const payload = await candidateService.listPaginated({
       page,
       limit: clampedLimit,
       search,
       advanced,
+      jobId: matchJobId,
     });
     const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
       if (!row || typeof row !== 'object') return row;
@@ -1562,6 +1589,8 @@ Candidate tag schema (from backend/src/models/CandidateTag.js):
 - confidence_score (float)
 - calculated_weight (float)
 - final_score (float)
+- tag_reason (String) — short Hebrew explanation of why this tag was inferred (paraphrase allowed)
+- quote (TEXT) — EXACT verbatim substring of the input CV text that triggered this tag (no paraphrase)
 Use this schema as guidance when tagging professional skills or roles.
 `;
 
@@ -2827,11 +2856,16 @@ const rebuildEmbedding = async (req, res) => {
 // Semantic search endpoint
 const semanticSearch = async (req, res) => {
   try {
-    const { query, filters, limit } = req.body || {};
+    const { query, filters, limit, jobId: bodyJobId } = req.body || {};
     if (!query || !query.trim()) {
       return res.status(400).json({ message: 'query is required' });
     }
     const results = await searchCandidates({ query, filters, limit: limit || 20 });
+    await candidateService.attachLatestJobSubmissions(results);
+    const jid = bodyJobId != null && String(bodyJobId).trim() !== '' ? String(bodyJobId).trim() : '';
+    if (jid) {
+      await candidateService.attachJobMatchScores(results, jid);
+    }
     res.json(results);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Semantic search failed' });

@@ -594,7 +594,10 @@ const JobsView: React.FC = () => {
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
-    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
+    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>({
+        key: 'openDate',
+        direction: 'desc',
+    });
     const jobScopeOptions = ['משרה מלאה', 'משרה חלקית', 'משמרות', 'פרילנס'];
 
     const requestSort = (key: string) => {

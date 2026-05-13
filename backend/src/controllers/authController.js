@@ -6,8 +6,10 @@ const clientUsageSettingService = require('../services/clientUsageSettingService
 
 const serializeAuthUserWithUsage = async (user) => {
   const base = serializeAuthUser(user);
-  const autoDisconnect = await clientUsageSettingService.getAutoDisconnectForClient(base.clientId);
-  return { ...base, autoDisconnect };
+  const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+  const clientId = base.clientId || effectiveClientId || null;
+  const autoDisconnect = await clientUsageSettingService.getAutoDisconnectForClient(clientId);
+  return { ...base, clientId, autoDisconnect };
 };
 
 const login = async (req, res) => {

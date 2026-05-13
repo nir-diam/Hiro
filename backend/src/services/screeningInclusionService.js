@@ -4,15 +4,20 @@ const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const recruitmentStatusPresentationService = require('./recruitmentStatusPresentationService');
+const candidateService = require('./candidateService');
 const { resolveStatusGroup, canonicalizeStatusGroup } = require('../utils/recruitmentStatusGroups');
-
-/** Sources treated as explicit application / staff link */
-const APPLICATION_SOURCES = new Set(['email', 'bulk_job_filter', 'manual_screening', 'public_apply', 'referral']);
+const { resolveEngineConfigForJob } = require('./matchingEngineService');
+const {
+  computeFullMatchScore,
+  getJobEmbedding,
+  buildLinkedInfoFromJobCandidate,
+  isExplicitJobCandidateSource,
+  JC_EXPLICIT_APPLICATION_SOURCES,
+} = require('./matchingScoreService');
 
 /** Path 1 = explicit application/link source; Path 3 = included via field/title interest match only (still passes hard rules, etc.). */
 function jcHasExplicitApplicationSource(jc) {
-  const src = jc.source ? String(jc.source).trim() : '';
-  return Boolean(src && APPLICATION_SOURCES.has(src));
+  return isExplicitJobCandidateSource(jc.source);
 }
 
 function norm(s) {
@@ -43,7 +48,7 @@ function interestMatches(candidate, job) {
 
 function hasAffinity(jc, candidate, job) {
   const src = jc.source ? String(jc.source).trim() : '';
-  if (src && APPLICATION_SOURCES.has(src)) return true;
+  if (src && JC_EXPLICIT_APPLICATION_SOURCES.has(src)) return true;
   return interestMatches(candidate, job);
 }
 
@@ -337,7 +342,7 @@ async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomp
 }
 
 async function computeScreeningForCandidate(candidateId) {
-  const candidate = await Candidate.findByPk(candidateId);
+  const candidate = await candidateService.findByPkWithTagsForMatchScore(candidateId);
   if (!candidate) {
     const err = new Error('Candidate not found');
     err.status = 404;
@@ -353,7 +358,7 @@ async function computeScreeningForCandidate(candidateId) {
   const included = [];
   const excluded = [];
   const presentationByClientId = {};
-  const candPlain = candidate.get({ plain: true });
+  const candPlain = candidateService.toPlainCandidateForMatchScore(candidate);
   const jcPlain = (row) => (row.get ? row.get({ plain: true }) : row);
 
   for (const jc of links) {
@@ -368,13 +373,31 @@ async function computeScreeningForCandidate(candidateId) {
     const group = await effectiveGroupForLink(jc, clientId);
     const evaluationChecks = computeEvaluationChecks(candPlain, jcPlain(jc), job, settings, group);
     const ev = await evaluateLink(candidate, jc, job, settings, clientId, group);
+
+    // Compute real multi-dimensional match score (same engine + client preset merge as candidate list / job-matches)
+    let matchPercentage = ev.jobPayload.matchPercentage; // fallback (stored or 85)
+    let scoreBreakdown = null;
+    try {
+      const jobPlain = job.get ? job.get({ plain: true }) : { ...job };
+      const engineConfig = await resolveEngineConfigForJob(jobPlain);
+      const jobEmb = await getJobEmbedding(jobPlain);
+      const jcData = jcPlain(jc);
+      const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
+      const result = await computeFullMatchScore(candPlain, jobPlain, jobEmb, engineConfig, linkedInfo);
+      matchPercentage = Math.round(result.finalScore);
+      scoreBreakdown = result.breakdown || null;
+    } catch (e) {
+      console.warn('[screeningPool] scoring error for job', job.id, e.message || e);
+    }
+
     const row = {
-      job: ev.jobPayload,
+      job: { ...ev.jobPayload, matchPercentage },
       jobCandidateId: ev.jobCandidateId,
       path: ev.path,
       reasons: ev.reasons,
       meta: ev.meta || null,
-      matchPercentage: ev.jobPayload.matchPercentage,
+      matchPercentage,
+      scoreBreakdown,
       evaluationChecks,
       clientId: clientId || null,
     };
@@ -491,5 +514,5 @@ module.exports = {
   checkHardRequirements,
   hasAffinity,
   computeEvaluationChecks,
-  APPLICATION_SOURCES,
+  APPLICATION_SOURCES: JC_EXPLICIT_APPLICATION_SOURCES,
 };

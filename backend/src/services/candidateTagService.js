@@ -45,6 +45,15 @@ const normalizeEntry = (entry) => {
       typeof entry?.raw_type_reason === 'string' ? entry.raw_type_reason.trim() : null,
     tag_reason:
       typeof entry?.tag_reason === 'string' ? entry.tag_reason.trim() : null,
+    quote: (() => {
+      const raw =
+        typeof entry?.quote === 'string' && entry.quote.trim()
+          ? entry.quote
+          : typeof entry?.evidence === 'string' && entry.evidence.trim()
+            ? entry.evidence
+            : null;
+      return raw ? raw.trim() : null;
+    })(),
   };
 };
 
@@ -328,6 +337,7 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
         context: payload.context,
         raw_type_reason: payload.raw_type_reason,
         tag_reason: payload.tag_reason,
+        quote: payload.quote,
         is_current: payload.is_current,
         is_in_summary: payload.is_in_summary,
         confidence_score: payload.confidence_score,
@@ -520,6 +530,12 @@ module.exports = {
     });
     if (!tag) throw new Error('Unable to ensure tag record');
     const score = tagScoringEngine.scoreTag(payload);
+    const normalizedQuote =
+      typeof payload.quote === 'string' && payload.quote.trim()
+        ? payload.quote.trim()
+        : typeof payload.evidence === 'string' && payload.evidence.trim()
+          ? payload.evidence.trim()
+          : null;
     const entry = await CandidateTag.create({
       candidate_id: payload.candidate_id,
       tag_id: tag.id,
@@ -527,6 +543,7 @@ module.exports = {
       context: payload.context,
       raw_type_reason: payload.raw_type_reason ?? null,
       tag_reason: payload.tag_reason ?? null,
+      quote: normalizedQuote,
       is_current: payload.is_current,
       is_in_summary: payload.is_in_summary,
       confidence_score: payload.confidence_score,
@@ -561,6 +578,13 @@ module.exports = {
       is_in_summary: typeof updates.is_in_summary === 'boolean' ? updates.is_in_summary : candidateTag.is_in_summary,
       confidence_score: typeof updates.confidence_score === 'number' ? updates.confidence_score : candidateTag.confidence_score,
     };
+    if (typeof updates.quote === 'string') {
+      const q = updates.quote.trim();
+      updates.quote = q || null;
+    } else if (typeof updates.evidence === 'string') {
+      const q = updates.evidence.trim();
+      updates.quote = q || null;
+    }
     const manualWeight = Number(updates.calculated_weight);
     const manualFinal = Number(updates.final_score);
     const hasManualScore = Number.isFinite(manualWeight) && Number.isFinite(manualFinal);

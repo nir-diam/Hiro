@@ -32,10 +32,20 @@ const SONAR_FILTER_KEYS = [
     'affinity',
 ] as const;
 
+/** Subset of matching engine breakdown used by Sonar cards */
+export interface SonarScoreBreakdown {
+    geo?: number;
+    geoDistance?: number | null;
+    geoMissing?: boolean;
+}
+
 export interface SonarScanRow {
     candidate: Record<string, unknown>;
     matchPercentage: number;
+    /** Composite engine score (before max with vector), when API sends it */
+    engineMatchPct?: number;
     vectorSimilarity: number | null;
+    scoreBreakdown?: SonarScoreBreakdown | null;
 }
 
 export interface JobSonarViewProps {
@@ -256,16 +266,36 @@ function normGenderBucket(raw: string): 'm' | 'f' | '' {
     return '';
 }
 
+function isSonarPlaceholderValue(val: string, emdash: string): boolean {
+    const s = String(val ?? '').trim();
+    return !s || s === emdash || s === '-';
+}
+
 function buildSonarMetricCells(
     job: Record<string, unknown>,
     c: Record<string, unknown>,
     row: SonarScanRow,
     t: (key: string, opts?: Record<string, string | number>) => string,
+    matchThresholdMin?: number,
 ): SonarMetricCell[] {
     const emdash = '—';
 
-    const vecPct = Math.max(0, Math.min(100, Math.round(row.matchPercentage)));
-    const vecTone: SonarMetricTone = vecPct >= 75 ? 'good' : 'muted';
+    const rawSim = typeof row.vectorSimilarity === 'number' ? row.vectorSimilarity : null;
+    const vecPctNum =
+        rawSim != null
+            ? Math.max(
+                  0,
+                  Math.min(
+                      100,
+                      Math.round(rawSim >= 0 && rawSim <= 1 ? rawSim * 100 : ((rawSim + 1) / 2) * 100),
+                  ),
+              )
+            : null;
+    const vecPctValue = vecPctNum != null ? `${vecPctNum}%` : emdash;
+    const thrRaw = Number(matchThresholdMin);
+    const vecThreshold = Number.isFinite(thrRaw) && thrRaw > 0 ? thrRaw : 70;
+    const vecTone: SonarMetricTone =
+        vecPctNum == null ? 'muted' : vecPctNum >= vecThreshold ? 'good' : 'bad';
 
     const prefs = Array.isArray(c.preferredWorkModels) ? (c.preferredWorkModels as string[]) : [];
     const scopes = Array.isArray(c.jobScopes) ? (c.jobScopes as string[]) : [];
@@ -275,40 +305,118 @@ function buildSonarMetricCells(
         (prefs.length ? prefs.join(', ') : '') ||
         normJobType(job) ||
         emdash;
-    const scopeTone: SonarMetricTone = scopeVal === emdash ? 'muted' : 'good';
+
+    const jobTypes = Array.isArray(job.jobType)
+        ? (job.jobType as unknown[]).map((x) => String(x ?? '').trim()).filter(Boolean)
+        : [];
+    const jobEmpT = String((job as { employmentType?: unknown }).employmentType ?? '').trim();
+    const jobSingleScope = String(job.jobScope ?? '').trim();
+    const jobHasScopeReq = Boolean(jobTypes.length || jobEmpT || jobSingleScope);
+    let scopeTone: SonarMetricTone = 'muted';
+    if (jobHasScopeReq) {
+        if (isSonarPlaceholderValue(scopeVal, emdash)) scopeTone = 'bad';
+        else {
+            const blob = scopeVal.toLowerCase();
+            const needles = [...jobTypes, jobEmpT, jobSingleScope].map((s) => s.toLowerCase()).filter((s) => s.length >= 2);
+            const hit = needles.some((n) => blob.includes(n) || n.includes(blob));
+            scopeTone = hit ? 'good' : 'bad';
+        }
+    }
 
     const hoursVal =
         String(c.preferredWorkingHours ?? '').trim() ||
         String(c.availability ?? '').trim() ||
         prefs.find((p) => /בוקר|ערב|לילה|גמיש|morning|evening/i.test(p)) ||
         emdash;
-    const hoursTone: SonarMetricTone = hoursVal === emdash ? 'muted' : 'good';
+    const jobPwh = String(job.preferredWorkingHours ?? '').trim();
+    const jobAvail = String(job.availability ?? '').trim();
+    const jobHasHoursReq = Boolean(jobPwh || jobAvail);
+    let hoursTone: SonarMetricTone = 'muted';
+    if (jobHasHoursReq) {
+        if (isSonarPlaceholderValue(hoursVal, emdash)) hoursTone = 'bad';
+        else {
+            const cand = hoursVal.toLowerCase();
+            const jb = `${jobPwh} ${jobAvail}`.toLowerCase().trim();
+            if (!jb) hoursTone = 'good';
+            else if (jb === 'גמיש' && cand.includes('גמיש')) hoursTone = 'good';
+            else if (jb === 'גמיש') hoursTone = 'good';
+            else {
+                const tokens = jb.split(/[\s,/|]+/).filter((w) => w.length > 2);
+                hoursTone =
+                    tokens.some((w) => cand.includes(w)) ||
+                    cand.split(/[\s,]+/).some((w) => w.length > 2 && jb.includes(w))
+                        ? 'good'
+                        : 'bad';
+            }
+        }
+    }
 
-    const distanceVal = t('job.sonar.distance_na');
+    const jobGeoText = String(job.city ?? job.region ?? job.location ?? '').trim();
+    const jobHasGeoTarget = Boolean(jobGeoText);
+    const bd = row.scoreBreakdown as SonarScoreBreakdown | null | undefined;
+    const rawGeoKm = bd?.geoDistance;
+    const geoKm =
+        typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
+    const geoMissing = Boolean(bd?.geoMissing);
+    const geoScoreNum = typeof bd?.geo === 'number' && Number.isFinite(bd.geo) ? bd.geo : null;
 
+    let distanceVal: string;
+    let distanceTone: SonarMetricTone = 'muted';
+    if (!jobHasGeoTarget) {
+        distanceVal = t('job.sonar.distance_not_on_job');
+        distanceTone = 'muted';
+    } else if (geoKm != null) {
+        distanceVal = t('job.sonar.distance_km', { km: geoKm });
+        if (geoScoreNum != null) {
+            distanceTone = geoScoreNum >= 72 ? 'good' : geoScoreNum < 55 ? 'bad' : 'muted';
+        } else {
+            distanceTone = geoKm <= 25 ? 'good' : geoKm > 60 ? 'bad' : 'muted';
+        }
+    } else {
+        distanceVal = t('job.sonar.distance_na');
+        distanceTone = geoMissing ? 'bad' : 'muted';
+    }
+
+    const jobAgeMin = job.ageMin != null ? Number(job.ageMin) : null;
+    const jobAgeMax = job.ageMax != null ? Number(job.ageMax) : null;
+    const jobHasAgeReq =
+        (jobAgeMin != null && Number.isFinite(jobAgeMin)) || (jobAgeMax != null && Number.isFinite(jobAgeMax));
     const ageVal = String(c.age ?? '').trim() || emdash;
-    const ageTone: SonarMetricTone = ageVal === emdash ? 'muted' : 'good';
+    let ageTone: SonarMetricTone = 'muted';
+    if (jobHasAgeReq) {
+        if (isSonarPlaceholderValue(ageVal, emdash)) ageTone = 'bad';
+        else {
+            const ageNum = parseInt(String(c.age).replace(/[^\d]/g, ''), 10);
+            if (!Number.isFinite(ageNum)) ageTone = 'bad';
+            else if (
+                (jobAgeMin != null && Number.isFinite(jobAgeMin) && ageNum < jobAgeMin) ||
+                (jobAgeMax != null && Number.isFinite(jobAgeMax) && ageNum > jobAgeMax)
+            ) {
+                ageTone = 'bad';
+            } else ageTone = 'good';
+        }
+    }
 
     const genderVal = String(c.gender ?? '').trim() || emdash;
     const jobGenderRaw = String(job.gender ?? '').trim();
-    let genderTone: SonarMetricTone = genderVal === emdash ? 'muted' : 'good';
-    if (
-        jobGenderRaw &&
-        !/^לא\s*משנה/i.test(jobGenderRaw) &&
-        genderVal !== emdash
-    ) {
-        const jb = normGenderBucket(jobGenderRaw);
-        const cb = normGenderBucket(genderVal);
-        if (jb && cb && jb !== cb) genderTone = 'bad';
+    let genderTone: SonarMetricTone = 'muted';
+    if (jobGenderRaw && !/^לא\s*משנה/i.test(jobGenderRaw)) {
+        if (isSonarPlaceholderValue(genderVal, emdash)) genderTone = 'bad';
+        else {
+            const jb = normGenderBucket(jobGenderRaw);
+            const cb = normGenderBucket(genderVal);
+            if (jb && cb) genderTone = jb === cb ? 'good' : 'bad';
+            else genderTone = 'muted';
+        }
     }
 
     const mobilityStr = String(c.mobility ?? '').trim();
-    const mobilityVal = mobilityStr || emdash;
-    let mobilityTone: SonarMetricTone = mobilityStr ? 'good' : 'muted';
+    const mobilityMeaningful = mobilityStr && !isSonarPlaceholderValue(mobilityStr, emdash);
+    const mobilityVal = mobilityMeaningful ? mobilityStr : emdash;
+    let mobilityTone: SonarMetricTone = 'muted';
     if (job.mobility === true) {
-        if (!mobilityStr) {
-            mobilityTone = 'bad';
-        } else {
+        if (!mobilityMeaningful) mobilityTone = 'bad';
+        else {
             const privateOk =
                 /רכב\s*פרטי|נהיגה\s*עצמית|פרטי|עם\s*רכב|מכונית\s*פרטית|נהג\s*עצמאי|private|own\s*car/i.test(
                     mobilityStr,
@@ -319,18 +427,22 @@ function buildSonarMetricCells(
                 ) && !privateOk;
             mobilityTone = publicOnly ? 'bad' : 'good';
         }
-    } else if (!mobilityStr) {
-        mobilityTone = 'muted';
     }
 
     const jobLic = String(job.licenseType ?? '').trim();
     const licRaw = candLicenseSummary(c);
     const licEmpty = !licRaw;
     const licVal = licRaw || emdash;
-    let licTone: SonarMetricTone =
-        Boolean(jobLic) && licEmpty ? 'bad' : !licEmpty ? 'good' : 'muted';
-    const licDisplay =
-        licTone === 'bad' && licEmpty ? t('job.sonar.license_none') : licVal;
+    let licTone: SonarMetricTone = 'muted';
+    let licDisplay = licVal;
+    if (jobLic) {
+        if (licEmpty) {
+            licTone = 'bad';
+            licDisplay = t('job.sonar.license_none');
+        } else {
+            licTone = 'good';
+        }
+    }
 
     const jMax = Number(job.salaryMax);
     const cMin = Number(c.salaryMin);
@@ -346,31 +458,37 @@ function buildSonarMetricCells(
         }
     } else if (Number.isFinite(cMin)) {
         salaryVal = String(cMin);
-        salaryTone = 'good';
+        salaryTone = 'muted';
     }
 
     const jf = String(job.field ?? '').trim().toLowerCase();
     const cf = String(c.field ?? '').trim().toLowerCase();
     const ji = String(job.industry ?? '').trim().toLowerCase();
     const ci = String(c.industry ?? '').trim().toLowerCase();
+    const jobHasAffReq = Boolean(jf || ji);
     let affVal = t('job.sonar.affinity_unknown');
     let affTone: SonarMetricTone = 'muted';
-    if (jf && cf && (jf === cf || jf.includes(cf) || cf.includes(jf))) {
-        affVal = t('job.sonar.affinity_strong');
-        affTone = 'good';
-    } else if (
-        (ji && ci && (ji.includes(ci) || ci.includes(ji))) ||
-        (jf && cf && (jf.includes(cf) || cf.includes(jf)))
-    ) {
-        affVal = t('job.sonar.affinity_partial');
-        affTone = 'good';
+    if (jobHasAffReq) {
+        if (jf && cf && (jf === cf || jf.includes(cf) || cf.includes(jf))) {
+            affVal = t('job.sonar.affinity_strong');
+            affTone = 'good';
+        } else if (
+            (ji && ci && (ji.includes(ci) || ci.includes(ji))) ||
+            (jf && cf && (jf.includes(cf) || cf.includes(jf)))
+        ) {
+            affVal = t('job.sonar.affinity_partial');
+            affTone = 'good';
+        } else {
+            affVal = t('job.sonar.affinity_gap');
+            affTone = 'bad';
+        }
     }
 
     return [
-        { label: t('job.sonar.metric_vector_pct'), value: `${vecPct}%`, tone: vecTone },
+        { label: t('job.sonar.metric_vector_pct'), value: vecPctValue, tone: vecTone },
         { label: t('job.sonar.fl_scope'), value: scopeVal, tone: scopeTone },
         { label: t('job.sonar.fl_hours'), value: hoursVal, tone: hoursTone },
-        { label: t('job.sonar.fl_distance'), value: distanceVal, tone: 'muted' },
+        { label: t('job.sonar.fl_distance'), value: distanceVal, tone: distanceTone },
         { label: t('job.sonar.fl_age'), value: ageVal, tone: ageTone },
         { label: t('job.sonar.fl_gender'), value: genderVal, tone: genderTone },
         { label: t('job.sonar.fl_mobility'), value: mobilityVal, tone: mobilityTone },
@@ -421,7 +539,11 @@ function MetricDot({ tone }: { tone: SonarMetricTone }) {
 }
 
 function metricValueClass(tone: SonarMetricTone): string {
-    return tone === 'bad' ? 'text-red-700' : tone === 'muted' ? 'text-text-muted' : 'text-text-default';
+    return tone === 'bad'
+        ? 'text-red-700'
+        : tone === 'muted'
+          ? 'text-text-muted'
+          : 'text-green-700 dark:text-green-400';
 }
 
 function SonarMetricInline({ m }: { m: SonarMetricCell }) {
@@ -480,6 +602,7 @@ interface SonarResultRowProps {
     tagJobModel: JobTagMatchInput;
     actingId: string | null;
     tagLoadingId: string | null;
+    matchVectorThresholdMin: number;
     openSummaryDrawer: (candidate: Candidate | number) => void;
     openTagPanel: (row: SonarScanRow) => void;
     handleAddToJob: (row: SonarScanRow) => void;
@@ -494,6 +617,7 @@ function SonarResultRow({
     tagJobModel,
     actingId,
     tagLoadingId,
+    matchVectorThresholdMin,
     openSummaryDrawer,
     openTagPanel,
     handleAddToJob,
@@ -506,13 +630,17 @@ function SonarResultRow({
     const name = candidateDisplayName(row.candidate) || cid || '—';
     const title = candidateDisplayTitle(row.candidate);
     const busy = actingId === cid;
-    const metrics = buildSonarMetricCells(job, row.candidate, row, t);
+    const metrics = buildSonarMetricCells(job, row.candidate, row, t, matchVectorThresholdMin);
     const activity = relativeActivityLabel(row.candidate, t);
     const insight = sonarInsightLine(row.candidate, t);
     const globalCand = isLikelyGlobalCandidate(row.candidate);
 
     const metricValueCls = (tone: SonarMetricTone) =>
-        tone === 'bad' ? 'text-red-700' : tone === 'muted' ? 'text-text-muted' : 'text-text-default';
+        tone === 'bad'
+            ? 'text-red-700'
+            : tone === 'muted'
+              ? 'text-text-muted'
+              : 'text-green-700 dark:text-green-400';
 
     const cardShell =
         'bg-white dark:bg-bg-card border border-border-default hover:border-primary-200 rounded-2xl p-4 shadow-[0_2px_8px_rgba(0,0,0,0.02)] transition-all cursor-pointer group relative overflow-hidden';
@@ -1096,6 +1224,18 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                     <GlobeAmericasIcon className="w-3 h-3 text-accent-500" />
                                     {t('job.sonar.legend_global_strip')}
                                 </div>
+                                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-bg-subtle">
+                                    <MetricDot tone="good" />
+                                    {t('job.sonar.legend_metric_ok')}
+                                </div>
+                                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-bg-subtle">
+                                    <MetricDot tone="bad" />
+                                    {t('job.sonar.legend_metric_bad')}
+                                </div>
+                                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-bg-subtle">
+                                    <MetricDot tone="muted" />
+                                    {t('job.sonar.legend_metric_na')}
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -1118,6 +1258,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                         tagJobModel={tagJobModel}
                                         actingId={actingId}
                                         tagLoadingId={tagLoadingId}
+                                        matchVectorThresholdMin={threshold}
                                         openSummaryDrawer={openSummaryDrawer}
                                         openTagPanel={openTagPanel}
                                         handleAddToJob={handleAddToJob}

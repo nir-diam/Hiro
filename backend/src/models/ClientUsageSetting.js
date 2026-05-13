@@ -64,6 +64,12 @@ const ClientUsageSetting = sequelize.define(
     oneCandidatePerEmail: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     billingStatusParent: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     billingStatusAccepted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    /** matching_engine_configs.id (preset); null = engine picks first preset that lists this client */
+    matchingEnginePresetId: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      field: 'matching_engine_preset_id',
+    },
   },
   {
     tableName: 'client_usage_settings',

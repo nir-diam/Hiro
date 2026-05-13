@@ -42,6 +42,13 @@ const apiBase = import.meta.env.VITE_API_BASE || '';
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
+/** Match-engine slice returned with candidate screening pool rows (Sonar-aligned). */
+interface ScreeningPoolScoreBreakdown {
+  geo?: number;
+  geoDistance?: number | null;
+  geoMissing?: boolean;
+}
+
 interface ScreeningJob {
   id: number | string;
   company: string;
@@ -49,6 +56,8 @@ interface ScreeningJob {
   location: string;
   /** Primary city field from Job.city when present — merged into locality tokens for metrics. */
   city?: string;
+  /** Job.region from API — used with city/location for geo distance display. */
+  region?: string;
   /** When API returns structured locations (radius row), compact summary matches Studio. */
   locations?: LocationItem[];
   salary: string;
@@ -61,6 +70,7 @@ interface ScreeningJob {
   mobility?: boolean;
   licenseType?: string;
   ageMin?: number;
+  ageMax?: number;
   /** Internal HTML/text notes — may embed `[WORKING_HOURS] …` (see NewJobView). */
   internalNotes?: string;
   aiMatchScore: number;
@@ -86,6 +96,8 @@ interface ScreeningJob {
   evaluationChecks?: ScreeningEvalCheck[];
   /** Job owner's client UUID when supplied by the screening pool (reserved). */
   screeningClientId?: string | null;
+  /** From GET …/screening-pool — same shape as Job Sonar `scoreBreakdown` (geoDistance, etc.). */
+  scoreBreakdown?: ScreeningPoolScoreBreakdown | null;
 }
 
 interface ScreeningEvalCheck {
@@ -512,6 +524,9 @@ function screeningJobSliceForMetrics(job: ScreeningJob): Record<string, unknown>
     gender: job.gender,
     mobility: job.mobility,
     licenseType: job.licenseType,
+    city: job.city,
+    region: job.region,
+    location: job.location,
   };
 }
 
@@ -521,7 +536,7 @@ function buildScreeningCardMetricCells(
   locationModel: JobLocationDisplayModel,
   t: (key: string, opts?: Record<string, string | number>) => string,
 ): { label: string; value: string; tone: ScreeningCardMetricTone }[] {
-  const jobRec = screeningJobSliceForMetrics(job);
+  const jobRec = screeningJobSliceForMetrics(job) as Record<string, unknown>;
   const emdash = '—';
 
   const vecPct = Math.max(0, Math.min(100, Math.round(Number(job.aiMatchScore) || 0)));
@@ -553,7 +568,31 @@ function buildScreeningCardMetricCells(
     candidateCityMatchesJobLocations(cityVal, jobLocTokens),
   );
 
-  const distanceVal = t('job.sonar.distance_na');
+  const jobGeoText = String(job.city ?? job.region ?? job.location ?? '').trim();
+  const jobHasGeoTarget = Boolean(jobGeoText);
+  const bd = job.scoreBreakdown;
+  const rawGeoKm = bd?.geoDistance;
+  const geoKm =
+    typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
+  const geoMissing = Boolean(bd?.geoMissing);
+  const geoScoreNum = typeof bd?.geo === 'number' && Number.isFinite(bd.geo) ? bd.geo : null;
+
+  let distanceVal: string;
+  let distanceTone: ScreeningCardMetricTone = 'muted';
+  if (!jobHasGeoTarget) {
+    distanceVal = t('job.sonar.distance_not_on_job');
+    distanceTone = 'muted';
+  } else if (geoKm != null) {
+    distanceVal = t('job.sonar.distance_km', { km: geoKm });
+    if (geoScoreNum != null) {
+      distanceTone = geoScoreNum >= 72 ? 'good' : geoScoreNum < 55 ? 'bad' : 'muted';
+    } else {
+      distanceTone = geoKm <= 25 ? 'good' : geoKm > 60 ? 'bad' : 'muted';
+    }
+  } else {
+    distanceVal = t('job.sonar.distance_na');
+    distanceTone = geoMissing ? 'bad' : 'muted';
+  }
 
   const ageVal = String(candidate.age ?? '').trim() || emdash;
   const ageNum = parseInt(String(candidate.age ?? '').trim(), 10);
@@ -635,7 +674,7 @@ function buildScreeningCardMetricCells(
     { label: t('job.sonar.fl_scope'), value: scopeVal, tone: scopeTone },
     { label: t('job.sonar.fl_hours'), value: hoursVal, tone: hoursTone },
     { label: t('job.sonar.fl_city'), value: cityVal, tone: cityTone },
-    { label: t('job.sonar.fl_distance'), value: distanceVal, tone: 'muted' },
+    { label: t('job.sonar.fl_distance'), value: distanceVal, tone: distanceTone },
     { label: t('job.sonar.fl_age'), value: ageVal, tone: ageTone },
     { label: t('job.sonar.fl_gender'), value: genderVal, tone: genderTone },
     { label: t('job.sonar.fl_mobility'), value: mobilityVal, tone: mobilityTone },
@@ -845,6 +884,12 @@ function mapApiJobToScreeningJob(raw: any): ScreeningJob {
         : typeof raw.city === 'number'
           ? String(raw.city)
           : undefined,
+    region:
+      typeof raw.region === 'string' && raw.region.trim()
+        ? raw.region.trim()
+        : raw.region != null && String(raw.region).trim()
+          ? String(raw.region).trim()
+          : undefined,
     locations: locArr,
     salary: raw.salaryMin && raw.salaryMax ? `${raw.salaryMin}-${raw.salaryMax}k ₪` : (raw.salary ?? ''),
     salaryMin: salaryMinNum,
@@ -1034,12 +1079,14 @@ const CandidateScreeningView: React.FC<{
             screeningPath: row.path === 2 ? 2 : row.path === 1 ? 1 : row.path === 3 ? 3 : undefined,
             evaluationChecks: mapChecks(row),
             screeningClientId: clientFromRow(row),
+            scoreBreakdown: row.scoreBreakdown ?? null,
           }));
           const excludedList = exc.map((row: any) => ({
             ...mapApiJobToScreeningJob(row.job || {}),
             excludedReasons: Array.isArray(row.reasons) ? row.reasons : [],
             evaluationChecks: mapChecks(row),
             screeningClientId: clientFromRow(row),
+            scoreBreakdown: row.scoreBreakdown ?? null,
           }));
           setJobs([...includedList, ...excludedList]);
         })

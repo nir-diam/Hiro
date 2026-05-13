@@ -3,6 +3,7 @@ const authMiddleware = require('../middleware/authMiddleware');
 const { attachDbUser } = require('../middleware/permissionMiddleware');
 const clientController = require('../controllers/clientController');
 const clientUsageSettingController = require('../controllers/clientUsageSettingController');
+const matchingEngineController = require('../controllers/matchingEngineController');
 const clientContactController = require('../controllers/clientContactController');
 const clientTaskController = require('../controllers/clientTaskController');
 const clientEventController = require('../controllers/clientEventController');
@@ -57,6 +58,13 @@ router.put(
   authMiddleware,
   attachDbUser,
   clientUsageSettingController.update,
+);
+
+router.get(
+  '/:id/matching-engine-configs',
+  authMiddleware,
+  attachDbUser,
+  matchingEngineController.listPresetsForClient,
 );
 
 router.get(

@@ -5,11 +5,15 @@ const Job = require('../models/Job');
 const Tag = require('../models/Tag');
 const Client = require('../models/Client');
 const ClientContact = require('../models/ClientContact');
+const Candidate = require('../models/Candidate');
+const JobCandidate = require('../models/JobCandidate');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const screeningInclusionService = require('../services/screeningInclusionService');
 const jobSonarService = require('../services/jobSonarService');
+const { computeFullMatchScore, getJobEmbedding, buildLinkedInfoFromJobCandidate } = require('../services/matchingScoreService');
+const { resolveEngineConfigForJob } = require('../services/matchingEngineService');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
 
@@ -520,12 +524,49 @@ const remove = async (req, res) => {
 
 const getCandidates = async (req, res) => {
   try {
-    const job = await jobService.getById(req.params.id);
-    const candidates = await jobCandidateService.listForJob(req.params.id);
-    const returnMonths = await clientUsageSettingService.resolveReturnMonthsForJobRequest(
-      job,
-      req,
-    );
+    const jobId = req.params.id;
+    const job = await jobService.getById(jobId);
+    const candidates = await jobCandidateService.listForJob(jobId);
+    const returnMonths = await clientUsageSettingService.resolveReturnMonthsForJobRequest(job, req);
+
+    // Enrich each candidate's matchScore with the full multi-dimensional engine
+    try {
+      const jobFull = await Job.findByPk(jobId);
+      if (jobFull && candidates.length) {
+        const jobPlain = jobFull.get({ plain: true });
+        const engineConfig = await resolveEngineConfigForJob(jobPlain);
+        const jobEmb = await getJobEmbedding(jobPlain);
+
+        // Load full candidate rows + their JobCandidate link rows in parallel
+        const candidateIds = candidates.map((c) => c.id).filter(Boolean);
+        const [fullCandidates, jcRows] = await Promise.all([
+          Candidate.findAll({ where: { id: candidateIds } }),
+          JobCandidate.findAll({
+            where: { jobId, candidateId: candidateIds },
+            attributes: ['id', 'candidateId', 'status', 'source'],
+          }),
+        ]);
+        const candidateMap = new Map(fullCandidates.map((c) => [String(c.id), c.get({ plain: true })]));
+        const jcMap = new Map(jcRows.map((r) => [String(r.candidateId), r.get ? r.get({ plain: true }) : r]));
+
+        for (const cView of candidates) {
+          const candPlain = candidateMap.get(String(cView.id));
+          if (!candPlain) continue;
+          const jcData = jcMap.get(String(cView.id)) || null;
+          const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
+          try {
+            const result = await computeFullMatchScore(candPlain, jobPlain, jobEmb, engineConfig, linkedInfo);
+            cView.matchScore = Math.round(result.finalScore);
+            cView.scoreBreakdown = result.breakdown;
+          } catch (e) {
+            // keep stored matchScore on individual scoring failure
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[getCandidates] live scoring skipped:', e.message || e);
+    }
+
     res.json({ job, candidates, returnMonths });
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });

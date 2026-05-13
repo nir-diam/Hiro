@@ -2,6 +2,7 @@ const { Op } = require('sequelize');
 const { sequelize } = require('../config/db');
 const Client = require('../models/Client');
 const ClientUsageSetting = require('../models/ClientUsageSetting');
+const MatchingEngineConfig = require('../models/MatchingEngineConfig');
 const User = require('../models/User');
 
 const DEFAULTS = {
@@ -19,10 +20,11 @@ const DEFAULTS = {
   candidateNoTagToFix: true,
   showCvPreview: true,
   jobAlerts: false,
-  autoThanksEmail: false,
+  autoThanksEmail: true,
   oneCandidatePerEmail: false,
   billingStatusParent: false,
   billingStatusAccepted: false,
+  matchingEnginePresetId: null,
 };
 
 const toDto = (row) => {
@@ -51,6 +53,10 @@ const toDto = (row) => {
     oneCandidatePerEmail: Boolean(plain.oneCandidatePerEmail),
     billingStatusParent: Boolean(plain.billingStatusParent),
     billingStatusAccepted: Boolean(plain.billingStatusAccepted),
+    matchingEnginePresetId:
+      plain.matchingEnginePresetId != null && Number.isFinite(Number(plain.matchingEnginePresetId))
+        ? Number(plain.matchingEnginePresetId)
+        : null,
   };
 };
 
@@ -61,6 +67,37 @@ const ensureClientExists = async (clientId) => {
     err.status = 404;
     throw err;
   }
+};
+
+/**
+ * @param {string} clientId
+ * @param {unknown} raw — undefined = omit change; null = clear
+ * @returns {Promise<number|null|undefined>} resolved id, null, or undefined to keep DB value
+ */
+const resolveMatchingEnginePresetIdForUpsert = async (clientId, raw) => {
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === '') return null;
+  const id = Number(raw);
+  if (!Number.isFinite(id) || id <= 0) {
+    const err = new Error('Invalid matchingEnginePresetId');
+    err.status = 400;
+    throw err;
+  }
+  const preset = await MatchingEngineConfig.findOne({
+    where: { id, type: 'preset' },
+  });
+  if (!preset) {
+    const err = new Error('Matching engine preset not found');
+    err.status = 400;
+    throw err;
+  }
+  const ids = Array.isArray(preset.clientIds) ? preset.clientIds.map(String) : [];
+  if (!ids.includes(String(clientId))) {
+    const err = new Error('Preset is not available for this client');
+    err.status = 400;
+    throw err;
+  }
+  return id;
 };
 
 const getByClientId = async (clientId) => {
@@ -188,8 +225,42 @@ const getAutoDisconnectForClient = async (clientId) => {
   return Boolean(row.autoDisconnect);
 };
 
+/**
+ * Client Usage "מייל התחברות" (autoThanksEmail): when true, the system queues
+ * a welcome email every time a new candidate is created (manual, AI upload, email ingest).
+ *
+ * Returns:
+ *   • `true`  → flag enabled, queue the welcome email
+ *   • `false` → flag disabled, suppress the welcome email
+ *   • `null`  → could not resolve (no clientId, lookup error, etc.) — caller should default to sending
+ */
+const getAutoThanksEmailForClient = async (clientId) => {
+  if (!clientId) return null;
+  try {
+    const row = await ClientUsageSetting.findByPk(clientId);
+    if (!row) return DEFAULTS.autoThanksEmail;
+    return Boolean(row.autoThanksEmail);
+  } catch (err) {
+    console.warn('[clientUsageSettings] autoThanksEmail lookup failed', err?.message || err);
+    return null;
+  }
+};
+
 const upsert = async (clientId, body) => {
   await ensureClientExists(clientId);
+  let row = await ClientUsageSetting.findByPk(clientId);
+  const prevPlain = row ? row.get({ plain: true }) : {};
+
+  let matchingEnginePresetId;
+  if (body.matchingEnginePresetId !== undefined) {
+    matchingEnginePresetId = await resolveMatchingEnginePresetIdForUpsert(clientId, body.matchingEnginePresetId);
+  } else {
+    matchingEnginePresetId =
+      prevPlain.matchingEnginePresetId != null && Number.isFinite(Number(prevPlain.matchingEnginePresetId))
+        ? Number(prevPlain.matchingEnginePresetId)
+        : null;
+  }
+
   const payload = {
     clientId,
     doubleAuth: typeof body.doubleAuth === 'string' ? body.doubleAuth : DEFAULTS.doubleAuth,
@@ -222,9 +293,9 @@ const upsert = async (clientId, body) => {
     oneCandidatePerEmail: Boolean(body.oneCandidatePerEmail),
     billingStatusParent: Boolean(body.billingStatusParent),
     billingStatusAccepted: Boolean(body.billingStatusAccepted),
+    matchingEnginePresetId,
   };
 
-  let row = await ClientUsageSetting.findByPk(clientId);
   if (row) {
     await row.update(payload);
     await row.reload();
@@ -238,6 +309,7 @@ module.exports = {
   DEFAULTS,
   getByClientId,
   getAutoDisconnectForClient,
+  getAutoThanksEmailForClient,
   getReturnMonthsForClientLabel,
   getClientIdForJobClientLabel,
   resolveScreeningDefaultsForJob,

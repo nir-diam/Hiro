@@ -14,4 +14,7 @@ router.get('/presets/:id',    ctrl.getPreset);
 router.put('/presets/:id',    ctrl.updatePreset);
 router.delete('/presets/:id', ctrl.deletePreset);
 
+// Simulation
+router.post('/simulate', ctrl.simulate);
+
 module.exports = router;

@@ -56,9 +56,6 @@ function buildIncompleteStatusExplanation(missing) {
   return `הסטטוס «חסר נתונים» נקבע כי חסרים או לא הושלמו עדיין: ${list}.`;
 }
 
-const READY_TO_APPROVE_EXPLANATION =
-  'כל השדות החובה לפי הגדרות החברה מולאו. ניתן ללחוץ על «אישור תיקונים» בכרטיס המועמד כדי להעביר לסטטוס «פעיל».';
-
 async function countActiveTagsForCandidate(candidateId) {
   return CandidateTag.count({
     where: { candidate_id: candidateId, is_active: true },
@@ -96,8 +93,6 @@ async function refreshCandidateDataStatusAfterSave(candidateId, req) {
     } else {
       await instance.update({ statusExplanation: explanation });
     }
-  } else if (prev === STATUS_INCOMPLETE) {
-    await instance.update({ statusExplanation: READY_TO_APPROVE_EXPLANATION });
   } else {
     await instance.update({ statusExplanation: null });
   }
@@ -124,8 +119,6 @@ async function refreshCandidateDataStatusForClient(candidateId, clientId) {
     } else {
       await instance.update({ statusExplanation: explanation });
     }
-  } else if (prev === STATUS_INCOMPLETE) {
-    await instance.update({ statusExplanation: READY_TO_APPROVE_EXPLANATION });
   } else {
     await instance.update({ statusExplanation: null });
   }

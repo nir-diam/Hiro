@@ -6,6 +6,11 @@ const CandidateTag = require('../models/CandidateTag');
 const Tag = require('../models/Tag');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const Organization = require('../models/Organization');
+const Job = require('../models/Job');
+const JobCandidate = require('../models/JobCandidate');
+const { resolveEngineConfigForJob } = require('./matchingEngineService');
+/** Lazy-require matchingScoreService + vectorSearchService inside scoring helpers to avoid circular load:
+ * vectorSearchService → candidateService → matchingScoreService → vectorSearchService */
 
 // Parse year from experience date string (YYYY-MM, YYYY, or "Present")
 const parseExperienceYear = (s) => {
@@ -354,6 +359,10 @@ const mapCandidateWithTags = (candidate, options = {}) => {
     category: ct.tag?.category,
     rawTypeReason: ct.raw_type_reason,
     tagReason: ct.tag_reason,
+    quote: ct.quote || null,
+    // Mirror `quote` into the legacy `evidence` field so existing UI tooltip code
+    // (CandidateProfile.normalizeTagDetail → SmartTagTooltipPanel.cvQuote) keeps working.
+    evidence: ct.quote || null,
     createdAt: ct.created_at,
     updatedAt: ct.updated_at,
   }));
@@ -397,6 +406,20 @@ const mapCandidateWithTags = (candidate, options = {}) => {
 
   return payload;
 };
+
+/** Same CandidateTag join as list scoring — engine matches job skills against `tags` + skills JSON. */
+async function findByPkWithTagsForMatchScore(id) {
+  return Candidate.findByPk(id, { include: includeCandidateTagsForList });
+}
+
+/** Plain candidate shaped like scored list rows for computeFullMatchScore. */
+function toPlainCandidateForMatchScore(candidateRow) {
+  if (!candidateRow) return null;
+  const plain = mapCandidateWithTags(candidateRow, { stripListHeavyJson: false });
+  const { normalizeEmbedding } = require('./vectorSearchService');
+  plain.embedding = normalizeEmbedding(plain.embedding);
+  return plain;
+}
 
 const list = async () =>
   (await Candidate.findAll({ include: includeCandidateTags })).map((r) => mapCandidateWithTags(r));
@@ -725,11 +748,254 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
   return { whereSql, binds };
 };
 
-const listPaginated = async ({ page = 1, limit = 100, search = '', advanced = null } = {}) => {
+/**
+ * Multi-dimensional match vs one job (matchingScoreService + admin weights).
+ * @param {import('sequelize').Model[]} modelRows Candidate rows with tags included
+ * @param {string} jobId
+ * @returns {Promise<Map<string, number>>} candidateId → finalScore 0–100
+ */
+const scoreCandidatesAgainstJob = async (modelRows, jobId) => {
+  const {
+    computeFullMatchScore,
+    getJobEmbedding,
+    buildLinkedInfoFromJobCandidate,
+  } = require('./matchingScoreService');
+
+  const scores = new Map();
+  const jid = jobId && String(jobId).trim();
+  if (!jid || !Array.isArray(modelRows) || modelRows.length === 0) return scores;
+
+  let jobRow;
+  try {
+    jobRow = await Job.findByPk(jid);
+  } catch (err) {
+    console.warn('[candidateService.scoreCandidatesAgainstJob] bad jobId', err.message || err);
+    return scores;
+  }
+  if (!jobRow) return scores;
+
+  const jobPlain = jobRow.get({ plain: true });
+
+  let config;
+  try {
+    config = await resolveEngineConfigForJob(jobPlain);
+  } catch (err) {
+    console.warn('[candidateService.scoreCandidatesAgainstJob] resolveEngineConfig failed', err.message || err);
+    return scores;
+  }
+
+  let jobEmb = [];
+  try {
+    jobEmb = await getJobEmbedding(jobPlain);
+  } catch (err) {
+    console.warn('[candidateService.scoreCandidatesAgainstJob] job embedding failed', err.message || err);
+  }
+
+  const ids = modelRows.map((r) => r.id).filter(Boolean);
+  let links = [];
+  try {
+    links = await JobCandidate.findAll({
+      where: { jobId: jid, candidateId: { [Op.in]: ids } },
+      attributes: ['candidateId', 'id', 'status', 'source'],
+    });
+  } catch (err) {
+    console.warn('[candidateService.scoreCandidatesAgainstJob] links failed', err.message || err);
+  }
+
+  const linkedMap = new Map(
+    links.map((r) => {
+      const p = r.get ? r.get({ plain: true }) : r;
+      return [String(p.candidateId), buildLinkedInfoFromJobCandidate(p)];
+    }),
+  );
+
+  for (const inst of modelRows) {
+    const cid = String(inst.id);
+    let finalScore = 0;
+    try {
+      const full = toPlainCandidateForMatchScore(inst);
+      const linkedInfo = linkedMap.get(cid) || null;
+      const result = await computeFullMatchScore(full, jobPlain, jobEmb, config, linkedInfo);
+      finalScore = result.finalScore;
+    } catch (err) {
+      console.warn('[candidateService.scoreCandidatesAgainstJob] score failed', cid, err.message || err);
+    }
+    scores.set(cid, finalScore);
+  }
+
+  return scores;
+};
+
+/**
+ * Plain candidate rows (e.g. semantic search): reload scored fields and set matchScore.
+ */
+const attachJobMatchScores = async (plainRows, jobId) => {
+  const jid = jobId && String(jobId).trim();
+  if (!jid || !Array.isArray(plainRows) || plainRows.length === 0) return plainRows;
+
+  const ids = [...new Set(plainRows.map((r) => r?.id).filter(Boolean))];
+  if (!ids.length) return plainRows;
+
+  const instRows = await Candidate.findAll({
+    where: { id: { [Op.in]: ids } },
+    include: includeCandidateTagsForList,
+    attributes: [...LIST_GRID_ATTRIBUTES, 'embedding', 'skills', 'workExperience', 'experience'],
+  });
+
+  const scoreMap = await scoreCandidatesAgainstJob(instRows, jid);
+  for (const row of plainRows) {
+    if (!row || typeof row !== 'object') continue;
+    const sc = scoreMap.get(String(row.id));
+    if (typeof sc === 'number' && Number.isFinite(sc)) row.matchScore = sc;
+  }
+  return plainRows;
+};
+
+/**
+ * Latest job_candidates link per candidate (by updatedAt/createdAt), with job title + rating-derived match %.
+ * Mutates plain candidate objects in `rows` (adds `lastJobSubmission` when a link exists).
+ */
+const attachLatestJobSubmissions = async (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  const ids = [...new Set(rows.map((r) => r?.id).filter(Boolean))];
+  if (!ids.length) return rows;
+
+  let subs;
+  try {
+    subs = await sequelize.query(
+      `SELECT DISTINCT ON (jc."candidateId")
+        jc."candidateId" AS "candidateId",
+        jc.id AS "jobCandidateId",
+        jc."jobId" AS "jobId",
+        COALESCE(NULLIF(TRIM(j.title), ''), NULLIF(TRIM(j."publicJobTitle"), ''), '—') AS "jobTitle",
+        j.rating AS "jobRating",
+        COALESCE(jc."updatedAt", jc."createdAt") AS "linkedAt"
+      FROM job_candidates jc
+      LEFT JOIN jobs j ON j.id = jc."jobId"
+      WHERE jc."candidateId" = ANY($1::uuid[])
+        AND jc."jobId" IS NOT NULL
+      ORDER BY jc."candidateId", COALESCE(jc."updatedAt", jc."createdAt") DESC NULLS LAST`,
+      { bind: [ids], type: QueryTypes.SELECT },
+    );
+  } catch (err) {
+    console.error('[candidateService.attachLatestJobSubmissions]', err.message || err);
+    return rows;
+  }
+
+  const subById = new Map((subs || []).map((s) => [String(s.candidateId), s]));
+  for (const row of rows) {
+    const sub = subById.get(String(row.id));
+    if (!sub || !sub.jobId) continue;
+    const rating = Number(sub.jobRating);
+    const matchScore =
+      Number.isFinite(rating) && rating > 0
+        ? Math.min(100, Math.max(0, Math.round((rating / 5) * 100)))
+        : null;
+    row.lastJobSubmission = {
+      jobId: String(sub.jobId),
+      jobCandidateId: String(sub.jobCandidateId),
+      jobTitle: String(sub.jobTitle || '—'),
+      matchScore,
+      linkedAt: sub.linkedAt ? new Date(sub.linkedAt).toISOString() : undefined,
+    };
+  }
+  return rows;
+};
+
+/** Extra columns for engine scoring when reloading candidates for last-job matches */
+const LIST_SCORING_EXTRA_ATTRIBUTES = ['embedding', 'skills'];
+
+/**
+ * Fill lastJobSubmission.matchScore (and optionally reuse list scores) via matchingScoreService
+ * for each candidate's latest submission job. Rating-only fallback stays null when unrated.
+ *
+ * @param {object[]} mappedRows plain rows (after attachLatestJobSubmissions)
+ * @param {{ reuseJobId?: string, reuseScoreMap?: Map<string, number> }} [opts]
+ */
+const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
+  if (!Array.isArray(mappedRows) || mappedRows.length === 0) return mappedRows;
+
+  const reuseJobId = opts.reuseJobId != null ? String(opts.reuseJobId).trim() : '';
+  const reuseScoreMap = opts.reuseScoreMap instanceof Map ? opts.reuseScoreMap : null;
+
+  const ids = [
+    ...new Set(
+      mappedRows.filter((m) => m?.lastJobSubmission?.jobId).map((m) => m.id).filter(Boolean),
+    ),
+  ];
+  if (!ids.length) return mappedRows;
+
+  let heavyRows = [];
+  try {
+    heavyRows = await Candidate.findAll({
+      where: { id: { [Op.in]: ids } },
+      include: includeCandidateTagsForList,
+      attributes: [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES],
+    });
+  } catch (err) {
+    console.warn('[candidateService.attachLastSubmissionEngineMatchScores] reload failed', err.message || err);
+    return mappedRows;
+  }
+
+  const heavyById = new Map(heavyRows.map((r) => [String(r.id), r]));
+  const byJob = new Map();
+  for (const m of mappedRows) {
+    const lj = m.lastJobSubmission;
+    if (!lj?.jobId) continue;
+    const jid = String(lj.jobId);
+    const cid = String(m.id);
+    if (!heavyById.has(cid)) continue;
+    if (!byJob.has(jid)) byJob.set(jid, []);
+    byJob.get(jid).push(cid);
+  }
+
+  const scoresByCandidate = new Map();
+
+  for (const [jobKey, candIdStrs] of byJob) {
+    if (reuseJobId && String(jobKey) === reuseJobId && reuseScoreMap?.size) {
+      for (const cid of candIdStrs) {
+        const sc = reuseScoreMap.get(cid);
+        if (typeof sc === 'number' && Number.isFinite(sc)) scoresByCandidate.set(cid, sc);
+      }
+      continue;
+    }
+
+    const instSubset = candIdStrs.map((cid) => heavyById.get(cid)).filter(Boolean);
+    if (!instSubset.length) continue;
+
+    try {
+      const sm = await scoreCandidatesAgainstJob(instSubset, jobKey);
+      for (const [cid, sc] of sm) {
+        if (typeof sc === 'number' && Number.isFinite(sc)) scoresByCandidate.set(cid, sc);
+      }
+    } catch (err) {
+      console.warn(
+        '[candidateService.attachLastSubmissionEngineMatchScores] score batch failed',
+        jobKey,
+        err.message || err,
+      );
+    }
+  }
+
+  for (const m of mappedRows) {
+    const lj = m.lastJobSubmission;
+    if (!lj?.jobId) continue;
+    const cid = String(m.id);
+    const sc = scoresByCandidate.get(cid);
+    if (typeof sc === 'number' && Number.isFinite(sc)) {
+      lj.matchScore = sc;
+    }
+  }
+
+  return mappedRows;
+};
+
+const listPaginated = async ({ page = 1, limit = 100, search = '', advanced = null, jobId = null } = {}) => {
   const safeLimit = Number.isFinite(limit) ? limit : 100;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
   const offset = (safePage - 1) * safeLimit;
   const trimmedSearch = String(search || '').trim();
+  const jid = jobId != null && String(jobId).trim() !== '' ? String(jobId).trim() : '';
 
   const { whereSql, binds } = buildCandidateListWhere(trimmedSearch, advanced);
   const li = binds.length + 1;
@@ -755,17 +1021,43 @@ const listPaginated = async ({ page = 1, limit = 100, search = '', advanced = nu
     };
   }
 
+  const listAttrs = jid ? [...LIST_GRID_ATTRIBUTES, 'embedding', 'skills'] : LIST_GRID_ATTRIBUTES;
+
   const rows = await Candidate.findAll({
     where: { id: ids },
     include: includeCandidateTagsForList,
-    attributes: LIST_GRID_ATTRIBUTES,
+    attributes: listAttrs,
   });
 
   const orderIndex = new Map(ids.map((id, i) => [String(id), i]));
   rows.sort((a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0));
 
+  let scoreMap = new Map();
+  if (jid) {
+    scoreMap = await scoreCandidatesAgainstJob(rows, jid);
+  }
+
+  const mappedRows = rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true }));
+
+  await attachLatestJobSubmissions(mappedRows);
+  await attachLastSubmissionEngineMatchScores(mappedRows, {
+    reuseJobId: jid,
+    reuseScoreMap: jid ? scoreMap : null,
+  });
+
+  for (const m of mappedRows) {
+    if (jid) {
+      const sc = scoreMap.get(String(m.id));
+      m.matchScore = typeof sc === 'number' && Number.isFinite(sc) ? sc : null;
+    } else {
+      const lj = m.lastJobSubmission;
+      m.matchScore =
+        lj && typeof lj.matchScore === 'number' && Number.isFinite(lj.matchScore) ? lj.matchScore : null;
+    }
+  }
+
   return {
-    rows: rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true })),
+    rows: mappedRows,
     count,
     page: safePage,
     limit: safeLimit,
@@ -1046,6 +1338,10 @@ module.exports = {
   listByWorkedAtOrganization,
   findByEmail,
   findByInboundFromEmail,
+  attachLatestJobSubmissions,
+  attachJobMatchScores,
+  findByPkWithTagsForMatchScore,
+  toPlainCandidateForMatchScore,
 };
 
 

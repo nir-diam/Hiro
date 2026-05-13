@@ -85,6 +85,7 @@ const initialSettings = {
     oneCandidatePerEmail: false,
     billingStatusParent: false,
     billingStatusAccepted: false,
+    matchingEnginePresetId: null as number | null,
 };
 
 function mergeUsageFromApi(
@@ -121,6 +122,12 @@ function mergeUsageFromApi(
         oneCandidatePerEmail: data.oneCandidatePerEmail,
         billingStatusParent: data.billingStatusParent,
         billingStatusAccepted: data.billingStatusAccepted,
+        matchingEnginePresetId:
+            typeof data.matchingEnginePresetId === 'number' && Number.isFinite(data.matchingEnginePresetId)
+                ? data.matchingEnginePresetId
+                : data.matchingEnginePresetId === null
+                  ? null
+                  : prev.matchingEnginePresetId ?? null,
     };
 }
 
@@ -147,6 +154,7 @@ function toSavePayload(s: typeof initialSettings): ClientUsageSettingsDto {
         oneCandidatePerEmail: s.oneCandidatePerEmail,
         billingStatusParent: s.billingStatusParent,
         billingStatusAccepted: s.billingStatusAccepted,
+        matchingEnginePresetId: s.matchingEnginePresetId ?? null,
     };
 }
 

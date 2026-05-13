@@ -36,6 +36,8 @@ export type ClientUsageSettingsDto = {
     oneCandidatePerEmail: boolean;
     billingStatusParent: boolean;
     billingStatusAccepted: boolean;
+    /** matching_engine_configs preset id; null = first eligible preset for this client */
+    matchingEnginePresetId?: number | null;
 };
 
 export async function fetchClientUsageSettings(clientId: string): Promise<ClientUsageSettingsDto> {

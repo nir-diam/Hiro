@@ -1,6 +1,6 @@
 
-import React, { useState } from 'react';
-import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, CalculatorIcon } from './Icons';
+import React, { useCallback, useEffect, useState } from 'react';
+import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, SparklesIcon, TagIcon, ArrowPathIcon } from './Icons';
 import UsageSettingsTab from './UsageSettingsTab';
 import CompanyTagsSettingsView from './CompanyTagsSettingsView';
 import CustomFieldsSettingsView from './CustomFieldsSettingsView';
@@ -8,7 +8,51 @@ import JobHealthSettingsView from './JobHealthSettingsView';
 import ClientHealthSettingsView from './ClientHealthSettingsView'; // New Import
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
+import { fetchClientMatchingEngineConfigs, type ClientMatchingEnginePresetDto } from '../services/matchingEngineClientApi';
+import { fetchClientUsageSettings, saveClientUsageSettings } from '../services/usageSettingsApi';
 
+const API_BASE = import.meta.env.VITE_API_BASE || '';
+
+type ClientOption = { id: string; name: string; displayName?: string };
+
+function buildMatchingEngineAuthHeaders(): HeadersInit {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    const h: HeadersInit = { Accept: 'application/json' };
+    if (token) (h as Record<string, string>).Authorization = `Bearer ${token}`;
+    return h;
+}
+
+/** Same mini bar as `AdminMatchingEngineView` preset cards */
+function PresetMainWeightsMiniBar({ config }: { config: Record<string, unknown> | undefined }) {
+    const mw = config?.mainWeights as Record<string, number> | undefined;
+    if (!mw) return null;
+    const keys = [
+        { id: 'vector', color: 'bg-purple-400', label: 'V' },
+        { id: 'tags', color: 'bg-blue-400', label: 'T' },
+        { id: 'geo', color: 'bg-emerald-400', label: 'G' },
+        { id: 'experience', color: 'bg-orange-400', label: 'E' },
+        { id: 'intent', color: 'bg-rose-400', label: 'I' },
+    ];
+    const total = keys.reduce((s, k) => s + (mw[k.id] ?? 0), 0) || 1;
+    return (
+        <div className="w-full mt-1 mb-2">
+            <div className="flex h-2 rounded-full overflow-hidden bg-slate-100 w-full gap-px">
+                {keys.map((k) => {
+                    const pct = ((mw[k.id] ?? 0) / total) * 100;
+                    if (pct === 0) return null;
+                    return (
+                        <div
+                            key={k.id}
+                            className={`${k.color} h-full`}
+                            style={{ width: `${pct}%` }}
+                            title={`${k.label}: ${mw[k.id]}%`}
+                        />
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
 
 // Reusable components for this view
 const TabButton: React.FC<{ title: string; isActive: boolean; onClick: () => void; icon?: React.ReactNode }> = ({ title, isActive, onClick, icon }) => (
@@ -373,7 +417,118 @@ const CompanySettingsView: React.FC = () => {
     const usageClientId = user?.clientId ?? null;
     const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults'>('details');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
-    const [matchingEnginePreset, setMatchingEnginePreset] = useState<'balanced' | 'skills' | 'experience'>('balanced');
+    const [matchingConfigs, setMatchingConfigs] = useState<ClientMatchingEnginePresetDto[]>([]);
+    const [matchingConfigsLoading, setMatchingConfigsLoading] = useState(false);
+    const [matchingConfigsError, setMatchingConfigsError] = useState<string | null>(null);
+    const [matchingClientOptions, setMatchingClientOptions] = useState<ClientOption[]>([]);
+    const [selectedMatchingPresetId, setSelectedMatchingPresetId] = useState<number | null>(null);
+    const [savedMatchingPresetId, setSavedMatchingPresetId] = useState<number | null>(null);
+    const [matchingUsageLoadError, setMatchingUsageLoadError] = useState<string | null>(null);
+    const [matchingPresetSaveError, setMatchingPresetSaveError] = useState<string | null>(null);
+    const [isSavingMatchingPreset, setIsSavingMatchingPreset] = useState(false);
+
+    useEffect(() => {
+        if (!usageClientId) {
+            setSelectedMatchingPresetId(null);
+            setSavedMatchingPresetId(null);
+            setMatchingUsageLoadError(null);
+            return;
+        }
+        let cancelled = false;
+        fetchClientUsageSettings(usageClientId)
+            .then((d) => {
+                if (cancelled) return;
+                const mid =
+                    typeof d.matchingEnginePresetId === 'number' && Number.isFinite(d.matchingEnginePresetId)
+                        ? d.matchingEnginePresetId
+                        : null;
+                setSelectedMatchingPresetId(mid);
+                setSavedMatchingPresetId(mid);
+                setMatchingUsageLoadError(null);
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setMatchingUsageLoadError(e.message || 'טעינת הגדרות נכשלה');
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [usageClientId]);
+
+    const handleSaveMatchingPreset = useCallback(async () => {
+        if (!usageClientId) return;
+        setMatchingPresetSaveError(null);
+        setIsSavingMatchingPreset(true);
+        try {
+            const cur = await fetchClientUsageSettings(usageClientId);
+            const saved = await saveClientUsageSettings(usageClientId, {
+                ...cur,
+                matchingEnginePresetId: selectedMatchingPresetId,
+            });
+            const next =
+                typeof saved.matchingEnginePresetId === 'number' && Number.isFinite(saved.matchingEnginePresetId)
+                    ? saved.matchingEnginePresetId
+                    : null;
+            setSavedMatchingPresetId(next);
+            setSelectedMatchingPresetId(next);
+        } catch (e: unknown) {
+            setMatchingPresetSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+        } finally {
+            setIsSavingMatchingPreset(false);
+        }
+    }, [usageClientId, selectedMatchingPresetId]);
+
+    useEffect(() => {
+        if (!usageClientId) {
+            setMatchingConfigs([]);
+            setMatchingConfigsError(null);
+            setMatchingConfigsLoading(false);
+            return;
+        }
+        let cancelled = false;
+        setMatchingConfigsLoading(true);
+        setMatchingConfigsError(null);
+        fetchClientMatchingEngineConfigs(usageClientId)
+            .then((rows) => {
+                if (!cancelled) setMatchingConfigs(rows);
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setMatchingConfigsError(e.message || 'טעינה נכשלה');
+            })
+            .finally(() => {
+                if (!cancelled) setMatchingConfigsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [usageClientId]);
+
+    useEffect(() => {
+        if (!usageClientId) {
+            setMatchingClientOptions([]);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const res = await fetch(`${API_BASE}/api/clients`, { headers: buildMatchingEngineAuthHeaders() });
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                const list = Array.isArray(data) ? data : (data.data ?? []);
+                setMatchingClientOptions(
+                    list.map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        name: String(c.name ?? ''),
+                        displayName: c.displayName ? String(c.displayName) : undefined,
+                    })),
+                );
+            } catch {
+                if (!cancelled) setMatchingClientOptions([]);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [usageClientId]);
 
     const renderContent = () => {
         switch (activeTab) {
@@ -389,45 +544,157 @@ const CompanySettingsView: React.FC = () => {
                             <SettingsInput label={t('company_settings.field_verified_phones')} value="0527372555" />
                         </div>
                         
-                        {/* Matching Engine Preset Section */}
-                        <div className="bg-bg-subtle/50 p-5 rounded-xl border border-border-default mt-6">
-                            <div className="flex items-center gap-2 mb-4 text-primary-700">
-                                <CalculatorIcon className="w-6 h-6" />
-                                <h3 className="text-lg font-bold">תבנית מנוע התאמות (Matching Engine Preset)</h3>
+                        {/* Matching Engine — preset cards + selection stored in client_usage_settings.matching_engine_preset_id */}
+                        <div className="bg-white p-6 rounded-2xl border border-border-subtle shadow-sm mt-6">
+                            <div className="flex items-center justify-between mb-4 gap-4 flex-wrap">
+                                <div className="flex items-center gap-2">
+                                    <SparklesIcon className="w-5 h-5 text-primary-500" />
+                                    <h3 className="text-lg font-bold text-text-default">תבניות שקלול (גישות)</h3>
+                                </div>
+                                {usageClientId && matchingConfigs.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleSaveMatchingPreset()}
+                                        disabled={
+                                            isSavingMatchingPreset ||
+                                            selectedMatchingPresetId === savedMatchingPresetId
+                                        }
+                                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold transition-all ${
+                                            selectedMatchingPresetId !== savedMatchingPresetId
+                                                ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-lg shadow-primary-500/20'
+                                                : 'bg-bg-subtle text-text-muted cursor-not-allowed'
+                                        }`}
+                                    >
+                                        {isSavingMatchingPreset ? (
+                                            <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                                        ) : (
+                                            <CheckCircleIcon className="w-5 h-5" />
+                                        )}
+                                        שמור בחירה
+                                    </button>
+                                )}
                             </div>
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                                <button
-                                    onClick={() => setMatchingEnginePreset('balanced')}
-                                    className={`p-4 rounded-xl border text-right transition-all ${matchingEnginePreset === 'balanced' ? 'bg-primary-50 border-primary-500 ring-1 ring-primary-500' : 'bg-bg-input border-border-default hover:border-primary-300'}`}
-                                >
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <span className="text-xl">⚖️</span>
-                                        <span className={`font-bold text-base ${matchingEnginePreset === 'balanced' ? 'text-primary-700' : 'text-text-default'}`}>מאוזן (Balanced)</span>
-                                    </div>
-                                    <p className="text-sm text-text-muted">שילוב קלאסי של כישורים, ניסיון והשכלה.</p>
-                                </button>
-                                <button
-                                    onClick={() => setMatchingEnginePreset('skills')}
-                                    className={`p-4 rounded-xl border text-right transition-all ${matchingEnginePreset === 'skills' ? 'bg-primary-50 border-primary-500 ring-1 ring-primary-500' : 'bg-bg-input border-border-default hover:border-primary-300'}`}
-                                >
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <span className="text-xl">⚡</span>
-                                        <span className={`font-bold text-base ${matchingEnginePreset === 'skills' ? 'text-primary-700' : 'text-text-default'}`}>מבוסס כישורים</span>
-                                    </div>
-                                    <p className="text-sm text-text-muted">התמקדות במיומנויות, התאמה סמנטית וכישורים רכים.</p>
-                                </button>
-                                <button
-                                    onClick={() => setMatchingEnginePreset('experience')}
-                                    className={`p-4 rounded-xl border text-right transition-all ${matchingEnginePreset === 'experience' ? 'bg-primary-50 border-primary-500 ring-1 ring-primary-500' : 'bg-bg-input border-border-default hover:border-primary-300'}`}
-                                >
-                                    <div className="flex items-center gap-2 mb-2">
-                                        <span className="text-xl">💼</span>
-                                        <span className={`font-bold text-base ${matchingEnginePreset === 'experience' ? 'text-primary-700' : 'text-text-default'}`}>מבוסס ניסיון</span>
-                                    </div>
-                                    <p className="text-sm text-text-muted">משקל גבוה לוותק, תעשייה והשכלה פורמלית.</p>
-                                </button>
-                            </div>
-                            <p className="text-xs text-text-muted mt-3">* קובע את משקלי ברירת המחדל של מנוע ההתאמות עבור הארגון. משפיע על אופן דירוג המועמדים למשרות.</p>
+                            {!usageClientId && (
+                                <p className="text-sm text-text-muted text-right py-2">
+                                    אין לחשבון משתמש מזהה לקוח — לא ניתן להציג הגדרות מנוע התאמה.
+                                </p>
+                            )}
+                            {usageClientId && matchingUsageLoadError && (
+                                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 text-right">
+                                    {matchingUsageLoadError}
+                                </p>
+                            )}
+                            {usageClientId && matchingPresetSaveError && (
+                                <p className="text-sm text-red-600 text-right py-2">{matchingPresetSaveError}</p>
+                            )}
+                            {usageClientId && matchingConfigsLoading && (
+                                <p className="text-sm text-text-muted text-right py-2">טוען הגדרות מנוע התאמה…</p>
+                            )}
+                            {usageClientId && matchingConfigsError && (
+                                <p className="text-sm text-red-600 text-right py-2">{matchingConfigsError}</p>
+                            )}
+                            {usageClientId &&
+                                !matchingConfigsLoading &&
+                                !matchingConfigsError &&
+                                savedMatchingPresetId != null &&
+                                matchingConfigs.length > 0 &&
+                                !matchingConfigs.some((p) => p.id === savedMatchingPresetId) && (
+                                    <p className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 text-right">
+                                        הגישה השמורה במערכת אינה מופיעה ברשימה (ייתכן שהוסרה). בחרו גישה חדשה
+                                        ושמרו.
+                                    </p>
+                                )}
+                            {usageClientId && !matchingConfigsLoading && !matchingConfigsError && matchingConfigs.length === 0 && (
+                                <p className="text-sm text-text-muted italic py-2 text-right">
+                                    אין גישות שמורות המקושרות ללקוח שלכם. ניתן להגדיר זאת בממשק הניהול — מנוע התאמה.
+                                </p>
+                            )}
+                            {usageClientId &&
+                                !matchingConfigsLoading &&
+                                !matchingConfigsError &&
+                                matchingConfigs.length > 0 &&
+                                selectedMatchingPresetId !== savedMatchingPresetId && (
+                                    <p className="text-sm text-primary-800 bg-primary-50 border border-primary-100 rounded-lg px-3 py-2 mb-3 text-right">
+                                        יש שינויים שלא נשמרו — יש ללחוץ על שמור בחירה לעדכון המערכת.
+                                    </p>
+                                )}
+                            {usageClientId && !matchingConfigsLoading && !matchingConfigsError && matchingConfigs.length > 0 && (
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    {matchingConfigs.map((preset) => {
+                                        const isSelected = selectedMatchingPresetId === preset.id;
+                                        const isPersisted =
+                                            savedMatchingPresetId === preset.id &&
+                                            selectedMatchingPresetId === savedMatchingPresetId;
+                                        return (
+                                            <button
+                                                key={preset.id}
+                                                type="button"
+                                                onClick={() => setSelectedMatchingPresetId(preset.id)}
+                                                className={`p-4 rounded-xl border transition-all text-right group relative flex flex-col items-start h-full
+                                                    ${
+                                                        isSelected
+                                                            ? 'border-purple-500 ring-2 ring-purple-500 bg-purple-50 shadow-md shadow-purple-200'
+                                                            : 'border-purple-200 bg-purple-50/30 hover:bg-purple-50 hover:border-purple-500 hover:ring-1 hover:ring-purple-500'
+                                                    }`}
+                                            >
+                                                {isPersisted && (
+                                                    <span className="absolute top-2.5 right-2.5 bg-purple-600 text-white text-[10px] font-bold px-2 py-0.5 rounded-full">
+                                                        פעיל
+                                                    </span>
+                                                )}
+                                                <div className="flex items-center gap-2 mb-2 pr-8 w-full">
+                                                    <div
+                                                        className={`p-2 bg-white rounded-lg shadow-sm transition-colors shrink-0 ${
+                                                            isSelected
+                                                                ? 'text-purple-600'
+                                                                : 'group-hover:text-purple-600 text-purple-400'
+                                                        }`}
+                                                    >
+                                                        <TagIcon className="w-5 h-5" />
+                                                    </div>
+                                                    <h3 className="font-bold text-text-default truncate">
+                                                        {preset.label || preset.configKey || `Preset #${preset.id}`}
+                                                    </h3>
+                                                </div>
+                                                <p className="text-xs text-text-muted leading-relaxed mb-1 line-clamp-2">
+                                                    {preset.description || 'גישה מותאמת אישית'}
+                                                </p>
+                                                <PresetMainWeightsMiniBar config={preset.config} />
+                                                {preset.clientIds && preset.clientIds.length > 0 && (
+                                                    <div className="flex flex-wrap gap-1 mt-auto">
+                                                        {preset.clientIds.map((cid) => {
+                                                            const client = matchingClientOptions.find((c) => c.id === cid);
+                                                            return (
+                                                                <span
+                                                                    key={cid}
+                                                                    className="bg-purple-100 text-purple-700 text-[10px] px-1.5 py-0.5 rounded-full font-medium"
+                                                                >
+                                                                    {client ? client.displayName || client.name : cid}
+                                                                </span>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                            {usageClientId && !matchingConfigsLoading && !matchingConfigsError && matchingConfigs.length > 0 && (
+                                <div className="mt-3 flex flex-wrap items-center justify-end gap-3">
+                                    <button
+                                        type="button"
+                                        className="text-xs font-semibold text-text-muted hover:text-primary-600 underline"
+                                        onClick={() => setSelectedMatchingPresetId(null)}
+                                    >
+                                        נקה בחירה (ברירת מחדל לפי סדר המערכת)
+                                    </button>
+                                </div>
+                            )}
+                            <p className="text-xs text-text-muted mt-4 text-right leading-relaxed">
+                                הבחירה נשמרת בהגדרות השימוש של הלקוח (client_usage_settings). ללא בחירה, המערכת
+                                משתמשת בגישה הראשונה המתאימה ללקוח. עריכת תבניות — ממשק הניהול מנוע התאמה.
+                            </p>
                         </div>
 
                         {/* Goals Section */}
