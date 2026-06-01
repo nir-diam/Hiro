@@ -3,6 +3,7 @@ const candidateController = require('../controllers/candidateController');
 const candidateDocumentController = require('../controllers/candidateDocumentController');
 const candidateEventController = require('../controllers/candidateEventController');
 const authMiddleware = require('../middleware/authMiddleware');
+const { optionalAuth } = require('../middleware/authMiddleware');
 const { attachDbUser } = require('../middleware/permissionMiddleware');
 
 const router = express.Router();
@@ -10,7 +11,7 @@ const router = express.Router();
 router.get('/screening-rejections', authMiddleware, candidateController.listScreeningRejections);
 router.patch('/linked-jobs/:jobCandidateId/status', authMiddleware, candidateController.patchJobLinkStatus);
 
-router.get('/', candidateController.list);
+router.get('/', optionalAuth, candidateController.list);
 router.get('/by-worked-at-company', candidateController.listByWorkedAtCompany);
 router.get('/by-user/:userId', candidateController.getByUser);
 // Place specific routes BEFORE the generic '/:id' to avoid param capture
@@ -27,8 +28,10 @@ router.get('/:id/screening-pool', authMiddleware, candidateController.getScreeni
 router.get('/:id/screening-precheck', authMiddleware, candidateController.getScreeningPrecheck);
 router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.post('/:id/linked-jobs', authMiddleware, candidateController.linkCandidateToJob);
+router.post('/:id/field-interest', authMiddleware, candidateController.addFieldInterest);
 router.get('/:id/screening-data', candidateController.getScreeningData);
 router.put('/:id/screening-data', candidateController.saveScreeningData);
+router.patch('/:id/parsed-text', authMiddleware, candidateController.saveParsedText);
 router.post(
   '/:id/approve-data-corrections',
   authMiddleware,

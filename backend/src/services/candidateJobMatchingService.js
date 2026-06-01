@@ -9,47 +9,19 @@ const Job          = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 
 const candidateService = require('./candidateService');
+const jobService = require('./jobService');
 const clientUsageSettingService  = require('./clientUsageSettingService');
 const screeningInclusionService  = require('./screeningInclusionService');
 const { embedCandidateAndSave, normalizeEmbedding } = require('./vectorSearchService');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 const {
-  computeFullMatchScore,
+  computeMatchPackage,
   getJobEmbedding,
   buildLinkedInfoFromJobCandidate,
+  buildIntentScoreOptions,
 } = require('./matchingScoreService');
-
-// ─── Parameter-match breakdown (for UI display) ───────────────────────────────
-
-function reasonsToParamMatches(reasons, job) {
-  const failed   = new Set(reasons);
-  const result   = (code) => (failed.has(code) ? 'gap' : 'match');
-  const lic      = job.licenseType ? String(job.licenseType).trim() : '';
-  const hasLicense  = lic && lic !== 'לא חשוב';
-  const hasAge      = Number.isFinite(Number(job.ageMin)) || Number.isFinite(Number(job.ageMax));
-  const hasGender   = job.gender && String(job.gender).trim() !== 'לא משנה';
-  const hasMobility = job.mobility === true;
-  const jType       = Array.isArray(job.jobType) ? job.jobType.join(',') : String(job.jobType || '');
-  const hasScope    = jType.includes('מלאה') || jType.includes('חלקית');
-
-  return {
-    mandatory_skill:    failed.has('mandatory_skill') ? 'gap' : (
-      Array.isArray(job.skills) && job.skills.some((s) => s?.mode === 'mandatory') ? 'match' : 'unknown'
-    ),
-    license:            hasLicense  ? result('license') : 'unknown',
-    age:                hasAge ? (
-      failed.has('age_unknown') ? 'unknown' :
-      (failed.has('age_min') || failed.has('age_max')) ? 'gap' : 'match'
-    ) : 'unknown',
-    gender:             hasGender   ? (failed.has('gender')   ? 'gap' : 'match') : 'unknown',
-    mobility:           hasMobility ? (failed.has('mobility') ? 'gap' : 'match') : 'unknown',
-    scope:              hasScope    ? (failed.has('mandatory_skill') ? 'gap' : 'match') : 'unknown',
-    mandatory_language: failed.has('mandatory_language') ? 'gap' : (
-      Array.isArray(job.languages) && job.languages.some((l) => l?.mandatory === true) ? 'match' : 'unknown'
-    ),
-    salary: 'unknown',
-  };
-}
+const { hydrateJobSkills } = require('./candidateTagService');
+const { findOpenJobsForFieldSelection } = require('./jobTaxonomyResolver');
 
 // ─── Main export ──────────────────────────────────────────────────────────────
 
@@ -66,6 +38,7 @@ function reasonsToParamMatches(reasons, job) {
  * @param {string[]} [opts.jobTypes]
  * @param {boolean}  [opts.useVector=true]
  * @param {object}   [opts.configOverride]  – when set, used as engine config for every job instead of resolveEngineConfigForJob()
+ * @param {string}   [opts.tenantClientId]  – logged-in staff client UUID (Company Settings preset)
  */
 async function computeMatchesForCandidate(candidateId, opts = {}) {
   const limit    = Math.min(Math.max(parseInt(opts.limit,    10) || 50, 1), 100);
@@ -77,6 +50,7 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
 
   // 1. Default admin/client preset merge happens per job below (opts.configOverride wins globally when set — rarely used)
   const globalOverrideConfig = opts.configOverride || null;
+  const staffTenantId = opts.tenantClientId ? String(opts.tenantClientId).trim() : '';
 
   // 2. Load candidate (+ AI tags join — same shape as list / screening scoring)
   const candidateRow = await candidateService.findByPkWithTagsForMatchScore(candidateId);
@@ -97,10 +71,11 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
   }
   candidate.embedding = candidateEmb; // inject normalised version so computeFullMatchScore uses it
 
-  // 3. Load existing links (determines intentType)
+  // 3. Load existing links (intent + per-job linkedInfo)
   const linkedRows = await JobCandidate.findAll({
     where: { candidateId },
     attributes: ['jobId', 'id', 'status', 'source'],
+    include: [{ model: Job, as: 'job', attributes: ['id', 'field', 'role'], required: false }],
   });
   const linkedMap = new Map(
     linkedRows.map((r) => {
@@ -108,6 +83,13 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
       return [String(p.jobId), buildLinkedInfoFromJobCandidate(p)];
     }),
   );
+  const linkedJobsForIntent = linkedRows
+    .map((r) => {
+      const p = r.get ? r.get({ plain: true }) : r;
+      return p.job || { id: p.jobId, field: null, role: null };
+    })
+    .filter((j) => j && j.id);
+  const intentScoreOptions = await buildIntentScoreOptions(linkedJobsForIntent);
 
   // 4. Load jobs with filters
   const jobWhere = {};
@@ -118,12 +100,13 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
     jobWhere[Op.or] = opts.jobTypes.map((jt) => ({ jobType: { [Op.contains]: [jt] } }));
   }
 
-  const allJobs = await Job.findAll({ where: jobWhere });
+  const allJobs = await Job.findAll({ where: jobWhere, attributes: { exclude: ['skills'] } });
+  await jobService.hydrateJobsSkills(allJobs);
 
   // 5. Score each job using the full engine
   const scored = [];
   for (const jobRow of allJobs) {
-    const jobPlain = jobRow.get({ plain: true });
+    const jobPlain = jobService.toPlainJobForMatchScore(jobRow);
     const jid      = String(jobPlain.id);
 
     // Get job embedding (cached)
@@ -138,26 +121,38 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
 
     const linkedInfo = linkedMap.get(jid) || null;
 
-    const config = globalOverrideConfig || (await resolveEngineConfigForJob(jobPlain));
+    let configTenant = staffTenantId;
+    if (!configTenant) {
+      const screeningDefaults = await clientUsageSettingService.resolveScreeningDefaultsForJob(jobRow);
+      configTenant = screeningDefaults.clientId ? String(screeningDefaults.clientId) : '';
+    }
+    const config =
+      globalOverrideConfig ||
+      (await resolveEngineConfigForJob(jobPlain, { tenantClientId: configTenant || null }));
 
     let scoreResult;
     try {
-      scoreResult = await computeFullMatchScore(candidate, jobPlain, jobEmb, config, linkedInfo);
+      scoreResult = await computeMatchPackage(
+        candidate,
+        jobPlain,
+        jobEmb,
+        config,
+        linkedInfo,
+        intentScoreOptions,
+      );
     } catch (e) {
       console.warn('[candidateJobMatchingService] scoring failed', jid, e.message);
-      scoreResult = { finalScore: 0, breakdown: {} };
+      scoreResult = { matchScore: 0, scoreBreakdown: {}, parameterMatches: {} };
     }
 
-    if (scoreResult.finalScore < minScore) continue;
+    if (scoreResult.matchScore < minScore) continue;
 
     // Hard requirements check (for UI display — does NOT affect score)
     let requirementsMet = true;
-    let parameterMatches = {};
     try {
       const settings = await clientUsageSettingService.resolveScreeningDefaultsForJob(jobRow);
       const hard      = screeningInclusionService.checkHardRequirements(candidate, jobPlain, settings);
       requirementsMet  = hard.ok;
-      parameterMatches = reasonsToParamMatches(hard.reasons, jobPlain);
     } catch (e) {
       console.warn('[candidateJobMatchingService] hard requirements check failed', jid, e.message);
     }
@@ -178,11 +173,11 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
       languages:        Array.isArray(jobPlain.languages)    ? jobPlain.languages    : [],
       role:             jobPlain.role  || '',
       field:            jobPlain.field || '',
-      matchScore:       scoreResult.finalScore,
-      scoreBreakdown:   scoreResult.breakdown,
+      matchScore:       scoreResult.matchScore,
+      scoreBreakdown:   scoreResult.scoreBreakdown,
+      parameterMatches: scoreResult.parameterMatches,
       matchType:        linkedInfo ? 'application' : 'ai',
       requirementsMet,
-      parameterMatches,
       jobCandidateId:   linkedInfo?.jcId || null,
       lastAnalyzed:     new Date().toLocaleDateString('he-IL'),
     });
@@ -198,4 +193,120 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
   return { rows: scored.slice(0, limit) };
 }
 
-module.exports = { computeMatchesForCandidate };
+/**
+ * Augment linked-job rows (GET …/linked-jobs) with engine matchScore + scoreBreakdown,
+ * same pipeline as job-matches / job candidates list.
+ *
+ * @param {string} candidateId
+ * @param {object[]} linkedRows – from jobCandidateService.listForCandidate (with nested `job`)
+ * @param {object}   [opts]
+ * @param {string}   [opts.tenantClientId]
+ * @returns {Promise<object[]>}
+ */
+async function enrichLinkedJobsRowsWithScores(candidateId, linkedRows, opts = {}) {
+  if (!candidateId || !Array.isArray(linkedRows) || linkedRows.length === 0) {
+    return linkedRows;
+  }
+
+  let candidateRow;
+  try {
+    candidateRow = await candidateService.findByPkWithTagsForMatchScore(candidateId);
+  } catch (e) {
+    console.warn('[enrichLinkedJobsRowsWithScores] load candidate failed', e.message);
+    return linkedRows;
+  }
+  if (!candidateRow) return linkedRows;
+
+  let candidate = candidateService.toPlainCandidateForMatchScore(candidateRow);
+  let candidateEmb = normalizeEmbedding(candidate.embedding);
+  if (!candidateEmb || !candidateEmb.length) {
+    try {
+      const rebuilt = await embedCandidateAndSave(candidateId);
+      candidateEmb = normalizeEmbedding(rebuilt);
+    } catch (e) {
+      console.warn('[enrichLinkedJobsRowsWithScores] embed failed', e.message);
+    }
+  }
+  candidate.embedding = candidateEmb;
+
+  const staffTenantId = opts.tenantClientId ? String(opts.tenantClientId).trim() : '';
+
+  const intentJobRows = [];
+  for (const row of linkedRows) {
+    const j = row.job;
+    if (j?.id) intentJobRows.push(j);
+    else if (row.source === 'field_interest' && row.workflowMeta) {
+      const wm = row.workflowMeta;
+      intentJobRows.push({
+        id: row.jobCandidateId,
+        field: wm.category,
+        role: wm.role,
+      });
+    }
+  }
+  const intentScoreOptions = await buildIntentScoreOptions(intentJobRows);
+
+  const out = [];
+  for (const row of linkedRows) {
+    let jobPlain = row.job;
+    if (!jobPlain?.id && row.source === 'field_interest' && row.workflowMeta) {
+      try {
+        const proxyJobs = await findOpenJobsForFieldSelection(row.workflowMeta, 1);
+        if (proxyJobs[0]) {
+          jobPlain = jobService.toPlainJobForMatchScore(proxyJobs[0]);
+        }
+      } catch (e) {
+        console.warn('[enrichLinkedJobsRowsWithScores] field-interest proxy job failed', e.message);
+      }
+    }
+    if (!jobPlain || !jobPlain.id) {
+      out.push({ ...row, matchScore: 0, scoreBreakdown: null, parameterMatches: null });
+      continue;
+    }
+
+    try {
+      await hydrateJobSkills(jobPlain);
+    } catch (e) {
+      console.warn('[enrichLinkedJobsRowsWithScores] hydrate job skills failed', row.jobId, e.message);
+    }
+
+    const linkedInfo = buildLinkedInfoFromJobCandidate({
+      id: row.jobCandidateId,
+      candidateId: row.candidateId,
+      jobId: row.jobId,
+      source: row.source,
+      status: row.status,
+    });
+
+    let scoreResult = { matchScore: 0, scoreBreakdown: null, parameterMatches: {} };
+    try {
+      const jobEmb = await getJobEmbedding(jobPlain);
+      let configTenant = staffTenantId;
+      if (!configTenant) {
+        const screeningDefaults = await clientUsageSettingService.resolveScreeningDefaultsForJob(jobPlain);
+        configTenant = screeningDefaults.clientId ? String(screeningDefaults.clientId) : '';
+      }
+      const config = await resolveEngineConfigForJob(jobPlain, { tenantClientId: configTenant || null });
+      scoreResult = await computeMatchPackage(
+        candidate,
+        jobPlain,
+        jobEmb,
+        config,
+        linkedInfo,
+        intentScoreOptions,
+      );
+    } catch (e) {
+      console.warn('[enrichLinkedJobsRowsWithScores] score failed', row.jobId, e.message);
+    }
+
+    out.push({
+      ...row,
+      matchScore: Math.round(Number(scoreResult.matchScore) || 0),
+      scoreBreakdown: scoreResult.scoreBreakdown || null,
+      parameterMatches: scoreResult.parameterMatches || null,
+    });
+  }
+  return out;
+}
+
+module.exports = { computeMatchesForCandidate, enrichLinkedJobsRowsWithScores };

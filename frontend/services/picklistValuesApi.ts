@@ -89,6 +89,37 @@ export const MOBILITY_FALLBACK: PicklistValueRow[] = [
     { id: '_fb_mob_req', label: 'חובה', value: 'חובה', displayName: null },
 ];
 
+/** זמינות להתחלה (מועמד / משרה) — `candidates.availability`, `jobs.availability`; `PicklistCategory.key`. */
+export const AVAILABILITY_PICKLIST_KEY = 'availability';
+
+/** When picklist `availability` is empty — recruitment timeline emoji options (MainContent / CandidateProfile). */
+export const AVAILABILITY_FALLBACK: PicklistValueRow[] = [
+    {
+        id: '_fb_av_green',
+        label: '🟢 מיידי (זמין לעבודה מיד).',
+        value: '🟢 מיידי (זמין לעבודה מיד).',
+        displayName: null,
+    },
+    {
+        id: '_fb_av_yellow',
+        label: '🟡 חודש הודעה (עובד, מחפש אקטיבית).',
+        value: '🟡 חודש הודעה (עובד, מחפש אקטיבית).',
+        displayName: null,
+    },
+    {
+        id: '_fb_av_orange',
+        label: '🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).',
+        value: '🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).',
+        displayName: null,
+    },
+    {
+        id: '_fb_av_red',
+        label: '🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).',
+        value: '🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).',
+        displayName: null,
+    },
+];
+
 /** סטטוס מועמד (`candidates.status`) — `PicklistCategory.key`. */
 export const CANDIDATE_STATUS_PICKLIST_KEY = 'candidate_status';
 

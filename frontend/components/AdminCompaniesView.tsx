@@ -37,6 +37,7 @@ interface Company {
     
     // Links
     website: string;
+    logo?: string;
     linkedinUrl: string;    
     
     // Hard Facts
@@ -139,6 +140,7 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         legalName: String(o.legalName ?? ''),
         aliases: Array.isArray(aliases) ? aliases.map(String) : [],
         website: String(o.website ?? ''),
+        logo: typeof o.logo === 'string' && o.logo.trim() ? o.logo.trim() : undefined,
         linkedinUrl: String(o.linkedinUrl ?? ''),
         foundedYear: String(o.foundedYear ?? ''),
         location: String(o.location ?? ''),
@@ -175,6 +177,7 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         employeeCount: c.employeeCount || null,
         type: c.type || null,
         website: c.website || null,
+        logo: c.logo || null,
         linkedinUrl: c.linkedinUrl || null,
         foundedYear: c.foundedYear || null,
         location: c.location || null,
@@ -224,6 +227,7 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         subField: (typeof raw.subField === 'string' && raw.subField) || c.subField,
         employeeCount: (typeof raw.employeeCount === 'string' && raw.employeeCount) || c.employeeCount,
         website: (typeof raw.website === 'string' && raw.website) || c.website,
+        logo: (typeof raw.logo === 'string' && raw.logo.trim() ? raw.logo.trim() : undefined) || c.logo,
         linkedinUrl: (typeof raw.linkedinUrl === 'string' && raw.linkedinUrl) || c.linkedinUrl,
         foundedYear: (typeof raw.foundedYear === 'string' && raw.foundedYear) || c.foundedYear,
         location: (typeof raw.location === 'string' && raw.location) || c.location,
@@ -252,8 +256,33 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
     };
 }
 
+function CompanyLogoMark({ company, size = 48 }: { company: Company; size?: number }) {
+    const px = `${size}px`;
+    const initial = (company.name || '?').charAt(0);
+    if (company.logo) {
+        return (
+            <img
+                src={company.logo}
+                alt=""
+                className="rounded object-contain bg-white border border-border-subtle flex-shrink-0"
+                style={{ width: px, height: px }}
+                referrerPolicy="no-referrer"
+            />
+        );
+    }
+    return (
+        <div
+            className="rounded-xl bg-primary-50 border border-border-default flex items-center justify-center text-primary-700 font-bold uppercase flex-shrink-0 shadow-sm"
+            style={{ width: px, height: px, fontSize: Math.round(size * 0.38) }}
+        >
+            {initial}
+        </div>
+    );
+}
+
 // --- Column Definition ---
 const allColumnsDef = [
+    { id: 'logo', label: 'לוגו' },
     { id: 'name', label: 'שם החברה' },
     { id: 'mainField', label: 'תחום' },
     { id: 'structure', label: 'מבנה' }, 
@@ -268,7 +297,7 @@ const allColumnsDef = [
     { id: 'lastVerified', label: 'עודכן' },
 ];
 
-const defaultVisibleColumns = ['name', 'structure', 'mainField', 'businessModel', 'linkedinUrl', 'foundedYear', 'employeeCount', 'dataConfidence', 'techTags', 'location'];
+const defaultVisibleColumns = ['logo', 'name', 'structure', 'mainField', 'businessModel', 'linkedinUrl', 'foundedYear', 'employeeCount', 'dataConfidence', 'techTags', 'location'];
 
 // --- Company Users Tab Component ---
 interface CompanyUser {
@@ -451,7 +480,7 @@ const CompanyModal: React.FC<{
         description: '',
         mainField: '', subField: '',
         employeeCount: '',
-        website: '', linkedinUrl: '',
+        website: '', linkedinUrl: '', logo: '',
         foundedYear: '', location: '', hqCountry: 'Israel',
         type: 'הייטק', classification: 'פרטית',
         businessModel: 'B2B', productType: 'Product',
@@ -482,7 +511,7 @@ const CompanyModal: React.FC<{
                     description: '',
                     mainField: '', subField: '',
                     employeeCount: '',
-                    website: '', linkedinUrl: '',
+                    website: '', linkedinUrl: '', logo: '',
                     foundedYear: '', location: '', hqCountry: 'Israel',
                     type: 'הייטק', classification: 'פרטית',
                     businessModel: 'B2B', productType: 'Product',
@@ -625,6 +654,28 @@ const CompanyModal: React.FC<{
                                 <div className="relative">
                                     <LinkedInIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
                                     <input type="url" name="linkedinUrl" value={formData.linkedinUrl} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="linkedin.com/company/..." dir="ltr" />
+                                </div>
+                            </div>
+                            <div className="md:col-span-3">
+                                <label className="block text-xs font-semibold text-text-muted mb-1">לוגו (URL)</label>
+                                <div className="flex items-center gap-2">
+                                    {formData.logo ? (
+                                        <img
+                                            src={formData.logo}
+                                            alt=""
+                                            className="w-10 h-10 rounded object-contain bg-white border border-border-subtle flex-shrink-0"
+                                            referrerPolicy="no-referrer"
+                                        />
+                                    ) : null}
+                                    <input
+                                        type="url"
+                                        name="logo"
+                                        value={formData.logo || ''}
+                                        onChange={handleChange}
+                                        className="flex-1 bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                                        placeholder="https://..."
+                                        dir="ltr"
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -1356,6 +1407,8 @@ const AdminCompaniesView: React.FC = () => {
     const renderCell = (company: Company, columnId: string) => {
          // ... existing implementation
          switch (columnId) {
+             case 'logo':
+                 return <CompanyLogoMark company={company} size={48} />;
              case 'name':
                  return (
                      <>
@@ -1793,9 +1846,7 @@ const AdminCompaniesView: React.FC = () => {
                                     </div>
                                     
                                     <div className="flex items-start gap-4 mb-4">
-                                        <div className="w-12 h-12 bg-white border border-border-default rounded-xl flex items-center justify-center font-bold text-xl text-primary-600 uppercase shadow-sm">
-                                            {company.name.charAt(0)}
-                                        </div>
+                                        <CompanyLogoMark company={company} size={48} />
                                         <div className="flex-1 min-w-0">
                                             <h3 className="font-bold text-lg text-text-default leading-tight truncate" title={company.name}>{company.name}</h3>
                                             <p className="text-xs text-text-muted mt-1 font-medium">{company.mainField}</p>

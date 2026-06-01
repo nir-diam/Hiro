@@ -62,12 +62,19 @@ const listForJob = async (jobId) => {
   return records.map(buildCandidateView).filter((payload) => payload.id);
 };
 
+const { syntheticJobFromWorkflowMeta } = require('../utils/jobCandidateInterestUtils');
+
 /** Job rows linked to a candidate (התעניינות במשרה) — from job_candidates + jobs. */
 const listForCandidate = async (candidateId) => {
   if (!candidateId) return [];
   const records = await JobCandidate.findAll({
-    where: { candidateId, jobId: { [Op.ne]: null } },
-    // Optional join: if a job row was deleted but job_candidates.job_id remains, still return the link row.
+    where: {
+      candidateId,
+      [Op.or]: [
+        { jobId: { [Op.ne]: null } },
+        { source: 'field_interest', jobId: null },
+      ],
+    },
     include: [{ model: Job, as: 'job', required: false }],
     order: [
       ['updatedAt', 'DESC'],
@@ -76,23 +83,30 @@ const listForCandidate = async (candidateId) => {
   });
   return records.map((jc) => {
     const plain = jc.get({ plain: true });
-    const job = plain.job || {};
-    return {
+    const wm =
+      plain.workflowMeta && typeof plain.workflowMeta === 'object' && !Array.isArray(plain.workflowMeta)
+        ? plain.workflowMeta
+        : {};
+    let job = plain.job || {};
+    const rowBase = {
       jobCandidateId: plain.id,
       jobId: plain.jobId,
       candidateId: plain.candidateId,
       status: plain.status,
       source: plain.source,
       manualOverride: Boolean(plain.manualOverride),
-      workflowMeta: plain.workflowMeta && typeof plain.workflowMeta === 'object' ? plain.workflowMeta : {},
+      workflowMeta: wm,
       lastStatusGroup: plain.lastStatusGroup ?? null,
       lastExitAt: plain.lastExitAt ?? null,
       lastExitReason: plain.lastExitReason ?? null,
       screeningEnteredAt: plain.screeningEnteredAt ?? null,
       updatedAt: plain.updatedAt,
       createdAt: plain.createdAt,
-      job,
     };
+    if (!plain.jobId && plain.source === 'field_interest') {
+      job = syntheticJobFromWorkflowMeta(wm, rowBase);
+    }
+    return { ...rowBase, job };
   });
 };
 

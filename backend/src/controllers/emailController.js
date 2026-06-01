@@ -8,6 +8,7 @@ const candidateService = require('../services/candidateService');
 const jobCandidateService = require('../services/jobCandidateService');
 const jobService = require('../services/jobService');
 const clientService = require('../services/clientService');
+const clientUsageSettingService = require('../services/clientUsageSettingService');
 const EmailUpload = require('../models/EmailUpload');
 const { createS3Client } = require('../services/s3Service');
 const {
@@ -29,12 +30,14 @@ const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
 const NotificationMessage = require('../models/NotificationMessage');
 const RecruitmentStatus = require('../models/RecruitmentStatus');
+const RecruitmentSource = require('../models/RecruitmentSource');
 const { Op, Sequelize, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const { embedCandidateAndSave } = require('../services/vectorSearchService');
+const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
 const supportedMimes = ['pdf', 'msword', 'officedocument', 'application/octet-stream'];
@@ -66,6 +69,40 @@ const countPriorScreeningCvSameCandidateSubject = async (subject, candidateId) =
     },
   );
   return Number(rows[0]?.c || 0);
+};
+
+const splitRecruitmentSourceAddresses = (addresses) =>
+  String(addresses || '')
+    .split(';')
+    .map((part) => part.trim().toLowerCase())
+    .filter(Boolean);
+
+const resolveRecruitmentSourceFromEmail = async (fromEmail, clientId = null) => {
+  const sender = String(fromEmail || '').trim().toLowerCase();
+  if (!sender) return null;
+
+  const rows = await RecruitmentSource.findAll({
+    where: clientId ? { clientId } : undefined,
+    order: [
+      ['sortIndex', 'ASC'],
+      ['createdAt', 'ASC'],
+    ],
+  });
+
+  for (const row of rows) {
+    const sourceName = String(row.name || '').trim();
+    if (!sourceName) continue;
+    const tokens = splitRecruitmentSourceAddresses(row.addresses);
+    if (tokens.some((token) => sender.includes(token))) {
+      return {
+        id: row.id,
+        name: sourceName,
+        clientId: row.clientId != null ? String(row.clientId) : null,
+      };
+    }
+  }
+
+  return null;
 };
 
 /** Staff app origin for deep links — no trailing slash (`PUBLIC_APP_URL` / `FRONTEND_URL`). */
@@ -237,6 +274,37 @@ const extractFirstEmailFromCvText = (text) => {
     return raw;
   }
   return null;
+};
+
+/** Candidate row email if valid, else null. */
+const candidateRowEmail = (row) => {
+  if (!row) return null;
+  const raw = row.get && typeof row.get === 'function' ? row.get('email') : row.email;
+  return raw && String(raw).includes('@') ? String(raw).trim().toLowerCase() : null;
+};
+
+/** CV body contact email (never the envelope From). */
+const extractCvContactEmail = (text, fallbackFromFirstCv = null) => {
+  const fromText = extractFirstEmailFromCvText(text);
+  if (fromText && String(fromText).includes('@')) {
+    return String(fromText).trim().toLowerCase();
+  }
+  if (fallbackFromFirstCv && String(fallbackFromFirstCv).includes('@')) {
+    return String(fallbackFromFirstCv).trim().toLowerCase();
+  }
+  return null;
+};
+
+/** Persist CV contact email on the candidate when the row has none yet. */
+const ensureCandidateEmailFromCvText = async (candidateId, cvText, fallbackFromFirstCv = null) => {
+  const row = await candidateService.getById(candidateId);
+  const existing = candidateRowEmail(row);
+  if (existing) return { row, email: existing };
+  const extracted = extractCvContactEmail(cvText, fallbackFromFirstCv);
+  if (!extracted) return { row, email: null };
+  await candidateService.update(candidateId, { email: extracted });
+  const updated = await candidateService.getById(candidateId);
+  return { row: updated, email: extracted };
 };
 
 const inferNameFromCvTextForEmail = (text, email) => {
@@ -446,15 +514,28 @@ const processEmailUpload = async (record) => {
         resolvedJob = null;
       }
     }
+    const inboxToText = parsed.to?.text || '';
+    let resolvedJobClientId = await clientUsageSettingService.resolveClientIdForWelcomeEmail({
+      jobId: resolvedJob?.id || null,
+      inboxTo: inboxToText,
+    });
+    const matchedRecruitmentSource = await resolveRecruitmentSourceFromEmail(fromEmail, resolvedJobClientId);
+    if (!resolvedJobClientId && matchedRecruitmentSource?.clientId) {
+      resolvedJobClientId = matchedRecruitmentSource.clientId;
+    }
+    const emailIngestSource = matchedRecruitmentSource?.name || 'email';
+    const emailIngestSourcePatch = {
+      source: emailIngestSource,
+      recruitmentSourceId: matchedRecruitmentSource?.id || null,
+    };
 
     // Candidate row for this ingest:
-    // - `findByEmail(from)` = applicant's own mailbox matches their profile (safe reuse).
-    // - `findByInboundFromEmail(from)` = continuity when CV parsing changed `email` away from the envelope.
-    // For **job-directed** mail (posting code in To), inbound-only reuse is dangerous: recruiters often
-    // forward many applicants from one From address → everyone would merge into the first row, overwrite
-    // CV/AI fields, and only one job_candidates link would remain. Non-job ingest still allows inbound match.
-    let candidate = await candidateService.findByEmail(fromEmail);
-    if (!candidate && !resolvedJob?.id) {
+    // `fromEmail` is only the envelope sender. Recruiters/agencies often forward CVs,
+    // so do not write it into candidates.email; CV parsing below owns that field.
+    // For job-directed mail (posting code in To), inbound-only reuse is dangerous:
+    // one recruiter can forward many applicants from the same From address.
+    let candidate = null;
+    if (!resolvedJob?.id) {
       candidate = await candidateService.findByInboundFromEmail(fromEmail);
     }
     let candidateCreatedViaEmailIngest = false;
@@ -462,11 +543,10 @@ const processEmailUpload = async (record) => {
       const inferredName =
         fromAddress?.name?.trim() || fromEmail.split('@')[0] || 'מועמד חדש';
       candidate = await candidateService.create({
-        email: fromEmail,
         /** Stable key when CV/AI later overwrites `email` to a different address. */
         inboundFromEmail: fromEmail,
         fullName: inferredName,
-        source: 'email',
+        ...emailIngestSourcePatch,
       });
       try {
         await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, null);
@@ -549,7 +629,7 @@ const processEmailUpload = async (record) => {
         entityType: 'Candidate',
         entityId: primaryAuditId,
         entityName: primaryAuditName,
-        params: { source: 'email' },
+        params: { source: emailIngestSource },
       });
     }
 
@@ -628,6 +708,7 @@ const processEmailUpload = async (record) => {
       .filter(Boolean);
     await candidateService.update(candidate.id, {
       resumeUrl: uploaded[0].publicUrl,
+      resumeUploadedAt: new Date(),
       documents: extraDocEntries.length ? [...extraDocEntries, ...prevDocs] : prevDocs,
     });
 
@@ -644,9 +725,16 @@ const processEmailUpload = async (record) => {
     const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(combinedText);
     if (aiFields && Object.keys(aiFields).length) {
       const safeAi = { ...aiFields };
-      const envelopeEmail = candidate.email && String(candidate.email).includes('@');
-      if (envelopeEmail && (!safeAi.email || !String(safeAi.email).includes('@'))) {
+      if (safeAi.email && String(safeAi.email).includes('@')) {
+        safeAi.email = String(safeAi.email).trim().toLowerCase();
+      } else {
+        // Keep any email extracted directly from the CV; never fall back to the envelope From.
         delete safeAi.email;
+        const cvMail = extractCvContactEmail(combinedText || '', emailInFirstCv);
+        const fromNorm = String(fromEmail || '').trim().toLowerCase();
+        if (cvMail && cvMail !== fromNorm) {
+          safeAi.email = cvMail;
+        }
       }
       await candidateService.update(candidate.id, safeAi);
 
@@ -658,7 +746,7 @@ const processEmailUpload = async (record) => {
         entityType: 'Candidate',
         entityId: candidate.id,
         entityName: auditNameAfterAi,
-        params: { source: aiFields?.source || 'email' },
+        params: { source: aiFields?.source || emailIngestSource },
       });
 
       // Audit: 'הגדרת תחום משרה' — candidate "field" inferred by AI
@@ -691,14 +779,10 @@ const processEmailUpload = async (record) => {
         params: { tags: tagsLabel || `${aiTags.length} תגיות` },
       });
     }
-    await candidateService.update(candidate.id, { source: 'email' });
+    await candidateService.update(candidate.id, emailIngestSourcePatch);
 
     try {
-      let completenessClientId = null;
-      if (resolvedJob?.client) {
-        completenessClientId = await clientService.findIdByJobClientLabel(resolvedJob.client);
-      }
-      await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, completenessClientId);
+      await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, resolvedJobClientId);
     } catch (cmpErr) {
       console.warn('[email] completeness after ingest', cmpErr?.message || cmpErr);
     }
@@ -726,24 +810,42 @@ const processEmailUpload = async (record) => {
     await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
     await record.reload();
 
-    let welcomeClientId = null;
-    if (resolvedJob?.client) {
-      welcomeClientId = await clientService.findIdByJobClientLabel(resolvedJob.client);
-    }
+    const welcomeClientId = resolvedJobClientId;
     const welcomeOnce = new Set();
-    const queueWelcome = (cand) => {
-      if (!cand || !cand.email) return;
-      const k = String(cand.email).trim().toLowerCase();
+    const queueWelcome = (cand, cvText = '') => {
+      if (!cand?.id) return;
+      const toEmail =
+        candidateRowEmail(cand) || extractCvContactEmail(cvText, emailInFirstCv);
+      if (!toEmail) {
+        console.log('[email] welcome skipped: no candidate contact email on CV', {
+          candidateId: cand.id,
+        });
+        return;
+      }
+      const fromNorm = String(fromEmail || '').trim().toLowerCase();
+      if (fromNorm && toEmail === fromNorm) {
+        console.log('[email] welcome skipped: CV contact is envelope From (not candidate)', {
+          candidateId: cand.id,
+        });
+        return;
+      }
+      const k = toEmail;
       if (welcomeOnce.has(k)) {
         console.log('[email] welcome skipped (dedupe, same address as earlier in this ingest)', k);
         return;
       }
       welcomeOnce.add(k);
+      const plain =
+        cand.get && typeof cand.get === 'function' ? cand.get({ plain: true }) : { ...cand };
       try {
-        messageTemplateService.queueCandidateWelcomeEmail(cand, {
-          clientId: welcomeClientId,
-          jobId: resolvedJob?.id || null,
-        });
+        messageTemplateService.queueCandidateWelcomeEmail(
+          { ...plain, email: k },
+          {
+            clientId: welcomeClientId,
+            jobId: resolvedJob?.id || null,
+            inboxTo: inboxToText,
+          },
+        );
       } catch (e) {
         console.warn('[email] welcome queue failed for', k, e?.message || e);
       }
@@ -756,9 +858,7 @@ const processEmailUpload = async (record) => {
         extractFirstEmailFromCvText(textChunks[j] || '') ||
         emailInFirstCv ||
         extractFirstEmailFromCvText(textChunks[0] || '');
-      if (!contactEmail) contactEmail = fromEmail;
-      if (!contactEmail) continue;
-      const norm = String(contactEmail).toLowerCase();
+      const norm = contactEmail ? String(contactEmail).trim().toLowerCase() : null;
       if (!identitySplitIndices.has(j) && norm === fromEmail) continue;
 
       const nameGuess =
@@ -773,8 +873,8 @@ const processEmailUpload = async (record) => {
         splitCand = await candidateService.create({
           email: norm,
           fullName: nameGuess,
-          source: 'email',
           inboundFromEmail: fromEmail,
+          ...emailIngestSourcePatch,
         });
         splitCandIsNew = true;
       } else {
@@ -783,21 +883,25 @@ const processEmailUpload = async (record) => {
           splitCand = await candidateService.create({
             email: norm,
             fullName: nameGuess,
-            source: 'email',
             inboundFromEmail: fromEmail,
+            ...emailIngestSourcePatch,
           });
           splitCandIsNew = true;
         } else if (splitCand.id === candidate.id) {
           splitCand = await candidateService.create({
             email: norm,
             fullName: nameGuess,
-            source: 'email',
             inboundFromEmail: fromEmail,
+            ...emailIngestSourcePatch,
           });
           splitCandIsNew = true;
         }
       }
-      await candidateService.update(splitCand.id, { resumeUrl: up.publicUrl, source: 'email' });
+      await candidateService.update(splitCand.id, {
+        resumeUrl: up.publicUrl,
+        resumeUploadedAt: new Date(),
+        ...emailIngestSourcePatch,
+      });
       if (splitCandIsNew) {
         const sid = splitCand.id != null ? String(splitCand.id) : null;
         const sname =
@@ -817,15 +921,19 @@ const processEmailUpload = async (record) => {
           entityType: 'Candidate',
           entityId: sid,
           entityName: sname,
-          params: { source: 'email' },
+          params: { source: emailIngestSource },
         });
       }
       const tj = textChunks[j] || '';
       const { aiFields: splitAi, aiTags: splitTags } = await deriveCandidateFieldsFromResume(tj);
       if (splitAi && Object.keys(splitAi).length) {
         const safeS = { ...splitAi };
-        if (norm && (!safeS.email || !String(safeS.email).includes('@'))) {
+        if (safeS.email && String(safeS.email).includes('@')) {
+          safeS.email = String(safeS.email).trim().toLowerCase();
+        } else if (norm && norm !== fromEmail) {
           safeS.email = norm;
+        } else {
+          delete safeS.email;
         }
         await candidateService.update(splitCand.id, safeS);
       }
@@ -864,22 +972,26 @@ const processEmailUpload = async (record) => {
           mirrorErr?.message || mirrorErr,
         );
       }
-      queueWelcome(splitFresh);
+      queueWelcome(splitFresh, textChunks[j] || '');
     }
 
     try {
-      const fresh = await candidateService.getById(candidate.id);
+      const { row: fresh, email: welcomeEmail } = await ensureCandidateEmailFromCvText(
+        candidate.id,
+        combinedText,
+        emailInFirstCv,
+      );
       console.log('[email] ingest template email queue (primary CV-by-mail)', {
         candidateId: fresh?.id,
         newCandidateThisIngest: candidateCreatedViaEmailIngest,
-        email: fresh?.email || null,
+        email: welcomeEmail || fresh?.email || null,
         source: fresh?.source,
         resolvedJobId: resolvedJob?.id || null,
         welcomeClientId,
         postingCode: postingCode || null,
         splitAttachmentWelcomeCount: splitFileIndices.size,
       });
-      queueWelcome(fresh);
+      queueWelcome(fresh, combinedText);
     } catch (welcomeErr) {
       console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
     }
@@ -3015,9 +3127,10 @@ const extractSkillsHeuristic = (text) => {
 };
 
 const getCandidateTagsSchemaText = () => `
-Candidate tag schema (from backend/src/models/CandidateTag.js):
+Candidate tag schema (from backend/src/models/SystemTag.js):
+- type (candidate | job) — always "candidate" for candidate profiles
 - name (String)
-- candidate_id (UUID, FK -> candidates.id)
+- entity_id (UUID, FK -> candidates.id or jobs.id depending on type)
 - tag_id (UUID, FK -> tags.id)
 - raw_type (role/skill/education/etc.)
 - context (Core/Tool/Degree)
@@ -3097,6 +3210,14 @@ const CV_PARSING_TAG_QUOTE_APPENDIX = `
   * If you also emit the legacy "evidence" field, it MUST equal "quote" (same verbatim substring).
 `;
 
+/** Overrides any legacy "10-15 tags" / hard-cap wording in the stored cv_parsing prompt. */
+const CV_PARSING_TAG_COUNT_APPENDIX = `
+--- Tag count (OVERRIDES any earlier cap in this prompt) ---
+- There is NO maximum tag count. Extract every relevant professional tag supported by evidence in the CV.
+- Include roles, skills, tools, seniority, industry, methodologies, degrees, and soft skills whenever they appear.
+- Still aim for at least 1-2 Role tags, one Seniority tag, and one Industry tag when the CV supports them.
+`;
+
 const coercePreferredWorkingHoursFromAi = (raw) => {
   if (raw == null || raw === '') return null;
   const s = String(raw).trim();
@@ -3131,7 +3252,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}`;
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[emailController] cv_parsing prompt missing', err.message || err);
@@ -3205,7 +3326,8 @@ const deriveCandidateFieldsFromResume = async (text) => {
     education: normalizeEducation(aiResult.education || fallback.education),
     languages: normalizeLanguages(aiResult.languages || fallback.languages),
     industryAnalysis: aiResult.industryAnalysis || fallback.industryAnalysis || {},
-    searchText: trimmed.slice(0, 50000),
+    searchText: normalizeResumeSearchText(trimmed).slice(0, 50000),
+    searchTextSavedAt: new Date(),
   };
 
   const aiTags = Array.isArray(aiResult.tags) && aiResult.tags.length

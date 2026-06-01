@@ -11,13 +11,27 @@
  *
  * Final formula (mirrors the admin panel simulation):
  *   TotalW = vW + tW + gW + eW + iW
- *   FinalScore = Σ(scoreᵢ × weightᵢ) / TotalW  − salaryPenalty − agePenalty
+ *   S_core = Σ(scoreᵢ × weightᵢ) / TotalW
+ *   FinalScore = max(0, S_core − Penalty_salary − Penalty_age − Penalty_general)
  */
 
 const { cosineSimilarity, normalizeEmbedding } = require('./vectorSearchService');
+const {
+  computeGeneralPenalties,
+  computeParameterMatches,
+  buildSalaryPenaltyReasons,
+  buildAgePenaltyReasons,
+  enrichBreakdownForApi,
+  parseCandidateAge,
+  jobRequiresAge,
+} = require('./matchingPenaltyService');
 const { embedText } = require('./embeddingService');
 const City = require('../models/City');
 const { getLocationSearchTerms } = require('../utils/locationSearchTerms');
+const {
+  loadTaxonomyIndex,
+  resolveJobTaxonomy,
+} = require('./jobTaxonomyResolver');
 
 // ─── Inline job-query builder (mirrors jobSonarService.buildJobSonarQuery)
 // Kept local to avoid circular imports between matchingScoreService ↔ jobSonarService.
@@ -88,6 +102,20 @@ function clamp(v) {
   return Math.min(100, Math.max(0, v));
 }
 
+/** Map job/candidate tag type strings → admin `tagWeights` ids */
+const TAG_CATEGORY_ALIASES = {
+  degree: 'education',
+  education: 'education',
+  soft: 'soft_skill',
+  domain: 'industry',
+};
+
+function normalizeTagCategory(raw) {
+  const n = norm(raw);
+  if (!n) return 'skill';
+  return TAG_CATEGORY_ALIASES[n] || n;
+}
+
 // ─── 1. Vector Score ──────────────────────────────────────────────────────────
 
 /**
@@ -108,30 +136,61 @@ function computeVectorScore(candidateEmb, jobEmb) {
 
 // ─── 2. Tag Score ─────────────────────────────────────────────────────────────
 
+/** Map candidate_tag row → admin sourceWeights id (recruiter | candidate | ai). */
+function resolveTagProvenance(td) {
+  if (!td || typeof td !== 'object') return 'ai';
+  if (td.createdBy || td.created_by) return 'recruiter';
+  const ctx = norm(td.context || '');
+  if (/candidate|מועמד|self|user/i.test(ctx)) return 'candidate';
+  const tagSrc = norm(td.tagSource || td.source || td.tag?.source || '');
+  if (tagSrc === 'ai') return 'ai';
+  if (tagSrc === 'user') return 'candidate';
+  if (tagSrc === 'admin' || tagSrc === 'manual' || tagSrc === 'system' || tagSrc === 'job') {
+    return 'recruiter';
+  }
+  if (td.quote) return 'ai';
+  return 'ai';
+}
+
 /**
  * Build a multi-map of { category → Set<normKey> } from a candidate's tags/skills.
- * Looks in: candidate.skills.technical, candidate.skills.soft, candidate.tags (strings),
- * and candidate.matchAnalysis.tags if it exists.
+ * Also tracks best tag provenance per category:key for sourceWeights.
  */
 function buildCandidateTagMap(candidate) {
   /** @type {Record<string, Set<string>>} */
   const byType = {};
+  /** @type {Map<string, string>} category:key → recruiter|candidate|ai */
+  const keySources = new Map();
 
-  const add = (rawType, rawKey) => {
-    const t = norm(rawType) || 'skill';
+  const add = (rawType, rawKey, sourceId = 'ai') => {
+    const t = normalizeTagCategory(rawType);
     const k = norm(rawKey);
     if (!k) return;
     if (!byType[t]) byType[t] = new Set();
     byType[t].add(k);
+    const mapKey = `${t}:${k}`;
+    const rank = { recruiter: 3, candidate: 2, ai: 1 };
+    const prev = keySources.get(mapKey);
+    if (!prev || (rank[sourceId] || 0) > (rank[prev] || 0)) {
+      keySources.set(mapKey, sourceId);
+    }
   };
 
-  // Also maintain a flat "all keys" set for cross-category partial credit
   const flat = new Set();
-  const addFlat = (rawType, rawKey) => {
-    add(rawType, rawKey);
+  const addFlat = (rawType, rawKey, sourceId = 'ai') => {
+    add(rawType, rawKey, sourceId);
     const k = norm(rawKey);
     if (k) flat.add(k);
   };
+
+  const tagDetails = Array.isArray(candidate.tagDetails) ? candidate.tagDetails : [];
+  for (const td of tagDetails) {
+    if (!td || typeof td !== 'object') continue;
+    const sourceId = resolveTagProvenance(td);
+    const category = normalizeTagCategory(td.rawType || td.category || td.type || 'skill');
+    const key = norm(td.tagKey || td.displayNameHe || td.displayNameEn || td.name || '');
+    if (key) addFlat(category, key, sourceId);
+  }
 
   // candidate.skills.technical
   const tech = Array.isArray(candidate.skills?.technical) ? candidate.skills.technical : [];
@@ -173,20 +232,30 @@ function buildCandidateTagMap(candidate) {
     if (typeof t === 'string') addFlat('skill', t);
   }
 
-  return { byType, flat };
+  return { byType, flat, keySources };
+}
+
+function sourceWeightFactor(sourceWeights, sourceId) {
+  const arr = toWeightArray(sourceWeights);
+  if (!arr.length) return 1;
+  const maxW = Math.max(1, ...arr.map((s) => Number(s.value) || 0));
+  const w = arr.find((s) => s.id === sourceId)?.value;
+  const val = w != null ? Number(w) : 50;
+  return val / maxW;
 }
 
 /**
  * @param {object} candidate
  * @param {object} job
  * @param {Array<{id:string,value:number}>} tagWeights   – from admin config
+ * @param {object|Array} sourceWeights – recruiter/candidate/ai weights
  * @returns {{ score: number, breakdown: Record<string, number> }}
  */
-function computeTagScore(candidate, job, tagWeights) {
+function computeTagScore(candidate, job, tagWeights, sourceWeights = []) {
   const jobSkills = Array.isArray(job.skills) ? job.skills : [];
-  if (!jobSkills.length) return { score: 100, breakdown: {} };
+  if (!jobSkills.length) return { score: 0, breakdown: {} };
 
-  const { byType, flat: allCandidateKeys } = buildCandidateTagMap(candidate);
+  const { byType, flat: allCandidateKeys, keySources } = buildCandidateTagMap(candidate);
 
   // Group job requirements by category
   /** @type {Record<string, object[]>} */
@@ -194,7 +263,9 @@ function computeTagScore(candidate, job, tagWeights) {
   for (const skill of jobSkills) {
     if (!skill || typeof skill !== 'object') continue;
     if (norm(skill.mode) === 'negative') continue;
-    const category = norm(skill.type || skill.tag_type || skill.category || 'skill');
+    const category = normalizeTagCategory(
+      skill.tagType || skill.type || skill.tag_type || skill.category || 'skill',
+    );
     if (!byCategory[category]) byCategory[category] = [];
     byCategory[category].push(skill);
   }
@@ -212,12 +283,17 @@ function computeTagScore(candidate, job, tagWeights) {
 
     for (const skill of skills) {
       const key = norm(skill.key || skill.name || '');
-      if (!key) { matched += 0.5; continue; } // no key to match → neutral credit
+      if (!key) { matched += 0.5; continue; }
 
+      let credit = 0;
       if (categorySet.has(key)) {
-        matched += 1; // exact category match
+        credit = 1;
       } else if (allCandidateKeys.has(key)) {
-        matched += 0.7; // found in candidate but different category
+        credit = 0.7;
+      }
+      if (credit > 0) {
+        const src = keySources.get(`${category}:${key}`) || 'ai';
+        matched += credit * sourceWeightFactor(sourceWeights, src);
       }
     }
 
@@ -229,7 +305,7 @@ function computeTagScore(candidate, job, tagWeights) {
     breakdown[category] = categoryScore;
   }
 
-  const score = totalWeight > 0 ? clamp(Math.round(totalWeighted / totalWeight)) : 100;
+  const score = totalWeight > 0 ? clamp(Math.round(totalWeighted / totalWeight)) : 0;
   return { score, breakdown };
 }
 
@@ -246,7 +322,8 @@ function _normalizeCityRow(row) {
   return {
     cityName: row.cityName || row.city || '',
     city:     row.city     || row.cityName || '',
-    region:   norm(row.region || ''),
+    // UI / legacy data often stores the district only in column4 (e.g. "צפון").
+    region:   norm(row.region || row.column4 || ''),
     x: Number.isFinite(px) ? px : null,
     y: Number.isFinite(py) ? py : null,
   };
@@ -324,6 +401,194 @@ async function _resolveCityRecord(raw) {
   return best;
 }
 
+/**
+ * Ordered free-text fragments to try against the cities table (city field, then
+ * full address/location, comma segments — city is often last in IL addresses).
+ * @param {...string|null|undefined} raws
+ * @returns {string[]}
+ */
+function _locationHintStrings(...raws) {
+  const out = [];
+  const seen = new Set();
+  const push = (s) => {
+    const t = String(s ?? '').trim();
+    if (!t) return;
+    const k = norm(t);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(t);
+  };
+  for (const r of raws) {
+    if (r == null || !String(r).trim()) continue;
+    const str = String(r).trim();
+    const parts = str.split(/[,،;]/).map((x) => x.trim()).filter(Boolean);
+    if (parts.length > 1) push(parts[parts.length - 1]);
+    push(str);
+    for (const p of parts) push(p);
+  }
+  return out;
+}
+
+/**
+ * @param {string[]} hints
+ * @returns {Promise<object|null>}
+ */
+async function _resolveCityRecordFromHints(hints) {
+  for (const h of hints) {
+    const rec = await _resolveCityRecord(h);
+    if (rec) return rec;
+  }
+  return null;
+}
+
+// ─── Open-Meteo geocoding fallback (when cities table has no coords for a side) ─
+const _geocodeCache = new Map(); // norm(query) → { lat, lon } | '__miss__'
+
+function _haversineKm(lat1, lon1, lat2, lon2) {
+  if (![lat1, lon1, lat2, lon2].every((x) => typeof x === 'number' && Number.isFinite(x))) return null;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const km = R * c;
+  return Number.isFinite(km) ? km : null;
+}
+
+async function _openMeteoGeocode(query) {
+  if (process.env.HIRO_DISABLE_GEOCODING === '1') return null;
+  const q = String(query ?? '').trim();
+  if (q.length < 2) return null;
+  // Bump prefix when geocode strategy changes so in-process __miss__ cache does not block fixes.
+  const key = `v4:${norm(q)}`;
+  if (_geocodeCache.has(key)) {
+    const v = _geocodeCache.get(key);
+    return v === '__miss__' ? null : v;
+  }
+
+  const enc = (s) => encodeURIComponent(String(s).trim());
+  /** Open-Meteo expects `countryCode` (ISO-3166 alpha-2). `country=IL` is not a valid param and yields empty results for some Hebrew queries (e.g. נהריה). */
+  const queryVariants = [
+    `name=${enc(q)}&count=3&language=he&format=json&countryCode=IL`,
+    `name=${enc(q)}&count=3&language=he&format=json`,
+    `name=${enc(`${q}, ישראל`)}&count=3&language=he&format=json&countryCode=IL`,
+    `name=${enc(`${q}, Israel`)}&count=3&language=en&format=json&countryCode=IL`,
+  ];
+  // GeoNames sometimes matches Hebrew city names poorly; common fixes (extend as needed).
+  if (norm(q) === norm('נהריה')) {
+    queryVariants.push(`name=${enc('Nahariya')}&count=3&language=en&format=json&countryCode=IL`);
+  }
+
+  try {
+    const signal =
+      typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(5000)
+        : undefined;
+
+    for (const qs of queryVariants) {
+      const url = `https://geocoding-api.open-meteo.com/v1/search?${qs}`;
+      const res = await fetch(url, { signal });
+      if (!res.ok) continue;
+      const j = await res.json();
+      const r = j?.results?.[0];
+      if (r && typeof r.latitude === 'number' && typeof r.longitude === 'number') {
+        const out = { lat: r.latitude, lon: r.longitude };
+        _geocodeCache.set(key, out);
+        return out;
+      }
+    }
+    _geocodeCache.set(key, '__miss__');
+    return null;
+  } catch {
+    _geocodeCache.set(key, '__miss__');
+    return null;
+  }
+}
+
+async function _coordsFromFirstGeocodeHint(hints, fallback) {
+  const seen = new Set();
+  const list = [];
+  const push = (s) => {
+    const t = String(s ?? '').trim();
+    if (!t) return;
+    const k = norm(t);
+    if (seen.has(k)) return;
+    seen.add(k);
+    list.push(t);
+  };
+  if (hints && hints.length) for (const h of hints) push(h);
+  if (fallback) push(fallback);
+  for (const h of list) {
+    const c = await _openMeteoGeocode(h);
+    if (c) return c;
+  }
+  return null;
+}
+
+/**
+ * Crow-flight km between two free-text places using Open-Meteo (cached).
+ * Used only when the local cities table cannot produce coordinates for both ends.
+ */
+async function _distanceKmViaGeocoding(candHints, jobHints, candFallback, jobFallback) {
+  const [a, b] = await Promise.all([
+    _coordsFromFirstGeocodeHint(candHints, candFallback),
+    _coordsFromFirstGeocodeHint(jobHints, jobFallback),
+  ]);
+  if (!a || !b) return null;
+  return _haversineKm(a.lat, a.lon, b.lat, b.lon);
+}
+
+/**
+ * Last-resort crow-flight km: try geocoding short candidate strings against job city / location
+ * (sequential, many pairs). Fills `geoDistance` when the cities table + hint-based geocode path fails.
+ */
+async function _distanceKmGeocodeCityFallback(candidateAddrRaw, candidateCityRaw, candidateLocRaw, job) {
+  const jobLines = [];
+  const addJob = (s) => {
+    const t = String(s ?? '')
+      .trim()
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (t.length < 2) return;
+    const k = norm(t);
+    if (!jobLines.some((x) => norm(x) === k)) jobLines.push(t);
+  };
+  addJob(job.city);
+  addJob(job.location);
+  const locPlain = String(job.location || '').replace(/<[^>]+>/g, ' ');
+  for (const p of locPlain.split(/[,،;]/)) addJob(p.trim());
+
+  const candLines = [];
+  const addCand = (s) => {
+    const t = String(s ?? '').trim();
+    if (t.length < 2) return;
+    const k = norm(t);
+    if (!candLines.some((x) => norm(x) === k)) candLines.push(t);
+  };
+  addCand(candidateCityRaw);
+  addCand(candidateAddrRaw);
+  addCand(String(candidateLocRaw ?? '').trim());
+  for (const p of String(candidateAddrRaw || '').split(/[,،;]/)) addCand(p.trim());
+
+  if (!candLines.length || !jobLines.length) return null;
+
+  for (const cStr of candLines) {
+    const a = await _openMeteoGeocode(cStr);
+    if (!a) continue;
+    for (const jStr of jobLines) {
+      const b = await _openMeteoGeocode(jStr);
+      if (!b) continue;
+      const km = _haversineKm(a.lat, a.lon, b.lat, b.lon);
+      if (Number.isFinite(km) && km >= 0) return km;
+    }
+  }
+  return null;
+}
+
 /** Euclidean distance in km between two cached city entries (x/y are ITM meters). */
 function _distanceKm(a, b) {
   if (!a || !b) return null;
@@ -337,14 +602,50 @@ function _distanceKm(a, b) {
   return looksItm ? meters / 1000 : meters;
 }
 
+const GEO_REGION_IDS = ['center', 'north', 'south', 'shfela', 'jerusalem'];
+
+/** Hebrew labels / DB column4 values → admin geoRegions config id. */
+const GEO_REGION_ALIASES = [
+  ['north',     ['north', 'צפון', 'הצפון']],
+  ['center',    ['center', 'מרכז', 'גוש דן', 'שרון', 'מרכז, שרון וגוש דן', 'מרכז שרון וגוש דן']],
+  ['south',     ['south', 'דרום', 'הדרום']],
+  ['shfela',    ['shfela', 'שפלה', 'השפלה']],
+  ['jerusalem', ['jerusalem', 'ירושלים', 'ירושלם']],
+];
+
+/**
+ * Map a free-text region (Hebrew or English) to a geoRegions config id.
+ * Returns '' when unknown — callers must not silently substitute another region.
+ */
+function resolveGeoRegionId(raw) {
+  const s = norm(raw);
+  if (!s) return '';
+  if (GEO_REGION_IDS.includes(s)) return s;
+
+  for (const [id, aliases] of GEO_REGION_ALIASES) {
+    for (const alias of aliases) {
+      if (s === norm(alias)) return id;
+    }
+  }
+
+  const byLen = GEO_REGION_ALIASES.flatMap(([id, aliases]) =>
+    aliases.map((alias) => ({ id, alias: norm(alias) })),
+  ).filter((x) => x.alias.length >= 3)
+    .sort((a, b) => b.alias.length - a.alias.length);
+
+  for (const { id, alias } of byLen) {
+    if (s.includes(alias) || alias.includes(s)) return id;
+  }
+
+  return '';
+}
+
 function _findRegionCfg(geoRegionsCfg, regionId) {
-  const id = norm(regionId);
+  const id = resolveGeoRegionId(regionId);
   const list = Array.isArray(geoRegionsCfg) ? geoRegionsCfg : [];
-  return (
-    list.find((r) => norm(r.id) === id) ||
-    list.find((r) => norm(r.id) === 'center') ||
-    { grace: 15, penaltyPerKm: 2 }
-  );
+  const hit = id ? list.find((r) => norm(r.id) === id) : null;
+  if (hit) return hit;
+  return { grace: 15, penaltyPerKm: 2 };
 }
 
 /**
@@ -357,6 +658,8 @@ function _findRegionCfg(geoRegionsCfg, regionId) {
  *   4. Same region (no coords) → mild penalty (~85), distance ≈ regionCfg.grace.
  *   5. Different known regions (no coords) → estimate ~80 km and apply region penalty curve.
  *   6. Substring "region in address" fallback for legacy data.
+ *   6b. Open-Meteo geocoding + haversine when the cities table cannot resolve coordinates.
+ *   6c. Loose candidate place ↔ job city/location geocode grid when 6b fails.
  *   7. Nothing resolvable → missingGeoScore + missing:true.
  *
  * @returns {Promise<{ score: number, missing: boolean, distance: number|null }>}
@@ -377,15 +680,28 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore) {
     return { score: 100, missing: false, distance: null };
   }
 
-  // Resolve both sides via the cities table (single shared cache hit).
+  const candHints = _locationHintStrings(
+    candidateCityRaw,
+    candidateAddrRaw,
+    String(candidate.location || '').trim(),
+  );
+  const jobHints = _locationHintStrings(
+    String(job.city || '').trim(),
+    String(job.location || '').trim(),
+    String(job.region || '').trim(),
+  );
+
+  // Resolve both sides via the cities table (try multiple fragments per side).
   const [candCity, jobCity] = await Promise.all([
-    _resolveCityRecord(candidateCityRaw || candidateAddrRaw),
-    _resolveCityRecord(jobGeoText),
+    _resolveCityRecordFromHints(candHints),
+    _resolveCityRecordFromHints(jobHints),
   ]);
 
-  const jobRegion  = norm((jobCity && jobCity.region)  || job.region || '');
-  const candRegion = norm((candCity && candCity.region) || '');
-  const regionCfg  = _findRegionCfg(geoRegionsCfg, jobRegion);
+  const jobRegionRaw  = norm((jobCity && jobCity.region)  || job.region || '');
+  const candRegionRaw = norm((candCity && candCity.region) || '');
+  const jobRegionId   = resolveGeoRegionId(jobRegionRaw);
+  const candRegionId  = resolveGeoRegionId(candRegionRaw);
+  const regionCfg     = _findRegionCfg(geoRegionsCfg, jobRegionRaw);
 
   // 2. Same canonical city
   if (candCity && jobCity) {
@@ -406,12 +722,12 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore) {
   }
 
   // 4. Same region but no coords on one side
-  if (jobRegion && candRegion && jobRegion === candRegion) {
+  if (jobRegionId && candRegionId && jobRegionId === candRegionId) {
     return { score: 85, missing: false, distance: Math.round(regionCfg.grace) };
   }
 
   // 5. Different known regions (estimate ~80 km between regions)
-  if (jobRegion && candRegion && jobRegion !== candRegion) {
+  if (jobRegionId && candRegionId && jobRegionId !== candRegionId) {
     const estimatedKm = 80;
     const excess      = Math.max(0, estimatedKm - regionCfg.grace);
     const score       = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
@@ -419,11 +735,37 @@ async function computeGeoScore(candidate, job, geoRegionsCfg, missingGeoScore) {
   }
 
   // 6. Legacy string fallback — job's region keyword appears inside candidate address
-  if (jobRegion && candidateAddrN && candidateAddrN.includes(jobRegion)) {
+  if (jobRegionRaw && candidateAddrN && candidateAddrN.includes(jobRegionRaw)) {
     const estimatedKm = regionCfg.grace / 2;
     const excess      = Math.max(0, estimatedKm - regionCfg.grace);
     const score       = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
     return { score, missing: false, distance: Math.round(estimatedKm) };
+  }
+
+  // 6b. Geocoding fallback (Israel-biased) — still real km, not random UI placeholders
+  const webKm = await _distanceKmViaGeocoding(
+    candHints,
+    jobHints,
+    candidateAddrRaw || candidateCityRaw,
+    jobGeoText,
+  );
+  if (Number.isFinite(webKm)) {
+    const excess = Math.max(0, webKm - regionCfg.grace);
+    const score  = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
+    return { score, missing: false, distance: Math.round(webKm) };
+  }
+
+  // 6c. Geocode short place strings (candidate ↔ job workplace) — catches hint-order / parallel edge cases
+  const looseKm = await _distanceKmGeocodeCityFallback(
+    candidateAddrRaw,
+    candidateCityRaw,
+    String(candidate.location || '').trim(),
+    job,
+  );
+  if (Number.isFinite(looseKm)) {
+    const excess = Math.max(0, looseKm - regionCfg.grace);
+    const score  = clamp(Math.round(100 - excess * regionCfg.penaltyPerKm));
+    return { score, missing: false, distance: Math.round(looseKm) };
   }
 
   // 7. Nothing resolvable
@@ -537,41 +879,110 @@ function buildLinkedInfoFromJobCandidate(jcPlain) {
   return base;
 }
 
-/**
- * @param {object}  candidate
- * @param {object}  job
- * @param {object|null} linkedInfo  – { source, jcStatus } from JobCandidate record, or null
- * @param {Array<{id:string,value:number}>} intentWeights
- * @returns {{ score: number, intentType: string }}
- */
-function computeIntentScore(candidate, job, linkedInfo, intentWeights) {
-  const w = (id) => intentWeights.find(iw => iw.id === id)?.value ?? 0;
+const INTENT_TIER_PRIORITY = {
+  exact: 4,
+  role: 3,
+  category: 2,
+  different: 1,
+};
 
-  // Explicit application to this exact job
-  if (linkedInfo?.explicit) {
-    return { score: w('exact'), intentType: 'exact' };
+function pickBestIntentTier(tiers, intentWeights) {
+  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  let best = { score: w('different'), intentType: 'different', priority: 0 };
+  for (const tier of tiers) {
+    const priority = INTENT_TIER_PRIORITY[tier.intentType] ?? 0;
+    const score = tier.score ?? w(tier.intentType);
+    if (priority > best.priority || (priority === best.priority && score > best.score)) {
+      best = { score, intentType: tier.intentType, priority };
+    }
   }
+  return { score: best.score, intentType: best.intentType };
+}
 
-  // Any link to this job (e.g. added by recruiter)
-  if (linkedInfo) {
+function compareTaxonomyToTarget(linkedTax, targetTax, intentWeights) {
+  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  if (!targetTax || !linkedTax) {
+    return { score: w('different'), intentType: 'different' };
+  }
+  if (
+    targetTax.clusterId &&
+    linkedTax.clusterId &&
+    targetTax.clusterId === linkedTax.clusterId
+  ) {
     return { score: w('role'), intentType: 'role' };
   }
+  if (
+    targetTax.categoryId &&
+    linkedTax.categoryId &&
+    targetTax.categoryId === linkedTax.categoryId
+  ) {
+    return { score: w('category'), intentType: 'category' };
+  }
+  return { score: w('different'), intentType: 'different' };
+}
 
-  // Field + role overlap (semantic interest)
-  const candField  = norm(candidate.field || '');
-  const candTitle  = norm(candidate.title || '');
-  const jobField   = norm(job.field  || '');
-  const jobRole    = norm(job.role   || '');
+function fallbackIntentFromProfile(candidate, job, intentWeights) {
+  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  const candField = norm(candidate.field || '');
+  const candTitle = norm(candidate.title || '');
+  const jobField = norm(job.field || '');
+  const jobRole = norm(job.role || '');
 
   const fieldMatch = candField && jobField &&
     (candField === jobField || candField.includes(jobField) || jobField.includes(candField));
-  const roleMatch  = candTitle && jobRole &&
+  const roleMatch = candTitle && jobRole &&
     (candTitle === jobRole || candTitle.includes(jobRole) || jobRole.includes(candTitle));
 
-  if (fieldMatch && roleMatch) return { score: w('cluster'),  intentType: 'cluster'  };
+  if (fieldMatch && roleMatch) return { score: w('role'), intentType: 'role' };
   if (fieldMatch || roleMatch) return { score: w('category'), intentType: 'category' };
-
   return { score: w('different'), intentType: 'different' };
+}
+
+/**
+ * Intent from candidate linked jobs vs target job taxonomy (JobCategory / JobCluster / JobRole).
+ *
+ * @param {object}  candidate
+ * @param {object}  job
+ * @param {object|null} linkedInfo  – JobCandidate link to *this* job, if any
+ * @param {Array<{id:string,value:number}>} intentWeights
+ * @param {object} [options]
+ * @param {Array<{ jobId: string, taxonomy?: object }>} [options.linkedJobs]
+ * @param {object} [options.targetTaxonomy]
+ * @param {object} [options.taxonomyIndex]
+ * @returns {{ score: number, intentType: string }}
+ */
+function computeIntentScore(candidate, job, linkedInfo, intentWeights, options = {}) {
+  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  const targetId = job?.id != null ? String(job.id) : '';
+  const index = options.taxonomyIndex || null;
+  const targetTax = options.targetTaxonomy
+    || (index ? resolveJobTaxonomy(job, index) : null);
+
+  const linkedJobs = Array.isArray(options.linkedJobs) ? options.linkedJobs : [];
+  const tiers = [];
+
+  if (linkedInfo && targetId) {
+    tiers.push({ intentType: 'exact', score: w('exact') });
+  }
+
+  for (const lj of linkedJobs) {
+    const lid = lj?.jobId != null ? String(lj.jobId) : '';
+    if (!lid || lid === targetId) {
+      if (lid === targetId) {
+        tiers.push({ intentType: 'exact', score: w('exact') });
+      }
+      continue;
+    }
+    const lt = lj.taxonomy
+      || (index ? resolveJobTaxonomy({ id: lid, field: lj.field, role: lj.role }, index) : null);
+    tiers.push(compareTaxonomyToTarget(lt, targetTax, intentWeights));
+  }
+
+  if (tiers.length) {
+    return pickBestIntentTier(tiers, intentWeights);
+  }
+
+  return fallbackIntentFromProfile(candidate, job, intentWeights);
 }
 
 // ─── Final composite score ────────────────────────────────────────────────────
@@ -615,7 +1026,7 @@ function toGeoArray(raw) {
   return [];
 }
 
-async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo = null) {
+async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo = null, options = {}) {
   const {
     mainWeights        = {},
     missingGeoScore    = 50,
@@ -627,9 +1038,10 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   } = config;
 
   // Normalise array fields — DB stores them as plain objects; functions need arrays
-  const tagWeights    = toWeightArray(config.tagWeights);
-  const intentWeights = toWeightArray(config.intentWeights);
-  const geoRegions    = toGeoArray(config.geoRegions);
+  const tagWeights      = toWeightArray(config.tagWeights);
+  const sourceWeights = config.sourceWeights;
+  const intentWeights   = toWeightArray(config.intentWeights);
+  const geoRegions      = toGeoArray(config.geoRegions);
 
   // Main weights (raw numbers from DB – already 0-100 scale)
   const vW = mainWeights.vector     ?? 20;
@@ -644,7 +1056,7 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   const vectorScore  = computeVectorScore(candidateEmb, jobEmb || []);
 
   // ── 2. Tags ─────────────────────────────────────────────────────────────────
-  const tagResult  = computeTagScore(candidate, job, tagWeights);
+  const tagResult  = computeTagScore(candidate, job, tagWeights, sourceWeights);
   const tagsScore  = tagResult.score;
 
   // ── 3. Geo ──────────────────────────────────────────────────────────────────
@@ -658,8 +1070,27 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   const expScore   = expResult.score;
 
   // ── 5. Intent ────────────────────────────────────────────────────────────────
-  const intentResult = computeIntentScore(candidate, job, linkedInfo, intentWeights);
-  const intentScore  = intentResult.score;
+  let intentOptions = options;
+  if (!intentOptions.taxonomyIndex && (intentOptions.linkedJobs?.length || linkedInfo)) {
+    try {
+      const taxonomyIndex = await loadTaxonomyIndex();
+      intentOptions = {
+        ...intentOptions,
+        taxonomyIndex,
+        targetTaxonomy: intentOptions.targetTaxonomy || resolveJobTaxonomy(job, taxonomyIndex),
+      };
+    } catch (e) {
+      console.warn('[matchingScoreService] taxonomy load failed', e.message);
+    }
+  }
+  const intentResult = computeIntentScore(
+    candidate,
+    job,
+    linkedInfo,
+    intentWeights,
+    intentOptions,
+  );
+  const intentScore = intentResult.score;
 
   // ── Core weighted score ──────────────────────────────────────────────────────
   const coreScore = totalW > 0
@@ -680,54 +1111,170 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
     }
   }
 
-  // ── Age-gap penalty ──────────────────────────────────────────────────────────
+  // ── Age-gap penalty (Penalty_age) ───────────────────────────────────────────
   let ageGapPenaltyPoints = 0;
-  const age = parseInt(String(candidate.age || '').replace(/[^\d]/g, ''), 10) || null;
-  if (age) {
-    if (job.ageMin && age < job.ageMin) {
-      ageGapPenaltyPoints = (job.ageMin - age) * ageGapPenalty;
-    } else if (job.ageMax && age > job.ageMax) {
-      ageGapPenaltyPoints = (age - job.ageMax) * ageGapPenalty;
+  const age = parseCandidateAge(candidate);
+  const missingAgeScore = Number(config.missingAgeScore ?? ageGapPenalty * 3) || 0;
+  if (jobRequiresAge(job)) {
+    if (age == null) {
+      if (missingAgeScore > 0) ageGapPenaltyPoints = missingAgeScore;
+    } else {
+      const amin = Number(job.ageMin);
+      const amax = Number(job.ageMax);
+      if (Number.isFinite(amin) && age < amin) {
+        ageGapPenaltyPoints = (amin - age) * ageGapPenalty;
+      } else if (Number.isFinite(amax) && age > amax) {
+        ageGapPenaltyPoints = (age - amax) * ageGapPenalty;
+      }
     }
   }
 
-  const finalScore = clamp(
-    Math.round(coreScore) - salaryPenaltyPoints - ageGapPenaltyPoints
+  // ── General penalties (gender, mobility, scope, license, hours, availability) ─
+  // availability: compares jobs.availability vs candidates.availability (matchingPenaltyService)
+  const generalResult = computeGeneralPenalties(candidate, job, config);
+  const generalPenaltyPoints = generalResult.total;
+
+  const penaltyReasons = [
+    ...generalResult.reasons.map((r) => ({ label: r.label, amount: r.amount, key: r.key, type: r.type })),
+    ...buildSalaryPenaltyReasons(salaryPenaltyPoints, missingSalaryScore, candSalaryMin),
+    ...buildAgePenaltyReasons(ageGapPenaltyPoints, {
+      missing: jobRequiresAge(job) && parseCandidateAge(candidate) == null,
+    }),
+  ];
+
+  const finalScore = Math.max(
+    0,
+    Math.round(coreScore) - salaryPenaltyPoints - ageGapPenaltyPoints - generalPenaltyPoints,
   );
 
-  return {
-    finalScore,
-    breakdown: {
-      vector:          Math.round(vectorScore),
-      tags:            Math.round(tagsScore),
-      geo:             Math.round(geoScore),
-      experience:      Math.round(expScore),
-      intent:          Math.round(intentScore),
-      coreScore:       Math.round(coreScore),
-      salaryPenalty:   salaryPenaltyPoints,
-      ageGapPenalty:   ageGapPenaltyPoints,
-      weights:         { vW, tW, gW, eW, iW, totalW },
-      tagBreakdown:    tagResult.breakdown,
-      geoMissing:      geoResult.missing,
-      geoDistance:     geoResult.distance,
-      intentType:      intentResult.intentType,
-      candidateYears:  expResult.candidateYears,
-      requiredYears:   expResult.requiredYears,
+  const roundedCore = Math.round(coreScore);
+  const roundedVector = Math.round(vectorScore);
+  const roundedTags = Math.round(tagsScore);
+  const roundedGeo = Math.round(geoScore);
+  const roundedExp = Math.round(expScore);
+  const roundedIntent = Math.round(intentScore);
+
+  const breakdown = enrichBreakdownForApi({
+    vector:            roundedVector,
+    tags:              roundedTags,
+    tagsScore:         roundedTags,
+    geo:               roundedGeo,
+    experience:        roundedExp,
+    intent:            roundedIntent,
+    isExperienceEnabled,
+    coreScore:         roundedCore,
+    salaryPenalty:     salaryPenaltyPoints,
+    ageGapPenalty:     ageGapPenaltyPoints,
+    generalPenalties:  generalPenaltyPoints,
+    weights:           { vW, tW, gW, eW, iW, totalW },
+    weightedContributions: {
+      vector:     { score: roundedVector, weight: vW, points: (roundedVector * vW) / totalW },
+      tags:       { score: roundedTags,   weight: tW, points: (roundedTags * tW) / totalW },
+      geo:        { score: roundedGeo,    weight: gW, points: (roundedGeo * gW) / totalW },
+      experience: { score: roundedExp,    weight: eW, points: (roundedExp * eW) / totalW },
+      intent:     { score: roundedIntent, weight: iW, points: (roundedIntent * iW) / totalW },
     },
+    tagBreakdown:      tagResult.breakdown,
+    geoMissing:        geoResult.missing,
+    geoDistance:       geoResult.distance,
+    intentType:        intentResult.intentType,
+    candidateYears:    expResult.candidateYears,
+    requiredYears:     expResult.requiredYears,
+    penaltyReasons,
+  });
+
+  return { finalScore, breakdown };
+}
+
+/**
+ * Full match payload for API consumers (score + breakdown + parameter traffic lights).
+ */
+async function computeMatchPackage(candidate, job, jobEmb, config, linkedInfo = null, options = {}) {
+  const { finalScore, breakdown } = await computeFullMatchScore(
+    candidate,
+    job,
+    jobEmb,
+    config,
+    linkedInfo,
+    options,
+  );
+  const parameterMatches = computeParameterMatches(candidate, job);
+  return {
+    matchScore: finalScore,
+    scoreBreakdown: breakdown,
+    parameterMatches,
   };
+}
+
+/**
+ * Build intent context from plain job rows (linked jobs list).
+ * @param {Array<{ id?: string, field?: string, role?: string }>} jobRows
+ */
+async function buildIntentScoreOptions(jobRows) {
+  const { buildLinkedJobsForIntent } = require('./jobTaxonomyResolver');
+  const linkedJobs = await buildLinkedJobsForIntent(jobRows);
+  const taxonomyIndex = await loadTaxonomyIndex();
+  return { linkedJobs, taxonomyIndex };
+}
+
+/**
+ * Per-candidate intent context from all JobCandidate links (for scoring one target job).
+ * @param {string[]} candidateIds
+ */
+async function buildIntentOptionsByCandidateIds(candidateIds) {
+  const ids = [...new Set((candidateIds || []).map((id) => String(id)).filter(Boolean))];
+  const out = new Map();
+  if (!ids.length) return out;
+
+  const JobCandidate = require('../models/JobCandidate');
+  const Job = require('../models/Job');
+  const { Op } = require('sequelize');
+
+  const links = await JobCandidate.findAll({
+    where: { candidateId: { [Op.in]: ids }, jobId: { [Op.ne]: null } },
+    include: [{ model: Job, as: 'job', attributes: ['id', 'field', 'role'], required: false }],
+  });
+
+  const jobsByCandidate = new Map();
+  for (const link of links) {
+    const cid = String(link.candidateId);
+    if (!jobsByCandidate.has(cid)) jobsByCandidate.set(cid, []);
+    const plain = link.get ? link.get({ plain: true }) : link;
+    const job = plain.job || { id: plain.jobId, field: null, role: null };
+    if (job?.id) jobsByCandidate.get(cid).push(job);
+  }
+
+  const taxonomyIndex = await loadTaxonomyIndex();
+  for (const cid of ids) {
+    const jobs = jobsByCandidate.get(cid) || [];
+    const linkedJobs = jobs.map((j) => ({
+      jobId: String(j.id),
+      field: j.field,
+      role: j.role,
+      taxonomy: resolveJobTaxonomy(j, taxonomyIndex),
+    }));
+    out.set(cid, { linkedJobs, taxonomyIndex });
+  }
+  return out;
 }
 
 module.exports = {
   computeFullMatchScore,
+  computeMatchPackage,
   computeVectorScore,
   computeTagScore,
+  normalizeTagCategory,
   computeGeoScore,
+  resolveGeoRegionId,
   computeExperienceScore,
   computeIntentScore,
   buildCandidateTagMap,
   getJobEmbedding,
   invalidateCityCache,
+  enrichBreakdownForApi,
   JC_EXPLICIT_APPLICATION_SOURCES,
   isExplicitJobCandidateSource,
   buildLinkedInfoFromJobCandidate,
+  buildIntentScoreOptions,
+  buildIntentOptionsByCandidateIds,
 };

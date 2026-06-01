@@ -311,7 +311,10 @@ const enrich = async (req, res) => {
     const searchOfficialWebsite = async (companyName) => {
       if (!companyName) return null;
 
-      const query = `${companyName} official website`;
+      const name = String(companyName).trim();
+      const query = /[\u0590-\u05FF]/.test(name)
+        ? `${name} האתר הרשמי`
+        : `${name} official website`;
 
       try {
         const response = await axios.get('https://serpapi.com/search.json', {

@@ -12,8 +12,10 @@ const JobCandidateScreening = require('../models/JobCandidateScreening');
 const Candidate = require('../models/Candidate');
 const User = require('../models/User');
 const jobCandidateService = require('../services/jobCandidateService');
+const jobService = require('../services/jobService');
 const jobCandidateStatusService = require('../services/jobCandidateStatusService');
 const screeningInclusionService = require('../services/screeningInclusionService');
+const candidateJobMatchingService = require('../services/candidateJobMatchingService');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
@@ -42,6 +44,9 @@ const AUDIT_CANDIDATE_FIELD_SKIP = new Set([
   'jobMatchesCount',
   'embedding',
   'searchText',
+  'originalText',
+  'searchTextSavedAt',
+  'resumeUploadedAt',
   'createdAt',
   'updatedAt',
 ]);
@@ -142,6 +147,7 @@ const picklistService = require('../services/picklistService');
 const candidateTagService = require('../services/candidateTagService');
 const fetch = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
 const mammoth = require('mammoth');
+const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 const pdfParse = require('pdf-parse');
 const { createWorker } = require('tesseract.js');
 
@@ -215,14 +221,23 @@ function welcomePlaceholderContextFromRequest(req) {
  * `queueCandidateWelcomeEmail` uses the admin template catalog (see messageTemplateService).
  */
 const getStaffClientIdFromRequest = async (req) => {
+  const userId = req.user?.sub;
+  if (userId) {
+    try {
+      const user = await User.findByPk(userId, { attributes: ['clientId'] });
+      if (user?.clientId) return String(user.clientId);
+    } catch (err) {
+      /* fall through to Bearer parse */
+    }
+  }
   const token = getBearerTokenFromRequest(req);
   if (!token) return null;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'change_me');
-    const userId = decoded.sub;
-    if (!userId) return null;
-    const user = await User.findByPk(userId, { attributes: ['clientId'] });
-    return user?.clientId || null;
+    const uid = decoded.sub;
+    if (!uid) return null;
+    const user = await User.findByPk(uid, { attributes: ['clientId'] });
+    return user?.clientId ? String(user.clientId) : null;
   } catch (err) {
     return null;
   }
@@ -232,7 +247,7 @@ const extractTextFromImageBuffer = async (buffer) => {
   const worker = await createWorker('eng+heb');
   try {
     const { data } = await worker.recognize(buffer);
-    return data?.text?.trim() || '';
+    return normalizeResumeSearchText(data?.text || '');
   } catch (err) {
     console.error('[embed-ocr-error]', err.message || err);
     return '';
@@ -341,7 +356,7 @@ const ocrImageBuffersWithSharedWorker = async (buffers) => {
         const t = (data?.text || '').trim();
         if (t) parts.push(t);
       }
-      return parts.join('\n\n').trim();
+      return normalizeResumeSearchText(parts.join('\n'));
     } finally {
       await worker.terminate();
     }
@@ -436,16 +451,16 @@ const extractTextFromPdfBuffer = async (buffer) => {
   } catch (e) {
     console.log('[embed-parse-pdf-error]', e.message || e);
   }
-  if (fromParse.length >= PDF_TEXT_MIN_TO_SKIP_OCR) return fromParse;
+  if (fromParse.length >= PDF_TEXT_MIN_TO_SKIP_OCR) return normalizeResumeSearchText(fromParse);
   let fromOcr = '';
   try {
     fromOcr = await extractTextFromScannedPdfBuffer(buffer);
   } catch (e) {
     console.log('[scanned-pdf-ocr-fallback-error]', e.message || e);
   }
-  if (fromOcr.length > fromParse.length) return fromOcr;
-  if (fromOcr) return fromOcr;
-  if (fromParse) return fromParse;
+  if (fromOcr.length > fromParse.length) return normalizeResumeSearchText(fromOcr);
+  if (fromOcr) return normalizeResumeSearchText(fromOcr);
+  if (fromParse) return normalizeResumeSearchText(fromParse);
   if (!fromOcr && !fromParse) {
     console.warn('[pdf-extract-empty]', {
       byteLength: buffer.length,
@@ -1154,6 +1169,14 @@ const CV_PARSING_TAG_QUOTE_APPENDIX = `
   * If you also emit the legacy "evidence" field, it MUST equal "quote" (same verbatim substring).
 `;
 
+/** Overrides any legacy "10-15 tags" / hard-cap wording in the stored cv_parsing prompt. */
+const CV_PARSING_TAG_COUNT_APPENDIX = `
+--- Tag count (OVERRIDES any earlier cap in this prompt) ---
+- There is NO maximum tag count. Extract every relevant professional tag supported by evidence in the CV.
+- Include roles, skills, tools, seniority, industry, methodologies, degrees, and soft skills whenever they appear.
+- Still aim for at least 1-2 Role tags, one Seniority tag, and one Industry tag when the CV supports them.
+`;
+
 /** Sequelize attribute type → short label for LLM context */
 const sequelizeAttrTypeLabel = (t) => {
   if (!t) return 'unknown';
@@ -1258,7 +1281,7 @@ const buildResumeResponseSchema = () => ({
     },
     tags: {
       type: 'array',
-      description: '10-15 tags total (HARD CAP 15). 1-2 Role tags, exactly 1 Seniority, exactly 1 Industry.',
+      description: 'All relevant professional tags from the CV (no fixed limit). Include 1-2 Role tags, at least one Seniority, and at least one Industry when present.',
       items: {
         type: 'object',
         required: ['name', 'evidence', 'quote', 'raw_type', 'context'],
@@ -1369,7 +1392,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}`;
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);
@@ -1404,7 +1427,7 @@ const parseResumeWithAi = async ({ resumeText }) => {
   // it keeps generating tag/work-experience items until it hits maxOutputTokens
   // (we observed 32,753 output tokens / ~100KB of JSON for one CV).
   // We keep `responseMimeType: 'application/json'` to force JSON-only output,
-  // and rely on the prompt's HARD CAPS + the controller's validate-and-repair
+  // and rely on the prompt's brevity rules + the validate-and-repair
   // pass + the truncation salvager to keep the result clean and complete.
   const generationConfig = {
     temperature: 0.1,
@@ -1513,13 +1536,41 @@ const list = async (req, res) => {
     const jobIdRaw = req.query.jobId ?? req.query.job_id;
     const matchJobId =
       jobIdRaw != null && String(jobIdRaw).trim() !== '' ? String(jobIdRaw).trim() : null;
+    const tagIdRaw = req.query.tagId ?? req.query.tag_id ?? req.query.tag;
+    const filterTagId =
+      tagIdRaw != null && String(tagIdRaw).trim() !== '' ? String(tagIdRaw).trim() : null;
+    const engineScoresRaw = req.query.engineScores ?? req.query.liveScores ?? req.query.includeEngineScores;
+    const includeEngineScores =
+      engineScoresRaw === '1' ||
+      engineScoresRaw === 1 ||
+      String(engineScoresRaw || '').toLowerCase() === 'true';
+    const matchLastJobScoresRaw =
+      req.query.matchLastJobScores ?? req.query.lastJobMatchScores ?? req.query.lastJobScores;
+    const matchLastJobScoresExplicit =
+      matchLastJobScoresRaw != null && String(matchLastJobScoresRaw).trim() !== '';
+    const matchLastJobScoresDisabled =
+      matchLastJobScoresRaw === '0' ||
+      matchLastJobScoresRaw === 0 ||
+      String(matchLastJobScoresRaw || '').toLowerCase() === 'false';
+    /** Default on so list column matches simulate popup; pass `matchLastJobScores=0` for lightweight poll. */
+    const matchLastJobScores = matchLastJobScoresExplicit
+      ? !matchLastJobScoresDisabled &&
+        (matchLastJobScoresRaw === '1' ||
+          matchLastJobScoresRaw === 1 ||
+          String(matchLastJobScoresRaw || '').toLowerCase() === 'true')
+      : true;
 
+    const tenantClientId = await getStaffClientIdFromRequest(req);
     const payload = await candidateService.listPaginated({
       page,
       limit: clampedLimit,
       search,
       advanced,
       jobId: matchJobId,
+      tagId: filterTagId,
+      tenantClientId,
+      includeEngineScores,
+      matchLastJobScores,
     });
     const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
       if (!row || typeof row !== 'object') return row;
@@ -1578,9 +1629,10 @@ const getByUser = async (req, res) => {
 
 
 const getCandidateTagsSchemaText = () => `
-Candidate tag schema (from backend/src/models/CandidateTag.js):
+Candidate tag schema (from backend/src/models/SystemTag.js):
+- type (candidate | job) — always "candidate" for candidate profiles
 - name (String)
-- candidate_id (UUID, FK -> candidates.id)
+- entity_id (UUID, FK -> candidates.id or jobs.id depending on type)
 - tag_id (UUID, FK -> tags.id)
 - raw_type (role/skill/education/etc.)
 - context (Core/Tool/Degree)
@@ -1601,9 +1653,12 @@ const get = async (req, res) => {
     { method: req.method, url: req.originalUrl, host: req.get('host'), candidateId: req.params.id },
   );
   try {
-    const candidate = await candidateService.getById(req.params.id);
+    const tenantClientId = await getStaffClientIdFromRequest(req);
+    const candidate = await candidateService.getById(req.params.id, { tenantClientId });
     console.log('[candidateController.get] found candidate', { id: candidate.id });
-    res.json(candidate);
+    const out = { ...candidate };
+    delete out.embedding;
+    res.json(out);
   } catch (err) {
     console.error('[candidateController.get] lookup failed', { id: req.params.id, error: err.message || err });
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
@@ -1760,13 +1815,6 @@ const createFromAi = async (req, res) => {
           })
           .filter(Boolean)
       : [];
-    const TAG_TARGET = 15;
-    if (aiTagObjects.length < TAG_TARGET) {
-      console.warn(
-        `[createFromAi] AI returned ${aiTagObjects.length} tags (target ${TAG_TARGET}). ` +
-          `Consider tightening the cv_parsing prompt or re-running the request.`,
-      );
-    }
       //DISABLE CANDIDATE TAGS BY JOB
     const roleCoveredTags = ensureRoleTagCoverage(aiTagObjects, normalizedWorkExperience);
 
@@ -1809,11 +1857,28 @@ const createFromAi = async (req, res) => {
       education: normalizeEducation(aiResult.education || fallback.education),
       languages: normalizeLanguages(aiResult.languages || fallback.languages),
       industryAnalysis,
-      searchText: text.slice(0, 50000),
+      searchText: normalizeResumeSearchText(text).slice(0, 50000),
+      searchTextSavedAt: new Date(),
       source: strOrNull(aiResult.source) || 'ai-upload',
     };
 
-    const createdCandidate = await candidateService.create(candidatePayload);
+    let createdCandidate;
+    try {
+      createdCandidate = await candidateService.create(candidatePayload);
+    } catch (createErr) {
+      const msg = String(createErr?.message || '');
+      if (createErr?.status === 400 && /עיר/.test(msg)) {
+        // eslint-disable-next-line no-console
+        console.warn('[createFromAi] city validation failed, creating without address:', candidatePayload.address);
+        createdCandidate = await candidateService.create({
+          ...candidatePayload,
+          address: null,
+          location: null,
+        });
+      } else {
+        throw createErr;
+      }
+    }
 
     // Audit: 'קליטת קו"ח' — AI-driven CV ingestion
     systemEventEmitter.emit(req, {
@@ -1888,6 +1953,25 @@ const createFromAi = async (req, res) => {
   } catch (err) {
     console.error('[createFromAi-error]', err);
     res.status(err.status || 500).json({ message: err.message || 'AI candidate creation failed' });
+  }
+};
+
+/** PATCH /api/candidates/:id/parsed-text — save edited parsed CV; archives prior searchText to originalText. */
+const saveParsedText = async (req, res) => {
+  try {
+    const { text } = req.body || {};
+    const updated = await candidateService.saveParsedTextVersion(req.params.id, text);
+    const embedText = [updated.fullName, updated.professionalSummary, updated.searchText]
+      .filter(Boolean)
+      .join(' ')
+      .trim();
+    if (embedText.length > 3) {
+      void tryEmbedCandidate(updated.id, embedText);
+    }
+    const refreshed = await candidateService.getById(updated.id);
+    res.json(refreshed);
+  } catch (err) {
+    res.status(err.status || 400).json({ message: err.message || 'Save failed' });
   }
 };
 
@@ -2173,13 +2257,15 @@ const attachMedia = async (req, res) => {
     const field = type === 'resume' ? 'resumeUrl' : 'profilePicture';
     const url = buildPublicUrl(key);
     console.log('[attachMedia] candidate', req.params.id, { key, type, field, url });
-    const baseCandidate = await candidateService.update(req.params.id, { [field]: url });
+    const attachUpdates = { [field]: url };
+    if (type === 'resume') attachUpdates.resumeUploadedAt = new Date();
+    const baseCandidate = await candidateService.update(req.params.id, attachUpdates);
     if (type === 'resume') {
       const extraText = await fetchResumeText(url, baseCandidate.id);
       console.log('[attachMedia] resume extraText length', baseCandidate.id, extraText ? extraText.length : 0);
       // Persist raw text for search/embedding + allow downstream keyword match
       const baseUpdates = extraText && extraText.trim()
-        ? { searchText: extraText.slice(0, 50000) }
+        ? { searchText: extraText.slice(0, 50000), searchTextSavedAt: new Date() }
         : {};
 
       // Prefer AI parsing (Gemini) to populate candidate fields; fallback to regex parsing.
@@ -2320,7 +2406,10 @@ const putResumeFileInS3 = async (candidateId, fileBase64, filename, mimeType) =>
 const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeType) => {
   const out = await putResumeFileInS3(candidateId, fileBase64, filename, mimeType);
   if (!out) return null;
-  await candidateService.update(candidateId, { resumeUrl: out.publicUrl });
+  await candidateService.update(candidateId, {
+    resumeUrl: out.publicUrl,
+    resumeUploadedAt: new Date(),
+  });
   return out.publicUrl;
 };
 
@@ -2393,7 +2482,7 @@ const extractFromBuffer = async (buffer, ct) => {
     ) {
       try {
         const resDoc = await mammoth.extractRawText({ buffer });
-        if (resDoc.value) return resDoc.value;
+        if (resDoc.value) return normalizeResumeSearchText(resDoc.value);
       } catch (e) {
         console.log('[embed-parse-doc-error]', e.message || e);
       }
@@ -2421,7 +2510,7 @@ const extractFromBuffer = async (buffer, ct) => {
     }
 
     const asText = buffer.toString('utf8');
-    if (asText && asText.trim()) return asText;
+    if (asText && asText.trim()) return normalizeResumeSearchText(asText);
   } catch (e) {
     console.log('[embed-parse-error]', e.message || e);
   }
@@ -2467,7 +2556,7 @@ const fetchResumeText = async (resumeUrl, candidateIdForLog = '') => {
   } catch (e) {
     console.log('[embed-fetch-error]', candidateIdForLog, e.message || e);
   }
-  return extraText;
+  return normalizeResumeSearchText(extraText);
 };
 
 const extFromContentType = (ct) => {
@@ -2940,6 +3029,42 @@ const generateInternalOpinion = async (req, res) => {
   }
 };
 
+/** Taxonomy field picker → save interest, link open jobs, return scored linked-jobs rows. */
+const addFieldInterest = async (req, res) => {
+  try {
+    const candidateId = req.params.id;
+    const body = req.body || {};
+    const category = body.category != null ? String(body.category).trim() : '';
+    const role = body.role != null ? String(body.role).trim() : '';
+    if (!category || !role) {
+      return res.status(400).json({ message: 'category and role are required' });
+    }
+    const candidateJobInterestService = require('../services/candidateJobInterestService');
+    const tenantClientId = await getStaffClientIdFromRequest(req);
+    const enriched = await candidateJobInterestService.addFieldInterestAndList(
+      candidateId,
+      {
+        category,
+        fieldType: body.fieldType != null ? String(body.fieldType).trim() : '',
+        role,
+        categoryId: body.categoryId,
+        clusterId: body.clusterId,
+        roleId: body.roleId,
+      },
+      {
+        maxJobs: body.maxJobs,
+        status: body.status,
+        tenantClientId,
+      },
+    );
+    res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.status(201).json(enriched);
+  } catch (err) {
+    console.error('[addFieldInterest]', err.message || err);
+    return res.status(err.status || 500).json({ message: err.message || 'Failed to add field interest' });
+  }
+};
+
 /** Create or update a job–candidate link (e.g. bulk “הוסף לסינון”) with optional filter notes/position in workflowMeta. */
 const linkCandidateToJob = async (req, res) => {
   try {
@@ -2981,10 +3106,15 @@ const listLinkedJobs = async (req, res) => {
   try {
     const candidateId = req.params.id;
     const rows = await jobCandidateService.listForCandidate(candidateId);
-    const usable = rows.filter((r) => r.jobId && r.job && r.job.id);
+    const usable = rows.filter((r) => {
+      if (r.jobId && r.job && r.job.id) return true;
+      if (!r.jobId && r.source === 'field_interest') return true;
+      return false;
+    });
+    const enriched = await candidateJobMatchingService.enrichLinkedJobsRowsWithScores(candidateId, usable);
     res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.set('Pragma', 'no-cache');
-    res.json(usable);
+    res.json(enriched);
   } catch (err) {
     console.error('[listLinkedJobs]', err.message || err);
     res.status(400).json({ message: err.message || 'Failed to list linked jobs' });
@@ -3092,7 +3222,10 @@ const patchJobLinkStatus = async (req, res) => {
 const getScreeningPoolForCandidate = async (req, res) => {
   try {
     const candidateId = req.params.id;
-    const data = await screeningInclusionService.computeScreeningForCandidate(candidateId);
+    const tenantClientId = await getStaffClientIdFromRequest(req);
+    const data = await screeningInclusionService.computeScreeningForCandidate(candidateId, {
+      tenantClientId,
+    });
     res.set('Cache-Control', 'private, no-store');
     return res.json(data);
   } catch (err) {
@@ -3200,7 +3333,9 @@ const getRelevantJobs = async (req, res) => {
     const allJobs = await Job.findAll({
       where: { openPositions: 1 },
       limit: 100,
+      attributes: { exclude: ['skills'] },
     });
+    await jobService.hydrateJobsSkills(allJobs);
 
     if (candidateEmb && candidateEmb.length) {
       const scored = [];
@@ -3506,13 +3641,12 @@ const listScreeningRejections = async (req, res) => {
 
 // ─── Job Matching (candidate → jobs) ────────────────────────────────────────
 
-const candidateJobMatchingService = require('../services/candidateJobMatchingService');
-
 /** POST /api/candidates/:id/job-matches */
 const getJobMatches = async (req, res) => {
   try {
     const candidateId = req.params.id;
     const body = req.body || {};
+    const tenantClientId = await getStaffClientIdFromRequest(req);
     const data = await candidateJobMatchingService.computeMatchesForCandidate(candidateId, {
       limit: body.limit,
       minScore: body.minScore,
@@ -3521,6 +3655,7 @@ const getJobMatches = async (req, res) => {
       cities: body.cities,
       jobTypes: body.jobTypes,
       useVector: body.useVector,
+      tenantClientId,
     });
     res.set('Cache-Control', 'private, no-store');
     return res.json(data);
@@ -3542,11 +3677,11 @@ const getJobDeepInsight = async (req, res) => {
       return res.status(404).json({ message: 'Candidate not found' });
     }
 
-    const Job = require('../models/Job');
-    const job = await Job.findByPk(jobId);
+    const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
     if (!job) {
       return res.status(404).json({ message: 'Job not found' });
     }
+    await jobService.hydrateJobSkills(job);
     const jobPlain = job.get({ plain: true });
 
     const apiKey = process.env.GEMINI_API_KEY || process.env.GEMINI_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
@@ -3633,6 +3768,7 @@ module.exports = {
   create,
   createFromAi,
   update,
+  saveParsedText,
   approveDataCorrections,
   remove,
   createUploadUrl,
@@ -3652,6 +3788,7 @@ module.exports = {
   getScreeningPrecheck,
   getRelevantJobs,
   linkCandidateToJob,
+  addFieldInterest,
   listLinkedJobs,
   patchJobLinkStatus,
   getScreeningData,

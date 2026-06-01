@@ -1,5 +1,6 @@
 const candidateService = require('./candidateService');
 const { embedText } = require('./embeddingService');
+const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 
 const buildSearchDocument = (candidate, extraText = '') => {
   if (!candidate) return '';
@@ -75,7 +76,8 @@ const embedCandidateAndSave = async (candidateId, extraText = '') => {
   const updatePayload = { embedding };
   if (extraText && extraText.trim()) {
     // persist a truncated version to allow keyword match later
-    updatePayload.searchText = extraText.slice(0, 50000);
+    updatePayload.searchText = normalizeResumeSearchText(extraText).slice(0, 50000);
+    updatePayload.searchTextSavedAt = new Date();
   }
   await candidateService.update(candidateId, updatePayload);
   return embedding;

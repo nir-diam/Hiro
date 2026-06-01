@@ -16,7 +16,7 @@ const issueToken = (user) =>
   jwt.sign(
     { sub: user.id, email: user.email, role: user.role },
     process.env.JWT_SECRET || 'change_me',
-    { expiresIn: process.env.JWT_EXPIRES_IN || '1h' },
+    { expiresIn: process.env.JWT_EXPIRES_IN || '24h' },
   );
 
 /** Only enforced when the client sends an explicit `role` (legacy). Omit role to use DB role. */

@@ -4,13 +4,14 @@ import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, Lin
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
-import { useAuth } from '../context/AuthContext';
 import { SmartTagType, SmartTagData, SmartTagTooltipPanel } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { buildCandidateFullName } from '../utils/candidateName';
+import CityEditableField from './CityEditableField';
+import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
 import { computeAgeFromBirth } from '../utils/ageFromBirth';
-import { fetchRecruitmentSources } from '../services/recruitmentSourcesApi';
+import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 import { createPortal } from 'react-dom';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
@@ -20,7 +21,7 @@ const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, 
 );
 
 function buildMissingProfileFieldLabels(
-    data: { field?: string; title?: string; address?: string; age?: string },
+    data: { field?: string; title?: string; address?: string; location?: string; age?: string; phone?: string },
     displayAge: string,
 ): string[] {
     const labels: string[] = [];
@@ -31,8 +32,9 @@ function buildMissingProfileFieldLabels(
         if (!field) labels.push('תחום משרה');
         if (!title) labels.push('כותרת משרה');
     }
-    if (!String(data.address ?? '').trim()) labels.push('כתובת');
+    if (!candidateCityDisplay(data)) labels.push('כתובת');
     if (!String(displayAge ?? '').trim() && !String(data.age ?? '').trim()) labels.push('גיל');
+    if (!String(data.phone ?? '').trim()) labels.push('טלפון');
     return labels;
 }
 
@@ -663,7 +665,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   approveCorrectionsLoading = false,
 }) => {
   const { t } = useLanguage();
-  const { user } = useAuth();
   const summaryId = useId();
   const jobMatchesCount =
     typeof candidateData.jobMatchesCount === 'number'
@@ -724,7 +725,6 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
       return token ? { Authorization: `Bearer ${token}` } : {};
   };
-  const recruitmentClientId = user?.clientId ?? null;
   const [recruitmentSources, setRecruitmentSources] = useState<{ id: string; name: string }[]>([]);
 
   const recruitmentSourceSelectValue = useMemo(() => {
@@ -763,12 +763,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   }, [recruitmentSources, rsComboSearch]);
 
   useEffect(() => {
-      if (!recruitmentClientId || !apiBase) {
-          setRecruitmentSources([]);
-          return;
-      }
       let cancelled = false;
-      void fetchRecruitmentSources(recruitmentClientId)
+      void fetchRecruitmentSourceOptions()
           .then((rows) => {
               if (!cancelled) setRecruitmentSources(rows.map((r) => ({ id: r.id, name: r.name })));
           })
@@ -778,7 +774,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
       return () => {
           cancelled = true;
       };
-  }, [recruitmentClientId, apiBase]);
+  }, []);
 
   useLayoutEffect(() => {
       if (!rsComboOpen) {
@@ -1371,14 +1367,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   };
 
   const isIncompleteProfile = String(candidateData.status || '').trim() === 'חסר נתונים';
-  const statusExplanationTrimmed = String(candidateData.statusExplanation || '').trim();
   const missingProfileLabels = buildMissingProfileFieldLabels(candidateData, displayAge);
-  const missingDetailsBannerLine =
-      missingProfileLabels.length > 0
-          ? `פרטים חסרים: ${missingProfileLabels.join(', ')}`
-          : statusExplanationTrimmed
-            ? `פרטים חסרים: ${statusExplanationTrimmed}`
-            : 'פרטים חסרים — השלימו את השדות החובה במערכת';
+  /** Hide as soon as required local fields are filled — do not wait for server status refresh. */
+  const showMissingDetailsBanner = isIncompleteProfile && missingProfileLabels.length > 0;
+  const missingDetailsBannerLine = `פרטים חסרים: ${missingProfileLabels.join(', ')}`;
 
   const showSaveFooter = Boolean(!hideActions && onSaveCandidate);
 
@@ -1471,7 +1463,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       }
                                       className="text-3xl font-extrabold text-text-default tracking-tight"
                                   />
-                                  {isIncompleteProfile ? (
+                                  {showMissingDetailsBanner ? (
                                       <div
                                           className="sm:mr-3 flex flex-wrap items-center gap-2 px-2.5 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-lg border border-amber-200 shadow-sm shrink-0"
                                           dir="rtl"
@@ -1505,11 +1497,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                   />
                                   <span className="mx-1.5">•</span>
                                   <MapPinIcon className="w-3.5 h-3.5 ml-1 shrink-0" />
-                                  <EditableField
-                                      value={candidateData.address || ''}
+                                  <CityEditableField
+                                      value={candidateCityDisplay(candidateData)}
                                       placeholder="מיקום"
-                                      onSave={(val) => onFormChange({ ...candidateData, address: val })}
+                                      onSave={(val) =>
+                                          onFormChange({ ...candidateData, ...candidateCityPatch(val) })
+                                      }
                                       className="min-w-[80px]"
+                                      compact
                                   />
                               </div>
                           </div>
@@ -1696,9 +1691,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                       <BriefcaseIcon className="w-3.5 h-3.5 text-primary-500 shrink-0" />
                                       <span>{t('profile.recruitment_source')}</span>
                                   </div>
-                                  {recruitmentClientId ? (
-                                      <>
-                                          <button
+                                  <>
+                                      <button
                                               ref={rsComboTriggerRef}
                                               type="button"
                                               aria-expanded={rsComboOpen}
@@ -1782,12 +1776,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                                   </div>,
                                                   document.body,
                                               )}
-                                      </>
-                                  ) : (
-                                      <div className="rounded-xl border border-dashed border-border-default bg-bg-subtle/50 px-3 py-2.5 text-sm font-medium text-text-default">
-                                          {candidateData.source?.trim() || '—'}
-                                      </div>
-                                  )}
+                                  </>
                               </div>
                               <div className="flex shrink-0 flex-row flex-nowrap items-end gap-x-4 whitespace-nowrap sm:gap-x-6">
                                   <div className="min-w-[6.5rem] text-right">

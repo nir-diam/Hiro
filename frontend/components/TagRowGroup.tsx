@@ -352,7 +352,7 @@ const rowConfigs: Array<{
         label: 'השכלה ושפות',
         icon: AcademicCapIcon,
         iconColor: 'text-orange-500',
-        types: ['certification', 'language'],
+        types: ['certification', 'language', 'degree', 'education'],
         limit: 4,
         buttonAction: 'qualification',
     },

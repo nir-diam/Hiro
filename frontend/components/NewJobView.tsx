@@ -19,6 +19,8 @@ import { useLanguage } from '../context/LanguageContext';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
 import type { PicklistValueRow } from '../services/picklistValuesApi';
 import {
+    AVAILABILITY_FALLBACK,
+    AVAILABILITY_PICKLIST_KEY,
     DRIVING_LICENSE_FALLBACK,
     DRIVING_LICENSE_PICKLIST_KEY,
     fetchPicklistValuesByKey,
@@ -111,6 +113,52 @@ function mapPicklistRowsToJobScopeOptions(
     }));
 }
 
+function isNeutralDrivingLicenseValue(v: string, rows: PicklistValueRow[]): boolean {
+    return !licenseTypeForJobPayload(v, rows);
+}
+
+function licenseTypesFromJob(jobData: { licenseTypes?: unknown; licenseType?: unknown }, rows: PicklistValueRow[]): string[] {
+    const raw = Array.isArray(jobData.licenseTypes) ? jobData.licenseTypes : [];
+    const mapped = raw.map((v) => remapDrivingLicenseFormValue(String(v), rows));
+    const kept = mapped.filter((v) => !isNeutralDrivingLicenseValue(v, rows));
+    if (kept.length) return kept;
+    if (jobData.licenseType) {
+        const one = remapDrivingLicenseFormValue(String(jobData.licenseType), rows);
+        if (!isNeutralDrivingLicenseValue(one, rows)) return [one];
+    }
+    return [];
+}
+
+function coerceFormAgeFromAi(v: unknown, fallback: number): number {
+    const n = typeof v === 'number' ? v : parseInt(String(v ?? '').replace(/[^\d]/g, ''), 10);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(70, Math.max(18, Math.round(n)));
+}
+
+function availabilityOptionsFromJob(jobData: { availabilityOptions?: unknown; availability?: unknown }): string[] {
+    const raw = Array.isArray(jobData.availabilityOptions) ? jobData.availabilityOptions : [];
+    const trimmed = raw.map((v) => String(v).trim()).filter(Boolean);
+    if (trimmed.length) return trimmed;
+    const single = jobData.availability != null ? String(jobData.availability).trim() : '';
+    return single ? [single] : [];
+}
+
+function licenseTypesForJobPayload(ids: string[], rows: PicklistValueRow[]): string[] {
+    return ids.map((v) => licenseTypeForJobPayload(v, rows)).filter((t) => t);
+}
+
+function drivingLicenseMultiOptions(rows: PicklistValueRow[]): { id: string; name: string }[] {
+    return rows
+        .filter((r) => !isNeutralDrivingLicenseValue(r.value, rows))
+        .map((r) => ({ id: r.value, name: picklistRowLabel(r) }));
+}
+
+function availabilityMultiOptions(rows: PicklistValueRow[]): { id: string; name: string }[] {
+    return rows
+        .filter((r) => String(r.value ?? '').trim() !== '')
+        .map((r) => ({ id: r.value, name: picklistRowLabel(r) }));
+}
+
 /** Map form driving-license picklist `value` → persisted `licenseType` (empty = לא נדרש). */
 function licenseTypeForJobPayload(formDrivingLicense: string, rows: PicklistValueRow[]): string {
     const v = String(formDrivingLicense ?? '').trim();
@@ -130,20 +178,43 @@ function licenseTypeForJobPayload(formDrivingLicense: string, rows: PicklistValu
     return row?.value ?? v;
 }
 
-/** Map form mobility picklist `value` → persisted boolean `jobs.mobility`. */
+/** Picklist row means “no mobility requirement” for `jobs.mobility` boolean. */
+function isMobilityNeutralPicklistRow(row: PicklistValueRow | undefined, rawValue: string): boolean {
+    const v = String(rawValue ?? '').trim().toLowerCase();
+    if (!v) return true;
+    const neutralVals = new Set(['לא חשוב', 'לא', '-', 'not_mobile', 'none', 'no', 'לא_נייד']);
+    if (neutralVals.has(v)) return true;
+    if (!row) return false;
+    const rv = String(row.value ?? '').trim().toLowerCase();
+    if (neutralVals.has(rv) || rv === 'not_mobile') return true;
+    const lbl = picklistRowLabel(row).toLowerCase();
+    if (/\bלא\s*נייד\b/.test(lbl) || /\bלא\s*חשוב\b/.test(lbl)) return true;
+    return false;
+}
+
+/** Map form mobility picklist `value` → persisted boolean `jobs.mobility` (DB is boolean). */
 function mobilityBoolForJobPayload(formMobility: string, rows: PicklistValueRow[]): boolean {
     const v = String(formMobility ?? '').trim();
+    if (!v) return false;
     if (v === 'חובה' || v === 'כן' || v === 'בעל/ת רכב') return true;
     if (v === 'לא חשוב' || v === 'לא' || v === '-') return false;
     const row = rows.find((r) => r.value === v);
-    if (!row) return ['כן', 'חובה', 'בעל/ת רכב'].includes(v);
-    const lbl = picklistRowLabel(row).trim();
-    if (row.value === 'כן' || lbl === 'כן') return true;
-    if (row.value === 'בעל/ת רכב' || lbl === 'בעל/ת רכב') return true;
-    if (row.value === 'חובה' || lbl === 'חובה') return true;
-    if (row.value === 'לא' || lbl === 'לא') return false;
-    if (row.value === '-' || lbl === 'לא חשוב') return false;
-    return false;
+    if (row) {
+        if (isMobilityNeutralPicklistRow(row, v)) return false;
+        return true;
+    }
+    return ['כן', 'חובה', 'בעל/ת רכב'].includes(v);
+}
+
+/** Map stored `jobs.mobility` boolean → current picklist `value` (supports Hebrew + API picklists). */
+function jobMobilityBooleanToFormValue(mobility: unknown, rows: PicklistValueRow[]): string {
+    const require = mobility === true;
+    if (!rows.length) return require ? 'חובה' : 'לא חשוב';
+    const neutral = (r: PicklistValueRow) => isMobilityNeutralPicklistRow(r, r.value);
+    const nonNeutral = rows.find((r) => !neutral(r));
+    const neutralRow = rows.find((r) => neutral(r));
+    if (require) return nonNeutral?.value ?? rows[0]!.value;
+    return neutralRow?.value ?? '';
 }
 
 function remapDrivingLicenseFormValue(current: string, rows: PicklistValueRow[]): string {
@@ -166,6 +237,7 @@ function remapDrivingLicenseFormValue(current: string, rows: PicklistValueRow[])
 }
 
 function remapMobilityFormValue(current: string, rows: PicklistValueRow[]): string {
+    if (current === '' || current == null) return '';
     if (!rows.length) return current;
     const valid = new Set(rows.map((r) => r.value));
     if (valid.has(current)) return current;
@@ -1006,6 +1078,8 @@ const SMART_TAG_TYPE_STYLES: Record<SmartTagType, string> = {
     industry: "bg-transparent text-emerald-700 border-emerald-200 font-bold",
     certification: "bg-transparent text-orange-700 border-orange-200 font-bold",
     language: "bg-transparent text-pink-600 border-pink-200 font-medium",
+    degree: "bg-transparent text-orange-700 border-orange-200 font-bold",
+    education: "bg-transparent text-orange-700 border-orange-200 font-bold",
 };
 
 const SMART_TAG_TYPE_LABELS: Record<SmartTagType, string> = {
@@ -1017,6 +1091,8 @@ const SMART_TAG_TYPE_LABELS: Record<SmartTagType, string> = {
     industry: "תעשייה",
     certification: "השכלה/הסמכה",
     language: "שפה",
+    degree: "השכלה/הסמכה",
+    education: "השכלה/הסמכה",
 };
 
 // Same category rows as CandidateProfile (TagRowGroup)
@@ -1613,7 +1689,8 @@ const initialJobState = {
     openDateIso: null as string | null,
     status: 'טיוטה', 
     priority: 'רגילה' as Priority, 
-    healthProfile: 'standard', 
+    healthProfile: 'standard',
+    availabilityOptions: [] as string[],
     jobType: ['מלאה'], 
     jobField: null as SelectedJobField | null,
     contacts: [] as string[],
@@ -1622,8 +1699,8 @@ const initialJobState = {
     internalNotes: '', 
     requirements: '',
     maritalStatus: 'לא חשוב', 
-    mobility: 'לא חשוב', 
-    drivingLicense: '-', 
+    mobility: '', 
+    drivingLicenses: [] as string[],
     gender: ['male', 'female'], 
     ageMin: 20, 
     ageMax: 65, 
@@ -1665,6 +1742,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         sortDrivingLicensePicklistRows(DRIVING_LICENSE_FALLBACK),
     );
     const [mobilityPicklist, setMobilityPicklist] = useState<PicklistValueRow[]>(MOBILITY_FALLBACK);
+    const [availabilityPicklist, setAvailabilityPicklist] = useState<PicklistValueRow[]>(AVAILABILITY_FALLBACK);
     const [activeSection, setActiveSection] = useState('general-info');
     const [isClientConfirmed, setIsClientConfirmed] = useState(false);
     const [activeClients, setActiveClients] = useState<Array<{ id: string; label: string }>>([]);
@@ -1733,7 +1811,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                           ? (s.mode as TagMode)
                           : mapLlmModeToTagMode(s.mode),
                       source: (s.source as TagSource) || 'manual',
-                      tagType: (s.tagType === 'soft_skill' ? 'soft' : s.tagType) as SmartTagType | undefined,
+                      tagType: (() => {
+                          const t = String(s.tagType || 'skill');
+                          if (t === 'soft_skill') return 'soft';
+                          if (t === 'degree' || t === 'education') return 'certification';
+                          return t;
+                      })() as SmartTagType | undefined,
                       tag_reason: typeof s.tag_reason === 'string' ? s.tag_reason : undefined,
                       quote: typeof s.quote === 'string' && s.quote.trim() ? s.quote : undefined,
                       relevance_score:
@@ -1778,6 +1861,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 })()),
                 salaryMin: jobData.salaryMin || prev.salaryMin,
                 salaryMax: jobData.salaryMax || prev.salaryMax,
+                ageMin: (() => {
+                    const n = Number(jobData.ageMin);
+                    return Number.isFinite(n) ? Math.round(Math.min(70, Math.max(18, n))) : prev.ageMin;
+                })(),
+                ageMax: (() => {
+                    const n = Number(jobData.ageMax);
+                    return Number.isFinite(n) ? Math.round(Math.min(70, Math.max(18, n))) : prev.ageMax;
+                })(),
                 status:
                     jobData.status != null && String(jobData.status).trim() !== ''
                         ? jobStatusApiToForm(String(jobData.status))
@@ -1787,6 +1878,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     : prev.openDateIso,
                 priority: jobData.priority || prev.priority,
                 healthProfile: jobData.healthProfile || 'standard',
+                availabilityOptions: availabilityOptionsFromJob(jobData),
                 jobType: Array.isArray(jobData.jobType)
                     ? jobData.jobType
                     : jobData.jobType
@@ -1810,8 +1902,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 skills: hydratedSkills.length ? hydratedSkills : prev.skills,
                 locations: candidateLocations.length ? candidateLocations : prev.locations,
                 gender: mapJobGenderSelection(jobData.gender),
-                mobility: jobData.mobility ? 'חובה' : 'לא חשוב',
-                drivingLicense: jobData.licenseType || 'לא חשוב',
+                mobility: jobMobilityBooleanToFormValue(jobData.mobility, mobilityPicklistRef.current),
+                drivingLicenses: licenseTypesFromJob(jobData, drivingLicensePicklistRef.current),
                 jobId: jobData.id || prev.jobId,
                 postingCode: jobData.postingCode || prev.postingCode,
                 uniqueEmail: jobData.postingCode ? `humand+${jobData.postingCode}@app.hiro.co.il` : (jobData.uniqueEmail || prev.uniqueEmail),
@@ -1875,10 +1967,30 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     }, [apiBase]);
 
     useEffect(() => {
+        let cancelled = false;
+        if (!apiBase) return;
+        void fetchPicklistValuesByKey(apiBase, AVAILABILITY_PICKLIST_KEY).then((rows) => {
+            if (cancelled) return;
+            setAvailabilityPicklist(rows.length > 0 ? rows : AVAILABILITY_FALLBACK);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
+
+    useEffect(() => {
         if (drivingLicensePicklist.length === 0) return;
         setFormData((prev) => {
-            const next = remapDrivingLicenseFormValue(prev.drivingLicense, drivingLicensePicklist);
-            return next === prev.drivingLicense ? prev : { ...prev, drivingLicense: next };
+            const next = prev.drivingLicenses
+                .map((v) => remapDrivingLicenseFormValue(v, drivingLicensePicklist))
+                .filter((v) => !isNeutralDrivingLicenseValue(v, drivingLicensePicklist));
+            if (
+                next.length === prev.drivingLicenses.length &&
+                next.every((v, i) => v === prev.drivingLicenses[i])
+            ) {
+                return prev;
+            }
+            return { ...prev, drivingLicenses: next };
         });
     }, [drivingLicensePicklist]);
 
@@ -2162,7 +2274,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 ...raw,
                 jobTitle: raw.title ?? raw.jobTitle,
                 jobDescription: raw.description ?? raw.jobDescription,
-                drivingLicense: raw.licenseType ?? raw.drivingLicense,
+                drivingLicenses: licenseTypesFromJob(raw, drivingLicensePicklistRef.current),
+                availabilityOptions: availabilityOptionsFromJob(raw),
                 publicJobTitle: raw.publicJobTitle ?? raw.public_job_title,
                 publicDescription: raw.PublicDescription ?? raw.publicDescription ?? raw.public_description,
             };
@@ -2179,6 +2292,22 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             if (extractedData.jobDescription) { filled.add('jobDescription'); filledList.push('תיאור המשרה'); } else missingList.push('תיאור המשרה');
             if (extractedData.requirements) { filled.add('requirements'); filledList.push('דרישות המשרה'); } else missingList.push('דרישות המשרה');
             if (extractedData.salaryMin || extractedData.salaryMax) { filled.add('salaryMin'); filled.add('salaryMax'); filledList.push('טווח שכר'); } else missingList.push('טווח שכר');
+            if (typeof extractedData.ageMin === 'number' || typeof extractedData.ageMax === 'number') {
+                filled.add('ageMin');
+                filled.add('ageMax');
+                filledList.push('טווח גיל');
+            } else {
+                missingList.push('טווח גיל');
+            }
+            if (
+                (Array.isArray(extractedData.availabilityOptions) && extractedData.availabilityOptions.length > 0) ||
+                (extractedData.availability != null && String(extractedData.availability).trim() !== '')
+            ) {
+                filled.add('availabilityOptions');
+                filledList.push(t('form.availability'));
+            } else {
+                missingList.push(t('form.availability'));
+            }
             if (extractedData.city) { filled.add('locations'); filledList.push('מיקום'); } else missingList.push('מיקום');
             if (extractedData.internalNotes) { filled.add('internalNotes'); filledList.push('הערות פנימיות'); } else missingList.push('הערות פנימיות');
             if (pwhFromAi) {
@@ -2186,7 +2315,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 filledList.push(t('form.working_hours'));
             }
             if (Array.isArray(extractedData.languages) && extractedData.languages.length > 0) { filled.add('languages'); filledList.push('שפות'); } else missingList.push('שפות');
-            if (extractedData.drivingLicense) { filled.add('drivingLicense'); filledList.push('רישיון נהיגה'); } else missingList.push('רישיון נהיגה');
+            if (
+                extractedData.drivingLicense ||
+                (Array.isArray(extractedData.drivingLicenses) && extractedData.drivingLicenses.length)
+            ) {
+                filled.add('drivingLicenses');
+                filledList.push('רישיון נהיגה');
+            } else missingList.push('רישיון נהיגה');
             if (extractedData.mobility) { filled.add('mobility'); filledList.push('דרישות ניידות'); } else missingList.push('דרישות ניידות');
             if (extractedData.gender) { filled.add('gender'); filledList.push('מין'); } else missingList.push('מין');
             const aiTagsSource = Array.isArray(extractedData.tags) && extractedData.tags.length > 0
@@ -2357,11 +2492,39 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 preferredWorkingHours: (pwhFromAi ?? prev.preferredWorkingHours) || 'גמיש',
                 salaryMin: typeof extractedData.salaryMin === 'number' ? extractedData.salaryMin : prev.salaryMin,
                 salaryMax: typeof extractedData.salaryMax === 'number' ? extractedData.salaryMax : prev.salaryMax,
+                ageMin:
+                    typeof extractedData.ageMin === 'number'
+                        ? coerceFormAgeFromAi(extractedData.ageMin, prev.ageMin)
+                        : prev.ageMin,
+                ageMax:
+                    typeof extractedData.ageMax === 'number'
+                        ? coerceFormAgeFromAi(extractedData.ageMax, prev.ageMax)
+                        : prev.ageMax,
                 locations: extractedData.city
                     ? [...prev.locations, { type: 'city', value: extractedData.city }]
                     : prev.locations,
                 languages: aiLanguages.length ? aiLanguages : prev.languages,
-                drivingLicense: extractedData.drivingLicense || prev.drivingLicense,
+                drivingLicenses: (() => {
+                    const fromAi = Array.isArray(extractedData.drivingLicenses)
+                        ? extractedData.drivingLicenses
+                        : extractedData.drivingLicense
+                          ? [extractedData.drivingLicense]
+                          : [];
+                    if (!fromAi.length) return prev.drivingLicenses;
+                    const mapped = fromAi
+                        .map((v: string) => remapDrivingLicenseFormValue(String(v), drivingLicensePicklistRef.current))
+                        .filter((v: string) => !isNeutralDrivingLicenseValue(v, drivingLicensePicklistRef.current));
+                    return mapped.length ? mapped : prev.drivingLicenses;
+                })(),
+                availabilityOptions: (() => {
+                    const fromAi = Array.isArray(extractedData.availabilityOptions)
+                        ? extractedData.availabilityOptions
+                        : extractedData.availability
+                          ? [extractedData.availability]
+                          : [];
+                    const trimmed = fromAi.map((v: string) => String(v).trim()).filter(Boolean);
+                    return trimmed.length ? trimmed : prev.availabilityOptions;
+                })(),
                 mobility: mobilityFromAi ?? prev.mobility,
                 gender: genderSelection.length ? genderSelection : prev.gender,
                 skills: apiTags.length ? apiTags : prev.skills,
@@ -2536,8 +2699,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             ...row,
             tags: skills.filter((tag) => {
                 const raw = tag.tagType ?? 'skill';
-                const t = raw === 'soft_skill' ? 'soft' : raw;
-                return row.types.includes(t);
+                let t = raw === 'soft_skill' ? 'soft' : raw;
+                if (t === 'degree' || t === 'education') t = 'certification';
+                return row.types.includes(t as SmartTagType);
             }),
         }));
     }, [formData.skills]);
@@ -2752,7 +2916,12 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             region: (data.regionLabel || '').trim(),
             gender: genderValue,
             mobility: mobilityBoolForJobPayload(data.mobility, mobilityPicklistRef.current),
-            licenseType: licenseTypeForJobPayload(data.drivingLicense, drivingLicensePicklistRef.current),
+            licenseTypes: licenseTypesForJobPayload(data.drivingLicenses, drivingLicensePicklistRef.current),
+            licenseType:
+                licenseTypesForJobPayload(data.drivingLicenses, drivingLicensePicklistRef.current)[0] || null,
+            availabilityOptions: (data.availabilityOptions || []).map((v: string) => String(v).trim()).filter(Boolean),
+            availability:
+                (data.availabilityOptions || []).map((v: string) => String(v).trim()).filter(Boolean)[0] || null,
             postingCode: data.postingCode,
             validityDays: (() => {
                 const n = Number(data.validityDays);
@@ -3150,6 +3319,16 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
 
                        <div className="lg:col-span-1">
                            <MultiSelect
+                               label={t('form.availability')}
+                               options={availabilityMultiOptions(availabilityPicklist)}
+                               selectedIds={formData.availabilityOptions}
+                               onChange={(ids) => setFormData((prev) => ({ ...prev, availabilityOptions: ids }))}
+                               placeholder="בחר זמינות מקובלת..."
+                           />
+                       </div>
+
+                       <div className="lg:col-span-1">
+                           <MultiSelect
                                label={t('new_job.job_scope')}
                                options={jobScopeOptions}
                                selectedIds={formData.jobType} 
@@ -3400,19 +3579,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                     <AIIndicator name="salaryMin" />
                                 </div>
                                  <div className="mt-4 flex flex-wrap gap-4">
-                                     <div>
-                                        <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('form.driving_license')}</label>
-                                        <select name="drivingLicense" value={formData.drivingLicense} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 min-w-[150px]">
-                                            {drivingLicensePicklist.map((row) => (
-                                                <option key={row.id} value={row.value}>
-                                                    {picklistRowLabel(row)}
-                                                </option>
-                                            ))}
-                                        </select>
+                                     <div className="min-w-[200px] flex-grow max-w-md">
+                                        <MultiSelect
+                                            label={t('form.driving_license')}
+                                            options={drivingLicenseMultiOptions(drivingLicensePicklist)}
+                                            selectedIds={formData.drivingLicenses}
+                                            onChange={(ids) => setFormData((prev) => ({ ...prev, drivingLicenses: ids }))}
+                                            placeholder="ללא דרישה..."
+                                        />
                                      </div>
                                      <div>
                                         <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('form.mobility')}</label>
                                         <select name="mobility" value={formData.mobility} onChange={handleChange} className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 min-w-[150px]">
+                                            <option value="">{t('form.mobility_placeholder')}</option>
                                             {mobilityPicklist.map((row) => (
                                                 <option key={row.id} value={row.value}>
                                                     {picklistRowLabel(row)}

@@ -9,7 +9,7 @@ import {
     UserPlusIcon, XMarkIcon, ChevronDownIcon, EnvelopeIcon, PaperAirplaneIcon,
     BriefcaseIcon, AcademicCapIcon, WalletIcon, PlusIcon, BookmarkIcon, FunnelIcon, MinusIcon,
     ChatBubbleBottomCenterTextIcon, TableCellsIcon, Squares2X2Icon, Cog6ToothIcon, CircleStackIcon,
-    ChevronLeftIcon, ChevronRightIcon
+    ChevronLeftIcon, ChevronRightIcon, ArrowPathIcon
 } from './Icons';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
@@ -800,7 +800,8 @@ const AdminCandidatesView: React.FC = () => {
         lastUpdated: null as DateRange | null,
     });
     const [searchParamsFromUrl] = useSearchParams();
-    const [tagFilterCandidateIds, setTagFilterCandidateIds] = useState<Set<string> | null>(null);
+    const tagFilterId = searchParamsFromUrl.get('tag');
+    const [tagFilterMeta, setTagFilterMeta] = useState<{ id: string; label: string } | null>(null);
     
     // Complex Query Builder State
     const [complexRules, setComplexRules] = useState<ComplexFilterRule[]>([]);
@@ -862,26 +863,25 @@ const AdminCandidatesView: React.FC = () => {
     const statsCustomizeBtnRef = useRef<HTMLButtonElement>(null);
 
     useEffect(() => {
-        const tagParam = searchParamsFromUrl.get('tag');
-        if (!apiBase || !tagParam) {
-            setTagFilterCandidateIds(null);
+        if (!apiBase || !tagFilterId) {
+            setTagFilterMeta(null);
             return;
         }
         (async () => {
             try {
-                const res = await fetch(`${apiBase}/api/admin/candidate-tags/tag/${tagParam}`);
-                if (!res.ok) throw new Error('Failed to load tag usage');
-                const data = await res.json();
-                const ids = Array.isArray(data)
-                    ? data.map(entry => entry.candidate_id || entry.candidateId || entry.candidateId || null).filter(Boolean).map(String)
-                    : [];
-                setTagFilterCandidateIds(new Set(ids));
+                const res = await fetch(`${apiBase}/api/tags/${encodeURIComponent(tagFilterId)}`);
+                if (!res.ok) throw new Error('Failed to load tag');
+                const tag = await res.json();
+                setTagFilterMeta({
+                    id: tagFilterId,
+                    label: tag.displayNameHe || tag.displayNameEn || tag.tagKey || tagFilterId,
+                });
             } catch (err) {
-                console.error('Failed to apply tag filter', err);
-                setTagFilterCandidateIds(null);
+                console.error('Failed to load tag filter meta', err);
+                setTagFilterMeta({ id: tagFilterId, label: tagFilterId });
             }
         })();
-    }, [apiBase, searchParamsFromUrl]);
+    }, [apiBase, tagFilterId]);
 
     // When URL has ?organization=id, load candidates for that organization (same as tag filter flow)
     useEffect(() => {
@@ -975,6 +975,9 @@ const AdminCandidatesView: React.FC = () => {
             if (trimmed.length >= 3) {
                 params.set('search', trimmed);
             }
+            if (tagFilterId) {
+                params.set('tagId', tagFilterId);
+            }
             const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
             if (!res.ok) throw new Error('Failed to load candidates');
             const payload = await res.json();
@@ -992,7 +995,7 @@ const AdminCandidatesView: React.FC = () => {
         } finally {
             setIsLoading(false);
         }
-    }, [apiBase, mapCandidate, page, pageSize, searchTerm]);
+    }, [apiBase, mapCandidate, page, pageSize, searchTerm, tagFilterId]);
 
     useEffect(() => {
         loadCandidates();
@@ -1002,7 +1005,7 @@ const AdminCandidatesView: React.FC = () => {
 
     useEffect(() => {
         setPage(1);
-    }, [searchTerm]);
+    }, [searchTerm, tagFilterId]);
 
     // Clear search when entering view
     useEffect(() => {
@@ -1110,10 +1113,6 @@ const AdminCandidatesView: React.FC = () => {
                                   c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
                                   c.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
                                   (c.phone || '').includes(searchTerm);
-            if (tagFilterCandidateIds && tagFilterCandidateIds.size) {
-                const backendId = c.backendId || c.id;
-                if (!backendId || !tagFilterCandidateIds.has(backendId)) return false;
-            }
             if (workedAtCompanyCandidateIds && workedAtCompanyCandidateIds.size) {
                 const backendId = c.backendId || c.id;
                 if (!backendId || !workedAtCompanyCandidateIds.has(backendId)) return false;
@@ -1813,7 +1812,30 @@ const AdminCandidatesView: React.FC = () => {
                 
                 {/* View Switcher Header (Visible in table/grid) */}
                 <div className="p-3 border-b border-border-default bg-bg-subtle/30 flex justify-between items-center">
-                    <span className="text-sm font-semibold text-text-muted">מציג {filteredCandidates.length} מועמדים</span>
+                    <span className="text-sm font-semibold text-text-muted">
+                        {isLoading ? (
+                            <span className="inline-flex items-center gap-2 text-primary-600">
+                                <ArrowPathIcon className="w-4 h-4 animate-spin shrink-0" />
+                                טוען מועמדים...
+                            </span>
+                        ) : tagFilterMeta ? (
+                            <span className="inline-flex items-center gap-2 flex-wrap">
+                                <span>
+                                    מציג {filteredCandidates.length}
+                                    {totalCandidates > filteredCandidates.length ? ` מתוך ${totalCandidates}` : ''} מועמדים עם תגית «{tagFilterMeta.label}»
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => navigate('/admin/candidates')}
+                                    className="text-xs font-bold text-primary-600 hover:text-primary-800 underline"
+                                >
+                                    הצג את כל המועמדים
+                                </button>
+                            </span>
+                        ) : (
+                            <>מציג {filteredCandidates.length} מועמדים</>
+                        )}
+                    </span>
                     <div className="flex items-center gap-2">
                         {viewMode === 'table' && (
                              <div className="relative" ref={settingsRef}>
@@ -1844,8 +1866,20 @@ const AdminCandidatesView: React.FC = () => {
                     </div>
                 </div>
 
-                <div className="overflow-x-auto">
+                <div className="overflow-x-auto relative min-h-[280px]">
                     {viewMode === 'table' ? (
+                <>
+                {isLoading && (
+                    <div
+                        className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-bg-card/80 backdrop-blur-[1px]"
+                        aria-live="polite"
+                        aria-busy="true"
+                    >
+                        <ArrowPathIcon className="w-10 h-10 text-primary-600 animate-spin" />
+                        <p className="text-sm font-medium text-text-default">טוען מועמדים...</p>
+                        <p className="text-xs text-text-muted">זה עשוי לקחת מספר שניות</p>
+                    </div>
+                )}
                 <table className="w-full text-sm text-right min-w-[1000px]">
                             <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default sticky top-0 z-10">
                                 <tr>
@@ -1897,6 +1931,7 @@ const AdminCandidatesView: React.FC = () => {
                     ))}
                     </tbody>
                 </table>
+                </>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 p-6 bg-bg-subtle/20">
                             {filteredCandidates.map(candidate => (

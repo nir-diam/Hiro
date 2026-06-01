@@ -115,22 +115,40 @@ async function deletePreset(req, res) {
 
 async function simulate(req, res) {
   try {
-    const { candidateId, jobId, presetId } = req.body || {};
+    const {
+      candidateId,
+      jobId,
+      presetId,
+      config: configOverride,
+      candidateOverrides,
+      jobOverrides,
+    } = req.body || {};
     if (!candidateId || !jobId) {
       return res.status(400).json({ message: 'candidateId and jobId are required' });
     }
 
-    // Load config (preset overrides global if provided)
-    let config = await svc.getConfig();
-    if (presetId) {
-      const preset = await svc.getPreset(presetId);
-      if (preset?.config) config = preset.config;
+    // Config for simulation:
+    // - When the panel sends `config`, it is the full live form (sliders) — merge onto global defaults.
+    //   Do not also merge `presetId` (preset is already reflected in the panel when selected).
+    // - Otherwise: global + optional preset.
+    let config;
+    if (configOverride && typeof configOverride === 'object') {
+      config = svc.mergeEngineConfig(await svc.getConfig(), configOverride);
+    } else {
+      config = await svc.getConfig();
+      if (presetId) {
+        const preset = await svc.getPreset(presetId);
+        if (preset?.config) config = svc.mergeEngineConfig(config, preset.config);
+      }
     }
 
-    // Load candidate
-    const candidateRow = await Candidate.findByPk(candidateId);
+    const candidateService = require('../services/candidateService');
+    const candidateRow = await candidateService.findByPkWithTagsForMatchScore(candidateId);
     if (!candidateRow) return res.status(404).json({ message: 'Candidate not found' });
-    const candidate = candidateRow.get({ plain: true });
+    let candidate = candidateService.toPlainCandidateForMatchScore(candidateRow);
+    if (candidateOverrides && typeof candidateOverrides === 'object') {
+      candidate = { ...candidate, ...candidateOverrides };
+    }
 
     // Ensure candidate embedding
     let candidateEmb = normalizeEmbedding(candidate.embedding);
@@ -142,10 +160,23 @@ async function simulate(req, res) {
     }
     candidate.embedding = candidateEmb;
 
-    // Load job
-    const jobRow = await Job.findByPk(jobId);
-    if (!jobRow) return res.status(404).json({ message: 'Job not found' });
-    const job = jobRow.get({ plain: true });
+    // Load job (skills from system_tags — same as Sonar / candidate job-matches)
+    const jobService = require('../services/jobService');
+    let jobRow;
+    try {
+      jobRow = await jobService.getById(jobId);
+    } catch (e) {
+      if (e.status === 404) return res.status(404).json({ message: 'Job not found' });
+      throw e;
+    }
+    let job = jobService.toPlainJobForMatchScore(jobRow);
+    if (!Array.isArray(job.skills) || !job.skills.length) {
+      await jobService.hydrateJobSkills(jobRow);
+      job = jobService.toPlainJobForMatchScore(jobRow);
+    }
+    if (jobOverrides && typeof jobOverrides === 'object') {
+      job = { ...job, ...jobOverrides };
+    }
 
     // Job embedding (attempt)
     let jobEmb = [];
@@ -154,32 +185,45 @@ async function simulate(req, res) {
       if (text.trim()) jobEmb = await embedText(text.slice(0, 8000)) || [];
     } catch { /* keep empty */ }
 
-    // Linked info
+    const {
+      computeMatchPackage,
+      buildIntentOptionsByCandidateIds,
+      buildLinkedInfoFromJobCandidate,
+    } = require('../services/matchingScoreService');
+
     const link = await JobCandidate.findOne({
       where: { candidateId, jobId },
       attributes: ['id', 'status', 'source'],
     });
-    const linkedInfo = link ? {
-      jcId:     String(link.id),
-      jcStatus: link.status,
-      source:   link.source,
-      explicit: ['email', 'public_apply', 'referral', 'manual_screening'].includes(link.source),
-    } : null;
+    const linkedInfo = link
+      ? buildLinkedInfoFromJobCandidate(link.get ? link.get({ plain: true }) : link)
+      : null;
+    const intentByCandidate = await buildIntentOptionsByCandidateIds([candidateId]);
+    const intentOpts = intentByCandidate.get(String(candidateId)) || {};
 
-    const result = await computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo);
+    const { normalizePenaltyPolicies } = require('../services/matchingPenaltyService');
+    const result = await computeMatchPackage(
+      candidate,
+      job,
+      jobEmb,
+      config,
+      linkedInfo,
+      intentOpts,
+    );
+    const penaltyPoliciesUsed = normalizePenaltyPolicies(config.penaltyPolicies);
 
     res.json({
       candidateId,
       jobId,
+      matchScore: result.matchScore,
+      finalScore: result.matchScore,
+      scoreBreakdown: result.scoreBreakdown,
+      breakdown: result.scoreBreakdown,
+      parameterMatches: result.parameterMatches,
       candidateName: candidate.fullName || candidate.firstName || candidateId,
-      jobTitle:      job.title || jobId,
-      ...result,
-      config: {
-        mainWeights:    config.mainWeights,
-        tagWeights:     config.tagWeights,
-        intentWeights:  config.intentWeights,
-        geoRegions:     config.geoRegions,
-      },
+      jobTitle: job.title || jobId,
+      config,
+      penaltyPoliciesUsed,
     });
   } catch (err) {
     console.error('[MatchingEngine] simulate:', err);

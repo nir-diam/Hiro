@@ -34,6 +34,7 @@ import {
     type ScreeningJobSkillRow,
     type ScreeningJobLanguageRow,
 } from '../utils/jobTagMatchCategories';
+import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 
 export { buildResumeDataFromCandidate };
 export type { ScreeningJobSkillRow, ScreeningJobLanguageRow };
@@ -98,6 +99,7 @@ interface ScreeningJob {
   screeningClientId?: string | null;
   /** From GET …/screening-pool — same shape as Job Sonar `scoreBreakdown` (geoDistance, etc.). */
   scoreBreakdown?: ScreeningPoolScoreBreakdown | null;
+  parameterMatches?: Record<string, 'match' | 'gap' | 'unknown'> | null;
 }
 
 interface ScreeningEvalCheck {
@@ -539,8 +541,13 @@ function buildScreeningCardMetricCells(
   const jobRec = screeningJobSliceForMetrics(job) as Record<string, unknown>;
   const emdash = '—';
 
-  const vecPct = Math.max(0, Math.min(100, Math.round(Number(job.aiMatchScore) || 0)));
-  const vecTone: ScreeningCardMetricTone = vecPct >= 75 ? 'good' : 'muted';
+  const vectorLayer = vectorLayerPctFromBreakdown(job.scoreBreakdown ?? undefined);
+  const vecPct =
+    vectorLayer != null
+      ? Math.max(0, Math.min(100, vectorLayer))
+      : null;
+  const vecTone: ScreeningCardMetricTone =
+    vecPct == null ? 'muted' : vecPct >= 75 ? 'good' : 'muted';
 
   const candScopeTokens = candidateJobScopesOnlyList(candidate);
   const jobScopeTokens = jobJobTypeOnlyList(job);
@@ -670,7 +677,11 @@ function buildScreeningCardMetricCells(
   }
 
   return [
-    { label: t('job.sonar.metric_vector_value'), value: `${vecPct}%`, tone: vecTone },
+    {
+      label: t('job.sonar.metric_vector_value'),
+      value: vecPct != null ? `${vecPct}%` : emdash,
+      tone: vecTone,
+    },
     { label: t('job.sonar.fl_scope'), value: scopeVal, tone: scopeTone },
     { label: t('job.sonar.fl_hours'), value: hoursVal, tone: hoursTone },
     { label: t('job.sonar.fl_city'), value: cityVal, tone: cityTone },
@@ -1080,6 +1091,7 @@ const CandidateScreeningView: React.FC<{
             evaluationChecks: mapChecks(row),
             screeningClientId: clientFromRow(row),
             scoreBreakdown: row.scoreBreakdown ?? null,
+            parameterMatches: row.parameterMatches ?? null,
           }));
           const excludedList = exc.map((row: any) => ({
             ...mapApiJobToScreeningJob(row.job || {}),
@@ -1087,6 +1099,7 @@ const CandidateScreeningView: React.FC<{
             evaluationChecks: mapChecks(row),
             screeningClientId: clientFromRow(row),
             scoreBreakdown: row.scoreBreakdown ?? null,
+            parameterMatches: row.parameterMatches ?? null,
           }));
           setJobs([...includedList, ...excludedList]);
         })
@@ -1391,17 +1404,14 @@ const CandidateScreeningView: React.FC<{
     }, []);
 
     const handleSelectJob = (jobId: number | string) => {
-      const row = jobs.find((j) => j.id === jobId);
-      if (row?.excludedReasons?.length) return;
       setSelectedJobs((prev) =>
         prev.includes(jobId) ? prev.filter((id) => id !== jobId) : [...prev, jobId],
       );
     };
 
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
-      const selectable = jobs.filter((j) => !(j.excludedReasons && j.excludedReasons.length));
       if (e.target.checked) {
-        setSelectedJobs(selectable.map((j) => j.id));
+        setSelectedJobs(jobs.map((j) => j.id));
       } else {
         setSelectedJobs([]);
       }
@@ -1723,14 +1733,9 @@ const CandidateScreeningView: React.FC<{
     const sendCvSendDisabled =
       sendCvBlockedNoJobContacts || sendCvBlockedMissingRecipientEmail || (!sendAttachOriginalCv && !sendAttachSystemPdf);
 
-    const selectableJobs = useMemo(
-      () => jobs.filter((j) => !(j.excludedReasons && j.excludedReasons.length)),
-      [jobs],
-    );
-
     const allSelected = useMemo(
-      () => selectableJobs.length > 0 && selectableJobs.every((j) => selectedJobs.includes(j.id)),
-      [selectableJobs, selectedJobs],
+      () => jobs.length > 0 && jobs.every((j) => selectedJobs.includes(j.id)),
+      [jobs, selectedJobs],
     );
 
     const getInitials = (name: string) => name.split(' ').map(n => n[0]).join('').slice(0, 2);
@@ -1783,7 +1788,6 @@ const CandidateScreeningView: React.FC<{
                                 checked={allSelected}
                                 onChange={handleSelectAll}
                                 id="select-all-jobs"
-                                disabled={jobsLoading || selectableJobs.length === 0}
                             />
                             <label htmlFor="select-all-jobs" className="text-sm text-text-muted cursor-pointer">בחר הכל</label>
                         </div>
@@ -1824,7 +1828,6 @@ const CandidateScreeningView: React.FC<{
                                             className="h-5 w-5 rounded border-border-default text-primary-600 focus:ring-primary-500"
                                             checked={selectedJobs.includes(job.id)}
                                             onChange={() => handleSelectJob(job.id)}
-                                            disabled={jobsLoading || jobExcluded}
                                         />
                                     </div>
                                     

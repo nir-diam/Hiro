@@ -35,6 +35,16 @@ export async function fetchRecruitmentSources(clientId: string): Promise<Recruit
     return Array.isArray(json.sources) ? json.sources : [];
 }
 
+export async function fetchRecruitmentSourceOptions(): Promise<RecruitmentSourceDto[]> {
+    const res = await fetch(`${apiBase()}/api/recruitment-sources/options`, {
+        headers: authHeaders(),
+        cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    const json = (await res.json()) as { sources?: RecruitmentSourceDto[] };
+    return Array.isArray(json.sources) ? json.sources : [];
+}
+
 export async function createRecruitmentSource(
     clientId: string,
     body: Pick<RecruitmentSourceDto, 'name' | 'addresses' | 'exclusivityMonths'>,

@@ -38,6 +38,15 @@ import {
     exportRowFromCandidate,
     triggerCsvDownload,
 } from '../utils/candidatesExportCsv';
+import {
+    MatchScoreBreakdownPanel,
+    type MatchScoreBreakdownData,
+    type ParameterMatchesMap,
+} from './MatchScoreBreakdownPanel';
+import { candidateToSonarRecord } from '../utils/sonarMatchBreakdown';
+import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
+
+const MATCH_POPUP_WIDTH = 288;
 
 /** Match API max page size for candidate list export. */
 const CANDIDATES_EXPORT_PAGE_SIZE = 500;
@@ -49,6 +58,12 @@ const eventApiHeaders = (withJson: boolean): Record<string, string> => {
     if (token) h.Authorization = `Bearer ${token}`;
     return h;
 };
+
+/** List scoring uses the logged-in user's client preset — requires Bearer token. */
+const candidatesListFetchInit = (): RequestInit => ({
+    headers: eventApiHeaders(false),
+    cache: 'no-store',
+});
 
 /** Blue ring when an advanced filter differs from its default. */
 const advFieldModifiedClass = 'ring-2 ring-primary-500 rounded-xl';
@@ -104,10 +119,16 @@ export interface Candidate {
   tags: string[];
   internalTags: string[];
   matchScore: number;
+  /** True when list API (or client hydrate) provided an engine score — not the 0 default. */
+  listMatchScoreFromApi?: boolean;
+  /** Filled via simulate when list API omitted scores (older backend). */
+  matchScoreHydrated?: boolean;
   matchAnalysis?: {
       jobTitle: string;
       reason: string;
   };
+  scoreBreakdown?: MatchScoreBreakdownData | null;
+  parameterMatches?: ParameterMatchesMap | null;
   address?: string;
   phone: string;
   industry?: string;
@@ -152,6 +173,8 @@ export interface Candidate {
     jobTitle: string;
     matchScore: number;
     linkedAt?: string;
+    scoreBreakdown?: MatchScoreBreakdownData | null;
+    parameterMatches?: ParameterMatchesMap | null;
   } | null;
 }
 
@@ -516,51 +539,148 @@ interface CandidatesListViewProps {
     openMessageModal: (config: MessageModalConfig) => void;
 }
 
-// --- NEW COMPONENT FOR MATCH SCORE POPUP ---
-const MatchScoreExplanation: React.FC<{ 
-    candidate: Candidate; 
+const MatchScoreExplanation: React.FC<{
+    candidate: Candidate;
     onClose: () => void;
-    position: { x: number, y: number };
-}> = ({ candidate, onClose, position }) => {
+    position: { x: number; y: number };
+    matchJobId: string;
+    matchJobTitle: string;
+    apiBase: string;
+}> = ({ candidate, onClose, position, matchJobId, matchJobTitle, apiBase }) => {
+    const [fetched, setFetched] = useState<{
+        matchScore: number;
+        scoreBreakdown: MatchScoreBreakdownData | null;
+        parameterMatches: ParameterMatchesMap | null;
+        vectorSimilarity?: number | null;
+    } | null>(null);
+    const [jobRecord, setJobRecord] = useState<Record<string, unknown> | null>(null);
+    const [loading, setLoading] = useState(false);
+    const jobId = matchJobId.trim() || candidate.lastJobSubmission?.jobId?.trim() || '';
+    const jobTitle =
+        matchJobTitle.trim() ||
+        candidate.lastJobSubmission?.jobTitle ||
+        candidate.matchAnalysis?.jobTitle ||
+        '';
+    // Always use live simulate API for breakdown layers — list bulk scores are opt-in
+    // (`engineScores=1`) and can carry stale/wrong tag % (e.g. 100% when job skills were empty).
+    const scoreBreakdown = fetched?.scoreBreakdown ?? null;
+    const parameterMatches = fetched?.parameterMatches ?? null;
+    const displayScore = fetched?.matchScore ?? candidate.matchScore;
+    const sonarCandidate = useMemo(() => candidateToSonarRecord(candidate), [candidate]);
+
+    const popupStyle = useMemo(() => {
+        if (typeof window === 'undefined') {
+            return { top: position.y, left: position.x, transform: 'translate(-50%, calc(-100% - 12px))' as const };
+        }
+        const left = clampCenteredPopoverX(position.x, MATCH_POPUP_WIDTH);
+        const top = Math.max(12, position.y);
+        return { top, left, transform: 'translate(-50%, calc(-100% - 12px))' as const };
+    }, [position.x, position.y]);
+
+    useEffect(() => {
+        if (!jobId) {
+            setJobRecord(null);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            try {
+                const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+                const headers: Record<string, string> = { Accept: 'application/json' };
+                if (token) headers.Authorization = `Bearer ${token}`;
+                const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobId)}`, { headers });
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                if (cancelled) return;
+                const job = (data.job ?? data) as Record<string, unknown>;
+                if (job && typeof job === 'object') setJobRecord(job);
+            } catch {
+                if (!cancelled) setJobRecord(null);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [jobId, apiBase]);
+
+    useEffect(() => {
+        if (!jobId || !candidate.backendId) {
+            setFetched(null);
+            return;
+        }
+        let cancelled = false;
+        (async () => {
+            setLoading(true);
+            setFetched(null);
+            try {
+                const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+                const headers: Record<string, string> = {
+                    Accept: 'application/json',
+                    'Content-Type': 'application/json',
+                };
+                if (token) headers.Authorization = `Bearer ${token}`;
+                const res = await fetch(`${apiBase}/api/admin/matching-engine/simulate`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ candidateId: candidate.backendId, jobId }),
+                });
+                if (!res.ok || cancelled) return;
+                const data = await res.json();
+                if (cancelled) return;
+                const bd = (data.scoreBreakdown ?? data.breakdown) as MatchScoreBreakdownData | undefined;
+                setFetched({
+                    matchScore:
+                        typeof data.matchScore === 'number'
+                            ? Math.round(data.matchScore)
+                            : typeof data.finalScore === 'number'
+                              ? Math.round(data.finalScore)
+                              : candidate.matchScore,
+                    scoreBreakdown: bd && typeof bd === 'object' ? bd : null,
+                    parameterMatches:
+                        data.parameterMatches && typeof data.parameterMatches === 'object'
+                            ? (data.parameterMatches as ParameterMatchesMap)
+                            : null,
+                    vectorSimilarity:
+                        typeof data.vectorSimilarity === 'number' ? data.vectorSimilarity : null,
+                });
+            } catch {
+                /* keep list data */
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [jobId, candidate.backendId, candidate.matchScore, apiBase]);
+
     return (
-        <div 
-            className="fixed z-[1000] w-72 bg-bg-card rounded-xl shadow-2xl border border-border-default p-4 text-right animate-fade-in"
-            style={{ 
-                top: position.y, 
-                left: position.x,
-                transform: 'translate(-50%, -100%)',
-                marginTop: '-12px'
-            }}
-            onClick={e => e.stopPropagation()}
+        <div
+            className="match-score-popup fixed z-[1000] w-72 max-h-[min(75vh,28rem)] text-right pointer-events-auto animate-fade-in"
+            style={popupStyle}
+            onClick={(e) => e.stopPropagation()}
         >
-            <div className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default transform rotate-45"></div>
-
-            <div className="flex justify-between items-center mb-3 border-b border-border-subtle pb-2">
-                <div className="flex items-center gap-2">
-                    <SparklesIcon className="w-5 h-5 text-purple-500" />
-                    <span className="font-bold text-sm text-text-default">ניתוח התאמה</span>
-                </div>
-                <button onClick={onClose} className="text-text-muted hover:text-text-default">
-                    <XMarkIcon className="w-4 h-4" />
-                </button>
-            </div>
-
-            <div className="space-y-3 text-xs text-text-default">
-                <p>
-                    <span className="font-bold">ציון: {candidate.matchScore}%</span>
-                </p>
-                {candidate.matchAnalysis ? (
-                    <>
-                        <p className="font-medium text-text-subtle mb-1">
-                            משרה: <span className="text-text-default font-bold">{candidate.matchAnalysis.jobTitle}</span>
-                        </p>
-                        <p className="leading-relaxed bg-bg-subtle p-2 rounded-lg">
-                            {candidate.matchAnalysis.reason}
-                        </p>
-                    </>
-                ) : (
-                    <p className="text-text-muted italic">אין ניתוח זמין למועמד זה.</p>
-                )}
+            <div className="relative overflow-hidden rounded-xl shadow-xl border border-border-default bg-bg-card">
+                <div
+                    className="absolute -bottom-2 left-1/2 -translate-x-1/2 w-4 h-4 bg-bg-card border-b border-r border-border-default rotate-45 pointer-events-none z-10"
+                    aria-hidden
+                />
+                <MatchScoreBreakdownPanel
+                    variant="popup"
+                    onClose={onClose}
+                    matchScore={displayScore}
+                    jobTitle={jobTitle || null}
+                    scoreBreakdown={scoreBreakdown}
+                    parameterMatches={parameterMatches}
+                    job={jobRecord}
+                    candidate={sonarCandidate}
+                    vectorSimilarity={fetched?.vectorSimilarity ?? null}
+                    loading={loading}
+                    candidateName={candidate.name}
+                    candidateTitle={candidate.title}
+                    professionalSummary={candidate.professionalSummary ?? candidate.matchAnalysis?.reason ?? null}
+                    className="max-h-[min(75vh,28rem)] overflow-y-auto custom-scrollbar"
+                />
             </div>
         </div>
     );
@@ -1116,6 +1236,122 @@ function clampListMatchPercent(raw: unknown): number | null {
     return Math.min(100, Math.max(0, Math.round(v)));
 }
 
+/** Same final % as matching engine popup when API sent breakdown but omitted top-level matchScore. */
+function engineMatchPercentFromBreakdown(bd: unknown): number | null {
+    if (!bd || typeof bd !== 'object') return null;
+    const o = bd as Record<string, unknown>;
+    const core = o.coreScore;
+    if (typeof core !== 'number' || !Number.isFinite(core)) return null;
+    const salary = Number(o.salaryPenalty) || 0;
+    const age = Number(o.ageGapPenalty) || 0;
+    const general = Number(o.generalPenalties) || 0;
+    return clampListMatchPercent(Math.max(0, Math.round(core) - salary - age - general));
+}
+
+const LIST_MATCH_HYDRATE_CONCURRENCY = 4;
+
+function rawListRowNeedsMatchHydration(raw: Record<string, unknown>): boolean {
+    if (clampListMatchPercent(raw.matchScore) != null) return false;
+    const lj = raw.lastJobSubmission;
+    if (!lj || typeof lj !== 'object') return false;
+    const jobId = (lj as Record<string, unknown>).jobId != null ? String((lj as Record<string, unknown>).jobId).trim() : '';
+    if (!jobId) return false;
+    if (clampListMatchPercent((lj as Record<string, unknown>).matchScore) != null) return false;
+    if (engineMatchPercentFromBreakdown(raw.scoreBreakdown) != null) return false;
+    if (engineMatchPercentFromBreakdown((lj as Record<string, unknown>).scoreBreakdown) != null) return false;
+    return raw.id != null && String(raw.id).trim() !== '';
+}
+
+async function fetchSimulateMatchScore(
+    apiBase: string,
+    candidateId: string,
+    jobId: string,
+): Promise<{ matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null } | null> {
+    try {
+        const res = await fetch(`${apiBase}/api/admin/matching-engine/simulate`, {
+            method: 'POST',
+            headers: eventApiHeaders(true),
+            body: JSON.stringify({ candidateId, jobId }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        const fromTop =
+            typeof data.matchScore === 'number'
+                ? Math.round(data.matchScore)
+                : typeof data.finalScore === 'number'
+                  ? Math.round(data.finalScore)
+                  : null;
+        const bd = (data.scoreBreakdown ?? data.breakdown) as MatchScoreBreakdownData | undefined;
+        const matchScore = fromTop ?? engineMatchPercentFromBreakdown(bd);
+        if (matchScore == null) return null;
+        return {
+            matchScore,
+            scoreBreakdown: bd && typeof bd === 'object' ? bd : null,
+        };
+    } catch {
+        return null;
+    }
+}
+
+async function hydrateMissingListMatchScores(
+    apiBase: string,
+    rawList: Record<string, unknown>[],
+    inFlight: Set<string>,
+): Promise<Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>> {
+    const patches = new Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>();
+    const tasks: { candidateId: string; jobId: string; key: string }[] = [];
+    for (const raw of rawList) {
+        if (!rawListRowNeedsMatchHydration(raw)) continue;
+        const candidateId = String(raw.id).trim();
+        const lj = raw.lastJobSubmission as Record<string, unknown>;
+        const jobId = String(lj.jobId).trim();
+        const key = `${candidateId}\0${jobId}`;
+        if (inFlight.has(key)) continue;
+        inFlight.add(key);
+        tasks.push({ candidateId, jobId, key });
+    }
+    let cursor = 0;
+    const worker = async () => {
+        while (cursor < tasks.length) {
+            const task = tasks[cursor++];
+            const result = await fetchSimulateMatchScore(apiBase, task.candidateId, task.jobId);
+            inFlight.delete(task.key);
+            if (result) patches.set(task.candidateId, result);
+        }
+    };
+    await Promise.all(
+        Array.from({ length: Math.min(LIST_MATCH_HYDRATE_CONCURRENCY, tasks.length) }, () => worker()),
+    );
+    return patches;
+}
+
+function mergeCandidatesPreservingMatchScores(prev: Candidate[], mapped: Candidate[]): Candidate[] {
+    const prevByKey = new Map(prev.map((c) => [c.backendId || String(c.id), c]));
+    return mapped.map((c) => {
+        const old = prevByKey.get(c.backendId || String(c.id));
+        if (!old) return c;
+        if (c.listMatchScoreFromApi || c.matchScoreHydrated) return c;
+        if (!old.listMatchScoreFromApi && !old.matchScoreHydrated) return c;
+        return {
+            ...c,
+            matchScore: old.matchScore,
+            listMatchScoreFromApi: old.listMatchScoreFromApi,
+            matchScoreHydrated: old.matchScoreHydrated,
+            scoreBreakdown: old.scoreBreakdown ?? c.scoreBreakdown,
+            parameterMatches: old.parameterMatches ?? c.parameterMatches,
+            lastJobSubmission:
+                c.lastJobSubmission && old.lastJobSubmission
+                    ? {
+                          ...c.lastJobSubmission,
+                          matchScore: old.lastJobSubmission.matchScore,
+                          scoreBreakdown:
+                              old.lastJobSubmission.scoreBreakdown ?? c.lastJobSubmission.scoreBreakdown,
+                      }
+                    : old.lastJobSubmission ?? c.lastJobSubmission,
+        };
+    });
+}
+
 const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite, openMessageModal }) => {
     /** Fresh read on each mount so returning from a candidate profile restores session-backed filters. */
     const listViewSnapshot = useMemo(() => loadListViewSnapshotFromSession(), []);
@@ -1224,6 +1460,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const pendingAdvancedSearchFeedback = useRef(false);
     /** Skip one auto list effect run after an imperative fetch (advanced apply / clear) to avoid duplicate GET. */
     const suppressNextListFetchEffectRef = useRef(false);
+    const prevSelectedJobIdRef = useRef(selectedJobId);
     /** After hydrating from session, skip the first page/dependency-driven fetch so restored rows stay visible. */
     const skipListFetchAfterHydrateRef = useRef(listViewSnapshot !== null);
 
@@ -1367,6 +1604,34 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     );
     const [isSmartSearching, setIsSmartSearching] = useState(false);
     const [activeMatchScorePopup, setActiveMatchScorePopup] = useState<{ id: number, x: number, y: number } | null>(null);
+    const listMatchHydrationInFlightRef = useRef(new Set<string>());
+
+    const applyListMatchPatches = useCallback(
+        (patches: Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>) => {
+            if (!patches.size) return;
+            setCandidates((prev) =>
+                prev.map((c) => {
+                    const patch = c.backendId ? patches.get(c.backendId) : undefined;
+                    if (!patch) return c;
+                    return {
+                        ...c,
+                        matchScore: patch.matchScore,
+                        listMatchScoreFromApi: true,
+                        matchScoreHydrated: true,
+                        scoreBreakdown: patch.scoreBreakdown ?? c.scoreBreakdown,
+                        lastJobSubmission: c.lastJobSubmission
+                            ? {
+                                  ...c.lastJobSubmission,
+                                  matchScore: patch.matchScore,
+                                  scoreBreakdown: patch.scoreBreakdown ?? c.lastJobSubmission.scoreBreakdown,
+                              }
+                            : c.lastJobSubmission,
+                    };
+                }),
+            );
+        },
+        [],
+    );
 
     const mapCandidate = useCallback((c: any, idx: number): Candidate => {
         const sourceId = c.id ?? c.userId;
@@ -1381,10 +1646,24 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 ? c.lastJobSubmission
                 : null;
 
+        const filterJobId = selectedJobId.trim();
         const apiMatch = clampListMatchPercent(c.matchScore);
+        const breakdownMatch = engineMatchPercentFromBreakdown(c.scoreBreakdown);
         const lastSubMatch = ljCandidate ? clampListMatchPercent(ljCandidate.matchScore) : null;
-        const profilePc = clampListMatchPercent(c.profileCompleteness);
-        const matchScore = apiMatch ?? lastSubMatch ?? profilePc ?? 0;
+        const lastSubBreakdown =
+            ljCandidate && filterJobId && String(ljCandidate.jobId) === filterJobId
+                ? engineMatchPercentFromBreakdown(ljCandidate.scoreBreakdown)
+                : null;
+        const listMatchScoreFromApi =
+            apiMatch != null ||
+            lastSubMatch != null ||
+            breakdownMatch != null ||
+            (ljCandidate != null && filterJobId !== '' && String(ljCandidate.jobId) === filterJobId && lastSubBreakdown != null);
+        const matchScore = listMatchScoreFromApi
+            ? filterJobId
+                ? apiMatch ?? breakdownMatch ?? lastSubBreakdown ?? 0
+                : apiMatch ?? lastSubMatch ?? 0
+            : 0;
 
         return {
             id: resolvedId,
@@ -1398,6 +1677,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         tags: Array.isArray(c.tags) ? c.tags : [],
         internalTags: Array.isArray(c.internalTags) ? c.internalTags : [],
         matchScore,
+        listMatchScoreFromApi,
+        scoreBreakdown:
+            c.scoreBreakdown && typeof c.scoreBreakdown === 'object'
+                ? (c.scoreBreakdown as MatchScoreBreakdownData)
+                : ljCandidate?.scoreBreakdown && typeof ljCandidate.scoreBreakdown === 'object'
+                  ? (ljCandidate.scoreBreakdown as MatchScoreBreakdownData)
+                  : null,
+        parameterMatches:
+            c.parameterMatches && typeof c.parameterMatches === 'object'
+                ? (c.parameterMatches as ParameterMatchesMap)
+                : ljCandidate?.parameterMatches && typeof ljCandidate.parameterMatches === 'object'
+                  ? (ljCandidate.parameterMatches as ParameterMatchesMap)
+                  : null,
         address: c.address || '',
         phone: c.phone || '',
         industry:
@@ -1442,10 +1734,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                           ljCandidate.linkedAt != null && ljCandidate.linkedAt !== ''
                               ? String(ljCandidate.linkedAt)
                               : undefined,
+                      scoreBreakdown:
+                          ljCandidate.scoreBreakdown && typeof ljCandidate.scoreBreakdown === 'object'
+                              ? (ljCandidate.scoreBreakdown as MatchScoreBreakdownData)
+                              : undefined,
+                      parameterMatches:
+                          ljCandidate.parameterMatches &&
+                          typeof ljCandidate.parameterMatches === 'object'
+                              ? (ljCandidate.parameterMatches as ParameterMatchesMap)
+                              : undefined,
                   }
                 : null,
         };
-    }, []);
+    }, [selectedJobId]);
 
     const fetchCandidatesList = useCallback(
         async (opts: {
@@ -1473,7 +1774,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 }
                 const matchJobId = String(opts.jobId || '').trim();
                 if (matchJobId) params.set('jobId', matchJobId);
-                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
+                // Engine score vs each candidate's latest submitted job (same as match popup).
+                params.set('matchLastJobScores', '1');
+                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, candidatesListFetchInit());
                 if (!res.ok) throw new Error('failed to load');
                 const payload = await res.json();
                 const list = Array.isArray(payload.data)
@@ -1485,6 +1788,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 setSemanticBaselineCandidates(null);
                 setCandidates(mapped);
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
+                const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
+                if (rawRows.some(rawListRowNeedsMatchHydration)) {
+                    void hydrateMissingListMatchScores(
+                        apiBase,
+                        rawRows,
+                        listMatchHydrationInFlightRef.current,
+                    ).then((patches) => applyListMatchPatches(patches));
+                }
             } catch (e) {
                 setSemanticBaselineCandidates(null);
                 setCandidates([]);
@@ -1494,7 +1805,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 setHasInitiallyLoaded(true);
             }
         },
-        [apiBase, mapCandidate],
+        [apiBase, mapCandidate, applyListMatchPatches],
     );
 
     const fetchCandidates = useCallback(() => {
@@ -1609,7 +1920,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     }
                 };
 
-                const res1 = await fetch(`${apiBase}/api/candidates?${buildParams(1).toString()}`);
+                const res1 = await fetch(
+                    `${apiBase}/api/candidates?${buildParams(1).toString()}`,
+                    candidatesListFetchInit(),
+                );
                 if (!res1.ok) throw new Error('failed');
                 const p1 = (await res1.json()) as { data?: unknown[]; rows?: unknown[]; total?: number };
                 const { list: firstList, total } = parseListPayload(p1);
@@ -1620,7 +1934,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 ingestChunk(firstList);
                 const pages = Math.ceil(total / CANDIDATES_EXPORT_PAGE_SIZE);
                 for (let p = 2; p <= pages && want.size > 0; p++) {
-                    const res = await fetch(`${apiBase}/api/candidates?${buildParams(p).toString()}`);
+                    const res = await fetch(
+                        `${apiBase}/api/candidates?${buildParams(p).toString()}`,
+                        candidatesListFetchInit(),
+                    );
                     if (!res.ok) throw new Error('failed');
                     const payload = (await res.json()) as { data?: unknown[]; rows?: unknown[] };
                     const { list } = parseListPayload({ ...payload, total });
@@ -1709,9 +2026,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 if (showIncompleteOnly) params.set('dataIncomplete', '1');
                 const pollJobId = selectedJobId.trim();
                 if (pollJobId) params.set('jobId', pollJobId);
-                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, {
-                    cache: 'no-store',
-                } as any);
+                params.set('matchLastJobScores', '0');
+                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, candidatesListFetchInit());
                 if (cancelled) return;
                 if (res.status === 304) return;
                 if (!res.ok) return;
@@ -1722,7 +2038,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         ? payload.rows
                         : [];
                 const mapped = list.map(mapCandidate);
-                setCandidates(mapped);
+                setCandidates((prev) => mergeCandidatesPreservingMatchScores(prev, mapped));
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
             } finally {
                 inFlight = false;
@@ -1784,6 +2100,38 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
         void fetchCandidates();
     }, [page, pageSize, fetchCandidates]);
+
+    /** Refetch with engine scores when the job filter changes (popup already scores via simulate). */
+    useEffect(() => {
+        if (!hasInitiallyLoaded || suspendListPolling) return;
+        if (prevSelectedJobIdRef.current === selectedJobId) return;
+        prevSelectedJobIdRef.current = selectedJobId;
+        suppressNextListFetchEffectRef.current = true;
+        setPage(1);
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced:
+                appliedAdvancedFilters == null
+                    ? null
+                    : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
+        });
+    }, [
+        selectedJobId,
+        hasInitiallyLoaded,
+        suspendListPolling,
+        pageSize,
+        debouncedSearchTerm,
+        appliedAdvancedFilters,
+        searchParams,
+        languageFilters,
+        complexRules,
+        showIncompleteOnly,
+        fetchCandidatesList,
+    ]);
 
     useEffect(() => {
         if (!pendingAdvancedSearchFeedback.current || isRemoteLoading || !hasInitiallyLoaded) return;
@@ -2796,8 +3144,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         // Calculate position relative to viewport, centered horizontally on button
         setActiveMatchScorePopup({
             id,
-            x: rect.left + (rect.width / 2),
-            y: rect.top - 10
+            x: rect.left + rect.width / 2,
+            y: rect.bottom + 8,
         });
     };
 
@@ -2857,15 +3205,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 const scoreTitle = jobFilterMismatch
                     ? 'הציון מחושב להתאמה למשרה שבחרת במסנן. עמודת ההגשה האחרונה מציגה את המשרה האחרונה אליה הוגש המועמד, ויכולה להיות שונה. לחץ להסבר.'
                     : 'לחץ להסבר';
+                const scoreKnown = Boolean(candidate.listMatchScoreFromApi || candidate.matchScoreHydrated);
+                const scoreLabel = scoreKnown ? `${candidate.matchScore}%` : '…';
                 return (
                     <div className="flex items-center justify-center">
                         <button
                             type="button"
                             onClick={(e) => handleScoreClick(e, candidate.id)}
-                            className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border-2 shadow-sm cursor-pointer hover:scale-105 transition-transform ${getScoreColorClass(candidate.matchScore)}`}
+                            className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold border-2 shadow-sm cursor-pointer hover:scale-105 transition-transform ${scoreKnown ? getScoreColorClass(candidate.matchScore) : 'text-text-muted border-border-subtle bg-bg-subtle'}`}
                             title={scoreTitle}
                         >
-                            {candidate.matchScore}%
+                            {scoreLabel}
                         </button>
                     </div>
                 );
@@ -3576,10 +3926,27 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
             {/* Global Match Score Popup - Rendered outside overflow containers */}
             {activeMatchScorePopup && activeCandidateForPopup && (
-                <MatchScoreExplanation 
-                    candidate={activeCandidateForPopup} 
+                <MatchScoreExplanation
+                    candidate={activeCandidateForPopup}
                     onClose={() => setActiveMatchScorePopup(null)}
                     position={{ x: activeMatchScorePopup.x, y: activeMatchScorePopup.y }}
+                    matchJobId={
+                        selectedJobId.trim() ||
+                        activeCandidateForPopup.lastJobSubmission?.jobId ||
+                        ''
+                    }
+                    matchJobTitle={
+                        jobs.find(
+                            (j) =>
+                                j.id ===
+                                (selectedJobId.trim() ||
+                                    activeCandidateForPopup.lastJobSubmission?.jobId ||
+                                    ''),
+                        )?.title ||
+                        activeCandidateForPopup.lastJobSubmission?.jobTitle ||
+                        ''
+                    }
+                    apiBase={apiBase}
                 />
             )}
 

@@ -20,6 +20,33 @@ const listByClientId = async (clientId) => {
   return rows.map(toDto);
 };
 
+const dedupeByName = (rows) => {
+  const seen = new Set();
+  const out = [];
+  for (const row of rows) {
+    const dto = toDto(row);
+    const key = String(dto.name || '').trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(dto);
+  }
+  return out;
+};
+
+const listOptions = async ({ clientId = null } = {}) => {
+  if (clientId) return listByClientId(clientId);
+
+  const rows = await RecruitmentSource.findAll({
+    attributes: ['id', 'clientId', 'name', 'addresses', 'exclusivityMonths', 'sortIndex'],
+    order: [
+      ['sortIndex', 'ASC'],
+      ['name', 'ASC'],
+      ['createdAt', 'ASC'],
+    ],
+  });
+  return dedupeByName(rows);
+};
+
 const nextSortIndex = async (clientId) => {
   const max = await RecruitmentSource.max('sortIndex', { where: { clientId } });
   const n = Number(max);
@@ -110,6 +137,7 @@ const removeForClient = async (clientId, sourceId) => {
 
 module.exports = {
   listByClientId,
+  listOptions,
   createForClient,
   updateForClient,
   removeForClient,

@@ -26,7 +26,14 @@ const Job = sequelize.define(
       defaultValue: 'לא משנה',
     },
     mobility: DataTypes.BOOLEAN,
+    /** Legacy single license (first of licenseTypes); kept for older clients. */
     licenseType: DataTypes.STRING,
+    /** Acceptable driving-license picklist values (OR — candidate needs at least one). */
+    licenseTypes: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
+    /** Legacy single availability (first of availabilityOptions). */
+    availability: DataTypes.STRING,
+    /** Acceptable candidate availability picklist values (OR — candidate tier must match one). */
+    availabilityOptions: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     postingCode: DataTypes.STRING,
     validityDays: DataTypes.INTEGER,
     reScreeningCooldownMonths: DataTypes.INTEGER,

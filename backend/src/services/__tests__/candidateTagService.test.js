@@ -1,9 +1,9 @@
-// Mock Tag and CandidateTag models so we don't hit real Sequelize models
+// Mock Tag and SystemTag models so we don't hit real Sequelize models
 const mockQuery = jest.fn();
 jest.mock('../../models/Tag', () => ({
   findByPk: jest.fn(),
 }));
-jest.mock('../../models/CandidateTag', () => ({
+jest.mock('../../models/SystemTag', () => ({
   associations: {},
   belongsTo: jest.fn(),
 }));

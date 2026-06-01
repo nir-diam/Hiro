@@ -29,6 +29,7 @@ const connectDb = async () => {
   require('../models/JobPublication');
   require('../models/Tag');
   require('../models/TagHistory');
+  require('../models/SystemTag');
   require('../models/Chat');
   require('../models/ChatMessage');
   require('../models/JobCategory');

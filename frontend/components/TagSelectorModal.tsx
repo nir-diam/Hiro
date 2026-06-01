@@ -44,7 +44,7 @@ const categoryConfig: Record<TagCategory, { label: string; icon: React.ReactNode
 };
 
 // Define which categories are visible for manual addition
-const VISIBLE_CATEGORIES: TagCategory[] = ['role', 'skill', 'tool', 'soft_skill'];
+const VISIBLE_CATEGORIES: TagCategory[] = ['role', 'skill', 'tool', 'soft_skill', 'industry', 'seniority', 'education', 'certification', 'language'];
 
 const mapBackendTypeToCategory = (type?: string): TagCategory => {
     if (!type) return 'role';

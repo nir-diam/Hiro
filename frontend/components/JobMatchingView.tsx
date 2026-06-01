@@ -8,6 +8,7 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import AIFeedbackModal from './AIFeedbackModal';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import JobMatchDeepInsightModal from './JobMatchDeepInsightModal';
+import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 import {
   fetchJobMatches, assignCandidateToJob, fetchCandidate, fetchClientOptions, fetchCityOptions,
   type JobMatchResult,
@@ -251,6 +252,17 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           </button>
         </div>
 
+        {Array.isArray(job.scoreBreakdown?.penaltyReasons) && job.scoreBreakdown.penaltyReasons.length > 0 && (
+          <div className="mb-3 space-y-1 rounded-lg border border-rose-100 bg-rose-50/80 p-2">
+            {(job.scoreBreakdown.penaltyReasons as { label: string; amount: number }[]).map((pr, i) => (
+              <div key={i} className="flex justify-between text-xs text-rose-800 font-semibold">
+                <span>{pr.label}</span>
+                <span>-{pr.amount}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
         {checks.length > 0 && (
           <div className="mb-3 space-y-1.5">
             {checks.map((c) => {
@@ -381,29 +393,55 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   // ─── match summary line ──────────────────────────────────────────────────
 
   const MatchSummaryLine: React.FC<{ job: JobMatchResult }> = ({ job }) => {
-    type Dot = { label: string; value: string; ok: boolean };
+    type Dot = { label: string; value: string; ok: boolean; muted?: boolean };
     const pm = job.parameterMatches;
 
     const scoreOk = job.matchScore >= 70;
+    const vectorPct = vectorLayerPctFromBreakdown(job.scoreBreakdown);
+    const vectorOk = vectorPct != null ? vectorPct >= 70 : scoreOk;
 
-    const map: { key: keyof typeof pm; label: string; matchLabel: string; gapLabel: string }[] = [
-      { key: 'salary',            label: 'ציפיות שכר',   matchLabel: 'תואם',        gapLabel: 'פער בשכר'      },
-      { key: 'scope',             label: 'שעות משרה',    matchLabel: 'תואם',        gapLabel: 'לא מתאים'      },
-      { key: 'mobility',          label: 'ניידות',        matchLabel: 'בסדר',        gapLabel: 'נדרש רכב'      },
-      { key: 'license',           label: 'רישיון נהיגה',  matchLabel: 'יש רישיון',   gapLabel: 'נדרש רישיון'   },
-      { key: 'age',               label: 'גיל',           matchLabel: 'מתאים',       gapLabel: 'לא בטווח גיל'  },
-      { key: 'gender',            label: 'מגדר',          matchLabel: 'מתאים',       gapLabel: 'מגבלת מגדר'    },
-      { key: 'mandatory_skill',   label: 'מיומנות חובה',  matchLabel: 'יש',          gapLabel: 'חסרה'          },
-      { key: 'mandatory_language',label: 'שפה חובה',      matchLabel: 'יש',          gapLabel: 'חסרה'          },
+    const rawGeoKm = job.scoreBreakdown?.geoDistance;
+    const geoKm =
+      typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
+
+    const map: {
+      key: keyof typeof pm;
+      label: string;
+      matchLabel: string;
+      mismatchLabel: string;
+      missingLabel: string;
+    }[] = [
+      { key: 'salary', label: 'ציפיות שכר', matchLabel: 'תואם', mismatchLabel: 'פער בשכר', missingLabel: 'מידע חסר' },
+      { key: 'scope', label: 'שעות משרה', matchLabel: 'תואם', mismatchLabel: 'לא מתאים', missingLabel: 'מידע חסר' },
+      { key: 'work_hours', label: 'שעות עבודה', matchLabel: 'תואם', mismatchLabel: 'לא מתאים', missingLabel: 'מידע חסר' },
+      { key: 'availability', label: 'זמינות', matchLabel: 'תואם', mismatchLabel: 'לא מתאים', missingLabel: 'מידע חסר' },
+      { key: 'mobility', label: 'ניידות', matchLabel: 'בסדר', mismatchLabel: 'נדרש רכב', missingLabel: 'מידע חסר' },
+      { key: 'license', label: 'רישיון נהיגה', matchLabel: 'יש רישיון', mismatchLabel: 'נדרש רישיון', missingLabel: 'מידע חסר' },
+      { key: 'age', label: 'גיל', matchLabel: 'מתאים', mismatchLabel: 'לא בטווח גיל', missingLabel: 'מידע חסר' },
+      { key: 'gender', label: 'מגדר', matchLabel: 'מתאים', mismatchLabel: 'מגבלת מגדר', missingLabel: 'מידע חסר' },
+      { key: 'mandatory_skill', label: 'מיומנות חובה', matchLabel: 'יש', mismatchLabel: 'חסרה', missingLabel: 'מידע חסר' },
+      { key: 'mandatory_language', label: 'שפה חובה', matchLabel: 'יש', mismatchLabel: 'חסרה', missingLabel: 'מידע חסר' },
     ];
 
     const items: Dot[] = [
-      { label: 'התאמה וקטורית', value: `${job.matchScore}%`, ok: scoreOk },
+      {
+        label: 'התאמה וקטורית',
+        value: vectorPct != null ? `${vectorPct}%` : '—',
+        ok: vectorOk,
+        muted: vectorPct == null,
+      },
       ...(job.city ? [{ label: 'מיקום', value: job.city, ok: true }] : []),
-      ...map.flatMap(({ key, label, matchLabel, gapLabel }) => {
+      {
+        label: 'מרחק מן היעד',
+        value: geoKm != null ? `${geoKm} ק"מ` : 'לא זמין',
+        ok: geoKm != null,
+        muted: geoKm == null,
+      },
+      ...map.flatMap(({ key, label, matchLabel, mismatchLabel, missingLabel }) => {
         const v = pm?.[key];
-        if (v === 'match') return [{ label, value: matchLabel, ok: true  }];
-        if (v === 'gap')   return [{ label, value: gapLabel,   ok: false }];
+        if (v === 'match') return [{ label, value: matchLabel, ok: true }];
+        if (v === 'missing') return [{ label, value: missingLabel, ok: false }];
+        if (v === 'mismatch' || v === 'gap') return [{ label, value: mismatchLabel, ok: false }];
         return [];
       }),
     ];
@@ -412,9 +450,19 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       <div className="flex flex-wrap gap-x-4 gap-y-1 mt-1.5">
         {items.map((item, i) => (
           <div key={i} className="flex items-center gap-1.5 shrink-0">
-            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${item.ok ? 'bg-green-500' : 'bg-red-500'}`} />
+            <span
+              className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                item.muted ? 'bg-gray-400' : item.ok ? 'bg-green-500' : 'bg-red-500'
+              }`}
+            />
             <span className="text-[11px] text-text-muted">{item.label}:</span>
-            <span className={`text-[11px] font-bold ${item.ok ? 'text-text-default' : 'text-red-700'}`}>{item.value}</span>
+            <span
+              className={`text-[11px] font-bold ${
+                item.muted ? 'text-text-muted' : item.ok ? 'text-text-default' : 'text-red-700'
+              }`}
+            >
+              {item.value}
+            </span>
           </div>
         ))}
       </div>

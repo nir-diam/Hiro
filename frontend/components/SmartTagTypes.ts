@@ -1,4 +1,4 @@
-export type SmartTagType = 'role' | 'seniority' | 'skill' | 'industry' | 'certification' | 'language' | 'tool' | 'soft';
+export type SmartTagType = 'role' | 'seniority' | 'skill' | 'industry' | 'certification' | 'language' | 'tool' | 'soft' | 'degree' | 'education';
 
 /** Rich tag detail panel (click-to-open); built in CandidateProfile from tag metadata */
 export interface SmartTagTooltipPanel {

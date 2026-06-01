@@ -19,6 +19,10 @@ import {
     type JobTagMatchInput,
 } from '../utils/jobTagMatchCategories';
 import type { Candidate } from './CandidatesListView';
+import {
+    formatIntentAffinityMetric,
+    type SonarScoreBreakdown as SonarBreakdownFull,
+} from '../utils/sonarMatchBreakdown';
 
 const SONAR_FILTER_KEYS = [
     'scope',
@@ -33,11 +37,7 @@ const SONAR_FILTER_KEYS = [
 ] as const;
 
 /** Subset of matching engine breakdown used by Sonar cards */
-export interface SonarScoreBreakdown {
-    geo?: number;
-    geoDistance?: number | null;
-    geoMissing?: boolean;
-}
+export type SonarScoreBreakdown = SonarBreakdownFull;
 
 export interface SonarScanRow {
     candidate: Record<string, unknown>;
@@ -461,28 +461,10 @@ function buildSonarMetricCells(
         salaryTone = 'muted';
     }
 
-    const jf = String(job.field ?? '').trim().toLowerCase();
-    const cf = String(c.field ?? '').trim().toLowerCase();
-    const ji = String(job.industry ?? '').trim().toLowerCase();
-    const ci = String(c.industry ?? '').trim().toLowerCase();
-    const jobHasAffReq = Boolean(jf || ji);
-    let affVal = t('job.sonar.affinity_unknown');
-    let affTone: SonarMetricTone = 'muted';
-    if (jobHasAffReq) {
-        if (jf && cf && (jf === cf || jf.includes(cf) || cf.includes(jf))) {
-            affVal = t('job.sonar.affinity_strong');
-            affTone = 'good';
-        } else if (
-            (ji && ci && (ji.includes(ci) || ci.includes(ji))) ||
-            (jf && cf && (jf.includes(cf) || cf.includes(jf)))
-        ) {
-            affVal = t('job.sonar.affinity_partial');
-            affTone = 'good';
-        } else {
-            affVal = t('job.sonar.affinity_gap');
-            affTone = 'bad';
-        }
-    }
+    const affMetric = formatIntentAffinityMetric(
+        row.scoreBreakdown as SonarScoreBreakdown | null | undefined,
+        t,
+    );
 
     return [
         { label: t('job.sonar.metric_vector_pct'), value: vecPctValue, tone: vecTone },
@@ -494,7 +476,7 @@ function buildSonarMetricCells(
         { label: t('job.sonar.fl_mobility'), value: mobilityVal, tone: mobilityTone },
         { label: t('job.sonar.fl_license'), value: licDisplay, tone: licTone },
         { label: t('job.sonar.fl_salary'), value: salaryVal, tone: salaryTone },
-        { label: t('job.sonar.fl_affinity'), value: affVal, tone: affTone },
+        affMetric,
     ];
 }
 

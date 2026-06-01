@@ -45,6 +45,8 @@ const Candidate = sequelize.define(
     professionalSummary: DataTypes.TEXT,
     profilePicture: DataTypes.STRING,
     resumeUrl: DataTypes.STRING,
+    /** When resumeUrl was last set (file upload); not updated on parsed-text edits. */
+    resumeUploadedAt: { type: DataTypes.DATE, allowNull: true },
     internalTags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     skills: { type: DataTypes.JSONB, defaultValue: { soft: [], technical: [] } },
     languages: { type: DataTypes.JSONB, defaultValue: [] },
@@ -74,6 +76,10 @@ const Candidate = sequelize.define(
     // Keep nullable; we only set it after we successfully generate an embedding.
     embedding: { type: DataTypes.JSONB, allowNull: true },
     searchText: DataTypes.TEXT,
+    /** When searchText was last written (parse or manual save). */
+    searchTextSavedAt: { type: DataTypes.DATE, allowNull: true },
+    /** Historical parsed CV versions: [{ text, savedAt }]; current text lives in searchText. */
+    originalText: { type: DataTypes.JSONB, defaultValue: [] },
     isArchived: { type: DataTypes.BOOLEAN, defaultValue: false },
     isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     documents: { type: DataTypes.JSONB, defaultValue: [] },

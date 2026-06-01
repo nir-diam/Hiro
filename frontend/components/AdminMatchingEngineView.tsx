@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
     SparklesIcon, 
     TagIcon, 
@@ -37,6 +37,10 @@ const API_CLIENTS     = `${API_BASE}/api/clients`;
 const API_CANDIDATES  = `${API_BASE}/api/candidates`;
 const API_JOBS        = `${API_BASE}/api/jobs`;
 
+const SIM_PICKER_SEARCH_MIN = 2;
+const SIM_PICKER_DEBOUNCE_MS = 350;
+const SIM_PICKER_RESULT_LIMIT = 30;
+
 /**
  * This screen talks only to admin matching-engine endpoints and `GET /api/clients` (labels for chips).
  * It does not read or write `client_usage_settings` — the tenant’s chosen preset id
@@ -64,6 +68,39 @@ interface ClientOption {
     id: string;
     name: string;
     displayName?: string;
+}
+
+type PenaltyPolicyRow = { mismatch: number; missing: number };
+
+const DEFAULT_PENALTY_POLICIES: Record<string, PenaltyPolicyRow> = {
+    gender:       { mismatch: 10, missing: 5 },
+    mobility:     { mismatch: 10, missing: 5 },
+    scope:        { mismatch: 10, missing: 5 },
+    license:      { mismatch: 10, missing: 5 },
+    work_hours:   { mismatch: 8,  missing: 4 },
+    availability: { mismatch: 8,  missing: 4 },
+};
+
+const PENALTY_DIMENSION_META: { id: keyof typeof DEFAULT_PENALTY_POLICIES; label: string }[] = [
+    { id: 'gender',       label: 'מין' },
+    { id: 'mobility',     label: 'ניידות' },
+    { id: 'scope',        label: 'היקף משרה' },
+    { id: 'license',      label: 'רישיון נהיגה' },
+    { id: 'work_hours',   label: 'שעות עבודה' },
+    { id: 'availability', label: 'זמינות' },
+];
+
+function normalizePenaltyPoliciesFromCfg(cfg: Record<string, unknown> | undefined): Record<string, PenaltyPolicyRow> {
+    const raw = cfg?.penaltyPolicies as Record<string, PenaltyPolicyRow> | undefined;
+    const out: Record<string, PenaltyPolicyRow> = {};
+    for (const [id, def] of Object.entries(DEFAULT_PENALTY_POLICIES)) {
+        const row = raw?.[id];
+        out[id] = {
+            mismatch: Number(row?.mismatch ?? def.mismatch),
+            missing:  Number(row?.missing  ?? def.missing),
+        };
+    }
+    return out;
 }
 
 const AdminMatchingEngineView: React.FC = () => {
@@ -110,9 +147,8 @@ const AdminMatchingEngineView: React.FC = () => {
 
     const [intentWeights, setIntentWeights] = useState<WeightSetting[]>([
         { id: 'exact', label: 'אותה משרה בדיוק', value: 100, icon: <UserGroupIcon className="w-4 h-4" />, description: 'הגשה מפורשת למשרה זו' },
-        { id: 'role', label: 'אותו תפקיד (ROLE)', value: 80, icon: <BriefcaseIcon className="w-4 h-4" />, description: 'הגשה למשרה באותו טייטל' },
-        { id: 'cluster', label: 'אותו קלאסטר (CLUSTER)', value: 50, icon: <TagIcon className="w-4 h-4" />, description: 'הגשה לתפקיד קרוב סמנטית' },
-        { id: 'category', label: 'אותה קטגוריה (CATEGORY)', value: 20, icon: <FolderIcon className="w-4 h-4" />, description: 'הגשה לאותו תחום מקצועי כללי' },
+        { id: 'role', label: 'Role שונה מאותו קלאסטר', value: 60, icon: <BriefcaseIcon className="w-4 h-4" />, description: 'הגשה למשרה באותו טייטל' },
+        { id: 'cluster', label: 'Role שונה מקלאסטר שונה מאותה קטגוריה', value: 30, icon: <TagIcon className="w-4 h-4" />, description: 'הגשה לתפקיד קרוב סמנטית' },
         { id: 'different', label: 'תחום אחר לגמרי', value: 0, icon: <XCircleIcon className="w-4 h-4" />, description: 'הגשה לתפקיד ללא הקשר' },
     ]);
 
@@ -154,8 +190,13 @@ const AdminMatchingEngineView: React.FC = () => {
 
     // Age Gap Penalty Settings
     const [ageGapPenalty, setAgeGapPenalty] = useState(2);
+    const [missingAgeScore, setMissingAgeScore] = useState(6);
 
     const [isExperienceEnabled, setIsExperienceEnabled] = useState(true);
+
+    const [penaltyPolicies, setPenaltyPolicies] = useState<Record<string, PenaltyPolicyRow>>(
+        () => ({ ...DEFAULT_PENALTY_POLICIES }),
+    );
 
     // Simulator — real backend IDs
     const [simCandidateId, setSimCandidateId] = useState('');
@@ -164,56 +205,113 @@ const AdminMatchingEngineView: React.FC = () => {
     const [isSimulating,   setIsSimulating]   = useState(false);
     const [simError,       setSimError]       = useState<string | null>(null);
 
-    // Search state for picking candidate / job
-    const [allCandidates,    setAllCandidates]    = useState<{id: string; name: string}[]>([]);
-    const [allJobs,          setAllJobs]          = useState<{id: string; title: string}[]>([]);
-    const [candidateFilter,  setCandidateFilter]  = useState('');
-    const [jobFilter,        setJobFilter]        = useState('');
+    /** Optional overrides merged on top of DB candidate/job (empty = use real data). */
+    const [simOverrides, setSimOverrides] = useState({
+        candidateGender: '',
+        jobGender: '',
+        candidateMobility: '',
+        jobMobility: '' as '' | 'true' | 'false',
+        candidateLicense: '',
+        jobLicense: '',
+        candidateScope: '',
+        jobJobType: '' as '' | 'מלאה' | 'חלקית' | 'משמרות',
+        candidateAvailability: '',
+        candidateWorkHours: '',
+    });
+
+    // Typeahead search for simulator pickers (no bulk load)
+    const [candidateResults, setCandidateResults] = useState<{ id: string; name: string }[]>([]);
+    const [jobResults, setJobResults] = useState<{ id: string; title: string }[]>([]);
+    const [selectedCandidate, setSelectedCandidate] = useState<{ id: string; name: string } | null>(null);
+    const [selectedJob, setSelectedJob] = useState<{ id: string; title: string } | null>(null);
+    const [candidateFilter, setCandidateFilter] = useState('');
+    const [jobFilter, setJobFilter] = useState('');
     const [isFetchingCandidates, setIsFetchingCandidates] = useState(false);
-    const [isFetchingJobs,       setIsFetchingJobs]       = useState(false);
+    const [isFetchingJobs, setIsFetchingJobs] = useState(false);
 
     useEffect(() => {
-        (async () => {
+        const q = candidateFilter.trim();
+        if (q.length < SIM_PICKER_SEARCH_MIN) {
+            setCandidateResults([]);
+            return undefined;
+        }
+        const timer = window.setTimeout(async () => {
             setIsFetchingCandidates(true);
             try {
-                const res = await fetch(`${API_CANDIDATES}?limit=500&sort=fullName&direction=asc`, { headers: buildHeaders() });
+                const res = await fetch(
+                    `${API_CANDIDATES}?search=${encodeURIComponent(q)}&limit=${SIM_PICKER_RESULT_LIMIT}`,
+                    { headers: buildHeaders() },
+                );
                 if (res.ok) {
                     const data = await res.json();
                     const list = Array.isArray(data) ? data : (data.data ?? data.rows ?? []);
-                    const sorted = list
-                        .map((c: any) => ({ id: String(c.id), name: String(c.fullName || c.firstName || c.id) }))
-                        .sort((a: {name: string}, b: {name: string}) => a.name.localeCompare(b.name, 'he'));
-                    setAllCandidates(sorted);
+                    const mapped = list
+                        .map((c: { id?: string; fullName?: string; firstName?: string }) => ({
+                            id: String(c.id),
+                            name: String(c.fullName || c.firstName || c.id),
+                        }))
+                        .filter((c: { id: string }) => c.id);
+                    setCandidateResults(mapped);
                 }
-            } catch { /* silent */ }
-            finally { setIsFetchingCandidates(false); }
-        })();
-    }, []);
+            } catch {
+                /* silent */
+            } finally {
+                setIsFetchingCandidates(false);
+            }
+        }, SIM_PICKER_DEBOUNCE_MS);
+        return () => window.clearTimeout(timer);
+    }, [candidateFilter]);
 
     useEffect(() => {
-        (async () => {
+        const q = jobFilter.trim();
+        if (q.length < SIM_PICKER_SEARCH_MIN) {
+            setJobResults([]);
+            return undefined;
+        }
+        const timer = window.setTimeout(async () => {
             setIsFetchingJobs(true);
             try {
-                const res = await fetch(`${API_JOBS}?limit=500&sort=title&direction=asc`, { headers: buildHeaders() });
+                const res = await fetch(
+                    `${API_JOBS}?search=${encodeURIComponent(q)}&limit=${SIM_PICKER_RESULT_LIMIT}`,
+                    { headers: buildHeaders() },
+                );
                 if (res.ok) {
                     const data = await res.json();
                     const list = Array.isArray(data) ? data : (data.data ?? data.rows ?? []);
-                    const sorted = list
-                        .map((j: any) => ({ id: String(j.id), title: String(j.title || j.id) }))
-                        .sort((a: {title: string}, b: {title: string}) => a.title.localeCompare(b.title, 'he'));
-                    setAllJobs(sorted);
+                    const mapped = list
+                        .map((j: { id?: string; title?: string; publicJobTitle?: string; client?: string }) => {
+                            const title = String(j.title || j.publicJobTitle || j.id || '');
+                            const client = j.client ? String(j.client).trim() : '';
+                            return {
+                                id: String(j.id),
+                                title: client ? `${title} · ${client}` : title,
+                            };
+                        })
+                        .filter((j: { id: string }) => j.id);
+                    setJobResults(mapped);
                 }
-            } catch { /* silent */ }
-            finally { setIsFetchingJobs(false); }
-        })();
-    }, []);
+            } catch {
+                /* silent */
+            } finally {
+                setIsFetchingJobs(false);
+            }
+        }, SIM_PICKER_DEBOUNCE_MS);
+        return () => window.clearTimeout(timer);
+    }, [jobFilter]);
 
-    const filteredCandidates = allCandidates.filter(c =>
-        !candidateFilter || c.name.toLowerCase().includes(candidateFilter.toLowerCase())
-    );
-    const filteredJobs = allJobs.filter(j =>
-        !jobFilter || j.title.toLowerCase().includes(jobFilter.toLowerCase())
-    );
+    const candidateOptions = useMemo(() => {
+        const byId = new Map<string, { id: string; name: string }>();
+        if (selectedCandidate) byId.set(selectedCandidate.id, selectedCandidate);
+        for (const c of candidateResults) byId.set(c.id, c);
+        return Array.from(byId.values()).sort((a, b) => a.name.localeCompare(b.name, 'he'));
+    }, [candidateResults, selectedCandidate]);
+
+    const jobOptions = useMemo(() => {
+        const byId = new Map<string, { id: string; title: string }>();
+        if (selectedJob) byId.set(selectedJob.id, selectedJob);
+        for (const j of jobResults) byId.set(j.id, j);
+        return Array.from(byId.values()).sort((a, b) => a.title.localeCompare(b.title, 'he'));
+    }, [jobResults, selectedJob]);
 
     const runSimulation = async () => {
         if (!simCandidateId || !simJobId) {
@@ -230,7 +328,27 @@ const AdminMatchingEngineView: React.FC = () => {
                 body: JSON.stringify({
                     candidateId: simCandidateId,
                     jobId:       simJobId,
-                    presetId:    activePresetId ?? undefined,
+                    // Live panel state only — preset is already applied to sliders when selected
+                    config:      buildPayload(),
+                    candidateOverrides: (() => {
+                        const o: Record<string, unknown> = {};
+                        if (simOverrides.candidateGender.trim()) o.gender = simOverrides.candidateGender.trim();
+                        if (simOverrides.candidateMobility.trim()) o.mobility = simOverrides.candidateMobility.trim();
+                        if (simOverrides.candidateLicense.trim()) o.drivingLicense = simOverrides.candidateLicense.trim();
+                        if (simOverrides.candidateScope.trim()) o.jobScope = simOverrides.candidateScope.trim();
+                        if (simOverrides.candidateAvailability.trim()) o.availability = simOverrides.candidateAvailability.trim();
+                        if (simOverrides.candidateWorkHours.trim()) o.preferredWorkingHours = simOverrides.candidateWorkHours.trim();
+                        return Object.keys(o).length ? o : undefined;
+                    })(),
+                    jobOverrides: (() => {
+                        const o: Record<string, unknown> = {};
+                        if (simOverrides.jobGender.trim()) o.gender = simOverrides.jobGender.trim();
+                        if (simOverrides.jobMobility === 'true') o.mobility = true;
+                        if (simOverrides.jobMobility === 'false') o.mobility = false;
+                        if (simOverrides.jobLicense.trim()) o.licenseType = simOverrides.jobLicense.trim();
+                        if (simOverrides.jobJobType) o.jobType = [simOverrides.jobJobType];
+                        return Object.keys(o).length ? o : undefined;
+                    })(),
                 }),
             });
             if (!res.ok) {
@@ -244,6 +362,7 @@ const AdminMatchingEngineView: React.FC = () => {
                 candidateName: data.candidateName,
                 jobTitle:      data.jobTitle,
                 breakdown:     data.breakdown,
+                penaltyPoliciesUsed: data.penaltyPoliciesUsed as Record<string, { mismatch: number; missing: number }> | undefined,
             });
         } catch (err: unknown) {
             setSimError(err instanceof Error ? err.message : 'שגיאה בסימולציה');
@@ -282,7 +401,9 @@ const AdminMatchingEngineView: React.FC = () => {
                 if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold);
                 if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty);
                 if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty);
+                if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
                 if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled);
+                setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg as Record<string, unknown>));
             } catch {
                 // silent — fall back to defaults
             }
@@ -313,7 +434,9 @@ const AdminMatchingEngineView: React.FC = () => {
                         if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(cfg.salaryDiffThreshold as number);
                         if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(cfg.salaryPenalty as number);
                         if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(cfg.ageGapPenalty as number);
+                        if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
                         if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(cfg.isExperienceEnabled as boolean);
+                        setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg));
                     }
                 }
             } catch { /* silent */ }
@@ -413,8 +536,10 @@ const AdminMatchingEngineView: React.FC = () => {
         salaryDiffThreshold,
         salaryPenalty,
         ageGapPenalty,
+        missingAgeScore,
         isExperienceEnabled,
-    }), [mainWeights, intentWeights, tagWeights, sourceWeights, geoRegions, missingGeoScore, missingSalaryScore, salaryDiffThreshold, salaryPenalty, ageGapPenalty, isExperienceEnabled]);
+        penaltyPolicies,
+    }), [mainWeights, intentWeights, tagWeights, sourceWeights, geoRegions, missingGeoScore, missingSalaryScore, salaryDiffThreshold, salaryPenalty, ageGapPenalty, missingAgeScore, isExperienceEnabled, penaltyPolicies]);
 
     const handleSaveAsNewPresetClick = () => {
         setNewPresetName('');
@@ -489,7 +614,9 @@ const AdminMatchingEngineView: React.FC = () => {
         if (cfg.salaryDiffThreshold !== undefined) setSalaryDiffThreshold(Number(cfg.salaryDiffThreshold));
         if (cfg.salaryPenalty       !== undefined) setSalaryPenalty(Number(cfg.salaryPenalty));
         if (cfg.ageGapPenalty       !== undefined) setAgeGapPenalty(Number(cfg.ageGapPenalty));
+        if (cfg.missingAgeScore     !== undefined) setMissingAgeScore(Number(cfg.missingAgeScore));
         if (cfg.isExperienceEnabled !== undefined) setIsExperienceEnabled(Boolean(cfg.isExperienceEnabled));
+        setPenaltyPolicies(normalizePenaltyPoliciesFromCfg(cfg));
     }, []);
 
     const toggleClientId = (id: string) =>
@@ -912,11 +1039,67 @@ const AdminMatchingEngineView: React.FC = () => {
                 </div>
             </div>
 
+            {/* General penalty policies */}
+            <div className="mt-8 bg-white rounded-2xl border border-border-default p-6 shadow-sm">
+                <h3 className="text-lg font-bold text-text-default mb-2 flex items-center gap-2">
+                    <ScaleIcon className="w-5 h-5 text-rose-500" />
+                    מדיניות קנסות כלליים (Penalty_general)
+                </h3>
+                <p className="text-xs text-text-muted mb-6">
+                    לכל ממד: קנס על חוסר התאמה (Mismatch) וקנס על מידע חסר בפרופיל כשהמשרה מחייבת את השדה.
+                    קנס נגבה רק אם המשרה דורשת את הממד (למשל ניידות רק כש־mobility=true במשרה) — שינוי ממד שלא רלוונטי למועמד/משרה בסימולציה לא ישפיע.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {PENALTY_DIMENSION_META.map((dim) => {
+                        const row = penaltyPolicies[dim.id] || DEFAULT_PENALTY_POLICIES[dim.id];
+                        return (
+                            <div key={dim.id} className="p-4 rounded-xl border border-border-default bg-bg-subtle/40 space-y-4">
+                                <div className="font-bold text-text-default text-sm">{dim.label}</div>
+                                <div>
+                                    <div className="flex justify-between text-xs mb-1">
+                                        <span className="text-rose-600 font-semibold">חוסר התאמה</span>
+                                        <span className="font-black text-rose-600">-{row.mismatch}</span>
+                                    </div>
+                                    <input
+                                        type="range" min={0} max={50} value={row.mismatch}
+                                        onChange={(e) => {
+                                            const v = parseInt(e.target.value, 10);
+                                            setPenaltyPolicies((prev) => ({
+                                                ...prev,
+                                                [dim.id]: { ...(prev[dim.id] || row), mismatch: v },
+                                            }));
+                                        }}
+                                        className="w-full h-1.5 accent-rose-500"
+                                    />
+                                </div>
+                                <div>
+                                    <div className="flex justify-between text-xs mb-1">
+                                        <span className="text-amber-600 font-semibold">מידע חסר</span>
+                                        <span className="font-black text-amber-600">-{row.missing}</span>
+                                    </div>
+                                    <input
+                                        type="range" min={0} max={50} value={row.missing}
+                                        onChange={(e) => {
+                                            const v = parseInt(e.target.value, 10);
+                                            setPenaltyPolicies((prev) => ({
+                                                ...prev,
+                                                [dim.id]: { ...(prev[dim.id] || row), missing: v },
+                                            }));
+                                        }}
+                                        className="w-full h-1.5 accent-amber-500"
+                                    />
+                                </div>
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+
             {/* Additional Settings & Penalties */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-8 items-start">
-                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm">
-                        <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
-                            <UserGroupIcon className="w-5 h-5 text-primary-500" />
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mt-8 items-stretch">
+                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
+                        <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
+                            <UserGroupIcon className="w-5 h-5 shrink-0 text-primary-500" />
                             שקלול מקור התגית
                         </h3>
                         
@@ -944,13 +1127,51 @@ const AdminMatchingEngineView: React.FC = () => {
                         </div>
                     </div>
 
-                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm">
-                        <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
-                            <InformationCircleIcon className="w-5 h-5 text-primary-500" />
-                            מדיניות מידע חסר
+                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
+                        <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
+                            <UserGroupIcon className="w-5 h-5 shrink-0 text-primary-500" />
+                            קנס על חריגה מטווח הגילאים
                         </h3>
                         
                         <div className="space-y-6">
+                            <div className="p-4 bg-orange-50 rounded-xl border border-orange-100">
+                                <div className="flex items-center justify-between mb-4">
+                                    <div className="font-bold text-text-default">נקודות קנס לכל שנת חריגה</div>
+                                    <span className="text-2xl font-black text-orange-600">-{ageGapPenalty}</span>
+                                </div>
+                                
+                                <input 
+                                    type="range" 
+                                    min="0" 
+                                    max="10" 
+                                    value={ageGapPenalty}
+                                    onChange={(e) => setAgeGapPenalty(parseInt(e.target.value))}
+                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-orange-500"
+                                />
+                                
+                                <div className="flex justify-between text-[10px] text-text-muted mt-2 font-bold uppercase tracking-wider">
+                                    <span>0 נק'</span>
+                                    <span>5 נק'</span>
+                                    <span>10 נק'</span>
+                                </div>
+                            </div>
+
+                            <div className="text-xs text-text-muted leading-relaxed">
+                                <p className="font-bold text-text-default mb-1">איך זה עובד?</p>
+                                כאשר גיל המועמד חורג מטווח הגילאים שהוגדר למשרה (כלפי מעלה או מטה), יופחתו {ageGapPenalty} נקודות מהציון הסופי על כל שנת חריגה.
+                                <br />
+                                <span className="text-primary-600 font-medium italic">הערה: הוצאת הגיל משכבת הניסיון והפיכתו לקנס מאפשרת שליטה מדויקת יותר ומונעת פגיעה במועמדים שמתאימים מקצועית אך חורגים מעט דמוגרפית.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
+                        <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
+                            <InformationCircleIcon className="w-5 h-5 shrink-0 text-primary-500" />
+                            מדיניות מידע חסר
+                        </h3>
+
+                        <div className="space-y-4 max-h-[min(500px,70vh)] overflow-y-auto pr-2 custom-scrollbar">
                             <div className="p-4 bg-primary-50 rounded-xl border border-primary-100">
                                 <div className="flex items-center justify-between mb-4">
                                     <div className="font-bold text-text-default">ציון ברירת מחדל ללא כתובת</div>
@@ -973,18 +1194,40 @@ const AdminMatchingEngineView: React.FC = () => {
                                 </div>
                             </div>
 
-                            <div className="text-xs text-text-muted leading-relaxed">
+                            <div className="p-4 rounded-xl border bg-rose-50 border-rose-100">
+                                <div className="flex items-center justify-between mb-4">
+                                    <div className="font-bold text-text-default">קנס ברירת מחדל ללא גיל</div>
+                                    <span className="text-2xl font-black text-rose-600">-{missingAgeScore}</span>
+                                </div>
+                                <input
+                                    type="range"
+                                    min={0}
+                                    max={50}
+                                    value={missingAgeScore}
+                                    onChange={(e) => setMissingAgeScore(parseInt(e.target.value, 10))}
+                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-rose-500"
+                                />
+                                <div className="flex justify-between text-[10px] text-text-muted mt-2 font-bold uppercase tracking-wider">
+                                    <span>0 נק&apos;</span>
+                                    <span>25 נק&apos;</span>
+                                    <span>50 נק&apos;</span>
+                                </div>
+                            </div>
+
+                            
+
+                            <div className="text-xs text-text-muted leading-relaxed mt-4">
                                 <p className="font-bold text-text-default mb-1">איך זה עובד?</p>
-                                כאשר למועמד אין כתובת, המערכת תיתן לו את הציון שקבעת כאן ברכיב הגיאוגרפי.
-                                <br />
-                                <span className="text-primary-600 font-medium italic">טיפ: כדי לעודד מועמדים להזין כתובת, מומלץ לקבוע ציון נמוך מ-80 (ציון "סביר").</span>
+                                כתובת וגיל מטופלים כאן כשכבות ציון / קנס ייעודיים. ניידות, היקף משרה, רישיון, שעות וזמינות — ב
+                                <span className="font-medium text-text-default"> מדיניות קנסות כלליים </span>
+                                (מידע חסר / חוסר התאמה).
                             </div>
                         </div>
                     </div>
 
-                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm">
-                        <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
-                            <ScaleIcon className="w-5 h-5 text-primary-500" />
+                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm min-w-0">
+                        <h3 className="text-base font-bold text-text-default mb-6 flex items-center gap-2 leading-snug">
+                            <ScaleIcon className="w-5 h-5 shrink-0 text-primary-500" />
                             קנס על פער בציפיות שכר
                         </h3>
                         
@@ -1057,52 +1300,20 @@ const AdminMatchingEngineView: React.FC = () => {
                             </div>
 
                             <div className="text-xs text-text-muted leading-relaxed">
-                                <p className="font-bold text-text-default mb-1">איך זה עובד?</p>
-                                כאשר למועמד אין ציפיות שכר, יופחת קנס ברירת המחדל שקבעת.
+                                <p className="font-bold text-text-default mb-1">איך זה עובד? (שכר בלבד — לא שעות עבודה)</p>
+                                משווה <span className="font-medium text-text-default">ציפיות שכר מינימום של המועמד</span> מול{' '}
+                                <span className="font-medium text-text-default">שכר מקסימום במשרה</span> (`salaryMin` / `salaryMax`).
                                 <br />
-                                כאשר ציפיות השכר של המועמד גבוהות מהשכר המוצע במשרה, המערכת תחשב את הפער באחוזים.
-                                על כל פער של {salaryDiffThreshold}% יופחתו {salaryPenalty} נקודות מהציון הסופי.
+                                אין ציפיות שכר → קנס קבוע של {missingSalaryScore} נק&apos;.
+                                <br />
+                                ציפיות גבוהות מהמשרה → פער באחוזים; מעל סף {salaryDiffThreshold}% →{' '}
+                                {salaryPenalty} נק&apos; לכל מדרגה של {salaryDiffThreshold}% (במנוע: `matchingScoreService`).
+                                <br />
+                                שעות עבודה (`preferredWorkingHours`) מוגדרות ב־<span className="font-medium text-text-default">מדיניות קנסות כלליים</span>.
                             </div>
                         </div>
                     </div>
 
-                    <div className="bg-white rounded-2xl border border-border-default p-6 shadow-sm">
-                        <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
-                            <UserGroupIcon className="w-5 h-5 text-primary-500" />
-                            קנס על חריגה מטווח הגילאים (Demographics)
-                        </h3>
-                        
-                        <div className="space-y-6">
-                            <div className="p-4 bg-orange-50 rounded-xl border border-orange-100">
-                                <div className="flex items-center justify-between mb-4">
-                                    <div className="font-bold text-text-default">נקודות קנס לכל שנת חריגה</div>
-                                    <span className="text-2xl font-black text-orange-600">-{ageGapPenalty}</span>
-                                </div>
-                                
-                                <input 
-                                    type="range" 
-                                    min="0" 
-                                    max="10" 
-                                    value={ageGapPenalty}
-                                    onChange={(e) => setAgeGapPenalty(parseInt(e.target.value))}
-                                    className="w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer accent-orange-500"
-                                />
-                                
-                                <div className="flex justify-between text-[10px] text-text-muted mt-2 font-bold uppercase tracking-wider">
-                                    <span>0 נק'</span>
-                                    <span>5 נק'</span>
-                                    <span>10 נק'</span>
-                                </div>
-                            </div>
-
-                            <div className="text-xs text-text-muted leading-relaxed">
-                                <p className="font-bold text-text-default mb-1">איך זה עובד?</p>
-                                כאשר גיל המועמד חורג מטווח הגילאים שהוגדר למשרה (כלפי מעלה או מטה), יופחתו {ageGapPenalty} נקודות מהציון הסופי על כל שנת חריגה.
-                                <br />
-                                <span className="text-primary-600 font-medium italic">הערה: הוצאת הגיל משכבת הניסיון והפיכתו לקנס מאפשרת שליטה מדויקת יותר ומונעת פגיעה במועמדים שמתאימים מקצועית אך חורגים מעט דמוגרפית.</span>
-                            </div>
-                        </div>
-                    </div>
             </div>
 
             {/* Geo Regional Logic Section */}
@@ -1201,26 +1412,45 @@ const AdminMatchingEngineView: React.FC = () => {
                                 <UserGroupIcon className="w-5 h-5 text-primary-500" />
                                 בחר מועמד
                                 {isFetchingCandidates && <ArrowPathIcon className="w-4 h-4 animate-spin text-text-muted mr-auto" />}
-                                {!isFetchingCandidates && allCandidates.length > 0 && (
-                                    <span className="mr-auto text-xs font-normal text-text-muted">{allCandidates.length} מועמדים</span>
+                                {!isFetchingCandidates && candidateFilter.trim().length >= SIM_PICKER_SEARCH_MIN && (
+                                    <span className="mr-auto text-xs font-normal text-text-muted">
+                                        {candidateOptions.length} תוצאות
+                                    </span>
                                 )}
                             </div>
                             <div className="p-4 space-y-2">
                                 <input
                                     type="text"
-                                    placeholder="סנן לפי שם..."
+                                    placeholder="הקלד שם, אימייל או טלפון (לפחות 2 תווים)..."
                                     value={candidateFilter}
                                     onChange={e => setCandidateFilter(e.target.value)}
                                     className="w-full border border-border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
                                 />
+                                {candidateFilter.trim().length > 0 && candidateFilter.trim().length < SIM_PICKER_SEARCH_MIN && (
+                                    <p className="text-xs text-text-muted">הקלד לפחות {SIM_PICKER_SEARCH_MIN} תווים לחיפוש</p>
+                                )}
                                 <select
                                     size={6}
                                     value={simCandidateId}
-                                    onChange={e => { setSimCandidateId(e.target.value); setSimResult(null); }}
+                                    onChange={e => {
+                                        const id = e.target.value;
+                                        setSimCandidateId(id);
+                                        const picked = candidateOptions.find(c => c.id === id);
+                                        if (picked) setSelectedCandidate(picked);
+                                        setSimResult(null);
+                                    }}
                                     className="w-full border border-border-default rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500 bg-white"
                                 >
-                                    <option value="" disabled>— בחר מועמד —</option>
-                                    {filteredCandidates.map(c => (
+                                    <option value="">
+                                        {candidateFilter.trim().length < SIM_PICKER_SEARCH_MIN
+                                            ? '— הקלד לחיפוש מועמד —'
+                                            : isFetchingCandidates
+                                              ? 'מחפש…'
+                                              : candidateOptions.length
+                                                ? '— בחר מועמד —'
+                                                : 'אין תוצאות'}
+                                    </option>
+                                    {candidateOptions.map(c => (
                                         <option key={c.id} value={c.id}>{c.name}</option>
                                     ))}
                                 </select>
@@ -1228,7 +1458,7 @@ const AdminMatchingEngineView: React.FC = () => {
                                     <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
                                         <CheckCircleIcon className="w-4 h-4 shrink-0" />
                                         <span className="font-bold truncate">
-                                            {allCandidates.find(c => c.id === simCandidateId)?.name || simCandidateId}
+                                            {selectedCandidate?.name || simCandidateId}
                                         </span>
                                     </div>
                                 )}
@@ -1241,26 +1471,45 @@ const AdminMatchingEngineView: React.FC = () => {
                                 <BriefcaseIcon className="w-5 h-5 text-orange-500" />
                                 בחר משרה
                                 {isFetchingJobs && <ArrowPathIcon className="w-4 h-4 animate-spin text-text-muted mr-auto" />}
-                                {!isFetchingJobs && allJobs.length > 0 && (
-                                    <span className="mr-auto text-xs font-normal text-text-muted">{allJobs.length} משרות</span>
+                                {!isFetchingJobs && jobFilter.trim().length >= SIM_PICKER_SEARCH_MIN && (
+                                    <span className="mr-auto text-xs font-normal text-text-muted">
+                                        {jobOptions.length} תוצאות
+                                    </span>
                                 )}
                             </div>
                             <div className="p-4 space-y-2">
                                 <input
                                     type="text"
-                                    placeholder="סנן לפי שם משרה..."
+                                    placeholder="הקלד כותרת משרה, לקוח או קוד (לפחות 2 תווים)..."
                                     value={jobFilter}
                                     onChange={e => setJobFilter(e.target.value)}
                                     className="w-full border border-border-default rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
                                 />
+                                {jobFilter.trim().length > 0 && jobFilter.trim().length < SIM_PICKER_SEARCH_MIN && (
+                                    <p className="text-xs text-text-muted">הקלד לפחות {SIM_PICKER_SEARCH_MIN} תווים לחיפוש</p>
+                                )}
                                 <select
                                     size={6}
                                     value={simJobId}
-                                    onChange={e => { setSimJobId(e.target.value); setSimResult(null); }}
+                                    onChange={e => {
+                                        const id = e.target.value;
+                                        setSimJobId(id);
+                                        const picked = jobOptions.find(j => j.id === id);
+                                        if (picked) setSelectedJob(picked);
+                                        setSimResult(null);
+                                    }}
                                     className="w-full border border-border-default rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-orange-400 bg-white"
                                 >
-                                    <option value="" disabled>— בחר משרה —</option>
-                                    {filteredJobs.map(j => (
+                                    <option value="">
+                                        {jobFilter.trim().length < SIM_PICKER_SEARCH_MIN
+                                            ? '— הקלד לחיפוש משרה —'
+                                            : isFetchingJobs
+                                              ? 'מחפש…'
+                                              : jobOptions.length
+                                                ? '— בחר משרה —'
+                                                : 'אין תוצאות'}
+                                    </option>
+                                    {jobOptions.map(j => (
                                         <option key={j.id} value={j.id}>{j.title}</option>
                                     ))}
                                 </select>
@@ -1268,7 +1517,7 @@ const AdminMatchingEngineView: React.FC = () => {
                                     <div className="flex items-center gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-1.5">
                                         <CheckCircleIcon className="w-4 h-4 shrink-0" />
                                         <span className="font-bold truncate">
-                                            {allJobs.find(j => j.id === simJobId)?.title || simJobId}
+                                            {selectedJob?.title || simJobId}
                                         </span>
                                     </div>
                                 )}
@@ -1276,25 +1525,75 @@ const AdminMatchingEngineView: React.FC = () => {
                         </div>
 
                         {/* Active preset indicator */}
-                        {activePresetId && (
-                            <div className="flex items-center gap-2 text-sm text-purple-700 bg-purple-50 border border-purple-200 rounded-xl px-4 py-3">
-                                <SparklesIcon className="w-4 h-4 shrink-0" />
-                                הסימולציה תרוץ עם הגישה הפעילה: <span className="font-bold">{dbPresets.find(p => p.id === activePresetId)?.label || activePresetId}</span>
-                            </div>
-                        )}
+                        <div className="flex items-center gap-2 text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-xl px-4 py-3">
+                            <SparklesIcon className="w-4 h-4 shrink-0" />
+                            הסימולציה משתמשת ב<strong className="mx-1">המשקלים והקנסות מהמסך הנוכחי</strong> (גם לפני שמירה).
+                            {activePresetId && (
+                                <span className="text-purple-700"> · גישה: {dbPresets.find(p => p.id === activePresetId)?.label}</span>
+                            )}
+                        </div>
 
-                        {/* info note */}
+                        {/* Penalty test overrides */}
                         <div className="bg-white rounded-2xl border border-border-default shadow-sm">
                             <div className="bg-bg-subtle rounded-t-2xl px-5 py-3.5 border-b border-border-default flex items-center gap-2.5 font-bold text-text-default">
-                                <InformationCircleIcon className="w-5 h-5 text-primary-500" />
-                                מידע
+                                <ScaleIcon className="w-5 h-5 text-rose-500" />
+                                שדות לבדיקת קנסות (אופציונלי)
                             </div>
-                            
-                            <div className="p-5">
-                                <p className="text-sm text-text-muted">
-                                    הסימולציה מחשבת ציון התאמה אמיתי עבור המועמד והמשרה שנבחרו, תוך שימוש בכל 5 שכבות הניקוד
-                                    (סמנטי, תגיות, גיאוגרפיה, ניסיון וזיקה) על פי המשקלים הנוכחיים.
-                                </p>
+                            <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">מין מועמד</span>
+                                    <select value={simOverrides.candidateGender} onChange={(e) => setSimOverrides((p) => ({ ...p, candidateGender: e.target.value }))} className="w-full border rounded-lg px-2 py-1.5">
+                                        <option value="">— מהמערכת —</option>
+                                        <option value="זכר">זכר</option>
+                                        <option value="נקבה">נקבה</option>
+                                    </select>
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">מין נדרש במשרה</span>
+                                    <select value={simOverrides.jobGender} onChange={(e) => setSimOverrides((p) => ({ ...p, jobGender: e.target.value }))} className="w-full border rounded-lg px-2 py-1.5">
+                                        <option value="">— מהמערכת —</option>
+                                        <option value="זכר">זכר</option>
+                                        <option value="נקבה">נקבה</option>
+                                        <option value="לא משנה">לא משנה</option>
+                                    </select>
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">ניידות מועמד</span>
+                                    <input value={simOverrides.candidateMobility} onChange={(e) => setSimOverrides((p) => ({ ...p, candidateMobility: e.target.value }))} placeholder="לדוגמה: רכב פרטי" className="w-full border rounded-lg px-2 py-1.5" />
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">ניידות נדרשת</span>
+                                    <select value={simOverrides.jobMobility} onChange={(e) => setSimOverrides((p) => ({ ...p, jobMobility: e.target.value as '' | 'true' | 'false' }))} className="w-full border rounded-lg px-2 py-1.5">
+                                        <option value="">— מהמערכת —</option>
+                                        <option value="true">כן</option>
+                                        <option value="false">לא</option>
+                                    </select>
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">רישיון מועמד</span>
+                                    <input value={simOverrides.candidateLicense} onChange={(e) => setSimOverrides((p) => ({ ...p, candidateLicense: e.target.value }))} className="w-full border rounded-lg px-2 py-1.5" />
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">רישיון נדרש</span>
+                                    <input value={simOverrides.jobLicense} onChange={(e) => setSimOverrides((p) => ({ ...p, jobLicense: e.target.value }))} placeholder="B" className="w-full border rounded-lg px-2 py-1.5" />
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">היקף מועמד</span>
+                                    <input value={simOverrides.candidateScope} onChange={(e) => setSimOverrides((p) => ({ ...p, candidateScope: e.target.value }))} placeholder="מלאה / חלקית" className="w-full border rounded-lg px-2 py-1.5" />
+                                </label>
+                                <label className="space-y-1">
+                                    <span className="text-xs font-semibold text-text-muted">סוג משרה</span>
+                                    <select value={simOverrides.jobJobType} onChange={(e) => setSimOverrides((p) => ({ ...p, jobJobType: e.target.value as typeof p.jobJobType }))} className="w-full border rounded-lg px-2 py-1.5">
+                                        <option value="">— מהמערכת —</option>
+                                        <option value="מלאה">מלאה</option>
+                                        <option value="חלקית">חלקית</option>
+                                        <option value="משמרות">משמרות</option>
+                                    </select>
+                                </label>
+                                <label className="space-y-1 sm:col-span-2">
+                                    <span className="text-xs font-semibold text-text-muted">זמינות מועמד</span>
+                                    <input value={simOverrides.candidateAvailability} onChange={(e) => setSimOverrides((p) => ({ ...p, candidateAvailability: e.target.value }))} className="w-full border rounded-lg px-2 py-1.5" />
+                                </label>
                             </div>
                         </div>
                     </div>{/* end left panel */}
@@ -1356,6 +1655,35 @@ const AdminMatchingEngineView: React.FC = () => {
                                         <div className="h-2.5 bg-bg-subtle rounded-full overflow-hidden">
                                             <div className="h-full bg-blue-500 rounded-full transition-all duration-1000" style={{ width: `${simResult.breakdown.tags}%` }}></div>
                                         </div>
+                                        {simResult.breakdown.tagBreakdown &&
+                                        typeof simResult.breakdown.tagBreakdown === 'object' &&
+                                        Object.keys(simResult.breakdown.tagBreakdown).length > 0 ? (
+                                            <div className="mt-2 ps-1 space-y-1 border-s-2 border-blue-100">
+                                                {Object.entries(
+                                                    simResult.breakdown.tagBreakdown as Record<string, number>,
+                                                ).map(([catId, catScore]) => {
+                                                    const label =
+                                                        tagWeights.find((w) => w.id === catId)?.label || catId;
+                                                    const wgt = tagWeights.find((w) => w.id === catId)?.value ?? 0;
+                                                    return (
+                                                        <div
+                                                            key={catId}
+                                                            className="flex justify-between text-[10px] text-text-muted"
+                                                        >
+                                                            <span>
+                                                                {label}
+                                                                {wgt > 0 ? (
+                                                                    <span className="text-blue-600/80"> (משקל {wgt})</span>
+                                                                ) : null}
+                                                            </span>
+                                                            <span className="font-semibold text-text-default">
+                                                                {catScore}%
+                                                            </span>
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        ) : null}
                                     </div>
 
                                     {/* Geo */}
@@ -1403,6 +1731,32 @@ const AdminMatchingEngineView: React.FC = () => {
                                             <div className="h-2.5 bg-orange-100 rounded-full overflow-hidden">
                                                 <div className="h-full bg-orange-500 rounded-full transition-all duration-1000" style={{ width: `100%` }}></div>
                                             </div>
+                                        </div>
+                                    )}
+
+                                    {/* General penalties */}
+                                    {(simResult.breakdown.generalPenalties > 0 || (Array.isArray(simResult.breakdown.penaltyReasons) && simResult.breakdown.penaltyReasons.length > 0)) && (
+                                        <div className="space-y-2 pt-4 mt-2 border-t border-border-subtle">
+                                            <div className="flex justify-between text-sm font-bold">
+                                                <span className="text-rose-600 flex items-center gap-2"><ScaleIcon className="w-4 h-4"/> קנסות כלליים</span>
+                                                <span className="text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">-{simResult.breakdown.generalPenalties || 0} נק'</span>
+                                            </div>
+                                            {(simResult.breakdown.penaltyReasons || []).filter((r: { key?: string }) => r.key !== 'salary' && r.key !== 'age').map((r: { label: string; amount: number }, i: number) => (
+                                                <div key={i} className="flex justify-between text-xs text-rose-700 bg-rose-50/80 px-2 py-1 rounded">
+                                                    <span>{r.label}</span>
+                                                    <span className="font-bold">-{r.amount}</span>
+                                                </div>
+                                            ))}
+                                            {simResult.penaltyPoliciesUsed && (
+                                                <p className="text-[10px] text-text-muted pt-1">
+                                                    משקלי Penalty_general בסימולציה:{' '}
+                                                    {PENALTY_DIMENSION_META.map((d) => {
+                                                        const p = simResult.penaltyPoliciesUsed[d.id];
+                                                        if (!p) return null;
+                                                        return `${d.label} ${p.mismatch}/${p.missing}`;
+                                                    }).filter(Boolean).join(' · ')}
+                                                </p>
+                                            )}
                                         </div>
                                     )}
 
@@ -1500,7 +1854,9 @@ const AdminMatchingEngineView: React.FC = () => {
                                     <span className="bg-rose-100   text-rose-700   px-2 py-0.5 rounded">Penalty_salary</span>
                                     <span className="text-text-muted">−</span>
                                     <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded">Penalty_age</span>
-                                    <span className="text-text-muted">(clamp 0–100)</span>
+                                    <span className="text-text-muted">−</span>
+                                    <span className="bg-rose-200 text-rose-800 px-2 py-0.5 rounded">Penalty_general</span>
+                                    <span className="text-text-muted">(max 0)</span>
                                 </div>
                             </div>
 

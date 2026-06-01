@@ -20,7 +20,7 @@ const DEFAULTS = {
   candidateNoTagToFix: true,
   showCvPreview: true,
   jobAlerts: false,
-  autoThanksEmail: true,
+  autoThanksEmail: false,
   oneCandidatePerEmail: false,
   billingStatusParent: false,
   billingStatusAccepted: false,
@@ -49,7 +49,8 @@ const toDto = (row) => {
     candidateNoTagToFix: plain.candidateNoTagToFix !== false,
     showCvPreview: plain.showCvPreview !== false,
     jobAlerts: Boolean(plain.jobAlerts),
-    autoThanksEmail: Boolean(plain.autoThanksEmail),
+    autoThanksEmail:
+      plain.autoThanksEmail != null ? Boolean(plain.autoThanksEmail) : DEFAULTS.autoThanksEmail,
     oneCandidatePerEmail: Boolean(plain.oneCandidatePerEmail),
     billingStatusParent: Boolean(plain.billingStatusParent),
     billingStatusAccepted: Boolean(plain.billingStatusAccepted),
@@ -144,7 +145,7 @@ const getClientIdForJobClientLabel = async (label) => {
   if (!trimmed) return null;
   const labelN = trimmed.toLowerCase();
 
-  const client = await Client.findOne({
+  let client = await Client.findOne({
     where: {
       [Op.or]: [
         sequelize.where(
@@ -161,7 +162,41 @@ const getClientIdForJobClientLabel = async (label) => {
     },
     attributes: ['id'],
   });
+  if (!client) {
+    client = await Client.findOne({
+      where: {
+        [Op.or]: [
+          { name: { [Op.iLike]: trimmed } },
+          { displayName: { [Op.iLike]: trimmed } },
+        ],
+      },
+      attributes: ['id'],
+    });
+  }
   return client ? String(client.id) : null;
+};
+
+/** Job inbox local-part before + (e.g. humand+220029@… → humand). */
+const inboxLocalPrefixFromAddress = (inboxTo) => {
+  const text = String(inboxTo || '').toLowerCase();
+  const m = text.match(/([a-z0-9_-]+)\+[^@]+@/);
+  return m ? m[1].trim() : null;
+};
+
+/** Known application-inbox prefixes → Client.name / displayName (see emailService humand lane). */
+const INBOX_PREFIX_CLIENT_LABEL = {
+  humand: 'מימד אנושי',
+};
+
+const resolveClientIdFromJobInbox = async (inboxTo) => {
+  const prefix = inboxLocalPrefixFromAddress(inboxTo);
+  if (!prefix) return null;
+  const mapped = INBOX_PREFIX_CLIENT_LABEL[prefix];
+  if (mapped) {
+    const cid = await getClientIdForJobClientLabel(mapped);
+    if (cid) return cid;
+  }
+  return getClientIdForJobClientLabel(prefix);
 };
 
 /**
@@ -226,24 +261,69 @@ const getAutoDisconnectForClient = async (clientId) => {
 };
 
 /**
- * Client Usage "מייל התחברות" (autoThanksEmail): when true, the system queues
- * a welcome email every time a new candidate is created (manual, AI upload, email ingest).
- *
- * Returns:
- *   • `true`  → flag enabled, queue the welcome email
- *   • `false` → flag disabled, suppress the welcome email
- *   • `null`  → could not resolve (no clientId, lookup error, etc.) — caller should default to sending
+ * Client Usage "מייל התחברות" (autoThanksEmail): when true, queue welcome email on new candidate.
+ * Default is false (model + DEFAULTS + missing usage row).
  */
 const getAutoThanksEmailForClient = async (clientId) => {
-  if (!clientId) return null;
+  if (!clientId) return false;
   try {
     const row = await ClientUsageSetting.findByPk(clientId);
     if (!row) return DEFAULTS.autoThanksEmail;
     return Boolean(row.autoThanksEmail);
   } catch (err) {
     console.warn('[clientUsageSettings] autoThanksEmail lookup failed', err?.message || err);
-    return null;
+    return false;
   }
+};
+
+/**
+ * Resolve tenant client for welcome-email gating:
+ *   1. explicit clientId
+ *   2. Job.client label (exact + iLike)
+ *   3. matchingEngineService iLike on job.client
+ *   4. application inbox address (humand+code@… → tenant)
+ */
+const resolveClientIdForWelcomeEmail = async ({
+  clientId = null,
+  jobId = null,
+  inboxTo = null,
+} = {}) => {
+  const direct =
+    clientId != null && String(clientId).trim() !== '' ? String(clientId).trim() : null;
+  if (direct) return direct;
+
+  const jid = jobId != null && String(jobId).trim() !== '' ? String(jobId).trim() : null;
+  if (jid) {
+    try {
+      const Job = require('../models/Job');
+      const job = await Job.findByPk(jid, { attributes: ['client'] });
+      if (job?.client) {
+        let cid = await getClientIdForJobClientLabel(job.client);
+        if (!cid) {
+          const { resolveClientIdFromJobLabel } = require('./matchingEngineService');
+          cid = await resolveClientIdFromJobLabel(
+            job.get ? job.get({ plain: true }) : job,
+          );
+        }
+        if (cid) return cid;
+        console.warn('[clientUsageSettings] job.client did not match any Client row', {
+          jobId: jid,
+          jobClient: String(job.client).slice(0, 80),
+        });
+      }
+    } catch (err) {
+      console.warn('[clientUsageSettings] resolveClientIdForWelcomeEmail job lookup failed', err?.message || err);
+    }
+  }
+
+  try {
+    const fromInbox = await resolveClientIdFromJobInbox(inboxTo);
+    if (fromInbox) return fromInbox;
+  } catch (err) {
+    console.warn('[clientUsageSettings] resolveClientIdFromJobInbox failed', err?.message || err);
+  }
+
+  return null;
 };
 
 const upsert = async (clientId, body) => {
@@ -310,6 +390,7 @@ module.exports = {
   getByClientId,
   getAutoDisconnectForClient,
   getAutoThanksEmailForClient,
+  resolveClientIdForWelcomeEmail,
   getReturnMonthsForClientLabel,
   getClientIdForJobClientLabel,
   resolveScreeningDefaultsForJob,

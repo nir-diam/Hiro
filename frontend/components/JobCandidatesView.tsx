@@ -42,12 +42,201 @@ function candidateDuplicateKey(c: { name?: string; title?: string }) {
     return `${String(c.name || '').trim()}|${String(c.title || '').trim()}`;
 }
 
+type ParameterMatchStatus = 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+
+type JobCandidateRow = {
+    matchScore?: number;
+    scoreBreakdown?: {
+        geoDistance?: number | null;
+        geoMissing?: boolean;
+        semanticScore?: number;
+        vector?: number;
+        tagsScore?: number;
+        tags?: number;
+        geoScore?: number;
+        geo?: number;
+        intentScore?: number;
+        intent?: number;
+        coreScore?: number;
+        penaltyReasons?: { label: string; amount: number }[];
+    } | null;
+    parameterMatches?: Partial<Record<
+        | 'salary'
+        | 'scope'
+        | 'mobility'
+        | 'license'
+        | 'age'
+        | 'gender'
+        | 'mandatory_skill'
+        | 'mandatory_language'
+        | 'work_hours'
+        | 'availability',
+        ParameterMatchStatus
+    >>;
+};
+
+type JobGeoSlice = { city?: string; location?: string; region?: string };
+
+const GEO_COORD_CACHE = new Map<string, { lat: number; lon: number } | null>();
+
+function buildJobGeoQuery(job: JobGeoSlice | null): string {
+    if (!job) return '';
+    const loc = String(job.location ?? '').trim();
+    const city = String(job.city ?? '').trim();
+    const region = String(job.region ?? '').trim();
+    const parts: string[] = [];
+    const push = (s: string) => {
+        if (!s) return;
+        if (!parts.some((p) => p.toLowerCase() === s.toLowerCase())) parts.push(s);
+    };
+    push(loc);
+    push(city);
+    push(region);
+    return parts.join(', ');
+}
+
+function haversineKm(a: { lat: number; lon: number }, b: { lat: number; lon: number }): number {
+    const R = 6371;
+    const toRad = (d: number) => (d * Math.PI) / 180;
+    const dLat = toRad(b.lat - a.lat);
+    const dLon = toRad(b.lon - a.lon);
+    const lat1 = toRad(a.lat);
+    const lat2 = toRad(b.lat);
+    const x =
+        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+        Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+async function geocodeOpenMeteo(query: string): Promise<{ lat: number; lon: number } | null> {
+    const key = query.trim().toLowerCase();
+    if (!key) return null;
+    if (GEO_COORD_CACHE.has(key)) return GEO_COORD_CACHE.get(key) ?? null;
+    try {
+        const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+            query.trim(),
+        )}&count=1&language=en&format=json&countryCode=IL`;
+        const res = await fetch(url);
+        if (!res.ok) {
+            GEO_COORD_CACHE.set(key, null);
+            return null;
+        }
+        const data = (await res.json()) as { results?: { latitude: number; longitude: number }[] };
+        const row = data.results?.[0];
+        if (
+            !row ||
+            typeof row.latitude !== 'number' ||
+            typeof row.longitude !== 'number' ||
+            !Number.isFinite(row.latitude) ||
+            !Number.isFinite(row.longitude)
+        ) {
+            GEO_COORD_CACHE.set(key, null);
+            return null;
+        }
+        const pt = { lat: row.latitude, lon: row.longitude };
+        GEO_COORD_CACHE.set(key, pt);
+        return pt;
+    } catch {
+        GEO_COORD_CACHE.set(key, null);
+        return null;
+    }
+}
+
+/** Straight-line km from matching engine (same as Sonar), else client geocode fallback; not driving distance. */
+function jobCandidateDistanceLabel(
+    c: JobCandidateRow,
+    jobHasGeoTarget: boolean,
+    clientKm: number | null | undefined,
+    clientPending: boolean,
+    t: (key: string, opts?: Record<string, string | number>) => string,
+): string {
+    const raw = c?.scoreBreakdown?.geoDistance;
+    const km = typeof raw === 'number' && Number.isFinite(raw) ? Math.round(raw) : null;
+    if (km != null) return t('job.sonar.distance_km', { km });
+    if (clientPending && clientKm === undefined) {
+        return t('job_candidates.distance_computing');
+    }
+    const fk = typeof clientKm === 'number' && Number.isFinite(clientKm) ? Math.round(clientKm) : null;
+    if (fk != null) return t('job.sonar.distance_km', { km: fk });
+    if (!jobHasGeoTarget) return t('job.sonar.distance_not_on_job');
+    return t('job.sonar.distance_na');
+}
+
 const statusStyles: { [key in CandidateStatus]: string } = {
   'חדש': 'bg-blue-100 text-blue-800 border-blue-200',
   'סינון טלפוני': 'bg-purple-100 text-purple-800 border-purple-200',
   'ראיון': 'bg-yellow-100 text-yellow-800 border-yellow-200',
   'הצעה': 'bg-green-100 text-green-800 border-green-200',
   'נדחה': 'bg-gray-100 text-gray-700 border-gray-200',
+};
+
+const CandidateMatchSummaryLine: React.FC<{ candidate: JobCandidateRow }> = ({ candidate }) => {
+    type Dot = { label: string; value: string; ok: boolean; muted?: boolean };
+    const pm = candidate.parameterMatches;
+    const scoreOk = (candidate.matchScore ?? 0) >= 70;
+    const rawGeoKm = candidate.scoreBreakdown?.geoDistance;
+    const geoKm =
+        typeof rawGeoKm === 'number' && Number.isFinite(rawGeoKm) ? Math.round(rawGeoKm) : null;
+
+    const map: {
+        key: keyof NonNullable<typeof pm>;
+        label: string;
+        matchLabel: string;
+        mismatchLabel: string;
+        missingLabel: string;
+    }[] = [
+        { key: 'salary', label: 'ציפיות שכר', matchLabel: 'תואם', mismatchLabel: 'פער בשכר', missingLabel: 'מידע חסר' },
+        { key: 'scope', label: 'שעות משרה', matchLabel: 'תואם', mismatchLabel: 'לא מתאים', missingLabel: 'מידע חסר' },
+        { key: 'work_hours', label: 'שעות עבודה', matchLabel: 'תואם', mismatchLabel: 'לא מתאים', missingLabel: 'מידע חסר' },
+        { key: 'availability', label: 'זמינות', matchLabel: 'תואם', mismatchLabel: 'לא מתאים', missingLabel: 'מידע חסר' },
+        { key: 'mobility', label: 'ניידות', matchLabel: 'בסדר', mismatchLabel: 'נדרש רכב', missingLabel: 'מידע חסר' },
+        { key: 'license', label: 'רישיון נהיגה', matchLabel: 'יש רישיון', mismatchLabel: 'נדרש רישיון', missingLabel: 'מידע חסר' },
+        { key: 'age', label: 'גיל', matchLabel: 'מתאים', mismatchLabel: 'לא בטווח גיל', missingLabel: 'מידע חסר' },
+        { key: 'gender', label: 'מגדר', matchLabel: 'מתאים', mismatchLabel: 'מגבלת מגדר', missingLabel: 'מידע חסר' },
+        { key: 'mandatory_skill', label: 'מיומנות חובה', matchLabel: 'יש', mismatchLabel: 'חסרה', missingLabel: 'מידע חסר' },
+        { key: 'mandatory_language', label: 'שפה חובה', matchLabel: 'יש', mismatchLabel: 'חסרה', missingLabel: 'מידע חסר' },
+    ];
+
+    const items: Dot[] = [
+        { label: 'התאמה', value: `${candidate.matchScore ?? 0}%`, ok: scoreOk },
+        {
+            label: 'מרחק',
+            value: geoKm != null ? `${geoKm} ק"מ` : 'לא זמין',
+            ok: geoKm != null,
+            muted: geoKm == null,
+        },
+        ...map.flatMap(({ key, label, matchLabel, mismatchLabel, missingLabel }) => {
+            const v = pm?.[key];
+            if (v === 'match') return [{ label, value: matchLabel, ok: true }];
+            if (v === 'missing') return [{ label, value: missingLabel, ok: false }];
+            if (v === 'mismatch' || v === 'gap') return [{ label, value: mismatchLabel, ok: false }];
+            return [];
+        }),
+    ];
+
+    if (items.length <= 2 && !pm) return null;
+
+    return (
+        <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1">
+            {items.map((item, i) => (
+                <div key={i} className="flex items-center gap-1 shrink-0">
+                    <span
+                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                            item.muted ? 'bg-gray-400' : item.ok ? 'bg-green-500' : 'bg-red-500'
+                        }`}
+                    />
+                    <span className="text-[10px] text-text-muted">{item.label}:</span>
+                    <span
+                        className={`text-[10px] font-bold ${
+                            item.muted ? 'text-text-muted' : item.ok ? 'text-text-default' : 'text-red-700'
+                        }`}
+                    >
+                        {item.value}
+                    </span>
+                </div>
+            ))}
+        </div>
+    );
 };
 
 // --- AI MATCH POPUP COMPONENT ---
@@ -84,8 +273,35 @@ const MatchAnalysisPopover: React.FC<{
             </div>
             
             <div className="space-y-4">
+                {candidate.scoreBreakdown && typeof candidate.scoreBreakdown === 'object' && (
+                    <div className="space-y-2 text-xs">
+                        {[
+                            { label: 'סמנטי', val: candidate.scoreBreakdown.semanticScore ?? candidate.scoreBreakdown.vector, color: 'bg-purple-500' },
+                            { label: 'תגיות', val: candidate.scoreBreakdown.tagsScore ?? candidate.scoreBreakdown.tags, color: 'bg-blue-500' },
+                            { label: 'מיקום', val: candidate.scoreBreakdown.geoScore ?? candidate.scoreBreakdown.geo, color: 'bg-emerald-500' },
+                            { label: 'זיקה', val: candidate.scoreBreakdown.intentScore ?? candidate.scoreBreakdown.intent, color: 'bg-amber-500' },
+                        ].map((row) => typeof row.val === 'number' && (
+                            <div key={row.label} className="flex items-center gap-2">
+                                <span className="w-14 text-text-muted font-semibold">{row.label}</span>
+                                <div className="flex-1 h-1.5 bg-bg-subtle rounded-full overflow-hidden">
+                                    <div className={`h-full ${row.color} rounded-full`} style={{ width: `${Math.min(100, row.val)}%` }} />
+                                </div>
+                                <span className="w-8 text-left font-bold">{Math.round(row.val)}%</span>
+                            </div>
+                        ))}
+                        {(candidate.scoreBreakdown.penaltyReasons as { label: string; amount: number }[] | undefined)?.map((pr, i) => (
+                            <div key={i} className="flex justify-between text-rose-700 bg-rose-50 px-2 py-1 rounded font-semibold">
+                                <span>{pr.label}</span>
+                                <span>-{pr.amount}</span>
+                            </div>
+                        ))}
+                    </div>
+                )}
                 <p className="text-sm text-text-default leading-relaxed font-medium">
-                    התאמה גבוהה (92%). המועמד מציג ניסיון ניהולי משמעותי התואם את דרישות המשרה. הרקע בתחום הלוגיסטיקה נרחב ומדויק.
+                    ציון התאמה: <strong>{candidate.matchScore}%</strong>
+                    {candidate.scoreBreakdown?.coreScore != null && (
+                        <span className="text-text-muted"> (לפני קנסות: {Math.round(Number(candidate.scoreBreakdown.coreScore))}%)</span>
+                    )}
                 </p>
                 
                 <div className="pt-3 border-t border-border-subtle flex justify-between items-center">
@@ -121,7 +337,9 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
     const { t } = useLanguage();
     const navigate = useNavigate();
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [job, setJob] = useState<{ city?: string; location?: string } | null>(null);
+    const [job, setJob] = useState<JobGeoSlice | null>(null);
+    const [clientKmByCandidateId, setClientKmByCandidateId] = useState<Record<string, number | null>>({});
+    const [clientGeoPending, setClientGeoPending] = useState(false);
     const [candidates, setCandidates] = useState<any[]>([]);
     const [loadingCandidates, setLoadingCandidates] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
@@ -130,6 +348,7 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [returnMonths, setReturnMonths] = useState(3);
     const [activePopoverId, setActivePopoverId] = useState<string | null>(null);
+    const clientGeoRunRef = useRef(0);
 
     useEffect(() => {
         if (!apiBase || !jobId) return;
@@ -151,6 +370,7 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                 setJob({
                     city: payload.job?.city,
                     location: payload.job?.location,
+                    region: payload.job?.region,
                 });
                 setCandidates(Array.isArray(payload.candidates) ? payload.candidates : []);
                 const rm = Number(payload.returnMonths);
@@ -204,7 +424,59 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
         setActivePopoverId(activePopoverId === id ? null : id);
     };
 
+    const jobGeoQuery = useMemo(() => buildJobGeoQuery(job), [job]);
+    const jobHasGeoTarget = Boolean(jobGeoQuery.trim());
     const jobAddress = job?.location || job?.city || 'תל אביב';
+
+    useEffect(() => {
+        const disabled =
+            typeof import.meta !== 'undefined' && String(import.meta.env?.VITE_HIRO_DISABLE_GEOCODING ?? '') === '1';
+        if (disabled) {
+            setClientKmByCandidateId({});
+            setClientGeoPending(false);
+            return;
+        }
+        if (!jobHasGeoTarget || !candidates.length) {
+            setClientKmByCandidateId({});
+            setClientGeoPending(false);
+            return;
+        }
+
+        const runId = ++clientGeoRunRef.current;
+        setClientGeoPending(true);
+
+        void (async () => {
+            try {
+                const jobPt = await geocodeOpenMeteo(jobGeoQuery);
+                if (clientGeoRunRef.current !== runId) return;
+                if (!jobPt) {
+                    const empty: Record<string, number | null> = {};
+                    for (const c of candidates) {
+                        if (c?.id != null) empty[String(c.id)] = null;
+                    }
+                    setClientKmByCandidateId(empty);
+                    return;
+                }
+                const out: Record<string, number | null> = {};
+                for (const c of candidates) {
+                    if (clientGeoRunRef.current !== runId) return;
+                    const id = c?.id != null ? String(c.id) : '';
+                    if (!id) continue;
+                    const addr = String(c.address ?? '').trim();
+                    if (!addr) {
+                        out[id] = null;
+                        continue;
+                    }
+                    const candPt = await geocodeOpenMeteo(addr);
+                    if (clientGeoRunRef.current !== runId) return;
+                    out[id] = candPt ? haversineKm(jobPt, candPt) : null;
+                }
+                if (clientGeoRunRef.current === runId) setClientKmByCandidateId(out);
+            } finally {
+                if (clientGeoRunRef.current === runId) setClientGeoPending(false);
+            }
+        })();
+    }, [candidates, jobGeoQuery, jobHasGeoTarget]);
 
     const handleNavigate = (e: React.MouseEvent, candidateAddress: string) => {
         e.stopPropagation();
@@ -277,8 +549,15 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                         </td>
                                     </tr>
                                 )}
-                                {filteredCandidates.map(c => {
+                                {filteredCandidates.map((c: JobCandidateRow & typeof filteredCandidates[number]) => {
                                     const dupGrey = duplicateNewerGreyIds.has(c.id);
+                                    const distanceLabel = jobCandidateDistanceLabel(
+                                        c,
+                                        jobHasGeoTarget,
+                                        clientKmByCandidateId[String(c.id)],
+                                        clientGeoPending,
+                                        t,
+                                    );
                                     return (
                                     <tr
                                         key={c.id}
@@ -331,22 +610,25 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                         </td>
                                         <td className={`p-4 ${dupGrey ? 'text-neutral-400' : ''}`}>
                                             <button 
+                                                type="button"
                                                 onClick={(e) => handleNavigate(e, c.address || '')}
+                                                disabled={!c.address}
                                                 className={
                                                     dupGrey
-                                                        ? 'flex items-center gap-1.5 text-xs font-semibold bg-neutral-200/60 text-neutral-400 hover:bg-neutral-200 hover:text-neutral-500 px-2 py-1 rounded-md border border-neutral-200/80 transition-all group/map'
-                                                        : 'flex items-center gap-1.5 text-xs font-semibold bg-bg-subtle hover:bg-blue-50 text-text-default hover:text-blue-600 px-2 py-1 rounded-md border border-transparent hover:border-blue-200 transition-all group/map'
+                                                        ? 'flex items-center gap-1.5 text-xs font-semibold bg-neutral-200/60 text-neutral-400 hover:bg-neutral-200 hover:text-neutral-500 px-2 py-1 rounded-md border border-neutral-200/80 transition-all group/map disabled:opacity-50 disabled:cursor-not-allowed'
+                                                        : 'flex items-center gap-1.5 text-xs font-semibold bg-bg-subtle hover:bg-blue-50 text-text-default hover:text-blue-600 px-2 py-1 rounded-md border border-transparent hover:border-blue-200 transition-all group/map disabled:opacity-50 disabled:cursor-not-allowed'
                                                 }
                                                 title={`${t('job_candidates.nav_waze')} ${c.address || t('job_candidates.unknown_location')}`}
                                             >
                                                 <MapPinIcon
                                                     className={`w-3.5 h-3.5 ${dupGrey ? 'text-neutral-400 group-hover/map:text-neutral-500' : 'text-text-subtle group-hover/map:text-blue-500'}`}
                                                 />
-                                                <span>{c.address ? `${Math.floor(Math.random() * 40) + 2} ק"מ` : t('job_candidates.unknown_location')}</span>
+                                                <span>{distanceLabel}</span>
                                             </button>
                                         </td>
                                         <td className={`p-4 overflow-visible ${dupGrey ? 'text-neutral-400' : ''}`}>
-                                            <div className="relative flex items-center gap-2">
+                                            <div className="relative flex flex-col gap-1 min-w-[140px]">
+                                                <div className="flex items-center gap-2">
                                                 <button 
                                                     className="flex items-center gap-2 group/score outline-none"
                                                     onClick={(e) => handleScoreClick(e, c.id)}
@@ -369,6 +651,8 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                                         onRecalculate={async () => { await new Promise(r => setTimeout(r, 1000)); }}
                                                     />
                                                 )}
+                                                </div>
+                                                <CandidateMatchSummaryLine candidate={c} />
                                             </div>
                                         </td>
                                         <td className={`p-4 text-xs ${dupGrey ? 'text-neutral-400' : 'text-text-muted'}`}>{c.source}</td>
@@ -390,8 +674,15 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                 אין מועמדים זמינים למשרה זו.
                             </div>
                         ) : (
-                            filteredCandidates.map(c => {
+                            filteredCandidates.map((c: JobCandidateRow & typeof filteredCandidates[number]) => {
                                 const dupGrey = duplicateNewerGreyIds.has(c.id);
+                                const distanceLabel = jobCandidateDistanceLabel(
+                                    c,
+                                    jobHasGeoTarget,
+                                    clientKmByCandidateId[String(c.id)],
+                                    clientGeoPending,
+                                    t,
+                                );
                                 return (
                                 <div
                                     key={c.id}
@@ -451,17 +742,25 @@ const JobCandidatesView: React.FC<JobCandidatesViewProps> = ({ openSummaryDrawer
                                     
                                     <div className="flex items-center justify-between mb-4">
                                          <button 
+                                            type="button"
                                             onClick={(e) => handleNavigate(e, c.address || '')}
+                                            disabled={!c.address}
                                             className={
                                                 dupGrey
-                                                    ? 'text-xs flex items-center gap-1 bg-neutral-200/60 px-2 py-1 rounded-md text-neutral-400 hover:text-neutral-500 hover:bg-neutral-200 transition-colors'
-                                                    : 'text-xs flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md text-text-muted hover:text-blue-600 hover:bg-blue-50 transition-colors'
+                                                    ? 'text-xs flex items-center gap-1 bg-neutral-200/60 px-2 py-1 rounded-md text-neutral-400 hover:text-neutral-500 hover:bg-neutral-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-start min-w-0'
+                                                    : 'text-xs flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md text-text-muted hover:text-blue-600 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-start min-w-0'
                                             }
                                         >
-                                            <MapPinIcon className={`w-3 h-3 ${dupGrey ? 'text-neutral-400' : ''}`}/>
-                                            {c.address ? `${c.address} (~${Math.floor(Math.random() * 40) + 2} ק"מ)` : t('job_candidates.unknown_location')}
+                                            <MapPinIcon className={`w-3 h-3 shrink-0 ${dupGrey ? 'text-neutral-400' : ''}`}/>
+                                            <span className="min-w-0 break-words">
+                                                {c.address
+                                                    ? `${c.address} · ${distanceLabel}`
+                                                    : distanceLabel}
+                                            </span>
                                         </button>
                                     </div>
+
+                                    <CandidateMatchSummaryLine candidate={c} />
 
                                     <div
                                         className={`flex items-center justify-between mt-6 pt-4 border-t ${dupGrey ? 'border-neutral-200' : 'border-border-subtle'}`}

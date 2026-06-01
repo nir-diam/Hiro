@@ -275,7 +275,12 @@ const MainContent: React.FC<MainContentProps> = ({
         while (el) {
             const style = window.getComputedStyle(el);
             const oy = style.overflowY;
-            if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+            if (
+                (oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
+                el.scrollHeight > el.clientHeight
+            ) {
+                return el;
+            }
             el = el.parentElement;
         }
         return (document.scrollingElement as HTMLElement | null) || null;
@@ -283,19 +288,85 @@ const MainContent: React.FC<MainContentProps> = ({
 
     const updateFormPreserveScroll = (next: any, origin?: EventTarget | null) => {
         const originEl = origin instanceof HTMLElement ? origin : null;
+        const fieldName =
+            originEl &&
+            (originEl.tagName === 'INPUT' ||
+                originEl.tagName === 'TEXTAREA' ||
+                originEl.tagName === 'SELECT')
+                ? String((originEl as HTMLInputElement).name || '')
+                : '';
+        const mainEl =
+            typeof document !== 'undefined'
+                ? (document.getElementById('main-scroll-container') as HTMLElement | null)
+                : null;
+        const scrollingEl =
+            typeof document !== 'undefined' ? (document.scrollingElement as HTMLElement | null) : null;
+
+        const nearestScroll = getScrollParent(originEl);
+        // When the real scroll happens on #main-scroll-container but it was skipped (e.g. height
+        // check during layout), getScrollParent falls back to document.scrollingElement — then we
+        // save/restore the wrong scrollTop and the page jumps to the top and inputs lose focus.
         const scrollEl =
-            // Prefer the nearest scroll container to the edited input
-            getScrollParent(originEl) ||
-            // Fallback to the recruiter main container if present
-            (typeof document !== 'undefined' ? (document.getElementById('main-scroll-container') as HTMLElement | null) : null);
+            mainEl && originEl && mainEl.contains(originEl) && nearestScroll === scrollingEl
+                ? mainEl
+                : nearestScroll || mainEl || scrollingEl;
 
         const prevTop = scrollEl ? scrollEl.scrollTop : null;
         flushSync(() => {
             onFormChange(next);
         });
-        if (scrollEl && prevTop !== null) {
-            scrollEl.scrollTop = prevTop;
-        }
+
+        const resolveFocusTarget = (): HTMLElement | null => {
+            if (
+                originEl &&
+                originEl.isConnected &&
+                (originEl.tagName === 'INPUT' ||
+                    originEl.tagName === 'TEXTAREA' ||
+                    originEl.tagName === 'SELECT')
+            ) {
+                return originEl;
+            }
+            if (!fieldName) return null;
+            const root = mainEl || scrollEl || (typeof document !== 'undefined' ? document.body : null);
+            if (!root) return null;
+            try {
+                const esc = typeof CSS !== 'undefined' && typeof CSS.escape === 'function' ? CSS.escape(fieldName) : fieldName;
+                return root.querySelector(
+                    `input[name="${esc}"],select[name="${esc}"],textarea[name="${esc}"]`,
+                ) as HTMLElement | null;
+            } catch {
+                return null;
+            }
+        };
+
+        const restoreScrollAndFocus = () => {
+            if (scrollEl && prevTop !== null) {
+                scrollEl.scrollTop = prevTop;
+            }
+            const target = resolveFocusTarget();
+            if (
+                target &&
+                target.isConnected &&
+                (target.tagName === 'INPUT' ||
+                    target.tagName === 'TEXTAREA' ||
+                    target.tagName === 'SELECT')
+            ) {
+                try {
+                    // Re-apply even if already focused: after flushSync the node may have been
+                    // replaced; stale originEl would skip, so we resolve by name and focus every pass.
+                    target.focus({ preventScroll: true });
+                } catch {
+                    /* ignore */
+                }
+            }
+        };
+
+        restoreScrollAndFocus();
+        queueMicrotask(restoreScrollAndFocus);
+        requestAnimationFrame(() => {
+            restoreScrollAndFocus();
+            requestAnimationFrame(restoreScrollAndFocus);
+        });
     };
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {

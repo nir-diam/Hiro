@@ -27,6 +27,8 @@ export interface TagMatchCandidateTag {
 
 export interface TagMatchCategory {
   name: string;
+  /** Internal category key — used for tone logic (e.g. 'language' uses all-must-match). */
+  key?: string;
   chips: TagMatchJobChip[];
   candidateTags: TagMatchCandidateTag[];
 }
@@ -94,10 +96,15 @@ function TagWeightBars({
   );
 }
 
-function categoryCardTone(chips: TagMatchJobChip[]): 'red' | 'green' | 'neutral' {
+function categoryCardTone(chips: TagMatchJobChip[], categoryKey?: string): 'red' | 'green' | 'neutral' {
   if (!chips.length) return 'neutral';
-  const allSatisfied = chips.every((c) => c.satisfiesRequirement);
-  return allSatisfied ? 'green' : 'red';
+  if (categoryKey === 'language') {
+    // Language: ALL required tags must be matched
+    return chips.every((c) => c.satisfiesRequirement) ? 'green' : 'red';
+  }
+  // All other categories: at least one match → green
+  const anySatisfied = chips.some((c) => c.satisfiesRequirement);
+  return anySatisfied ? 'green' : 'red';
 }
 
 const TagMatchPanel: React.FC<TagMatchPanelProps> = ({
@@ -157,7 +164,7 @@ const TagMatchPanel: React.FC<TagMatchPanelProps> = ({
             <>
               <div className="mb-4 bg-primary-50/50 rounded-xl p-3.5 border border-primary-100/50">
                 <p className="text-xs font-bold text-primary-800 mb-2">
-                  מקרא חיוניות תגית (דרישות משרה):
+                  מקרא חיוניות תגית (תגיות משרה):
                 </p>
                 <div className="grid grid-cols-1 gap-2">
                   <div className="flex items-center gap-2 text-[11px] text-text-muted">
@@ -188,7 +195,7 @@ const TagMatchPanel: React.FC<TagMatchPanelProps> = ({
                 {categories.map((cat, idx) => {
                   const jobList = Array.isArray(cat.chips) ? cat.chips : [];
                   const candList = Array.isArray(cat.candidateTags) ? cat.candidateTags : [];
-                  const tone = categoryCardTone(jobList);
+                  const tone = categoryCardTone(jobList, cat.key);
                   const shell =
                     tone === 'red'
                       ? 'p-4 rounded-xl border border-red-100 bg-red-50/50'
@@ -215,7 +222,7 @@ const TagMatchPanel: React.FC<TagMatchPanelProps> = ({
                       <div className="grid grid-cols-2 gap-4">
                         <div>
                           <p className="text-[10px] font-bold text-text-muted uppercase mb-1.5 tracking-wide">
-                            דרישות המשרה
+                            תגיות משרה
                           </p>
                           <ul className="space-y-1.5">
                             {jobList.length > 0 ? (
@@ -234,7 +241,7 @@ const TagMatchPanel: React.FC<TagMatchPanelProps> = ({
                                 );
                               })
                             ) : (
-                              <li className="text-xs text-text-muted italic px-2 py-1">אין דרישות</li>
+                              <li className="text-xs text-text-muted italic px-2 py-1">אין תגיות</li>
                             )}
                           </ul>
                         </div>

@@ -7,6 +7,9 @@ export interface SelectedJobField {
     category: string;
     fieldType: string;
     role: string;
+    categoryId?: string;
+    clusterId?: string;
+    roleId?: string;
 }
 
 type JobRoleTag = {
@@ -97,13 +100,21 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
         if (!selectedCategory && categories.length) setSelectedCategory(categories[0]);
     };
 
-    const handleSelectRole = (role: JobRole, fieldType: JobFieldType, categoryName?: string) => {
-        const catName = categoryName || selectedCategory?.name;
+    const handleSelectRole = (
+        role: JobRole,
+        fieldType: JobFieldType,
+        category?: JobCategory | null,
+    ) => {
+        const cat = category || selectedCategory;
+        const catName = cat?.name;
         if (catName) {
             onChange({
                 category: catName,
                 fieldType: fieldType.name,
                 role: role.value,
+                categoryId: cat?.id != null ? String(cat.id) : undefined,
+                clusterId: fieldType?.id != null ? String(fieldType.id) : undefined,
+                roleId: role?.id != null ? String(role.id) : undefined,
             });
             setIsModalOpen(false);
             resetState();
@@ -206,7 +217,7 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                                                     <button
                                                         key={`${role.id}-${fieldType.id}`}
                                                         type="button"
-                                            onClick={() => handleSelectRole(role, fieldType, category.name)}
+                                            onClick={() => handleSelectRole(role, fieldType, category)}
                                             className="w-full text-right p-3 rounded-lg hover:bg-white hover:shadow-sm hover:border-primary-200 border border-transparent bg-bg-subtle/30 transition-all flex items-center gap-3 group"
                                         >
                                             <div className="p-2 bg-white rounded-full text-text-subtle group-hover:text-primary-600 shadow-sm transition-colors border border-border-subtle">
@@ -315,7 +326,7 @@ const JobFieldSelector: React.FC<JobFieldSelectorProps> = ({ value, onChange, is
                                                         {fieldType.roles.map(role => (
                                                             <button 
                                                                 key={role.value} 
-                                                                onClick={() => handleSelectRole(role, fieldType)} 
+                                                                onClick={() => handleSelectRole(role, fieldType, selectedCategory)} 
                                                                 className="text-right px-3 py-2.5 rounded-lg text-sm text-text-default hover:bg-primary-50 hover:text-primary-700 transition-all border border-border-subtle hover:border-primary-200 hover:shadow-sm truncate bg-white"
                                                                 title={role.value}
                                                             >

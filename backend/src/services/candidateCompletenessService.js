@@ -3,7 +3,8 @@
  * Status: "חסר נתונים" when invalid; moving to "פעיל" is explicit (approve endpoint).
  */
 const Candidate = require('../models/Candidate');
-const CandidateTag = require('../models/CandidateTag');
+const SystemTag = require('../models/SystemTag');
+const { SYSTEM_TAG_TYPE_CANDIDATE } = require('../models/SystemTag');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const User = require('../models/User');
 
@@ -15,7 +16,7 @@ const trim = (v) => (v != null && v !== undefined ? String(v).trim() : '');
 /**
  * @param {object} candidateRow — plain candidate fields (+ optional tag count)
  * @param {object} usage — from clientUsageSettingService.toDto / getByClientId
- * @param {number} activeTagCount — active candidate_tags rows
+ * @param {number} activeTagCount — active system_tags rows (type = candidate)
  */
 function evaluateCandidateDataCompleteness(candidateRow, usage, activeTagCount) {
   const missing = [];
@@ -57,8 +58,8 @@ function buildIncompleteStatusExplanation(missing) {
 }
 
 async function countActiveTagsForCandidate(candidateId) {
-  return CandidateTag.count({
-    where: { candidate_id: candidateId, is_active: true },
+  return SystemTag.count({
+    where: { entity_id: candidateId, is_active: true, type: SYSTEM_TAG_TYPE_CANDIDATE },
   });
 }
 

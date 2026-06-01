@@ -21,6 +21,16 @@ const list = async (req, res) => {
   }
 };
 
+const listOptions = async (req, res) => {
+  try {
+    const clientId = req.dbUser?.clientId || null;
+    const rows = await recruitmentSourceService.listOptions({ clientId });
+    return res.json({ sources: rows });
+  } catch (err) {
+    return res.status(500).json({ message: err.message || 'Failed to load sources' });
+  }
+};
+
 const create = async (req, res) => {
   try {
     const { id } = req.params;
@@ -63,4 +73,4 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { list, create, update, remove };
+module.exports = { list, listOptions, create, update, remove };

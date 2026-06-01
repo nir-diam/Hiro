@@ -1,17 +1,61 @@
 const { Op, fn, col, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
-const CandidateTag = require('../models/CandidateTag');
+const SystemTag = require('../models/SystemTag');
+const {
+  SYSTEM_TAG_TYPE_CANDIDATE,
+  SYSTEM_TAG_TYPE_JOB,
+} = require('../models/SystemTag');
+
+const candidateTagTypeWhere = (where = {}) => ({ ...where, type: SYSTEM_TAG_TYPE_CANDIDATE });
+const jobTagTypeWhere = (where = {}) => ({ ...where, type: SYSTEM_TAG_TYPE_JOB });
 const Tag = require('../models/Tag');
+const Job = require('../models/Job');
 const Candidate = require('../models/Candidate');
 const tagScoringEngine = require('./tagScoringEngine');
 
-if (!CandidateTag.associations?.tag) {
-  CandidateTag.belongsTo(Tag, { foreignKey: 'tag_id', as: 'tag' });
+if (!SystemTag.associations?.tag) {
+  SystemTag.belongsTo(Tag, { foreignKey: 'tag_id', as: 'tag' });
 }
 
-if (!CandidateTag.associations?.candidate) {
-  CandidateTag.belongsTo(Candidate, { foreignKey: 'candidate_id', as: 'candidate' });
+if (!SystemTag.associations?.candidate) {
+  SystemTag.belongsTo(Candidate, { foreignKey: 'entity_id', as: 'candidate', constraints: false });
 }
+
+/** Catalog Tag.status === 'active' → system_tags.is_active true (CandidateTag / SystemTag rows). */
+const isCatalogTagStatusActive = (status) =>
+  String(status || '').trim().toLowerCase() === 'active';
+
+/**
+ * system_tags.is_active for a job/candidate link:
+ * - Catalog tag already existed and is active → true
+ * - New catalog row (ensureTagRecord created pending) → false
+ * - Catalog tag exists but pending/draft/etc. → false
+ */
+const systemTagIsActiveForCatalogTag = (tag, { created = false } = {}) => {
+  if (!tag) return false;
+  if (created) return false;
+  return isCatalogTagStatusActive(tag.status);
+};
+
+/**
+ * When a catalog tag's status changes, mirror it on all system_tags links (candidate + job).
+ * Table: system_tags (legacy model name: CandidateTag).
+ */
+const syncSystemTagsActiveForCatalogTag = async (tagId, catalogStatus, transaction) => {
+  if (!tagId) return 0;
+  const isActive = isCatalogTagStatusActive(catalogStatus);
+  const [count] = await SystemTag.update(
+    { is_active: isActive },
+    {
+      where: {
+        tag_id: tagId,
+        type: { [Op.in]: [SYSTEM_TAG_TYPE_CANDIDATE, SYSTEM_TAG_TYPE_JOB] },
+      },
+      ...(transaction ? { transaction } : {}),
+    },
+  );
+  return count;
+};
 
 const normalizeEntry = (entry) => {
   if (!entry) return null;
@@ -59,17 +103,19 @@ const normalizeEntry = (entry) => {
 
 const reassignCandidateTag = async (id, targetTagId) => {
   if (!id || !targetTagId) return null;
-  const candidateTag = await CandidateTag.findByPk(id);
+  const candidateTag = await SystemTag.findOne({
+    where: { id, type: SYSTEM_TAG_TYPE_CANDIDATE },
+  });
   if (!candidateTag) return null;
   if (candidateTag.tag_id === targetTagId) return candidateTag;
   const targetTag = await Tag.findByPk(targetTagId);
   if (!targetTag) return null;
 
-  const existing = await CandidateTag.findOne({
-    where: {
-      candidate_id: candidateTag.candidate_id,
+  const existing = await SystemTag.findOne({
+    where: candidateTagTypeWhere({
+      entity_id: candidateTag.entity_id,
       tag_id: targetTagId,
-    },
+    }),
   });
 
   if (existing) {
@@ -84,7 +130,9 @@ const reassignCandidateTag = async (id, targetTagId) => {
 };
 
 const deleteCandidateTag = async (id) => {
-  const entry = await CandidateTag.findByPk(id);
+  const entry = await SystemTag.findOne({
+    where: { id, type: SYSTEM_TAG_TYPE_CANDIDATE },
+  });
   if (!entry) return null;
   await entry.destroy();
   return entry;
@@ -187,23 +235,24 @@ const findTagByNameOrAlias = async (name) => {
   // Prefer raw query so synonym/alias match is reliable (no Sequelize alias or literal issues)
   const rows = await sequelize.query(
     `
-    SELECT id FROM public.tags
+        SELECT id
+    FROM public.tags
     WHERE lower(trim(COALESCE(display_name_he, '')::text)) = lower(${escaped})
-       OR lower(trim(COALESCE(display_name_en, '')::text)) = lower(${escaped})
-       OR lower(trim(COALESCE(tag_key, '')::text)) = lower(${escaped})
-       OR EXISTS (
-         SELECT 1
-         FROM jsonb_array_elements(COALESCE(synonyms, '[]'::jsonb)) AS syn_elem
-         WHERE jsonb_typeof(syn_elem) = 'object'
-           AND (syn_elem ? 'phrase')
-           AND length(trim(COALESCE(syn_elem->>'phrase', ''))) > 0
-           AND strpos(lower(syn_elem->>'phrase'), lower(${escaped}::text)) > 0
-       )
-       OR EXISTS (
-         SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS alias
-         WHERE lower(trim(COALESCE(alias, '')::text)) = lower(${escaped})
-       )
-    LIMIT 1
+      OR lower(trim(COALESCE(display_name_en, '')::text)) = lower(${escaped})
+      OR lower(trim(COALESCE(tag_key, '')::text)) = lower(${escaped})
+      OR EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(COALESCE(synonyms, '[]'::jsonb)) AS syn_elem
+          WHERE jsonb_typeof(syn_elem) = 'object'
+            AND (syn_elem ? 'phrase')
+            AND lower(trim(COALESCE(syn_elem->>'phrase', ''))) = lower(${escaped})
+      )
+      OR EXISTS (
+          SELECT 1
+          FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS alias
+          WHERE lower(trim(COALESCE(alias, '')::text)) = lower(${escaped})
+      )
+    LIMIT 1;
     `,
     { type: QueryTypes.SELECT }
   );
@@ -257,8 +306,9 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     const found = await findTagByNameOrAlias(target);
     if (found) return { tag: found, created: false };
   }
-  const fuzzy = await findFuzzyTag(defaults.displayNameHe || defaults.displayNameEn || tagKey);
-  if (fuzzy) return { tag: fuzzy, created: false };
+  // NEVER RETURN THIS CODE!!!
+  //const fuzzy = await findFuzzyTag(defaults.displayNameHe || defaults.displayNameEn || tagKey);
+  //if (fuzzy) return { tag: fuzzy, created: false };
 
   let typeValue = typeof defaults.type === 'string' ? defaults.type.toLowerCase().trim() : 'role';
   // LLM often sends "education"; catalog enum uses "degree".
@@ -281,14 +331,279 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     displayNameHe: defaults.displayNameHe || tagKey,
     displayNameEn: defaults.displayNameEn || tagKey,
     type: tagType,
-    source: 'ai',
-    status: 'pending'
+    source: defaults.source || 'ai',
+    status: 'pending',
   });
   return { tag, created: true };
 };
 
+const JOB_TAG_TYPE_MAP = {
+  role: 'role',
+  skill: 'skill',
+  industry: 'industry',
+  tool: 'tool',
+  certification: 'certification',
+  language: 'language',
+  seniority: 'seniority',
+  degree: 'degree',
+  soft: 'soft_skill',
+  soft_skill: 'soft_skill',
+};
+
+const normalizeJobTagType = (tagType) => {
+  const raw = String(tagType || 'skill').toLowerCase().trim();
+  if (raw === 'soft') return 'soft_skill';
+  if (raw === 'education') return 'degree';
+  return JOB_TAG_TYPE_MAP[raw] || 'skill';
+};
+
+const normalizeJobSkillEntry = (skill) => {
+  if (!skill || !skill.name) return null;
+  const name = String(skill.name).trim();
+  const tagKey = String(skill.key ?? skill.name).trim();
+  if (!name || !tagKey) return null;
+  const modeRaw = String(skill.mode || 'normal').trim().toLowerCase();
+  const mode = ['mandatory', 'negative', 'normal'].includes(modeRaw) ? modeRaw : 'normal';
+  const relevance =
+    typeof skill.relevance_score === 'number'
+      ? skill.relevance_score
+      : skill.relevance_score != null && skill.relevance_score !== ''
+        ? Number(skill.relevance_score)
+        : null;
+  return {
+    name,
+    tagKey,
+    raw_type: skill.tagType || skill.tag_type || skill.type || 'skill',
+    mode,
+    tag_reason: typeof skill.tag_reason === 'string' ? skill.tag_reason.trim() : null,
+    quote:
+      typeof skill.quote === 'string' && skill.quote.trim() ? skill.quote.trim() : null,
+    confidence_score: Number.isFinite(relevance) ? relevance : null,
+    raw_type_reason:
+      skill.aiMode != null && String(skill.aiMode).trim() ? String(skill.aiMode).trim() : null,
+  };
+};
+
+const mapSystemTagsToJobSkills = (rows = []) =>
+  rows.map((row) => {
+    const plain = row.get ? row.get({ plain: true }) : row;
+    const tag = plain.tag || row.tag;
+    const tagPlain = tag?.get ? tag.get({ plain: true }) : tag;
+    const tagSource = String(tagPlain?.source || '').toLowerCase();
+    const uiSource = tagSource === 'ai' ? 'ai' : 'manual';
+    return {
+      id: tagPlain?.id || plain.tag_id,
+      name: tagPlain?.displayNameHe || tagPlain?.displayNameEn || tagPlain?.tagKey || '',
+      key: tagPlain?.tagKey || '',
+      mode: plain.mode || 'normal',
+      source: uiSource,
+      tagType: plain.raw_type || tagPlain?.type || 'skill',
+      tag_reason: plain.tag_reason || undefined,
+      quote: plain.quote || undefined,
+      relevance_score:
+        plain.confidence_score != null && plain.confidence_score !== undefined
+          ? plain.confidence_score
+          : undefined,
+      aiMode: plain.raw_type_reason || undefined,
+      status: tagPlain?.status || 'pending',
+    };
+  });
+
+const listJobTags = async (jobId) =>
+  SystemTag.findAll({
+    where: jobTagTypeWhere({ entity_id: jobId }),
+    include: [{ model: Tag, as: 'tag' }],
+    order: [['created_at', 'ASC']],
+  });
+
+const listJobTagsByJobIds = async (jobIds = []) => {
+  const ids = (Array.isArray(jobIds) ? jobIds : []).map(String).filter(Boolean);
+  if (!ids.length) return new Map();
+  const rows = await SystemTag.findAll({
+    where: jobTagTypeWhere({ entity_id: { [Op.in]: ids } }),
+    include: [{ model: Tag, as: 'tag' }],
+    order: [['created_at', 'ASC']],
+  });
+  const map = new Map();
+  for (const row of rows) {
+    const key = String(row.entity_id);
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+  }
+  return map;
+};
+
+const resolveEntityId = (row) => {
+  if (!row) return null;
+  if (row.id != null && typeof row.id !== 'object') return String(row.id);
+  if (typeof row.get === 'function') {
+    const direct = row.get('id');
+    if (direct != null && typeof direct !== 'object') return String(direct);
+    const plain = row.get({ plain: true });
+    if (plain?.id != null) return String(plain.id);
+  }
+  return null;
+};
+
+const assignJobSkills = (job, skills) => {
+  const list = Array.isArray(skills) ? skills : [];
+  if (typeof job.set === 'function') job.set('skills', list);
+  else job.skills = list;
+  return list;
+};
+
+/** Map jobs.skills JSONB (legacy column) into the shape expected by matchingScoreService. */
+const mapLegacyJobSkillsJson = (skills = []) =>
+  (Array.isArray(skills) ? skills : [])
+    .map((s) => {
+      if (!s || typeof s !== 'object') return null;
+      const name = String(s.name || s.displayNameHe || s.displayNameEn || '').trim();
+      const key = String(s.key || s.tagKey || name).trim();
+      if (!name && !key) return null;
+      return {
+        id: s.id,
+        name: name || key,
+        key: key || name,
+        mode: s.mode || 'normal',
+        source: s.source || 'ai',
+        tagType: s.tagType || s.tag_type || s.type || 'skill',
+        tag_reason: s.tag_reason || undefined,
+        quote: s.quote || undefined,
+        relevance_score: s.relevance_score,
+        aiMode: s.aiMode,
+        status: s.status || 'pending',
+      };
+    })
+    .filter(Boolean);
+
+const loadLegacyJobSkillsByIds = async (jobIds = []) => {
+  const ids = [...new Set((Array.isArray(jobIds) ? jobIds : []).map(String).filter(Boolean))];
+  if (!ids.length) return new Map();
+  const rows = await Job.findAll({
+    where: { id: { [Op.in]: ids } },
+    attributes: ['id', 'skills'],
+  });
+  const map = new Map();
+  for (const row of rows) {
+    map.set(String(row.id), mapLegacyJobSkillsJson(row.skills));
+  }
+  return map;
+};
+
+const backfillJobSkillsToSystemTags = (jobId, skills) => {
+  if (!jobId || !Array.isArray(skills) || !skills.length) return;
+  syncTagsForJob(jobId, skills).catch((e) => {
+    console.warn('[candidateTagService] legacy job skills backfill failed', jobId, e.message || e);
+  });
+};
+
+const hydrateJobSkills = async (job) => {
+  if (!job) return job;
+  const id = resolveEntityId(job);
+  if (!id) return job;
+  const rows = await listJobTags(id);
+  let skills = mapSystemTagsToJobSkills(rows);
+  if (!skills.length) {
+    const legacyById = await loadLegacyJobSkillsByIds([id]);
+    const legacy = legacyById.get(id) || [];
+    if (legacy.length) {
+      skills = legacy;
+      backfillJobSkillsToSystemTags(id, legacy);
+    }
+  }
+  assignJobSkills(job, skills);
+  return job;
+};
+
+const hydrateJobsSkills = async (jobs = []) => {
+  if (!Array.isArray(jobs) || !jobs.length) return jobs;
+  const ids = jobs.map((j) => resolveEntityId(j)).filter(Boolean);
+  const byJob = await listJobTagsByJobIds(ids);
+  const needLegacy = [];
+  for (const job of jobs) {
+    const id = resolveEntityId(job) || '';
+    let skills = mapSystemTagsToJobSkills(byJob.get(id) || []);
+    if (!skills.length && id) needLegacy.push({ job, id });
+    else assignJobSkills(job, skills);
+  }
+  if (needLegacy.length) {
+    const legacyById = await loadLegacyJobSkillsByIds(needLegacy.map((x) => x.id));
+    for (const { job, id } of needLegacy) {
+      const skills = legacyById.get(id) || [];
+      assignJobSkills(job, skills);
+      if (skills.length) backfillJobSkillsToSystemTags(id, skills);
+    }
+  }
+  return jobs;
+};
+
 /**
- * Sync all given tag entries to CandidateTag for a candidate.
+ * Sync job skills into system_tags (type = job). Tags are ensured in Tag table first.
+ * - Existing catalog tag with status active → SystemTag.is_active true
+ * - New catalog tag (status pending) → SystemTag.is_active false
+ */
+const syncTagsForJob = async (jobId, skills = [], uploadedByUserId = null) => {
+  if (!jobId) return [];
+  const entries = (Array.isArray(skills) ? skills : [])
+    .map(normalizeJobSkillEntry)
+    .filter(Boolean)
+    .reduce((acc, curr) => {
+      const key = curr.tagKey.toLowerCase();
+      if (!acc.has(key)) acc.set(key, curr);
+      return acc;
+    }, new Map());
+  const payloads = Array.from(entries.values());
+
+  await SystemTag.destroy({ where: jobTagTypeWhere({ entity_id: jobId }) });
+  if (!payloads.length) return [];
+
+  const resolved = await Promise.all(
+    payloads.map(async (payload) => {
+      const { tag, created } = await ensureTagRecord(payload.tagKey, {
+        displayNameHe: payload.name,
+        displayNameEn: payload.name,
+        type: normalizeJobTagType(payload.raw_type),
+        source: 'job',
+      });
+      return tag ? { tag, created, payload } : null;
+    }),
+  );
+
+  const byTagId = new Map();
+  resolved.filter(Boolean).forEach((r) => {
+    if (!byTagId.has(r.tag.id)) byTagId.set(r.tag.id, r);
+  });
+
+  await Promise.all(
+    Array.from(byTagId.values()).map(async ({ tag, created, payload }) => {
+      const score = tagScoringEngine.scoreTag(payload);
+      const isActive = systemTagIsActiveForCatalogTag(tag, { created });
+      await SystemTag.create({
+        type: SYSTEM_TAG_TYPE_JOB,
+        entity_id: jobId,
+        tag_id: tag.id,
+        mode: payload.mode,
+        raw_type: payload.raw_type,
+        tag_reason: payload.tag_reason,
+        quote: payload.quote,
+        confidence_score: payload.confidence_score,
+        raw_type_reason: payload.raw_type_reason,
+        calculated_weight: score.calculatedWeight,
+        final_score: score.finalScore,
+        is_active: isActive,
+        is_current: true,
+        is_in_summary: false,
+        ...(uploadedByUserId ? { created_by: uploadedByUserId } : {}),
+      });
+      await recordTagUsage(tag);
+    }),
+  );
+
+  return listJobTags(jobId);
+};
+
+/**
+ * Sync all given tag entries to SystemTag for a candidate.
  * Every entry is inserted; is_active is true only when the tag exists in Tag with status === 'active'.
  * @param {string} candidateId - Candidate UUID
  * @param {Array} entries - Tag entries (strings or objects with tagKey/name/displayNameHe, etc.)
@@ -307,7 +622,7 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
   const payloads = Array.from(normalizedEntries.values());
   if (!payloads.length) return [];
 
-  await CandidateTag.destroy({ where: { candidate_id: candidateId } });
+  await SystemTag.destroy({ where: candidateTagTypeWhere({ entity_id: candidateId }) });
 
   // Resolve each payload to a tag (find existing or create pending). Deduplicate by tag.id.
   const resolved = await Promise.all(
@@ -325,13 +640,14 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
   });
   const uniqueResolved = Array.from(byTagId.values());
 
-  // Insert every tag: is_active = true only when Tag exists with status === 'active', else false. Attach uploader if provided.
+  // Insert every tag: is_active mirrors catalog status (see systemTagIsActiveForCatalogTag).
   await Promise.all(
-    uniqueResolved.map(async ({ tag, payload }) => {
+    uniqueResolved.map(async ({ tag, created, payload }) => {
       const score = tagScoringEngine.scoreTag(payload);
-      const isActive = (tag.status && String(tag.status).toLowerCase() === 'active') || false;
-      await CandidateTag.create({
-        candidate_id: candidateId,
+      const isActive = systemTagIsActiveForCatalogTag(tag, { created });
+      await SystemTag.create({
+        type: SYSTEM_TAG_TYPE_CANDIDATE,
+        entity_id: candidateId,
         tag_id: tag.id,
         raw_type: payload.raw_type,
         context: payload.context,
@@ -350,8 +666,8 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
     }),
   );
 
-  return CandidateTag.findAll({
-    where: { candidate_id: candidateId },
+  return SystemTag.findAll({
+    where: candidateTagTypeWhere({ entity_id: candidateId }),
     include: [{ model: Tag, as: 'tag' }],
   });
 };
@@ -364,8 +680,8 @@ const removeAbsentTags = async (candidateId, tags = []) => {
       .map((tag) => tag.trim().toLowerCase())
       .filter(Boolean),
   );
-  const existing = await CandidateTag.findAll({
-    where: { candidate_id: candidateId },
+  const existing = await SystemTag.findAll({
+    where: candidateTagTypeWhere({ entity_id: candidateId }),
     include: [{ model: Tag, as: 'tag' }],
   });
   await Promise.all(
@@ -410,9 +726,9 @@ const listCandidateTagsPaginatedForAdmin = async ({
   search,
   isActive = 'all',
 } = {}) => {
-  const base = {};
+  const base = candidateTagTypeWhere();
   if (candidateId) {
-    base.candidate_id = String(candidateId).trim();
+    base.entity_id = String(candidateId).trim();
   }
   if (isActive === true) {
     base.is_active = true;
@@ -441,7 +757,7 @@ const listCandidateTagsPaginatedForAdmin = async ({
             sequelize.where(sequelize.col('candidate.email'), { [Op.iLike]: like }),
             sequelize.where(sequelize.col('candidate.phone'), { [Op.iLike]: like }),
             sequelize.literal(
-              `("CandidateTag"."candidate_id")::text ILIKE ${sequelize.escape(like)}`,
+              `("SystemTag"."entity_id")::text ILIKE ${sequelize.escape(like)}`,
             ),
           ],
         },
@@ -457,7 +773,7 @@ const listCandidateTagsPaginatedForAdmin = async ({
     { model: Candidate, as: 'candidate', attributes: ['id', 'fullName', 'email', 'phone'], required: false },
   ];
 
-  const { rows, count } = await CandidateTag.findAndCountAll({
+  const { rows, count } = await SystemTag.findAndCountAll({
     where: whereClause,
     limit: safeLimit,
     offset: safeOffset,
@@ -479,7 +795,8 @@ const listCandidateTagsPaginatedForAdmin = async ({
 
 /** @deprecated Prefer listCandidateTagsPaginatedForAdmin — loads full table (risk of OOM). */
 const listAllCandidateTags = () =>
-  CandidateTag.findAll({
+  SystemTag.findAll({
+    where: candidateTagTypeWhere(),
     include: [
       { model: Tag, as: 'tag', attributes: TAG_ADMIN_LIST_ATTRIBUTES },
       { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
@@ -491,8 +808,8 @@ const listAllCandidateTags = () =>
 const listCandidateTagsByTagName = async (name) => {
   const tag = await findTagByNameOrAlias(name);
   if (!tag) return [];
-  return CandidateTag.findAll({
-    where: { tag_id: tag.id, is_active: true },
+  return SystemTag.findAll({
+    where: candidateTagTypeWhere({ tag_id: tag.id, is_active: true }),
     include: [
       { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
       { model: Tag, as: 'tag' },
@@ -500,29 +817,64 @@ const listCandidateTagsByTagName = async (name) => {
   });
 };
 
-const countTagUsage = async (tagIds = []) => {
-  if (!Array.isArray(tagIds) || !tagIds.length) return {};
-  const rows = await CandidateTag.findAll({
-    attributes: ['tag_id', [fn('COUNT', col('id')), 'count']],
-    where: {
-      tag_id: { [Op.in]: tagIds },
-      is_active: true,
-    },
-    group: ['tag_id'],
-  });
-  return rows.reduce((acc, row) => {
+const countRowsByTagId = (rows) =>
+  rows.reduce((acc, row) => {
     acc[row.tag_id] = Number(row.get('count')) || 0;
     return acc;
   }, {});
+
+const listJobIdsByTag = async (tagId, { activeOnly = true } = {}) => {
+  const tid = String(tagId || '').trim();
+  if (!tid) return [];
+  const rows = await SystemTag.findAll({
+    attributes: ['entity_id'],
+    where: jobTagTypeWhere({
+      tag_id: tid,
+      ...(activeOnly ? { is_active: true } : {}),
+    }),
+    group: ['entity_id'],
+  });
+  return rows.map((row) => row.entity_id).filter(Boolean);
+};
+
+const countTagUsage = async (tagIds = []) => {
+  if (!Array.isArray(tagIds) || !tagIds.length) {
+    return { candidates: {}, jobs: {} };
+  }
+  const activeWhere = { tag_id: { [Op.in]: tagIds }, is_active: true };
+  const [candidateRows, jobRows] = await Promise.all([
+    SystemTag.findAll({
+      attributes: ['tag_id', [fn('COUNT', col('id')), 'count']],
+      where: candidateTagTypeWhere(activeWhere),
+      group: ['tag_id'],
+    }),
+    SystemTag.findAll({
+      attributes: ['tag_id', [fn('COUNT', col('id')), 'count']],
+      where: jobTagTypeWhere(activeWhere),
+      group: ['tag_id'],
+    }),
+  ]);
+  return {
+    candidates: countRowsByTagId(candidateRows),
+    jobs: countRowsByTagId(jobRows),
+  };
 };
 
 module.exports = {
   syncTagsForCandidate,
+  syncTagsForJob,
   removeAbsentTags,
   ensureTagRecord,
   findTagByNameOrAlias,
+  mapSystemTagsToJobSkills,
+  listJobTags,
+  listJobTagsByJobIds,
+  hydrateJobSkills,
+  hydrateJobsSkills,
   createCandidateTag: async (payload) => {
-    if (!payload?.candidate_id || !payload?.tagKey) throw new Error('candidate_id and tagKey required');
+    if (!payload?.tagKey) throw new Error('tagKey required');
+    const entityId = payload.entity_id || payload.candidate_id || payload.candidateId;
+    if (!entityId) throw new Error('candidate_id and tagKey required');
     const { tag, created } = await ensureTagRecord(payload.tagKey, {
       displayNameHe: payload.displayNameHe,
       displayNameEn: payload.displayNameEn,
@@ -536,8 +888,9 @@ module.exports = {
         : typeof payload.evidence === 'string' && payload.evidence.trim()
           ? payload.evidence.trim()
           : null;
-    const entry = await CandidateTag.create({
-      candidate_id: payload.candidate_id,
+    const entry = await SystemTag.create({
+      type: SYSTEM_TAG_TYPE_CANDIDATE,
+      entity_id: entityId,
       tag_id: tag.id,
       raw_type: payload.raw_type,
       context: payload.context,
@@ -555,7 +908,9 @@ module.exports = {
     return entry;
   },
   updateCandidateTag: async (id, updates = {}) => {
-    const candidateTag = await CandidateTag.findByPk(id);
+    const candidateTag = await SystemTag.findOne({
+      where: { id, type: SYSTEM_TAG_TYPE_CANDIDATE },
+    });
     if (!candidateTag) return null;
 
     let newTag = null;
@@ -607,16 +962,19 @@ module.exports = {
   reassignCandidateTag,
   bulkUpdateCandidateTags,
   listCandidateTags: async (candidateId) =>
-    CandidateTag.findAll({
-      where: { candidate_id: candidateId, is_active: true },
+    SystemTag.findAll({
+      where: candidateTagTypeWhere({ entity_id: candidateId, is_active: true }),
       include: [
         { model: Tag, as: 'tag' },
         { model: Candidate, as: 'candidate', attributes: ['id', 'fullName'] },
       ],
     }),
   listCandidateTagsByTag: async (tagId, { activeOnly = true } = {}) =>
-    CandidateTag.findAll({
-      where: { tag_id: tagId, ...(activeOnly ? { is_active: true } : {}) },
+    SystemTag.findAll({
+      where: candidateTagTypeWhere({
+        tag_id: tagId,
+        ...(activeOnly ? { is_active: true } : {}),
+      }),
       include: [
         { model: Candidate, as: 'candidate', attributes: ['id', 'fullName', 'email', 'phone'] },
       ],
@@ -625,5 +983,8 @@ module.exports = {
   listAllCandidateTags,
   listCandidateTagsPaginatedForAdmin,
   countTagUsage,
+  listJobIdsByTag,
+  isCatalogTagStatusActive,
+  syncSystemTagsActiveForCatalogTag,
 };
 

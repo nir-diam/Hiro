@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, XMarkIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import UpdateStatusModal from './UpdateStatusModal';
@@ -37,6 +37,8 @@ interface JobInterest {
   dueTime: string;
   inviteCandidate: boolean;
   inviteClient: boolean;
+  /** Raw engine breakdown when loaded from API (optional). */
+  scoreBreakdown?: Record<string, unknown> | null;
 }
 
 type LinkedJobApiRow = {
@@ -48,7 +50,35 @@ type LinkedJobApiRow = {
   createdAt?: string | null;
   job: Record<string, unknown>;
   workflowMeta?: Record<string, unknown>;
+  /** Set by GET …/linked-jobs after server-side scoring */
+  matchScore?: number | null;
+  scoreBreakdown?: Record<string, unknown> | null;
 };
+
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function matchSummaryFromEngine(descPlain: string, bd: Record<string, unknown> | null | undefined): string {
+  if (!bd || typeof bd !== 'object') return descPlain || '—';
+  const bits: string[] = [];
+  if (typeof bd.vector === 'number' && Number.isFinite(bd.vector)) {
+    bits.push(`התאמה וקטורית ${Math.round(bd.vector)}%`);
+  }
+  if (typeof bd.tags === 'number' && Number.isFinite(bd.tags)) {
+    bits.push(`תגיות ${Math.round(bd.tags)}%`);
+  }
+  if (typeof bd.geo === 'number' && Number.isFinite(bd.geo)) {
+    bits.push(`מיקום ${Math.round(bd.geo)}%`);
+  }
+  const dist = bd.geoDistance;
+  if (typeof dist === 'number' && Number.isFinite(dist)) {
+    bits.push(`${Math.round(dist)} ק"מ מן היעד`);
+  }
+  const line = bits.length ? bits.join(' · ') : '';
+  if (line && descPlain) return `${line}\n\n${descPlain.slice(0, 320)}`;
+  return line || descPlain || '—';
+}
 
 function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
   const job = row.job || {};
@@ -64,11 +94,22 @@ function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
   const lastUpdated = updatedRaw
     ? new Date(updatedRaw).toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' })
     : '—';
-  const desc = typeof job.description === 'string' ? job.description.trim().slice(0, 400) : '';
+  const descRaw = typeof job.description === 'string' ? job.description.trim().slice(0, 400) : '';
+  const desc = stripHtml(descRaw);
+  const engineMs = row.matchScore;
+  const hasEngine = typeof engineMs === 'number' && Number.isFinite(engineMs) && engineMs >= 0;
   const rating = typeof job.rating === 'number' ? job.rating : 0;
+  const ratingPct = rating ? Math.round((rating / 5) * 100) : 0;
+  const matchScore = hasEngine
+    ? Math.min(100, Math.max(0, Math.round(engineMs)))
+    : Math.min(100, Math.max(0, ratingPct));
+  const scoreBreakdown =
+    row.scoreBreakdown && typeof row.scoreBreakdown === 'object' && !Array.isArray(row.scoreBreakdown)
+      ? (row.scoreBreakdown as Record<string, unknown>)
+      : null;
   return {
     linkId: row.jobCandidateId,
-    jobId: row.jobId,
+    jobId: row.jobId != null ? String(row.jobId) : '',
     industry: String(job.field || '').trim(),
     role: String(job.role || '').trim(),
     jobTitle: title,
@@ -76,11 +117,11 @@ function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
     location,
     lastUpdated,
     status: String(row.status || 'חדש').trim() || 'חדש',
-    matchScore: Math.min(100, Math.max(0, rating ? Math.round((rating / 5) * 100) : 0)),
+    matchScore,
     matchDetails: {
       positive: [],
       negative: [],
-      summary: desc || '—',
+      summary: matchSummaryFromEngine(desc, scoreBreakdown),
     },
     lastAnalyzed: lastUpdated,
     linkSource: row.source,
@@ -89,6 +130,7 @@ function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
     dueTime: wm.dueTime != null ? String(wm.dueTime) : '',
     inviteCandidate: Boolean(wm.inviteCandidate),
     inviteClient: Boolean(wm.inviteClient),
+    scoreBreakdown,
   };
 }
 
@@ -119,7 +161,7 @@ const StatusBadge: React.FC<{ status: string; onClick: () => void }> = ({ status
   );
 };
 
-const MatchScore: React.FC<{ score: number }> = ({ score }) => {
+const MatchScore: React.FC<{ score: number; title?: string }> = ({ score, title }) => {
     const size = 40;
     const strokeWidth = 4;
     const radius = (size - strokeWidth) / 2;
@@ -130,7 +172,7 @@ const MatchScore: React.FC<{ score: number }> = ({ score }) => {
     const trackColor = score > 75 ? 'bg-accent-100' : score > 50 ? 'bg-yellow-100' : 'bg-red-100';
 
     return (
-        <div className="relative flex items-center justify-center group" title="לחץ לניתוח התאמה מבוסס AI">
+        <div className="relative flex items-center justify-center group" title={title || undefined}>
             <div className={`absolute inset-0 ${trackColor} rounded-full`}></div>
             <svg className="transform -rotate-90" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
                 <circle
@@ -162,7 +204,18 @@ const MatchScore: React.FC<{ score: number }> = ({ score }) => {
     );
 };
 
-const MatchScorePopover: React.FC<{ details: MatchDetails; onClose: () => void; onRecalculate: () => Promise<void>; lastAnalyzed: string; }> = ({ details, onClose, onRecalculate, lastAnalyzed }) => {
+const MatchScorePopover: React.FC<{
+    details: MatchDetails;
+    onClose: () => void;
+    onRecalculate: () => Promise<void>;
+    lastAnalyzed: string;
+    labels: {
+        title: string;
+        recalc: string;
+        recalcLoading: string;
+        last: string;
+    };
+}> = ({ details, onClose, onRecalculate, lastAnalyzed, labels }) => {
     const [isLoading, setIsLoading] = useState(false);
 
     const handleButtonClick = async () => {
@@ -182,7 +235,7 @@ const MatchScorePopover: React.FC<{ details: MatchDetails; onClose: () => void; 
             <div className="flex justify-between items-center mb-3">
                 <h4 className="font-bold text-text-default text-sm flex items-center gap-2">
                     <SparklesIcon className="w-5 h-5 text-purple-500" />
-                    ניתוח התאמת AI
+                    {labels.title}
                 </h4>
                 <button onClick={onClose} className="p-1 rounded-full hover:bg-bg-hover" aria-label="סגור">
                     <XMarkIcon className="w-4 h-4 text-text-muted" />
@@ -193,7 +246,7 @@ const MatchScorePopover: React.FC<{ details: MatchDetails; onClose: () => void; 
             </div>
             <div className="mt-3 pt-3 border-t border-border-default text-center">
                  <p className="text-xs text-text-subtle mb-3">
-                    ניתוח אחרון: {lastAnalyzed}
+                    {labels.last} {lastAnalyzed}
                 </p>
                  <button 
                     onClick={handleButtonClick} 
@@ -206,12 +259,12 @@ const MatchScorePopover: React.FC<{ details: MatchDetails; onClose: () => void; 
                                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                                 <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                             </svg>
-                            <span>מחשב מחדש...</span>
+                            <span>{labels.recalcLoading}</span>
                         </>
                     ) : (
                         <>
                             <ArrowPathIcon className="w-4 h-4"/>
-                            <span>חשב מחדש התאמה</span>
+                            <span>{labels.recalc}</span>
                         </>
                     )}
                 </button>
@@ -220,18 +273,67 @@ const MatchScorePopover: React.FC<{ details: MatchDetails; onClose: () => void; 
     );
 };
 
-const JobInterestCard: React.FC<{ job: JobInterest; onStatusClick: () => void; onTitleClick: () => void }> = ({ job, onStatusClick, onTitleClick }) => (
+const INTEREST_TABLE_SKELETON_ROWS = 6;
+
+const InterestTableSkeletonRows: React.FC<{ columnCount: number }> = ({ columnCount }) => (
+    <>
+        {Array.from({ length: INTEREST_TABLE_SKELETON_ROWS }).map((_, rowIdx) => (
+            <tr key={`interest-sk-${rowIdx}`} className="animate-pulse" aria-hidden>
+                {Array.from({ length: columnCount }).map((_, colIdx) => (
+                    <td key={colIdx} className="p-4">
+                        <div
+                            className={`h-4 bg-bg-subtle rounded ${
+                                colIdx === 0 ? 'w-[85%]' : colIdx === 1 ? 'w-[60%]' : 'w-[70%]'
+                            }`}
+                        />
+                    </td>
+                ))}
+                <td className="p-4 sticky left-0 bg-bg-card w-16">
+                    <div className="h-8 w-8 bg-bg-subtle rounded-full" />
+                </td>
+            </tr>
+        ))}
+    </>
+);
+
+const InterestGridSkeletonCards: React.FC = () => (
+    <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4" aria-hidden>
+        {Array.from({ length: INTEREST_TABLE_SKELETON_ROWS }).map((i) => (
+            <div
+                key={`interest-grid-sk-${i}`}
+                className="bg-bg-card rounded-lg border border-border-default p-4 animate-pulse space-y-3"
+            >
+                <div className="flex justify-between gap-3">
+                    <div className="flex-1 space-y-2">
+                        <div className="h-4 bg-bg-subtle rounded w-4/5" />
+                        <div className="h-3 bg-bg-subtle rounded w-1/2" />
+                    </div>
+                    <div className="w-10 h-10 bg-bg-subtle rounded-full shrink-0" />
+                </div>
+                <div className="h-6 bg-bg-subtle rounded-full w-24" />
+            </div>
+        ))}
+    </div>
+);
+
+const JobInterestCard: React.FC<{
+    job: JobInterest;
+    onStatusClick: () => void;
+    onTitleClick: () => void;
+    matchRingTitle: string;
+    lastUpdatedLabel: string;
+}> = ({ job, onStatusClick, onTitleClick, matchRingTitle, lastUpdatedLabel }) => (
     <div className="bg-bg-card rounded-lg border border-border-default shadow-sm p-4 hover:shadow-md transition-shadow flex flex-col justify-between">
         <div>
             <div className="flex justify-between items-start">
                 <button onClick={onTitleClick} className="font-semibold text-primary-700 hover:underline text-right">{job.jobTitle}</button>
-                <MatchScore score={job.matchScore} />
+                <MatchScore score={job.matchScore} title={matchRingTitle} />
             </div>
             <p className="text-sm text-text-muted">{job.company}</p>
         </div>
         <div className="mt-4 flex justify-between items-end">
             <StatusBadge status={job.status} onClick={onStatusClick} />
-            <p className="text-xs text-text-subtle">עדכון אחרון: {job.lastUpdated}</p>
+            <p className="text-xs text-text-subtle">{lastUpdatedLabel} {job.lastUpdated}</p>
         </div>
     </div>
 );
@@ -256,6 +358,7 @@ const InterestedInJobs: React.FC<{
     const popoverRef = useRef<HTMLDivElement>(null);
     const [recalculatingId, setRecalculatingId] = useState<string | null>(null);
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
+    const [fieldInterestSaving, setFieldInterestSaving] = useState(false);
     
     // New state for advanced table features & modals
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
@@ -312,6 +415,27 @@ const InterestedInJobs: React.FC<{
         };
     }, [apiBase]);
 
+    const reloadLinkedJobs = useCallback(async () => {
+        const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
+        if (!apiBase || !id) {
+            setJobs([]);
+            return;
+        }
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/linked-jobs`, {
+            credentials: 'include',
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+        });
+        if (!res.ok) throw new Error(t('interested_jobs.load_error') || 'טעינת התעניינות במשרות נכשלה');
+        const rows: unknown = await res.json();
+        if (Array.isArray(rows)) {
+            setJobs(rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
+        }
+    }, [apiBase, candidateId, t]);
+
     useEffect(() => {
         const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
         if (!apiBase || !id) {
@@ -323,20 +447,7 @@ const InterestedInJobs: React.FC<{
         let cancelled = false;
         setLinkedJobsLoading(true);
         setLinkedJobsError(null);
-        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-        fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/linked-jobs`, {
-            credentials: 'include',
-            headers: {
-                Accept: 'application/json',
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-        })
-            .then((res) => (res.ok ? res.json() : Promise.reject(new Error('טעינת התעניינות במשרות נכשלה'))))
-            .then((rows: unknown) => {
-                if (cancelled) return;
-                const list = Array.isArray(rows) ? rows : [];
-                setJobs(list.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
-            })
+        reloadLinkedJobs()
             .catch((err: Error) => {
                 if (!cancelled) setLinkedJobsError(err.message || 'שגיאה');
             })
@@ -346,7 +457,7 @@ const InterestedInJobs: React.FC<{
         return () => {
             cancelled = true;
         };
-    }, [apiBase, candidateId]);
+    }, [apiBase, candidateId, reloadLinkedJobs]);
 
     // Sorting logic
     const requestSort = (key: string) => {
@@ -422,52 +533,68 @@ const InterestedInJobs: React.FC<{
 
     const handleRecalculateMatch = async (linkId: string) => {
         setRecalculatingId(linkId);
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        setJobs((prevJobs) =>
-            prevJobs.map((job) =>
-                job.linkId === linkId
-                    ? {
-                          ...job,
-                          matchScore: Math.floor(Math.random() * 30) + 70,
-                          lastAnalyzed: new Date().toLocaleDateString('he-IL'),
-                      }
-                    : job,
-            ),
-        );
-        setRecalculatingId(null);
-        setActivePopoverId(null);
+        try {
+            await reloadLinkedJobs();
+        } catch (e) {
+            console.error('[InterestedInJobs] recalculate linked jobs failed', e);
+        } finally {
+            setRecalculatingId(null);
+            setActivePopoverId(null);
+        }
     };
 
-    const handleFieldSelected = (selectedField: SelectedJobField | null) => {
+    const handleFieldSelected = async (selectedField: SelectedJobField | null) => {
         if (!selectedField) {
             setIsJobFieldSelectorOpen(false);
             return;
         }
-        const newInterest: JobInterest = {
-            linkId: `local-${Date.now()}`,
-            jobId: '',
-            industry: selectedField.category,
-            role: selectedField.role,
-            jobTitle: `${selectedField.role} (יש לערוך)`,
-            company: 'לא צוין',
-            location: 'לא צוין',
-            lastUpdated: new Date().toLocaleDateString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric' }),
-            status: 'פעיל',
-            matchScore: 30,
-            matchDetails: {
-                positive: ['נוסף ידנית מתחום'],
-                negative: ['נדרש למלא פרטים נוספים'],
-                summary: 'התעניינות נוספה מבחירת תחום בלבד. יש לעדכן פרטים נוספים.',
-            },
-            lastAnalyzed: new Date().toLocaleDateString('he-IL'),
-            internalNote: '',
-            dueDate: '',
-            dueTime: '',
-            inviteCandidate: false,
-            inviteClient: false,
-        };
-        setJobs((prevJobs) => [newInterest, ...prevJobs]);
-        setIsJobFieldSelectorOpen(false);
+        const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
+        if (!apiBase || !id) {
+            setLinkedJobsError(t('interested_jobs.no_candidate') || 'לא נבחר מועמד');
+            setIsJobFieldSelectorOpen(false);
+            return;
+        }
+        setFieldInterestSaving(true);
+        setLinkedJobsError(null);
+        try {
+            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+            const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/field-interest`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    Accept: 'application/json',
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+                body: JSON.stringify({
+                    category: selectedField.category,
+                    fieldType: selectedField.fieldType,
+                    role: selectedField.role,
+                    categoryId: selectedField.categoryId,
+                    clusterId: selectedField.clusterId,
+                    roleId: selectedField.roleId,
+                }),
+            });
+            if (!res.ok) {
+                const errBody = await res.json().catch(() => ({}));
+                throw new Error(
+                    (errBody as { message?: string }).message || 'שמירת התעניינות בתחום נכשלה',
+                );
+            }
+            const rows: unknown = await res.json();
+            if (Array.isArray(rows)) {
+                setJobs(rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
+            } else {
+                await reloadLinkedJobs();
+            }
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'שגיאה';
+            setLinkedJobsError(msg);
+            console.error('[InterestedInJobs] field-interest save failed', err);
+        } finally {
+            setFieldInterestSaving(false);
+            setIsJobFieldSelectorOpen(false);
+        }
     };
 
     const handleOpenStatusModal = (interest: JobInterest) => {
@@ -618,16 +745,22 @@ const InterestedInJobs: React.FC<{
                                     </svg>
                                 </div>
                             ) : (
-                                <MatchScore score={job.matchScore} />
+                                <MatchScore score={job.matchScore} title={t('interested_jobs.match_ring_title')} />
                             )}
                         </button>
                         {activePopoverId === job.linkId && (
                             <div ref={popoverRef}>
-                                <MatchScorePopover 
-                                    details={job.matchDetails} 
+                                <MatchScorePopover
+                                    details={job.matchDetails}
                                     onClose={() => setActivePopoverId(null)}
                                     onRecalculate={() => handleRecalculateMatch(job.linkId)}
                                     lastAnalyzed={job.lastAnalyzed}
+                                    labels={{
+                                        title: t('interested_jobs.popover_title'),
+                                        recalc: t('interested_jobs.popover_recalc'),
+                                        recalcLoading: t('interested_jobs.popover_recalc_loading'),
+                                        last: t('interested_jobs.popover_last'),
+                                    }}
                                 />
                             </div>
                         )}
@@ -638,6 +771,8 @@ const InterestedInJobs: React.FC<{
         }
     }
     
+    const isTableLoading = linkedJobsLoading || fieldInterestSaving;
+
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm">
              <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
@@ -649,9 +784,14 @@ const InterestedInJobs: React.FC<{
             {/* Toolbar */}
             <header className="flex items-center justify-between p-3 border-b border-border-default bg-bg-card">
                  <div className="flex items-center gap-3">
-                    <button onClick={() => setIsJobFieldSelectorOpen(true)} className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
+                    <button
+                        type="button"
+                        disabled={fieldInterestSaving || !candidateId}
+                        onClick={() => setIsJobFieldSelectorOpen(true)}
+                        className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm disabled:opacity-60 disabled:pointer-events-none"
+                    >
                         <PlusIcon className="w-5 h-5"/>
-                        <span>{t('interested_jobs.add_button')}</span>
+                        <span>{fieldInterestSaving ? t('interested_jobs.saving_field') : t('interested_jobs.add_button')}</span>
                     </button>
                     <div className="relative">
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
@@ -671,50 +811,149 @@ const InterestedInJobs: React.FC<{
 
             {/* Content */}
             {viewMode === 'table' ? (
-                <table className="w-full text-sm text-right min-w-[1000px]">
-                    <thead className="text-xs text-text-muted uppercase bg-bg-subtle/80">
-                        <tr>
-                            {visibleColumns.map((colId, index) => {
-                                const col = allColumns.find(c => c.id === colId);
-                                if (!col) return null;
-                                return (
-                                    <th key={col.id} draggable onDragStart={() => handleDragStart(index, col.id)} onDragEnter={() => handleDragEnter(index)} onDragEnd={handleDragEnd} onDrop={handleDragEnd} onDragOver={e => e.preventDefault()} onClick={() => requestSort(col.id)} className={`p-4 cursor-pointer hover:bg-bg-hover ${draggingColumn === col.id ? 'dragging' : ''}`}>
-                                        <div className="flex items-center gap-1">{col.header} {getSortIndicator(col.id)}</div>
-                                    </th>
-                                );
-                            })}
-                            <th className="p-4 sticky left-0 bg-bg-subtle/80 w-16">
-                                <div className="relative" ref={settingsRef}>
-                                    <button onClick={() => setIsSettingsOpen(!isSettingsOpen)} title={t('candidates.customize_columns')} className="p-2 hover:bg-bg-hover rounded-full"><Cog6ToothIcon className="w-5 h-5"/></button>
-                                    {isSettingsOpen && (
-                                    <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
-                                        <p className="font-bold text-text-default mb-2 text-sm">{t('candidates.customize_columns')}</p>
-                                        <div className="space-y-2 max-h-60 overflow-y-auto">{allColumns.map(c => (<label key={c.id} className="flex items-center gap-2 text-sm font-normal text-text-default"><input type="checkbox" checked={visibleColumns.includes(c.id)} onChange={() => handleColumnToggle(c.id)} className="w-4 h-4 text-primary-600" />{c.header}</label>))}</div>
+                <div className="relative overflow-x-auto">
+                    {isTableLoading && (
+                        <div
+                            className="absolute inset-0 z-10 flex items-center justify-center bg-bg-card/60 backdrop-blur-[1px] pointer-events-none min-h-[280px]"
+                            role="status"
+                            aria-live="polite"
+                            aria-busy="true"
+                        >
+                            <span className="inline-flex items-center gap-2 text-sm font-semibold text-primary-700 bg-bg-card px-4 py-2 rounded-lg shadow-sm border border-border-default">
+                                <svg
+                                    className="animate-spin h-5 w-5 text-primary-600"
+                                    xmlns="http://www.w3.org/2000/svg"
+                                    fill="none"
+                                    viewBox="0 0 24 24"
+                                    aria-hidden
+                                >
+                                    <circle
+                                        className="opacity-25"
+                                        cx="12"
+                                        cy="12"
+                                        r="10"
+                                        stroke="currentColor"
+                                        strokeWidth="4"
+                                    />
+                                    <path
+                                        className="opacity-75"
+                                        fill="currentColor"
+                                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                                    />
+                                </svg>
+                                {fieldInterestSaving
+                                    ? t('interested_jobs.saving_field')
+                                    : t('interested_jobs.loading')}
+                            </span>
+                        </div>
+                    )}
+                    <table
+                        className={`w-full text-sm text-right min-w-[1000px] transition-opacity duration-200 ${
+                            isTableLoading ? 'opacity-50' : ''
+                        }`}
+                    >
+                        <thead className="text-xs text-text-muted uppercase bg-bg-subtle/80">
+                            <tr>
+                                {visibleColumns.map((colId, index) => {
+                                    const col = allColumns.find(c => c.id === colId);
+                                    if (!col) return null;
+                                    return (
+                                        <th
+                                            key={col.id}
+                                            draggable
+                                            onDragStart={() => handleDragStart(index, col.id)}
+                                            onDragEnter={() => handleDragEnter(index)}
+                                            onDragEnd={handleDragEnd}
+                                            onDrop={handleDragEnd}
+                                            onDragOver={(e) => e.preventDefault()}
+                                            onClick={() => requestSort(col.id)}
+                                            className={`p-4 cursor-pointer hover:bg-bg-hover ${draggingColumn === col.id ? 'dragging' : ''}`}
+                                        >
+                                            <div className="flex items-center gap-1">
+                                                {col.header} {getSortIndicator(col.id)}
+                                            </div>
+                                        </th>
+                                    );
+                                })}
+                                <th className="p-4 sticky left-0 bg-bg-subtle/80 w-16">
+                                    <div className="relative" ref={settingsRef}>
+                                        <button
+                                            onClick={() => setIsSettingsOpen(!isSettingsOpen)}
+                                            title={t('candidates.customize_columns')}
+                                            className="p-2 hover:bg-bg-hover rounded-full"
+                                        >
+                                            <Cog6ToothIcon className="w-5 h-5" />
+                                        </button>
+                                        {isSettingsOpen && (
+                                            <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-lg shadow-xl border border-border-default z-20 p-4">
+                                                <p className="font-bold text-text-default mb-2 text-sm">
+                                                    {t('candidates.customize_columns')}
+                                                </p>
+                                                <div className="space-y-2 max-h-60 overflow-y-auto">
+                                                    {allColumns.map((c) => (
+                                                        <label
+                                                            key={c.id}
+                                                            className="flex items-center gap-2 text-sm font-normal text-text-default"
+                                                        >
+                                                            <input
+                                                                type="checkbox"
+                                                                checked={visibleColumns.includes(c.id)}
+                                                                onChange={() => handleColumnToggle(c.id)}
+                                                                className="w-4 h-4 text-primary-600"
+                                                            />
+                                                            {c.header}
+                                                        </label>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
                                     </div>
-                                    )}
-                                </div>
-                            </th>
-                        </tr>
-                    </thead>
-                    <tbody className="divide-y divide-border-subtle">
-                        {sortedJobs.map(job => (
-                            <tr key={job.linkId} className="hover:bg-bg-hover">
-                                {visibleColumns.map(colId => (
-                                    <td key={colId} className="p-4 text-text-muted">{renderCell(job, colId)}</td>
-                                ))}
-                                <td className="p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-16"></td>
+                                </th>
                             </tr>
-                        ))}
-                    </tbody>
-                </table>
+                        </thead>
+                        <tbody className="divide-y divide-border-subtle min-h-[280px]">
+                            {isTableLoading ? (
+                                <InterestTableSkeletonRows columnCount={visibleColumns.length} />
+                            ) : sortedJobs.length === 0 ? (
+                                <tr>
+                                    <td
+                                        colSpan={visibleColumns.length + 1}
+                                        className="p-10 text-center text-text-muted text-sm"
+                                    >
+                                        {t('interested_jobs.empty') || 'אין התעניינות במשרות'}
+                                    </td>
+                                </tr>
+                            ) : (
+                                sortedJobs.map((job) => (
+                                    <tr key={job.linkId} className="hover:bg-bg-hover">
+                                        {visibleColumns.map((colId) => (
+                                            <td key={colId} className="p-4 text-text-muted">
+                                                {renderCell(job, colId)}
+                                            </td>
+                                        ))}
+                                        <td className="p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-16" />
+                                    </tr>
+                                ))
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            ) : isTableLoading ? (
+                <InterestGridSkeletonCards />
+            ) : sortedJobs.length === 0 ? (
+                <div className="p-10 text-center text-text-muted text-sm">
+                    {t('interested_jobs.empty') || 'אין התעניינות במשרות'}
+                </div>
             ) : (
                 <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {sortedJobs.map(job => (
-                        <JobInterestCard 
-                            key={job.linkId} 
-                            job={job} 
+                    {sortedJobs.map((job) => (
+                        <JobInterestCard
+                            key={job.linkId}
+                            job={job}
                             onStatusClick={() => handleOpenStatusModal(job)}
                             onTitleClick={() => handleOpenJobDrawer(job.jobId)}
+                            matchRingTitle={t('interested_jobs.match_ring_title')}
+                            lastUpdatedLabel={t('interested_jobs.card_last_updated')}
                         />
                     ))}
                 </div>

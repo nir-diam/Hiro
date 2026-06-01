@@ -99,6 +99,7 @@ const CANDIDATE_API_PASSTHROUGH_KEYS = [
     'birthMonth',
     'birthDay',
     'age',
+    'address',
     'location',
     'physicalWork',
     'salaryMin',

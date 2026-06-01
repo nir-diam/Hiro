@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { ClipboardDocumentCheckIcon, PencilIcon, SparklesIcon, WalletIcon, CalendarDaysIcon, LanguageIcon, AcademicCapIcon, TagIcon, ChatBubbleOvalLeftEllipsisIcon, BriefcaseIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
@@ -8,18 +8,21 @@ const ContentNavBar: React.FC = () => {
     const [activeSection, setActiveSection] = useState('summary');
     const navRef = useRef<HTMLDivElement>(null);
 
-    const sections = [
-        { id: 'summary', title: t('section.summary'), icon: <ClipboardDocumentCheckIcon className="w-5 h-5"/> },
-        { id: 'personal-details', title: t('section.personal_details'), icon: <PencilIcon className="w-5 h-5"/> },
-        { id: 'work-experience', title: t('section.work_experience'), icon: <BriefcaseIcon className="w-5 h-5"/> },
-        { id: 'preferences', title: t('section.preferences'), icon: <SparklesIcon className="w-5 h-5"/> },
-        { id: 'salary', title: t('section.salary'), icon: <WalletIcon className="w-5 h-5"/> },
-        { id: 'birth-date', title: t('section.birth_date'), icon: <CalendarDaysIcon className="w-5 h-5"/> },
-        { id: 'languages', title: t('section.languages'), icon: <LanguageIcon className="w-5 h-5"/> },
-        { id: 'education', title: t('section.education'), icon: <AcademicCapIcon className="w-5 h-5"/> },
-        { id: 'skills', title: t('section.skills'), icon: <TagIcon className="w-5 h-5"/> },
-        { id: 'notes', title: t('section.notes'), icon: <ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/> },
-    ];
+    const sections = useMemo(
+        () => [
+            { id: 'summary', title: t('section.summary'), icon: <ClipboardDocumentCheckIcon className="w-5 h-5"/> },
+            { id: 'personal-details', title: t('section.personal_details'), icon: <PencilIcon className="w-5 h-5"/> },
+            { id: 'work-experience', title: t('section.work_experience'), icon: <BriefcaseIcon className="w-5 h-5"/> },
+            { id: 'preferences', title: t('section.preferences'), icon: <SparklesIcon className="w-5 h-5"/> },
+            { id: 'salary', title: t('section.salary'), icon: <WalletIcon className="w-5 h-5"/> },
+            { id: 'birth-date', title: t('section.birth_date'), icon: <CalendarDaysIcon className="w-5 h-5"/> },
+            { id: 'languages', title: t('section.languages'), icon: <LanguageIcon className="w-5 h-5"/> },
+            { id: 'education', title: t('section.education'), icon: <AcademicCapIcon className="w-5 h-5"/> },
+            { id: 'skills', title: t('section.skills'), icon: <TagIcon className="w-5 h-5"/> },
+            { id: 'notes', title: t('section.notes'), icon: <ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/> },
+        ],
+        [t],
+    );
 
     useEffect(() => {
         const scrollContainer = document.getElementById('main-scroll-container');

@@ -117,7 +117,7 @@ const normalizeIncomingSynonyms = (synonyms?: any[]): TagSynonym[] => {
 
 type SourceFilterValue = '' | 'ai' | 'manual' | 'candidate' | 'curator';
 
-type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'status' | 'createdAt' | 'source' | 'usageCount';
+type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'status' | 'createdAt' | 'source' | 'usageCount' | 'jobUsageCount';
 type SortConfig = { key: SortKey | null; direction: 'asc' | 'desc' };
 
 const getRelativeTimeLabel = (date?: Date | string) => {
@@ -1053,13 +1053,14 @@ const AdminTagsView: React.FC = () => {
     const [updatedFrom, setUpdatedFrom] = useState('');
     const [updatedTo, setUpdatedTo] = useState('');
     const [sortConfig, setSortConfig] = useState<SortConfig>({ key: 'tagKey', direction: 'asc' });
-    const [columnOrder, setColumnOrder] = useState<SortKey[]>(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'createdAt', 'source', 'usageCount']);
+    const [columnOrder, setColumnOrder] = useState<SortKey[]>(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'createdAt', 'source', 'usageCount', 'jobUsageCount']);
     const [inlineLoading, setInlineLoading] = useState<Record<string, boolean>>({});
     const [bulkActionType, setBulkActionType] = useState<'delete' | 'reassign'>('delete');
     const [bulkTargetTagId, setBulkTargetTagId] = useState<string>('');
     const [bulkTagSearch, setBulkTagSearch] = useState('');
     const [inlineTagSearch, setInlineTagSearch] = useState('');
-    const [usageCounts, setUsageCounts] = useState<Record<string, number>>({});
+    const [candidateUsageCounts, setCandidateUsageCounts] = useState<Record<string, number>>({});
+    const [jobUsageCounts, setJobUsageCounts] = useState<Record<string, number>>({});
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [filterVertical, setFilterVertical] = useState(true);
     const navigate = useNavigate();
@@ -1157,7 +1158,8 @@ const AdminTagsView: React.FC = () => {
         status: { label: 'סטטוס' },
         createdAt: { label: 'תאריך יצירה' },
         source: { label: 'מקור' },
-        usageCount: { label: 'שימוש' },
+        usageCount: { label: 'שימוש במועמדים' },
+        jobUsageCount: { label: 'שימוש במשרות' },
     };
 
     const handleColumnDragStart = (event: React.DragEvent<HTMLTableHeaderCellElement>, key: SortKey) => {
@@ -1191,7 +1193,8 @@ const AdminTagsView: React.FC = () => {
         );
     };
 
-    const getCountForTag = (tag: Tag) => usageCounts[tag.id] ?? tag.usageCount;
+    const getCandidateUsageCount = (tag: Tag) => candidateUsageCounts[tag.id] ?? 0;
+    const getJobUsageCount = (tag: Tag) => jobUsageCounts[tag.id] ?? 0;
 
     const renderColumnCell = (tag: Tag, key: SortKey) => {
         switch (key) {
@@ -1258,11 +1261,24 @@ const AdminTagsView: React.FC = () => {
                     <td className="p-4 text-xs tabular-nums">
                         <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); handleUsageNavigate(tag); }}
+                            onClick={(e) => { e.stopPropagation(); handleCandidateUsageNavigate(tag); }}
                             className={`w-full text-left font-semibold ${tag.tagKey ? 'text-primary-600 hover:text-primary-800' : 'text-text-muted cursor-not-allowed'}`}
                             disabled={!tag.tagKey}
                         >
-                            {getCountForTag(tag).toLocaleString()}
+                            {getCandidateUsageCount(tag).toLocaleString()}
+                        </button>
+                    </td>
+                );
+            case 'jobUsageCount':
+                return (
+                    <td className="p-4 text-xs tabular-nums">
+                        <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); handleJobUsageNavigate(tag); }}
+                            className={`w-full text-left font-semibold ${tag.tagKey ? 'text-primary-600 hover:text-primary-800' : 'text-text-muted cursor-not-allowed'}`}
+                            disabled={!tag.tagKey}
+                        >
+                            {getJobUsageCount(tag).toLocaleString()}
                         </button>
                     </td>
                 );
@@ -1271,9 +1287,14 @@ const AdminTagsView: React.FC = () => {
         }
     };
 
-    const handleUsageNavigate = (tag: Tag) => {
+    const handleCandidateUsageNavigate = (tag: Tag) => {
         if (!tag.tagKey) return;
         navigate(`/admin/candidates?tag=${encodeURIComponent(tag.id)}`);
+    };
+
+    const handleJobUsageNavigate = (tag: Tag) => {
+        if (!tag.tagKey) return;
+        navigate(`/admin/jobs?tag=${encodeURIComponent(tag.id)}`);
     };
 
     const handleInlineUpdate = async (tagId: string, updates: Partial<Pick<Tag, 'status' | 'qualityState'>>) => {
@@ -1314,7 +1335,12 @@ const AdminTagsView: React.FC = () => {
             });
             if (!res.ok) throw new Error(await res.text() || 'Failed to load usage counts');
             const payload = await res.json();
-            setUsageCounts(prev => ({ ...prev, ...payload }));
+            if (payload && typeof payload === 'object' && ('candidates' in payload || 'jobs' in payload)) {
+                setCandidateUsageCounts(prev => ({ ...prev, ...(payload.candidates || {}) }));
+                setJobUsageCounts(prev => ({ ...prev, ...(payload.jobs || {}) }));
+            } else if (payload && typeof payload === 'object') {
+                setCandidateUsageCounts(prev => ({ ...prev, ...payload }));
+            }
         } catch (error) {
             console.error('Failed to refresh usage counts', error);
         }
@@ -1339,7 +1365,8 @@ const AdminTagsView: React.FC = () => {
             if (updatedFrom) params.set('updatedFrom', updatedFrom);
             if (updatedTo) params.set('updatedTo', updatedTo);
             const currentSortKey = sortConfig.key || 'tagKey';
-            params.set('sort', currentSortKey);
+            const serverSortKey = currentSortKey === 'jobUsageCount' ? 'tagKey' : currentSortKey;
+            params.set('sort', serverSortKey);
             params.set('direction', sortConfig.direction);
             const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
                 cache: 'reload',

@@ -29,6 +29,10 @@ import { SmartTagType, SmartTagData } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
 import { educationEntryToDisplayLine, normalizeLanguagesForPrintRows } from '../utils/printableResumeFormatting';
+import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
+import CityEditableField from './CityEditableField';
+import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
+import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -261,6 +265,11 @@ const normalizeCandidateData = (data: any) => {
     }
 
     syncCandidateNameFields(copy);
+    const city = candidateCityDisplay(copy);
+    if (city) {
+        copy.address = city;
+        copy.location = city;
+    }
     return copy;
 };
 
@@ -964,6 +973,125 @@ export const PrintableResume: React.FC<{
     );
 };
 
+type CvFilesTab = 'original' | 'searchText';
+
+const CvFilesManagementModal: React.FC<{
+    isOpen: boolean;
+    onClose: () => void;
+    resumeUrl?: string;
+    searchText?: string;
+    candidateName?: string;
+    initialTab?: CvFilesTab;
+}> = ({ isOpen, onClose, resumeUrl, searchText, candidateName, initialTab = 'original' }) => {
+    const [tab, setTab] = useState<CvFilesTab>(initialTab);
+
+    useEffect(() => {
+        if (isOpen) setTab(initialTab);
+    }, [isOpen, initialTab]);
+
+    if (!isOpen) return null;
+
+    const url = String(resumeUrl ?? '').trim();
+    const isDocx = /\.(doc|docx)$/i.test(url);
+    const docxViewerUrl = isDocx ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}` : '';
+    const isImage = /\.(png|jpe?g|gif|webp)$/i.test(url);
+    const parsedText = normalizeSearchTextLineBreaks(searchText ?? '');
+
+    return (
+        <div
+            className="fixed inset-0 bg-black/60 z-[110] flex items-center justify-center p-4 backdrop-blur-sm"
+            onClick={onClose}
+        >
+            <div
+                className="bg-bg-card w-full max-w-4xl h-[min(90vh,52rem)] rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fade-in"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <div className="p-4 border-b border-border-default flex justify-between items-center bg-bg-subtle/50 shrink-0">
+                    <h2 className="font-bold text-lg text-text-default">ניהול קבצים וגרסאות</h2>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors"
+                    >
+                        <XMarkIcon className="w-6 h-6" />
+                    </button>
+                </div>
+
+                <div className="flex border-b border-border-default bg-bg-subtle/30 shrink-0">
+                    <button
+                        type="button"
+                        onClick={() => setTab('original')}
+                        className={`flex-1 py-3 px-4 text-sm font-bold transition border-b-2 ${
+                            tab === 'original'
+                                ? 'border-primary-500 text-primary-700 bg-bg-card'
+                                : 'border-transparent text-text-muted hover:text-text-default'
+                        }`}
+                    >
+                        מסמך מקורי
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setTab('searchText')}
+                        className={`flex-1 py-3 px-4 text-sm font-bold transition border-b-2 ${
+                            tab === 'searchText'
+                                ? 'border-primary-500 text-primary-700 bg-bg-card'
+                                : 'border-transparent text-text-muted hover:text-text-default'
+                        }`}
+                    >
+                    </button>
+                </div>
+
+                <div className="flex-1 overflow-y-auto custom-scrollbar bg-white p-4">
+                    {tab === 'original' ? (
+                        url ? (
+                            <div className="flex flex-col gap-3 h-full min-h-[50vh]">
+                                <p className="text-xs text-text-muted text-right">
+                                    {candidateName ? `קובץ מקורי — ${candidateName}` : 'קובץ מקורי'}
+                                </p>
+                                <div className="flex-1 min-h-[50vh] border border-border-default rounded-2xl overflow-auto bg-black/5">
+                                    {isImage ? (
+                                        <img
+                                            src={url}
+                                            alt="קורות חיים מקוריים"
+                                            className="object-contain w-full h-full min-h-[50vh]"
+                                        />
+                                    ) : (
+                                        <iframe
+                                            style={{ width: '100%', minWidth: '200px', height: '100%', minHeight: '50vh' }}
+                                            src={isDocx ? docxViewerUrl : url}
+                                            title="מסמך מקורי"
+                                            className="w-full"
+                                        />
+                                    )}
+                                </div>
+                                <p className="text-center text-xs text-text-muted">
+                                    לא נטען?{' '}
+                                    <a
+                                        className="text-primary-600 font-bold underline"
+                                        href={url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                    >
+                                        פתח / הורד את הקובץ
+                                    </a>
+                                </p>
+                            </div>
+                        ) : (
+                            <p className="text-sm text-text-muted text-center py-16">לא הועלה קובץ מקורי.</p>
+                        )
+                    ) : parsedText ? (
+                        <pre className="text-sm text-text-default whitespace-pre-wrap break-words font-sans leading-relaxed text-right dir-rtl">
+                            {parsedText}
+                        </pre>
+                    ) : (
+                        <p className="text-sm text-text-muted text-center py-16">אין טקסט מפורסר ראשוני למועמד זה.</p>
+                    )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const ResumePreviewModal: React.FC<{ isOpen: boolean; onClose: () => void; data: any }> = ({ isOpen, onClose, data }) => {
     if (!isOpen) return null;
     
@@ -975,7 +1103,7 @@ const ResumePreviewModal: React.FC<{ isOpen: boolean; onClose: () => void; data:
         <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm print:hidden" onClick={onClose}>
             <div className="bg-bg-card w-full max-w-4xl h-[90vh] rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fade-in" onClick={e => e.stopPropagation()}>
                  <div className="p-4 border-b border-border-default flex justify-between items-center bg-bg-subtle/50">
-                    <h2 className="font-bold text-lg text-text-default">תצוגה מקדימה - קורות חיים</h2>
+                    <h2 className="font-bold text-lg text-text-default">תצוגת AI חכמה</h2>
                     <div className="flex gap-2">
                         <button 
                             onClick={handlePrint}
@@ -1016,6 +1144,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [isDeletingProfileId, setIsDeletingProfileId] = useState<string | null>(null);
     const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState(false);
     const [isResumePreviewOpen, setIsResumePreviewOpen] = useState(false);
+    const [isCvFilesModalOpen, setIsCvFilesModalOpen] = useState(false);
     const avatarInputRef = useRef<HTMLInputElement>(null);
     const resumeInputRef = useRef<HTMLInputElement>(null);
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -1042,6 +1171,8 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     // Data for forms (synced with active profile)
     const [formData, setFormData] = useState<any>(() => cloneEmptyCandidateForm());
+    const [recruitmentSources, setRecruitmentSources] = useState<{ id: string; name: string }[]>([]);
+    const [recruitmentSourceDraft, setRecruitmentSourceDraft] = useState('');
     
     // UI State for Header Interactions
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
@@ -1066,6 +1197,22 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const authHeaders = useCallback(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         return token ? { Authorization: `Bearer ${token}` } : {};
+    }, []);
+
+    useEffect(() => {
+        let cancelled = false;
+        void fetchRecruitmentSourceOptions()
+            .then((rows) => {
+                if (!cancelled) {
+                    setRecruitmentSources(rows.map((row) => ({ id: row.id, name: row.name })));
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setRecruitmentSources([]);
+            });
+        return () => {
+            cancelled = true;
+        };
     }, []);
 
     const persistCandidateTag = async (tag: TagOption) => {
@@ -1689,6 +1836,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     }, [activeProfile]);
 
     useEffect(() => {
+        setRecruitmentSourceDraft(String(formData.source || ''));
+    }, [formData.source]);
+
+    useEffect(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         if (!token) {
             setLoadError('לא מחובר/ת. התחבר/י כדי לראות את הפרופיל.');
@@ -1849,6 +2000,22 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }, 800);
     };
 
+    const applyRecruitmentSourceDraft = useCallback(
+        (value: string) => {
+            const clean = String(value || '').trim();
+            const selected = recruitmentSources.find(
+                (source) => source.name.trim().toLowerCase() === clean.toLowerCase(),
+            );
+            const nextName = selected?.name || clean;
+            setRecruitmentSourceDraft(nextName);
+            handleUpdateProfileData({
+                source: nextName,
+                recruitmentSourceId: selected?.id || null,
+            });
+        },
+        [recruitmentSources, handleUpdateProfileData],
+    );
+
 
     const handleSelectRole = (selected: SelectedJobField | null) => {
         if (selected) {
@@ -1871,12 +2038,12 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         return createdId;
     };
 
-    const handleShowOriginalCv = () => {
-        if (formData.resumeUrl) {
-            window.open(formData.resumeUrl, '_blank');
-        } else {
-            alert('לא נמצא קובץ קורות חיים לצפייה.');
-        }
+    const handleOpenAiSmartView = () => {
+        setIsResumePreviewOpen(true);
+    };
+
+    const handleOpenCvFilesModal = () => {
+        setIsCvFilesModalOpen(true);
     };
 
     const handleCopyCv = async () => {
@@ -2074,10 +2241,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                             className="font-medium"
                         />
                         <span className="hidden sm:inline text-text-subtle">•</span>
-                        <EditableField 
-                            value={formData.location} 
-                            onSave={(val) => handleUpdateProfileData({ location: val })}
-                                icon={<MapPinIcon className="w-5 h-5" />}
+                        <CityEditableField
+                            value={candidateCityDisplay(formData)}
+                            onSave={(val) => handleUpdateProfileData(candidateCityPatch(val))}
+                            icon={<MapPinIcon className="w-5 h-5" />}
                             placeholder="עיר מגורים"
                         />
                         <span className="hidden sm:inline text-text-subtle">•</span>
@@ -2087,6 +2254,38 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                             placeholder="גיל"
                             className="w-24"
                         />
+                    </div>
+
+                    <div className="mb-4 max-w-md text-right">
+                        <label className="mb-1 flex items-center gap-1.5 text-xs font-bold text-text-muted">
+                            <BriefcaseIcon className="w-4 h-4 text-primary-500" />
+                            {t('profile.recruitment_source')}
+                        </label>
+                        <input
+                            type="text"
+                            list="candidate-public-recruitment-source-options"
+                            value={recruitmentSourceDraft}
+                            onChange={(e) => setRecruitmentSourceDraft(e.target.value)}
+                            onBlur={() => applyRecruitmentSourceDraft(recruitmentSourceDraft)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    applyRecruitmentSourceDraft(recruitmentSourceDraft);
+                                    (e.currentTarget as HTMLInputElement).blur();
+                                }
+                                if (e.key === 'Escape') {
+                                    setRecruitmentSourceDraft(String(formData.source || ''));
+                                    (e.currentTarget as HTMLInputElement).blur();
+                                }
+                            }}
+                            placeholder={t('profile.recruitment_source_placeholder')}
+                            className="w-full rounded-xl border border-border-default bg-bg-input px-3 py-2 text-sm font-semibold text-text-default shadow-inner outline-none transition focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20"
+                        />
+                        <datalist id="candidate-public-recruitment-source-options">
+                            {recruitmentSources.map((source) => (
+                                <option key={source.id} value={source.name} />
+                            ))}
+                        </datalist>
                     </div>
                     
                     <div className="mb-4">
@@ -2122,12 +2321,22 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3 border-b border-border-default bg-bg-subtle/10">
                     <div className="flex items-center gap-2">
                         <button
-                            onClick={handleShowOriginalCv}
-                            className="text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border bg-white text-text-muted border-border-default hover:bg-bg-hover"
+                            type="button"
+                            onClick={handleOpenAiSmartView}
+                            className="flex items-center gap-1.5 text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border bg-primary-50 text-primary-700 border-primary-200 hover:bg-primary-100"
                         >
-                            הצג קובץ מקורי
+                            <SparklesIcon className="w-4 h-4 shrink-0" />
+                            תצוגת AI חכמה
                         </button>
                         <button
+                            type="button"
+                            onClick={handleOpenCvFilesModal}
+                            className="text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border bg-white text-text-muted border-border-default hover:bg-bg-hover hover:text-primary-600"
+                        >
+                            ניהול קבצים וגרסאות
+                        </button>
+                        <button
+                            type="button"
                             onClick={handleCopyCv}
                             className="flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition bg-white text-text-muted border border-border-default hover:bg-bg-hover hover:text-primary-600 shadow-sm"
                         >
@@ -2483,6 +2692,13 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             
              {/* PDF Preview Modal */}
             <ResumePreviewModal isOpen={isResumePreviewOpen} onClose={() => setIsResumePreviewOpen(false)} data={formData} />
+            <CvFilesManagementModal
+                isOpen={isCvFilesModalOpen}
+                onClose={() => setIsCvFilesModalOpen(false)}
+                resumeUrl={formData.resumeUrl}
+                searchText={formData.searchText || formData.resumeText || formData.cvText}
+                candidateName={formData.fullName || buildCandidateFullName(formData)}
+            />
             
             {/* Modals for Tags/Roles */}
             <JobFieldSelector onChange={handleSelectRole} isModalOpen={isJobFieldSelectorOpen} setIsModalOpen={setIsJobFieldSelectorOpen} />

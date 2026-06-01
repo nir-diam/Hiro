@@ -5,15 +5,18 @@ const JobCandidate = require('../models/JobCandidate');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const recruitmentStatusPresentationService = require('./recruitmentStatusPresentationService');
 const candidateService = require('./candidateService');
+const jobService = require('./jobService');
 const { resolveStatusGroup, canonicalizeStatusGroup } = require('../utils/recruitmentStatusGroups');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 const {
-  computeFullMatchScore,
+  computeMatchPackage,
   getJobEmbedding,
   buildLinkedInfoFromJobCandidate,
+  buildIntentScoreOptions,
   isExplicitJobCandidateSource,
   JC_EXPLICIT_APPLICATION_SOURCES,
 } = require('./matchingScoreService');
+const { jobRequiredLicenseTypes } = require('./matchingPenaltyService');
 
 /** Path 1 = explicit application/link source; Path 3 = included via field/title interest match only (still passes hard rules, etc.). */
 function jcHasExplicitApplicationSource(jc) {
@@ -102,14 +105,18 @@ function checkHardRequirements(candidate, job, settings) {
     if (!ru) reasons.push('no_cv');
   }
 
-  const lic = job.licenseType ? String(job.licenseType).trim() : '';
-  if (lic && lic !== 'לא חשוב') {
+  const requiredLicenses = jobRequiredLicenseTypes(job);
+  if (requiredLicenses.length) {
     const dl = norm(candidate.drivingLicense);
     const dls = Array.isArray(candidate.drivingLicenses)
-      ? candidate.drivingLicenses.map((x) => norm(String(x))).join(' ')
-      : '';
-    const needle = norm(lic);
-    if (!partialMatch(dl, needle) && !dls.includes(needle)) reasons.push('license');
+      ? candidate.drivingLicenses.map((x) => norm(String(x)))
+      : [];
+    const candParts = [dl, ...dls].filter(Boolean);
+    const ok = requiredLicenses.some((lic) => {
+      const needle = norm(lic);
+      return candParts.some((part) => partialMatch(part, needle));
+    });
+    if (!ok) reasons.push('license');
   }
 
   const amin = Number(job.ageMin);
@@ -156,8 +163,9 @@ function buildApplicableHardChecks(candidate, job, settings, failedCodes) {
   if (hasNegative) checks.push({ code: 'negative_skill', ok: !failed.has('negative_skill'), category: 'hard_requirements' });
   if (settings.requireOriginalCv) checks.push({ code: 'no_cv', ok: !failed.has('no_cv'), category: 'hard_requirements' });
 
-  const lic = job.licenseType ? String(job.licenseType).trim() : '';
-  if (lic && lic !== 'לא חשוב') checks.push({ code: 'license', ok: !failed.has('license'), category: 'hard_requirements' });
+  if (jobRequiredLicenseTypes(job).length) {
+    checks.push({ code: 'license', ok: !failed.has('license'), category: 'hard_requirements' });
+  }
 
   const amin = Number(job.ageMin);
   const amax = Number(job.ageMax);
@@ -272,7 +280,7 @@ function workflowMetaPlain(jc) {
 }
 
 function buildScreeningJobPayload(job, candidate, jc) {
-  const jp = job.get ? job.get({ plain: true }) : { ...job };
+  const jp = jobService.toPlainJobForMatchScore(job);
   const wm = workflowMetaPlain(jc);
   const fp = wm.filterPosition != null ? String(wm.filterPosition).trim() : '';
   const fn = wm.filterNotes != null ? String(wm.filterNotes).trim() : '';
@@ -341,7 +349,8 @@ async function evaluateLink(candidate, jc, job, settings, clientId, groupPrecomp
   return { include: false, path: null, reasons: ['status_not_screening'], ...baseOut };
 }
 
-async function computeScreeningForCandidate(candidateId) {
+async function computeScreeningForCandidate(candidateId, opts = {}) {
+  const staffTenantId = opts.tenantClientId ? String(opts.tenantClientId).trim() : '';
   const candidate = await candidateService.findByPkWithTagsForMatchScore(candidateId);
   if (!candidate) {
     const err = new Error('Candidate not found');
@@ -355,11 +364,20 @@ async function computeScreeningForCandidate(candidateId) {
     order: [['updatedAt', 'DESC']],
   });
 
+  const jobInstances = links.map((jc) => jc.job).filter(Boolean);
+  if (jobInstances.length) {
+    await jobService.hydrateJobsSkills(jobInstances);
+  }
+
   const included = [];
   const excluded = [];
   const presentationByClientId = {};
   const candPlain = candidateService.toPlainCandidateForMatchScore(candidate);
   const jcPlain = (row) => (row.get ? row.get({ plain: true }) : row);
+
+  const intentScoreOptions = await buildIntentScoreOptions(
+    jobInstances.map((j) => ({ id: j.id, field: j.field, role: j.role })),
+  );
 
   for (const jc of links) {
     const job = jc.job;
@@ -377,15 +395,27 @@ async function computeScreeningForCandidate(candidateId) {
     // Compute real multi-dimensional match score (same engine + client preset merge as candidate list / job-matches)
     let matchPercentage = ev.jobPayload.matchPercentage; // fallback (stored or 85)
     let scoreBreakdown = null;
+    let parameterMatches = null;
     try {
-      const jobPlain = job.get ? job.get({ plain: true }) : { ...job };
-      const engineConfig = await resolveEngineConfigForJob(jobPlain);
+      const jobPlain = jobService.toPlainJobForMatchScore(job);
+      const configTenant = staffTenantId || (clientId ? String(clientId) : '');
+      const engineConfig = await resolveEngineConfigForJob(jobPlain, {
+        tenantClientId: configTenant || null,
+      });
       const jobEmb = await getJobEmbedding(jobPlain);
       const jcData = jcPlain(jc);
       const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
-      const result = await computeFullMatchScore(candPlain, jobPlain, jobEmb, engineConfig, linkedInfo);
-      matchPercentage = Math.round(result.finalScore);
-      scoreBreakdown = result.breakdown || null;
+      const result = await computeMatchPackage(
+        candPlain,
+        jobPlain,
+        jobEmb,
+        engineConfig,
+        linkedInfo,
+        intentScoreOptions,
+      );
+      matchPercentage = Math.round(result.matchScore);
+      scoreBreakdown = result.scoreBreakdown || null;
+      parameterMatches = result.parameterMatches || null;
     } catch (e) {
       console.warn('[screeningPool] scoring error for job', job.id, e.message || e);
     }
@@ -398,6 +428,7 @@ async function computeScreeningForCandidate(candidateId) {
       meta: ev.meta || null,
       matchPercentage,
       scoreBreakdown,
+      parameterMatches,
       evaluationChecks,
       clientId: clientId || null,
     };
@@ -409,12 +440,13 @@ async function computeScreeningForCandidate(candidateId) {
 }
 
 async function computeScreeningForJob(jobId) {
-  const job = await Job.findByPk(jobId);
+  const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
   if (!job) {
     const err = new Error('Job not found');
     err.status = 404;
     throw err;
   }
+  await jobService.hydrateJobSkills(job);
 
   const settings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
   const clientId = settings.clientId;
@@ -456,17 +488,18 @@ async function computeScreeningForJob(jobId) {
     else excluded.push(row);
   }
 
-  return { job: job.get({ plain: true }), included, excluded, presentationByClientId };
+  return { job: jobService.toPlainJobForMatchScore(job), included, excluded, presentationByClientId };
 }
 
 async function precheckManualAdd(jobId, candidateId) {
-  const job = await Job.findByPk(jobId);
+  const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
   const candidate = await Candidate.findByPk(candidateId);
   if (!job || !candidate) {
     const err = new Error(!job ? 'Job not found' : 'Candidate not found');
     err.status = 404;
     throw err;
   }
+  await jobService.hydrateJobSkills(job);
 
   const settings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
   const clientId = settings.clientId;

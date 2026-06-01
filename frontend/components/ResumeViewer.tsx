@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { PencilIcon, ArrowDownTrayIcon, TrashIcon, ChevronDownIcon, ArrowUpTrayIcon, PinIcon, PaperClipIcon, EyeIcon, CodeBracketIcon, EnvelopeIcon } from './Icons';
-import OriginalResume from './OriginalResume';
+import { PencilIcon, ArrowDownTrayIcon, TrashIcon, ChevronDownIcon, ArrowUpTrayIcon, PinIcon, PaperClipIcon, EyeIcon, CodeBracketIcon, EnvelopeIcon, SparklesIcon } from './Icons';
+import { CvFilesVersionsPanel, type CvFilesPdfExporter } from './CvFilesVersionsPanel';
 import IndustryExperienceSummary from './IndustryExperienceSummary';
 import IndustryExperienceModal from './IndustryExperienceModal';
 import { MessageModalConfig } from '../hooks/useUIState';
@@ -13,6 +13,8 @@ import {
     stripResumeHtml,
 } from '../utils/printableResumeFormatting';
 import { downloadElementAsMultiPagePdf, sanitizePdfFilename } from '../utils/resumeViewerPdfExport';
+import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
+import { normalizeOriginalTextHistory } from '../utils/parsedTextHistory';
 
 const TopTab: React.FC<{ title: string; isActive: boolean; onClick: () => void }> = ({ title, isActive, onClick }) => (
     <button 
@@ -296,8 +298,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
 }) => {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'resume' | 'email'>('resume');
-  const [tagsHighlighted, setTagsHighlighted] = useState(true);
-  const [resumeViewMode, setResumeViewMode] = useState<'parsed' | 'original'>('parsed');
+  const [resumePanelMode, setResumePanelMode] = useState<'ai' | 'files'>('ai');
     const [resumeContentMode, setResumeContentMode] = useState<'resume' | 'summary'>('resume');
     const uploadInputRef = useRef<HTMLInputElement>(null);
   const [emailViewMode, setEmailViewMode] = useState<'formatted' | 'original'>('formatted');
@@ -307,6 +308,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const [uploading, setUploading] = useState(false);
   const [parsedPdfDownloading, setParsedPdfDownloading] = useState(false);
   const parsedResumeCaptureRef = useRef<HTMLDivElement>(null);
+  const filesPdfExporterRef = useRef<CvFilesPdfExporter | null>(null);
   const [latestEmail, setLatestEmail] = useState<EmailUploadRecord | null>(null);
   const uploadingLabel = t('resume.uploading') || 'טוען קובץ...';
 
@@ -342,6 +344,44 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
           : { name: '', contact: '', summary: '', experience: [], education: [], resumeUrl: effectiveResumeUrl };
       return buildPrintableResumePayload(fullData, rd);
   }, [fullData, resumeData, effectiveResumeUrl]);
+
+  const candidateSearchText = useMemo(() => {
+      const fd = fullData && typeof fullData === 'object' ? fullData : {};
+      return normalizeSearchTextLineBreaks(
+          String(fd.searchText ?? fd.resumeText ?? fd.cvText ?? ''),
+      );
+  }, [fullData]);
+
+  const candidateOriginalText = useMemo(() => {
+      const fd = fullData && typeof fullData === 'object' ? fullData : {};
+      return normalizeOriginalTextHistory(fd.originalText);
+  }, [fullData]);
+
+  const candidateSearchTextSavedAt = useMemo(() => {
+      const fd = fullData && typeof fullData === 'object' ? fullData : {};
+      const v = fd.searchTextSavedAt ?? fd.search_text_saved_at;
+      return v ? String(v) : null;
+  }, [fullData]);
+
+  const candidateResumeUploadedAt = useMemo(() => {
+      const fd = fullData && typeof fullData === 'object' ? fullData : {};
+      const v = fd.resumeUploadedAt ?? fd.resume_uploaded_at;
+      return v ? String(v) : null;
+  }, [fullData]);
+
+  const candidateTagDetails = useMemo(() => {
+      const fd = fullData && typeof fullData === 'object' ? fullData : {};
+      return Array.isArray(fd.tagDetails) ? fd.tagDetails : [];
+  }, [fullData]);
+
+  const candidateCreatedAt =
+      fullData && typeof fullData === 'object'
+          ? (fullData.createdAt ?? fullData.created_at ?? null)
+          : null;
+  const candidateUpdatedAt =
+      fullData && typeof fullData === 'object'
+          ? (fullData.updatedAt ?? fullData.updated_at ?? null)
+          : null;
 
   const candidateIdentifier = candidateIdProp || resumeData.candidateId || null;
 
@@ -433,16 +473,32 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
     fetchLatestEmail();
   }, [activeTab, fetchLatestEmail]);
 
-  const handleToggleView = () => {
-    setResumeViewMode(prev => prev === 'parsed' ? 'original' : 'parsed');
-  };
-  
   const handleToggleEmailView = () => {
       setEmailViewMode(prev => prev === 'formatted' ? 'original' : 'formatted');
   };
 
   const handleDownloadResume = async () => {
-      if (resumeViewMode === 'original') {
+      if (resumePanelMode === 'files') {
+          const filesExporter = filesPdfExporterRef.current;
+          if (filesExporter) {
+              setParsedPdfDownloading(true);
+              try {
+                  await filesExporter();
+              } catch (e) {
+                  const code = e instanceof Error ? e.message : '';
+                  if (code === 'no_file') {
+                      alert(t('resume.no_file_download'));
+                  } else if (code === 'empty_text') {
+                      alert(t('resume.no_parsed_text_download'));
+                  } else {
+                      console.error('[ResumeViewer] parsed text PDF export failed', e);
+                      alert(t('resume.download_pdf_error'));
+                  }
+              } finally {
+                  setParsedPdfDownloading(false);
+              }
+              return;
+          }
           if (onDownloadResume) {
               onDownloadResume();
           } else if (effectiveResumeUrl) {
@@ -553,12 +609,11 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
     }
   };
 
-  const isDocxPreview = Boolean(finalResumeData.resumeUrl?.match(/\.(doc|docx)$/i));
-  const docxViewerUrl = isDocxPreview ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(finalResumeData.resumeUrl)}` : '';
-
   const handleCopyResume = () => {
     let textToCopy: string;
-    if (resumeViewMode === 'parsed') {
+    if (resumePanelMode === 'files' && candidateSearchText) {
+      textToCopy = candidateSearchText;
+    } else if (resumePanelMode === 'ai') {
       const d = printablePayload;
       const parts: string[] = [];
       parts.push(d.fullName || finalResumeData.name);
@@ -671,39 +726,45 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                 <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3 border-b border-border-default bg-bg-subtle/10">
                     <div className="flex items-center gap-2">
                         <button
-                            onClick={handleToggleView}
-                            className={`text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border ${
-                                resumeViewMode === 'original'
-                                ? 'bg-primary-100 text-primary-700 border-primary-200'
-                                : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
+                            type="button"
+                            onClick={() => setResumePanelMode('ai')}
+                            className={`flex items-center gap-2 text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border ${
+                                resumePanelMode === 'ai'
+                                    ? 'bg-primary-100 text-primary-700 border-primary-200'
+                                    : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
                             }`}
                         >
-                            {resumeViewMode === 'parsed' ? t('resume.view_original') : t('resume.view_parsed')}
+                            <SparklesIcon className="w-4 h-4" />
+                            {t('resume.view_ai_smart')}
                         </button>
                         <button
+                            type="button"
+                            onClick={() => setResumePanelMode('files')}
+                            className={`text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border ${
+                                resumePanelMode === 'files'
+                                    ? 'bg-primary-100 text-primary-700 border-primary-200'
+                                    : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
+                            }`}
+                        >
+                            {t('resume.manage_files_versions')}
+                        </button>
+                        <button
+                            type="button"
                             onClick={handleCopyResume}
                             className="flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition bg-white text-text-muted border border-border-default hover:bg-bg-hover hover:text-primary-600 shadow-sm"
                         >
                             <span>{copyButtonText}</span>
                             <PaperClipIcon className="w-4 h-4 mr-1.5" />
                         </button>
-                        {resumeViewMode === 'original' && (
-                          <button
-                            onClick={() => setTagsHighlighted(!tagsHighlighted)}
-                            className={`flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border ${
-                              tagsHighlighted
-                                ? 'bg-primary-100 text-primary-700 border-primary-200'
-                                : 'bg-white text-text-muted border-border-default hover:bg-bg-hover'
-                            }`}
-                          >
-                            <span>{t('resume.highlight_tags')}</span>
-                          </button>
-                        )}
                     </div>
 
         <div className="flex items-center gap-1">
                         <ActionButton
-                            title={t('resume.download')}
+                            title={
+                                resumePanelMode === 'files'
+                                    ? t('resume.download_parsed_pdf')
+                                    : t('resume.download')
+                            }
                             disabled={parsedPdfDownloading}
                             onClick={() => void handleDownloadResume()}
                         >
@@ -731,32 +792,48 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                 </div>
               )}
 
-              <div className="flex-1 overflow-y-auto custom-scrollbar bg-white">
+              <div
+                  className={`flex-1 custom-scrollbar bg-white ${
+                      resumePanelMode === 'files' && resumeContentMode === 'resume'
+                          ? 'overflow-hidden flex flex-col min-h-0'
+                          : 'overflow-y-auto'
+                  }`}
+              >
                   {activeTab === 'resume' ? (
-                       <div className="p-6">
+                       <div
+                           className={
+                               resumeContentMode === 'resume' && resumePanelMode === 'files'
+                                   ? 'flex-1 min-h-0 flex flex-col'
+                                   : 'p-6'
+                           }
+                       >
                           {resumeContentMode === 'resume' && (
-                            resumeViewMode === 'parsed' ? (
+                            resumePanelMode === 'ai' ? (
                                 <div className="inline-block w-full min-w-0">
                                     <PrintableResume data={printablePayload} className="" density="default" />
                                 </div>
                             ) : (
-                                finalResumeData.resumeUrl ? (
-                                    <div className="flex flex-col gap-3 max-w-4xl mx-auto w-full">
-                                        <div className="flex-1 min-h-[60vh] border border-border-default rounded-2xl overflow-auto bg-black/5">
-                                            <iframe
-                                                style={{ width: '100%', minWidth: '200px', height: '1000px' }}
-                                                src={isDocxPreview ? docxViewerUrl : finalResumeData.resumeUrl}
-                                                title="Resume preview"
-                                                className="w-full h-full"
-                                            />
-                                        </div>
-                                        <div className="text-center text-xs text-text-muted">
-                                            לא תומך בתצוגה? <a className="text-primary-600 font-bold underline" href={finalResumeData.resumeUrl} target="_blank" rel="noreferrer">הורד את הקובץ המקורי</a>
-                                        </div>
-                                    </div>
-                                ) : (
-                                    <OriginalResume highlighted={tagsHighlighted} resumeData={finalResumeData} />
-                                )
+                                <CvFilesVersionsPanel
+                                    resumeUrl={effectiveResumeUrl}
+                                    searchText={candidateSearchText}
+                                    originalText={candidateOriginalText}
+                                    searchTextSavedAt={candidateSearchTextSavedAt}
+                                    resumeUploadedAt={candidateResumeUploadedAt}
+                                    tagDetails={candidateTagDetails}
+                                    createdAt={candidateCreatedAt}
+                                    updatedAt={candidateUpdatedAt}
+                                    candidateId={candidateIdentifier}
+                                    apiBase={apiBase}
+                                    getAuthHeaders={getAuthHeaders}
+                                    pdfFilenameBase={finalResumeData.name || 'resume'}
+                                    onRegisterPdfExporter={(exporter) => {
+                                        filesPdfExporterRef.current = exporter;
+                                    }}
+                                    onCandidateUpdated={(payload) => {
+                                        onResumeUploaded?.(payload);
+                                        dispatchCandidateRefreshedEvent(payload);
+                                    }}
+                                />
                             )
                           )}
                           {resumeContentMode === 'summary' && (
@@ -848,7 +925,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
               .custom-scrollbar-modal::-webkit-scrollbar-thumb:hover { background: rgb(var(--color-text-subtle)); }
           `}</style>
       </div>
-      {activeTab === 'resume' && resumeViewMode === 'parsed' && (
+      {activeTab === 'resume' && resumePanelMode === 'ai' && (
           <div
               className="fixed pointer-events-none top-0 left-0 z-[-20] w-[210mm] max-w-[210mm] -translate-x-full"
               aria-hidden

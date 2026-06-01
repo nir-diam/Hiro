@@ -1,8 +1,10 @@
 const { Op } = require('sequelize');
 const Tag = require('../models/Tag');
 const TagHistory = require('../models/TagHistory');
-const CandidateTag = require('../models/CandidateTag');
+const SystemTag = require('../models/SystemTag');
+const { SYSTEM_TAG_TYPE_CANDIDATE, SYSTEM_TAG_TYPE_JOB } = require('../models/SystemTag');
 const tagEmbeddingService = require('./tagEmbeddingService');
+const { syncSystemTagsActiveForCatalogTag } = require('./candidateTagService');
 const { sendSingleTurnChat } = require('./geminiService');
 const promptService = require('./promptService');
 const { sequelize } = require('../config/db');
@@ -34,12 +36,61 @@ const withConnectionRetry = async (fn, maxAttempts = 2) => {
   throw lastErr;
 };
 
+const copySystemTagDefaultsFromRow = (row, activatedTag) => {
+  const hasNumber = (v) => typeof v === 'number' && !Number.isNaN(v);
+  const hasBoolean = (v) => typeof v === 'boolean';
+  return {
+    raw_type: row.raw_type ?? activatedTag.type ?? null,
+    context: row.context ?? null,
+    mode: row.mode ?? null,
+    tag_reason: row.tag_reason ?? null,
+    quote: row.quote ?? null,
+    raw_type_reason: row.raw_type_reason ?? null,
+    is_current: hasBoolean(row.is_current) ? row.is_current : true,
+    is_in_summary: hasBoolean(row.is_in_summary) ? row.is_in_summary : false,
+    confidence_score: hasNumber(row.confidence_score) ? row.confidence_score : null,
+    calculated_weight: hasNumber(row.calculated_weight) ? row.calculated_weight : null,
+    final_score: hasNumber(row.final_score) ? row.final_score : null,
+    is_active: true,
+  };
+};
+
+/**
+ * Re-point system_tags rows from a pending catalog tag to the activated tag (per entity + type).
+ */
+const migrateSystemTagsOfType = async (pendingTagId, activatedTag, tagType, transaction) => {
+  const rows = await SystemTag.findAll({
+    where: { tag_id: pendingTagId, type: tagType },
+    transaction,
+  });
+  for (const row of rows) {
+    await SystemTag.findOrCreate({
+      where: {
+        entity_id: row.entity_id,
+        tag_id: activatedTag.id,
+        type: tagType,
+      },
+      defaults: {
+        type: tagType,
+        entity_id: row.entity_id,
+        tag_id: activatedTag.id,
+        ...copySystemTagDefaultsFromRow(row, activatedTag),
+      },
+      transaction,
+    });
+  }
+  await SystemTag.destroy({
+    where: { tag_id: pendingTagId, type: tagType },
+    transaction,
+  });
+};
+
 /**
  * When a tag is updated from draft to active: find pending tags whose name matches
  * the activated tag's main name (tagKey, displayNameHe, displayNameEn) or any alias/synonym;
- * migrate their candidate_tags to the activated tag, then delete the pending tags.
+ * migrate their system_tags (candidate + job) to the activated tag, then delete the pending tags.
  */
-const migratePendingTagsToActivated = async (activatedTag) => {
+const migratePendingTagsToActivated = async (activatedTag, opts = {}) => {
   const primaryNames = [
     activatedTag.tagKey,
     activatedTag.displayNameHe,
@@ -75,52 +126,42 @@ const migratePendingTagsToActivated = async (activatedTag) => {
 
   for (const pendingTag of pendingTags) {
     await withConnectionRetry(async () => {
-      const transaction = await sequelize.transaction();
+      const transaction = opts.transaction || (await sequelize.transaction());
+      const ownTransaction = !opts.transaction;
       try {
-        const candidateTags = await CandidateTag.findAll({
+        await migrateSystemTagsOfType(
+          pendingTag.id,
+          activatedTag,
+          SYSTEM_TAG_TYPE_CANDIDATE,
+          transaction,
+        );
+        await migrateSystemTagsOfType(
+          pendingTag.id,
+          activatedTag,
+          SYSTEM_TAG_TYPE_JOB,
+          transaction,
+        );
+
+        const remainingLinks = await SystemTag.count({
           where: { tag_id: pendingTag.id },
           transaction,
         });
-
-        // 1. Create new CandidateTag linking each candidate to the activated tag (findOrCreate to avoid duplicate). Use activatedTag for tag-derived fields; use ct values when present for the rest.
-        for (const ct of candidateTags) {
-          const hasNumber = (v) => typeof v === 'number' && !Number.isNaN(v);
-          const hasBoolean = (v) => typeof v === 'boolean';
-          await CandidateTag.findOrCreate({
-            where: { candidate_id: ct.candidate_id, tag_id: activatedTag.id },
-            defaults: {
-              candidate_id: ct.candidate_id,
-              tag_id: activatedTag.id,
-              raw_type: activatedTag.type ?? ct.raw_type ?? null,
-              context: activatedTag.context ?? ct.context ?? null,
-              is_current: hasBoolean(ct.is_current) ? ct.is_current : true,
-              is_in_summary: hasBoolean(ct.is_in_summary) ? ct.is_in_summary : true,
-              confidence_score: hasNumber(ct.confidence_score) ? ct.confidence_score : null,
-              calculated_weight: hasNumber(ct.calculated_weight) ? ct.calculated_weight : null,
-              final_score: hasNumber(ct.final_score) ? ct.final_score : null,
-              is_active: true,
-            },
+        if (remainingLinks > 0) {
+          await SystemTag.destroy({
+            where: { tag_id: pendingTag.id },
             transaction,
           });
         }
 
-        // 2. Remove old CandidateTag rows that pointed to the pending tag
-        await CandidateTag.destroy({
-          where: { tag_id: pendingTag.id },
-          transaction,
-        });
-
-        // 3. Remove tag_histories that reference the pending tag (FK constraint)
         await TagHistory.destroy({
           where: { tag_id: pendingTag.id },
           transaction,
         });
 
-        // 4. Delete the pending tag
         await pendingTag.destroy({ transaction });
-        await transaction.commit();
+        if (ownTransaction) await transaction.commit();
       } catch (err) {
-        await transaction.rollback();
+        if (ownTransaction) await transaction.rollback();
         console.error('[tagService.migratePendingTagsToActivated]', pendingTag.id, err?.message || err);
         throw err;
       }
@@ -155,7 +196,10 @@ const cleanupPendingCorrections = async (values = [], options = {}) => {
   });
   const ids = pending.map((entry) => entry.id);
   if (!ids.length) return;
-  await CandidateTag.destroy({
+  await SystemTag.destroy({
+    where: { tag_id: { [Op.in]: ids } },
+  });
+  await TagHistory.destroy({
     where: { tag_id: { [Op.in]: ids } },
   });
   await Tag.destroy({
@@ -391,6 +435,8 @@ const create = async (payload, options = {}) => {
   return created;
 };
 
+const normalizeTagStatus = (status) => String(status || '').trim().toLowerCase();
+
 const update = async (id, payload, options = {}) => {
   const tag = await getById(id);
   const beforeState = tag.get({ plain: true });
@@ -402,27 +448,31 @@ const update = async (id, payload, options = {}) => {
     payload.synonyms = normalizeSynonyms(payload.synonyms);
   }
 
+  const oldStatus = normalizeTagStatus(beforeState.status);
+  const newStatus =
+    payload.status != null ? normalizeTagStatus(payload.status) : oldStatus;
+  const statusChanged = payload.status != null && newStatus !== oldStatus;
 
-  const wasDraft = (beforeState.status || '').toLowerCase() === 'draft';
-  const becomingActive = (payload.status || '').toLowerCase() === 'active';
-  const wasActive = (beforeState.status || '').toLowerCase() === 'active';
-  const becomingDraft = (payload.status || '').toLowerCase() === 'draft';
+  const transaction = options.transaction || (await sequelize.transaction());
+  const ownTransaction = !options.transaction;
 
-  await tag.update(payload);
+  try {
+    await tag.update(payload, { transaction });
 
-  if (wasDraft && becomingActive) {
-    await migratePendingTagsToActivated(tag);
-    await CandidateTag.update({ is_active: true }, { where: { tag_id: tag.id } });
+    if (statusChanged) {
+      if (oldStatus === 'draft' && newStatus === 'active') {
+        await migratePendingTagsToActivated(tag, { transaction });
+      }
+      await syncSystemTagsActiveForCatalogTag(tag.id, newStatus, transaction);
+    }
+
+    if (ownTransaction) await transaction.commit();
+  } catch (err) {
+    if (ownTransaction) await transaction.rollback();
+    throw err;
   }
-  if (wasActive && becomingDraft) {
-    await CandidateTag.update({ is_active: false }, { where: { tag_id: tag.id } });
-  }
 
-
-
- 
-
- 
+  await tag.reload();
 
   fireAndForget(recordTagHistory({
     tagId: tag.id,

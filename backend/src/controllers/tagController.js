@@ -2,7 +2,8 @@ const { Op } = require('sequelize');
 const tagService = require('../services/tagService');
 const Tag = require('../models/Tag');
 const TagHistory = require('../models/TagHistory');
-const CandidateTag = require('../models/CandidateTag');
+const SystemTag = require('../models/SystemTag');
+const { SYSTEM_TAG_TYPE_CANDIDATE, SYSTEM_TAG_TYPE_JOB } = require('../models/SystemTag');
 const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
 const { sequelize } = require('../config/db');
@@ -148,6 +149,21 @@ const update = async (req, res) => {
     delete responsePayload.embedding;
     res.json(responsePayload);
   } catch (err) {
+    const isFkError =
+      err?.parent?.constraint === 'system_tags_tag_id_fkey' ||
+      err?.parent?.constraint === 'candidate_tags_tag_id_fkey' ||
+      err?.code === '23503' ||
+      (err?.message || '').includes('system_tags_tag_id_fkey') ||
+      (err?.message || '').includes('candidate_tags_tag_id_fkey');
+
+    if (isFkError) {
+      return res.status(409).json({
+        message:
+          'Cannot update this tag because duplicate pending tags are still linked to candidates or jobs. Try again after merging duplicates in the admin tags screen.',
+        detail: err.message,
+      });
+    }
+
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
   }
 };
@@ -168,8 +184,10 @@ const remove = async (req, res) => {
     await transaction.rollback();
 
     const isFkError =
+      err?.parent?.constraint === 'system_tags_tag_id_fkey' ||
       err?.parent?.constraint === 'candidate_tags_tag_id_fkey' ||
       err?.code === '23503' ||
+      (err?.message || '').includes('system_tags_tag_id_fkey') ||
       (err?.message || '').includes('candidate_tags_tag_id_fkey');
 
     if (isFkError) {
@@ -196,7 +214,7 @@ const listTagCandidatesHelper = async (tagId) => {
   const entries = await candidateTagService.listCandidateTagsByTag(tagId, { activeOnly: false });
   return entries.map((entry) => ({
     candidate_tag_id: entry.id,
-    candidate_id: entry.candidate_id,
+    candidate_id: entry.entity_id,
     full_name: entry.candidate?.fullName || entry.candidate?.full_name,
     email: entry.candidate?.email,
     phone: entry.candidate?.phone,
@@ -204,25 +222,12 @@ const listTagCandidatesHelper = async (tagId) => {
 };
 
 const listTagJobsHelper = async (tagId) => {
-  // Find jobs whose JSONB skills array contains an element with name matching the tag key/display name
-  const tag = await Tag.findByPk(tagId);
-  if (!tag) return [];
-
-  const plain = tag.toJSON ? tag.toJSON() : tag.get({ plain: true });
-  const rawName = plain.displayNameHe || plain.displayNameEn || plain.tagKey;
-  const tagName = (rawName || '').toString().trim();
-  if (!tagName) return [];
-
   const [rows] = await sequelize.query(
-    `SELECT id, title, status, client, "postingCode"
-     FROM jobs
-     WHERE skills IS NOT NULL
-       AND EXISTS (
-         SELECT 1
-         FROM jsonb_array_elements(skills) elem
-         WHERE elem ->> 'name' = :tagName
-       )`,
-    { replacements: { tagName } },
+    `SELECT DISTINCT j.id, j.title, j.status, j.client, j."postingCode"
+     FROM jobs j
+     INNER JOIN system_tags st ON st.entity_id = j.id AND st.type = 'job'
+     WHERE st.tag_id = :tagId`,
+    { replacements: { tagId } },
   );
   return rows;
 };
@@ -255,18 +260,28 @@ const listTagCandidates = async (req, res) => {
   }
 
   try {
-    const candidates = await listTagCandidatesHelper(tagId);
-
-    // If tag is not linked to any candidates, check if it is used on jobs (Job.skills JSONB)
-    if (!candidates.length) {
-      const jobs = await listTagJobsHelper(tagId);
-      return res.json({ candidates: [], jobs });
-    }
-
-    res.json({ candidates, jobs: [] });
+    const [candidates, jobs] = await Promise.all([
+      listTagCandidatesHelper(tagId),
+      listTagJobsHelper(tagId),
+    ]);
+    res.json({ candidates, jobs });
   } catch (err) {
     console.error('[tagController.listTagCandidates]', err);
     res.status(500).json({ message: 'Failed to load candidate tags for this tag' });
+  }
+};
+
+const listTagJobs = async (req, res) => {
+  const tagId = req.params.id;
+  if (!tagId) {
+    return res.status(400).json({ message: 'Missing tag id' });
+  }
+  try {
+    const jobs = await listTagJobsHelper(tagId);
+    res.json({ jobs });
+  } catch (err) {
+    console.error('[tagController.listTagJobs]', err);
+    res.status(500).json({ message: 'Failed to load jobs for this tag' });
   }
 };
 
@@ -329,11 +344,11 @@ const listPending = async (req, res) => {
     const tagIds = entries.map((t) => t.id);
     let tagToCandidates = new Map();
     if (tagIds.length) {
-      const candidateTags = await CandidateTag.findAll({
-        where: { tag_id: { [Op.in]: tagIds } },
-        attributes: ['tag_id', 'candidate_id'],
+      const candidateTags = await SystemTag.findAll({
+        where: { tag_id: { [Op.in]: tagIds }, type: SYSTEM_TAG_TYPE_CANDIDATE },
+        attributes: ['tag_id', 'entity_id'],
       });
-      const candidateIds = [...new Set(candidateTags.map((ct) => ct.candidate_id))];
+      const candidateIds = [...new Set(candidateTags.map((ct) => ct.entity_id))];
       const candidates =
         candidateIds.length === 0
           ? []
@@ -346,7 +361,7 @@ const listPending = async (req, res) => {
         tagToCandidates.set(tid, []);
       }
       for (const ct of candidateTags) {
-        const c = candidateMap.get(ct.candidate_id);
+        const c = candidateMap.get(ct.entity_id);
         if (!c) continue;
         const list = tagToCandidates.get(ct.tag_id);
         if (list && !list.some((x) => x.id === c.id)) list.push(c);
@@ -408,15 +423,21 @@ const resolvePending = async (req, res) => {
 
   const pendingTagIds = entries.map((entry) => entry.id);
   const hasPendingTags = pendingTagIds.length > 0;
-  const candidateTagFilter = hasPendingTags ? { tag_id: { [Op.in]: pendingTagIds } } : null;
+  const candidateTagFilter = hasPendingTags
+    ? { tag_id: { [Op.in]: pendingTagIds }, type: SYSTEM_TAG_TYPE_CANDIDATE }
+    : null;
 
   if (action === 'link' && targetTag && hasPendingTags) {
-    // Update each candidate_tag row: if candidate already has target tag, remove the pending row; else reassign to target tag (avoids unique constraint)
-    const rows = await CandidateTag.findAll({ where: candidateTagFilter });
-    const candidateIds = [...new Set(rows.map((r) => r.candidate_id))];
+    // Update each system_tag row: if candidate already has target tag, remove the pending row; else reassign to target tag (avoids unique constraint)
+    const rows = await SystemTag.findAll({ where: candidateTagFilter });
+    const candidateIds = [...new Set(rows.map((r) => r.entity_id))];
     for (const row of rows) {
-      const alreadyHas = await CandidateTag.findOne({
-        where: { candidate_id: row.candidate_id, tag_id: targetTag.id },
+      const alreadyHas = await SystemTag.findOne({
+        where: {
+          entity_id: row.entity_id,
+          tag_id: targetTag.id,
+          type: SYSTEM_TAG_TYPE_CANDIDATE,
+        },
       });
       if (alreadyHas) {
         await row.destroy();
@@ -426,14 +447,19 @@ const resolvePending = async (req, res) => {
     }
     // Ensure target tag is linked and active for every candidate that had the pending tag
     for (const cid of candidateIds) {
-      const existingLink = await CandidateTag.findOne({
-        where: { candidate_id: cid, tag_id: targetTag.id },
+      const existingLink = await SystemTag.findOne({
+        where: {
+          entity_id: cid,
+          tag_id: targetTag.id,
+          type: SYSTEM_TAG_TYPE_CANDIDATE,
+        },
       });
 
       if (!existingLink) {
         // No row yet for this candidate+targetTag -> create it explicitly as active
-        await CandidateTag.create({
-          candidate_id: cid,
+        await SystemTag.create({
+          type: SYSTEM_TAG_TYPE_CANDIDATE,
+          entity_id: cid,
           tag_id: targetTag.id,
           is_active: true,
         });
@@ -445,7 +471,7 @@ const resolvePending = async (req, res) => {
   }
 
   if (action === 'ignore' && hasPendingTags) {
-    await CandidateTag.destroy({ where: candidateTagFilter });
+    await SystemTag.destroy({ where: candidateTagFilter });
   }
 
   try {
@@ -457,84 +483,54 @@ const resolvePending = async (req, res) => {
         entry.qualityState = entry.qualityState || 'initial_detection';
         entry.source = entry.source || 'ai';
         await entry.save({ fields: ['status', 'qualityState', 'source'] });
+        await SystemTag.update(
+          { is_active: true },
+          {
+            where: {
+              tag_id: entry.id,
+              type: { [Op.in]: [SYSTEM_TAG_TYPE_CANDIDATE, SYSTEM_TAG_TYPE_JOB] },
+            },
+          },
+        );
         continue;
       }
 
       if (action === 'link' && targetTag) {
-        // Also update any jobs' skills entries that still reference this pending tag
-        const pendingPlain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
-        const pendingRawName = pendingPlain.displayNameHe || pendingPlain.displayNameEn || pendingPlain.tagKey;
-        const pendingName = (pendingRawName || '').toString().trim();
-        const pendingKey = (pendingPlain.tagKey || '').toString().trim();
-
         const targetPlain = targetTag.toJSON ? targetTag.toJSON() : targetTag.get({ plain: true });
-        const targetRawName =
-          targetPlain.displayNameHe || targetPlain.displayNameEn || targetPlain.tagKey;
-        const targetName = (targetRawName || '').toString().trim();
-        const targetKey = (targetPlain.tagKey || '').toString().trim();
-        const targetType = targetPlain.type; // matches Job.skills.tagType domain (role, skill, industry, ...)
+        const targetType = targetPlain.type;
+        const targetActive =
+          (targetTag.status && String(targetTag.status).toLowerCase() === 'active') || false;
 
-        if (pendingName || pendingKey) {
-          const jobs = await listTagJobsHelper(entry.id);
-          for (const jobRow of jobs) {
-            const jobInstance = await Job.findByPk(jobRow.id);
-            if (!jobInstance) continue;
-
-            const currentSkills = Array.isArray(jobInstance.skills) ? jobInstance.skills : [];
-            let changed = false;
-            const updatedSkills = currentSkills.map((skill) => {
-              if (
-                !skill ||
-                (typeof skill.name !== 'string' && typeof skill.key !== 'string')
-              ) {
-                return skill;
-              }
-
-              const skillName = (skill.name || '').toString().trim();
-              const skillKey = (skill.key || '').toString().trim();
-
-              const matchesByName =
-                pendingName && skillName && skillName === pendingName;
-              const matchesByKey =
-                pendingKey && skillKey && skillKey === pendingKey;
-
-              if (!matchesByName && !matchesByKey) return skill;
-
-              changed = true;
-              return {
-                ...skill,
-                key: targetKey || skill.key,
-                name: targetName || skill.name,
-                tagType: targetType || skill.tagType,
-              };
-            });
-
-            if (changed) {
-              await jobInstance.update({ skills: updatedSkills });
+        const jobTagRows = await SystemTag.findAll({
+          where: { tag_id: entry.id, type: SYSTEM_TAG_TYPE_JOB },
+        });
+        for (const row of jobTagRows) {
+          const alreadyHas = await SystemTag.findOne({
+            where: {
+              entity_id: row.entity_id,
+              tag_id: targetTag.id,
+              type: SYSTEM_TAG_TYPE_JOB,
+            },
+          });
+          if (alreadyHas) {
+            await row.destroy();
+            if (targetActive && !alreadyHas.is_active) {
+              await alreadyHas.update({ is_active: true });
             }
+          } else {
+            await row.update({
+              tag_id: targetTag.id,
+              raw_type: targetType || row.raw_type,
+              is_active: targetActive,
+            });
           }
         }
       }
 
       if (action === 'ignore') {
-        // Also remove this tag from any jobs' skills arrays where its name appears
-        const plain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
-        const rawName = plain.displayNameHe || plain.displayNameEn || plain.tagKey;
-        const tagName = (rawName || '').toString().trim();
-        if (tagName) {
-          const jobs = await listTagJobsHelper(entry.id);
-          for (const jobRow of jobs) {
-            const jobInstance = await Job.findByPk(jobRow.id);
-            if (!jobInstance) continue;
-            const currentSkills = Array.isArray(jobInstance.skills) ? jobInstance.skills : [];
-            const filtered = currentSkills.filter(
-              (skill) => !skill || typeof skill.name !== 'string' || skill.name.trim() !== tagName,
-            );
-            if (filtered.length !== currentSkills.length) {
-              await jobInstance.update({ skills: filtered });
-            }
-          }
-        }
+        await SystemTag.destroy({
+          where: { tag_id: entry.id, type: SYSTEM_TAG_TYPE_JOB },
+        });
       }
 
       if (action === 'link' && targetTag) {
@@ -597,6 +593,7 @@ module.exports = {
   listPending,
   resolvePending,
   listTagCandidates,
+  listTagJobs,
   getHistory,
   rebuildEmbeddings,
   rebuildEmbedding,

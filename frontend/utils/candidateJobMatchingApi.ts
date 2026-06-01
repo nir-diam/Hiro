@@ -20,17 +20,37 @@ export interface JobMatchResult {
   role?: string;
   field?: string;
   matchScore: number;
+  /** From matchingScoreService.computeFullMatchScore (includes geoDistance in km when resolved). */
+  scoreBreakdown?: {
+    semanticScore?: number;
+    tagsScore?: number;
+    geoScore?: number;
+    intentScore?: number;
+    experienceScore?: number;
+    generalPenalties?: number;
+    salaryPenalty?: number;
+    ageGapPenalty?: number;
+    penaltyReasons?: Array<{ label: string; amount: number; key?: string; type?: string }>;
+    geoDistance?: number | null;
+    geo?: number;
+    geoMissing?: boolean;
+    vector?: number;
+    tags?: number;
+    [key: string]: unknown;
+  } | null;
   matchType: 'application' | 'ai';
   requirementsMet: boolean;
   parameterMatches: {
-    mandatory_skill: 'match' | 'gap' | 'unknown';
-    license: 'match' | 'gap' | 'unknown';
-    age: 'match' | 'gap' | 'unknown';
-    gender: 'match' | 'gap' | 'unknown';
-    mobility: 'match' | 'gap' | 'unknown';
-    scope: 'match' | 'gap' | 'unknown';
-    mandatory_language: 'match' | 'gap' | 'unknown';
-    salary: 'match' | 'gap' | 'unknown';
+    mandatory_skill: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    license: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    age: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    gender: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    mobility: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    scope: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    work_hours: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    availability: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    mandatory_language: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
+    salary: 'match' | 'missing' | 'mismatch' | 'gap' | 'unknown';
   };
   jobCandidateId?: string | null;
   lastAnalyzed?: string;

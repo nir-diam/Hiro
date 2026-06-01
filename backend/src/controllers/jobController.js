@@ -12,7 +12,12 @@ const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const screeningInclusionService = require('../services/screeningInclusionService');
 const jobSonarService = require('../services/jobSonarService');
-const { computeFullMatchScore, getJobEmbedding, buildLinkedInfoFromJobCandidate } = require('../services/matchingScoreService');
+const {
+  computeMatchPackage,
+  getJobEmbedding,
+  buildLinkedInfoFromJobCandidate,
+  buildIntentOptionsByCandidateIds,
+} = require('../services/matchingScoreService');
 const { resolveEngineConfigForJob } = require('../services/matchingEngineService');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
@@ -55,6 +60,7 @@ const JOB_UPDATE_AUDIT_LABELS = {
   gender: 'מגדר',
   mobility: 'ניידות',
   licenseType: 'רישיון נהיגה',
+  availability: 'זמינות להתחלה',
   postingCode: 'קוד משרה',
   validityDays: 'ימי תוקף',
   reScreeningCooldownMonths: 'תקופת צינון לחזרה לתהליך (חודשים)',
@@ -154,9 +160,18 @@ const analyzeDescription = async (req, res) => {
   }
 };
 
-const list = async (_req, res) => {
+const list = async (req, res) => {
   try {
-    const jobs = await jobService.list();
+    const search = String(req.query.search || '').trim();
+    if (search.length >= 2) {
+      const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 30, 5), 50);
+      const rows = await jobService.searchForPicker({ search, limit });
+      return res.json(rows.map((r) => (r.get ? r.get({ plain: true }) : r)));
+    }
+    const tagIdRaw = req.query.tagId ?? req.query.tag_id ?? req.query.tag;
+    const tagId =
+      tagIdRaw != null && String(tagIdRaw).trim() !== '' ? String(tagIdRaw).trim() : null;
+    const jobs = await jobService.list({ tagId });
     res.json(jobs);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
@@ -271,51 +286,7 @@ const create = async (req, res) => {
       }
     }
 
-    // Normalize skills against Tag table: ensure each skill has status from Tag,
-    // and create missing tags with pending status.
-    if (Array.isArray(payload.skills) && payload.skills.length > 0) {
-      const typeMap = {
-        role: 'role',
-        skill: 'skill',
-        industry: 'industry',
-        tool: 'tool',
-        certification: 'certification',
-        language: 'language',
-        seniority: 'seniority',
-        degree: 'degree',
-        soft: 'soft_skill',
-        soft_skill: 'soft_skill',
-      };
-
-      const normalizedSkills = await Promise.all(
-        payload.skills.map(async (skill) => {
-          if (!skill || !skill.name) return skill;
-
-          const tagKey = String(skill.key ?? skill.name).trim();
-          const tagName = String(skill.name).trim();
-
-          const mappedType = typeMap[skill.tagType] || 'skill';
-
-          // Search tag only by key (ignore type)
-          let tag = await Tag.findOne({ where: { tagKey } });
-
-          if (!tag) {
-            tag = await Tag.create({
-              tagKey,
-              displayNameHe: tagName,
-              type: mappedType,
-              status: 'pending',
-              source: 'job',
-            });
-          }
-
-          return { ...skill, status: tag.status || 'pending' };
-        }),
-      );
-
-      payload.skills = normalizedSkills;
-    }
-
+    // Skills are synced to system_tags in jobService (Tag ensure + active status logic).
     const job = await jobService.create(payload);
 
     // Audit: 'הגדרת תחום משרה' — job category assigned
@@ -531,33 +502,53 @@ const getCandidates = async (req, res) => {
 
     // Enrich each candidate's matchScore with the full multi-dimensional engine
     try {
-      const jobFull = await Job.findByPk(jobId);
-      if (jobFull && candidates.length) {
-        const jobPlain = jobFull.get({ plain: true });
+      if (job && candidates.length) {
+        const jobPlain = jobService.toPlainJobForMatchScore(job);
         const engineConfig = await resolveEngineConfigForJob(jobPlain);
         const jobEmb = await getJobEmbedding(jobPlain);
 
         // Load full candidate rows + their JobCandidate link rows in parallel
         const candidateIds = candidates.map((c) => c.id).filter(Boolean);
-        const [fullCandidates, jcRows] = await Promise.all([
-          Candidate.findAll({ where: { id: candidateIds } }),
+        const candidateService = require('../services/candidateService');
+        const [fullCandidateRows, jcRows] = await Promise.all([
+          Promise.all(
+            candidateIds.map((id) => candidateService.findByPkWithTagsForMatchScore(id)),
+          ),
           JobCandidate.findAll({
             where: { jobId, candidateId: candidateIds },
             attributes: ['id', 'candidateId', 'status', 'source'],
           }),
         ]);
-        const candidateMap = new Map(fullCandidates.map((c) => [String(c.id), c.get({ plain: true })]));
+        const candidateMap = new Map(
+          fullCandidateRows
+            .filter(Boolean)
+            .map((row) => {
+              const plain = candidateService.toPlainCandidateForMatchScore(row);
+              return [String(plain.id), plain];
+            }),
+        );
         const jcMap = new Map(jcRows.map((r) => [String(r.candidateId), r.get ? r.get({ plain: true }) : r]));
+        const intentByCandidate = await buildIntentOptionsByCandidateIds(candidateIds);
 
         for (const cView of candidates) {
           const candPlain = candidateMap.get(String(cView.id));
           if (!candPlain) continue;
-          const jcData = jcMap.get(String(cView.id)) || null;
+          const cid = String(cView.id);
+          const jcData = jcMap.get(cid) || null;
           const linkedInfo = buildLinkedInfoFromJobCandidate(jcData);
+          const intentOpts = intentByCandidate.get(cid) || {};
           try {
-            const result = await computeFullMatchScore(candPlain, jobPlain, jobEmb, engineConfig, linkedInfo);
-            cView.matchScore = Math.round(result.finalScore);
-            cView.scoreBreakdown = result.breakdown;
+            const result = await computeMatchPackage(
+              candPlain,
+              jobPlain,
+              jobEmb,
+              engineConfig,
+              linkedInfo,
+              intentOpts,
+            );
+            cView.matchScore = Math.round(result.matchScore);
+            cView.scoreBreakdown = result.scoreBreakdown;
+            cView.parameterMatches = result.parameterMatches;
           } catch (e) {
             // keep stored matchScore on individual scoring failure
           }
@@ -567,6 +558,8 @@ const getCandidates = async (req, res) => {
       console.warn('[getCandidates] live scoring skipped:', e.message || e);
     }
 
+    res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
     res.json({ job, candidates, returnMonths });
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });

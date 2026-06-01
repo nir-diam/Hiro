@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, CheckCircleIcon, XMarkIcon, BriefcaseIcon, 
     ClockIcon, FunnelIcon, AdjustmentsHorizontalIcon, 
@@ -700,11 +700,14 @@ const JobRoleTagsTab: React.FC<{ apiBase: string }> = ({ apiBase }) => {
 
 const AdminJobsView: React.FC = () => {
     const navigate = useNavigate();
+    const [searchParamsFromUrl] = useSearchParams();
+    const tagFilterId = searchParamsFromUrl.get('tag');
     const { t } = useLanguage();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     
     // State
     const [searchTerm, setSearchTerm] = useState('');
+    const [tagFilterMeta, setTagFilterMeta] = useState<{ id: string; label: string } | null>(null);
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
@@ -715,20 +718,48 @@ const AdminJobsView: React.FC = () => {
         if (!apiBase) return;
         setLoadingJobs(true);
         try {
-            const res = await fetch(`${apiBase}/api/jobs`);
+            const params = new URLSearchParams();
+            if (tagFilterId) {
+                params.set('tagId', tagFilterId);
+            }
+            const qs = params.toString();
+            const res = await fetch(`${apiBase}/api/jobs${qs ? `?${qs}` : ''}`, { cache: 'no-store' });
             if (res.ok) {
                 const data = await res.json();
                 setJobs(Array.isArray(data) ? data : []);
+            } else {
+                setJobs([]);
             }
         } catch (err) {
             console.error('[AdminJobsView] loadJobs', err);
         } finally {
             setLoadingJobs(false);
         }
-    }, [apiBase]);
+    }, [apiBase, tagFilterId]);
     useEffect(() => {
         loadJobs();
     }, [loadJobs]);
+
+    useEffect(() => {
+        if (!apiBase || !tagFilterId) {
+            setTagFilterMeta(null);
+            return;
+        }
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/tags/${encodeURIComponent(tagFilterId)}`);
+                if (!res.ok) throw new Error('Failed to load tag');
+                const tag = await res.json();
+                setTagFilterMeta({
+                    id: tagFilterId,
+                    label: tag.displayNameHe || tag.displayNameEn || tag.tagKey || tagFilterId,
+                });
+            } catch (err) {
+                console.error('[AdminJobsView] tag filter meta', err);
+                setTagFilterMeta({ id: tagFilterId, label: tagFilterId });
+            }
+        })();
+    }, [apiBase, tagFilterId]);
     
     // Drawer State
     const [selectedJob, setSelectedJob] = useState<any | null>(null);
@@ -784,26 +815,45 @@ const AdminJobsView: React.FC = () => {
 
     // Filter Logic
     const filteredJobs = useMemo(() => {
-        return displayJobs.filter(job => {
-            // Context Filter
+        const q = searchTerm.trim().toLowerCase();
+        const list = displayJobs.filter((job) => {
+            if (tagFilterMeta) {
+                if (!q) return true;
+                const code = String(job.postingCode ?? '').toLowerCase();
+                const title = String(job.title ?? '').toLowerCase();
+                const client = String(job.client ?? '').toLowerCase();
+                return title.includes(q) || client.includes(q) || code.includes(q);
+            }
+
             if (activeContextTab === 'public' && !job.isPublic) return false;
 
-            const matchesSearch = !searchTerm || 
-                job.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                job.client.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                job.postingCode.toLowerCase().includes(searchTerm.toLowerCase());
-            
+            const matchesSearch =
+                !q ||
+                String(job.title ?? '').toLowerCase().includes(q) ||
+                String(job.client ?? '').toLowerCase().includes(q) ||
+                String(job.postingCode ?? '').toLowerCase().includes(q);
+
             const matchesStatus = filters.status === 'all' || job.status === filters.status;
             const matchesRecruiter = !filters.recruiter || job.recruiter === filters.recruiter;
             const matchesClient = !filters.client || job.client === filters.client;
             const matchesPriority = !filters.priority || job.priority === filters.priority;
-            
-            // New matches for Role and Field
-            const matchesRole = !filters.role || job.role.includes(filters.role);
-            const matchesField = !filters.field || job.field.includes(filters.field);
-            
-            return matchesSearch && matchesStatus && matchesRecruiter && matchesClient && matchesPriority && matchesRole && matchesField;
-        }).sort((a, b) => {
+
+            const roleText = String(job.role ?? '');
+            const fieldText = String(job.field ?? '');
+            const matchesRole = !filters.role || roleText.includes(filters.role);
+            const matchesField = !filters.field || fieldText.includes(filters.field);
+
+            return (
+                matchesSearch &&
+                matchesStatus &&
+                matchesRecruiter &&
+                matchesClient &&
+                matchesPriority &&
+                matchesRole &&
+                matchesField
+            );
+        });
+        return list.sort((a, b) => {
             if (!sortConfig) return 0;
             const aVal = (a as any)[sortConfig.key];
             const bVal = (b as any)[sortConfig.key];
@@ -811,7 +861,7 @@ const AdminJobsView: React.FC = () => {
             if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
             return 0;
         });
-    }, [searchTerm, filters, sortConfig, activeContextTab]);
+    }, [searchTerm, filters, sortConfig, activeContextTab, tagFilterMeta, displayJobs]);
 
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.checked) setSelectedIds(new Set(filteredJobs.map(j => j.id)));
@@ -873,10 +923,21 @@ const AdminJobsView: React.FC = () => {
     };
 
     const handleClearFilters = () => {
-        setFilters({status: 'all', recruiter: '', client: '', priority: '', role: '', field: ''});
+        setFilters({ status: 'all', recruiter: '', client: '', priority: '', role: '', field: '' });
         setSearchTerm('');
         setCompanyFilters({ sizes: [], sectors: [], industry: '', field: '' });
+        if (tagFilterId) {
+            navigate('/admin/jobs');
+            return;
+        }
     };
+
+    useEffect(() => {
+        if (!tagFilterId) return;
+        setFilters({ status: 'all', recruiter: '', client: '', priority: '', role: '', field: '' });
+        setSearchTerm('');
+        setCompanyFilters({ sizes: [], sectors: [], industry: '', field: '' });
+    }, [tagFilterId]);
 
     // Column Management Handlers
     useEffect(() => {
@@ -939,9 +1000,9 @@ const AdminJobsView: React.FC = () => {
                  return (
                     <div className="flex items-center gap-2">
                         <div className="w-6 h-6 bg-gray-100 rounded-md flex items-center justify-center text-xs font-bold text-gray-500 border border-gray-200">
-                            {job.client.charAt(0)}
+                            {(job.client || '?').charAt(0)}
                         </div>
-                        <span className="font-medium">{job.client}</span>
+                        <span className="font-medium">{job.client || '—'}</span>
                     </div>
                 );
             case 'health': return <JobHealthIndicator score={job.healthScore} />;
@@ -961,7 +1022,12 @@ const AdminJobsView: React.FC = () => {
                     </span>
                 );
             case 'recruiter': return <span className="text-text-muted text-xs">{job.recruiter}</span>;
-            case 'openDate': return <span className="text-text-muted font-mono text-xs">{new Date(job.openDate).toLocaleDateString('he-IL')}</span>;
+            case 'openDate':
+                return (
+                    <span className="text-text-muted font-mono text-xs">
+                        {job.openDate ? new Date(job.openDate).toLocaleDateString('he-IL') : '—'}
+                    </span>
+                );
             case 'source': 
                 return job.isPublic 
                     ? <span className="inline-flex items-center gap-1 text-[10px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded border border-purple-100"><GlobeAmericasIcon className="w-3 h-3"/> Public Board</span>
@@ -1053,6 +1119,22 @@ const AdminJobsView: React.FC = () => {
                       </button>
                 </nav>
             </div>
+
+            {tagFilterMeta && activeContextTab !== 'tags' && (
+                <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-primary-200 bg-primary-50/60 px-4 py-3 text-sm">
+                    <span className="font-semibold text-primary-900">
+                        מציג {filteredJobs.length} משרות עם תגית «{tagFilterMeta.label}»
+                        {loadingJobs ? ' (טוען...)' : ''}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={() => navigate('/admin/jobs')}
+                        className="text-xs font-bold text-primary-600 hover:text-primary-800 underline"
+                    >
+                        הצג את כל המשרות
+                    </button>
+                </div>
+            )}
 
             {/* Tags Tab — rendered outside the jobs card */}
             {activeContextTab === 'tags' && (
@@ -1261,7 +1343,22 @@ const AdminJobsView: React.FC = () => {
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">
-                                    {filteredJobs.map(job => (
+                                    {filteredJobs.length === 0 ? (
+                                        <tr>
+                                            <td
+                                                colSpan={visibleColumns.length + 1}
+                                                className="p-10 text-center text-text-muted text-sm"
+                                            >
+                                                {loadingJobs
+                                                    ? 'טוען משרות...'
+                                                    : jobs.length > 0
+                                                        ? 'אין משרות התואמות לסינון הנוכחי'
+                                                        : tagFilterMeta
+                                                            ? 'לא נמצאו משרות עם תגית זו'
+                                                            : 'אין משרות להצגה'}
+                                            </td>
+                                        </tr>
+                                    ) : filteredJobs.map(job => (
                                         <tr key={job.id} onClick={() => handleJobClick(job)} className={`group hover:bg-bg-hover transition-colors cursor-pointer ${selectedIds.has(job.id) ? 'bg-primary-50/50' : ''}`}>
                                              {/* Select Cell (Static First) */}
                                             <td className="p-4 text-center" onClick={e => e.stopPropagation()}>

@@ -701,12 +701,11 @@ const sendAdminTemplateEmailOptional = async (opts) =>
  * Gating order:
  *   1. `options.sendWelcomeEmail === false` (per-request) → skip.
  *   2. Missing record / email / onlyIfNoResume guards → skip.
- *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) setting:
- *        • flag `false` → skip
- *        • flag `true`  → send
- *        • unresolved (no clientId or lookup failure) → send (legacy fallthrough)
+ *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) — default off:
+ *        • resolve client from `options.clientId` or linked `options.jobId` (Job.client → Client)
+ *        • send only when setting is explicitly `true` for that client
  *
- * @param {{ onlyIfNoResume?: boolean; clientId?: string | null; sendWelcomeEmail?: boolean; jobId?: string | null; recruiter?: object }} options
+ * @param {{ onlyIfNoResume?: boolean; clientId?: string | null; sendWelcomeEmail?: boolean; jobId?: string | null; inboxTo?: string | null; recruiter?: object }} options
  */
 const queueCandidateWelcomeEmail = (record, options = {}) => {
   if (options.sendWelcomeEmail === false) {
@@ -741,27 +740,31 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
   }).format(new Date());
   const welcomeKey =
     String(process.env.CANDIDATE_WELCOME_TEMPLATE_KEY || '').trim() || 'welcome_email';
-  const clientId = options.clientId || null;
+  const jobIdOpt =
+    options.jobId != null && String(options.jobId).trim() ? String(options.jobId).trim() : null;
 
-  // Gate on the client's autoThanksEmail setting + dispatch (kept fire-and-forget
-  // so callers don't need to await; matches the previous void semantics).
+  // Gate on client usage autoThanksEmail (default false) + dispatch (fire-and-forget).
   void (async () => {
-    if (clientId) {
-      const enabled = await clientUsageSettingService.getAutoThanksEmailForClient(clientId);
-      if (enabled === false) {
-        console.log('[message-templates] welcome skipped: autoThanksEmail disabled', {
-          candidateId: id,
-          clientId,
-        });
-        return;
-      }
+    const clientId = await clientUsageSettingService.resolveClientIdForWelcomeEmail({
+      clientId: options.clientId,
+      jobId: jobIdOpt,
+      inboxTo: options.inboxTo,
+    });
+    const enabled = await clientUsageSettingService.getAutoThanksEmailForClient(clientId);
+    if (!enabled) {
+      console.log('[message-templates] welcome skipped: autoThanksEmail disabled or client unresolved', {
+        candidateId: id,
+        clientId: clientId || null,
+        jobId: jobIdOpt,
+      });
+      return;
     }
 
     console.log('[message-templates] welcome queued', {
       candidateId: id,
       to: String(email).trim(),
       templateName: welcomeKey,
-      clientId: clientId || null,
+      clientId,
     });
 
     try {
@@ -771,10 +774,7 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
         placeholderValues: [displayName, dateStr],
         candidateRecord: record,
         placeholderContext: {
-          jobId:
-            options.jobId != null && String(options.jobId).trim()
-              ? String(options.jobId).trim()
-              : null,
+          jobId: jobIdOpt,
           recruiter:
             options.recruiter && typeof options.recruiter === 'object'
               ? options.recruiter

@@ -2,10 +2,16 @@ const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const candidateService = require('./candidateService');
+const jobService = require('./jobService');
 const { searchCandidates } = require('./vectorSearchService');
 const screeningInclusionService = require('./screeningInclusionService');
 const clientUsageSettingService = require('./clientUsageSettingService');
-const { computeFullMatchScore, getJobEmbedding } = require('./matchingScoreService');
+const {
+  computeMatchPackage,
+  getJobEmbedding,
+  buildIntentOptionsByCandidateIds,
+} = require('./matchingScoreService');
+const { computeParameterMatches } = require('./matchingPenaltyService');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 
 function cosineToMatchPercent(score) {
@@ -43,8 +49,57 @@ function buildJobSonarQuery(job) {
   return parts.join('\n');
 }
 
+const FILTER_TO_PARAM = {
+  gender: 'gender',
+  mobility: 'mobility',
+  license: 'license',
+  scope: 'scope',
+  hours: 'work_hours',
+  salary: 'salary',
+  age: 'age',
+};
+
+/**
+ * Pre-filters aligned with matchingPenaltyService traffic lights (sync dimensions only).
+ */
+function passesHardFilters(candPlain, jobPlain, filterKeys, settings) {
+  if (!filterKeys.length) return true;
+  const keys = new Set(filterKeys);
+
+  if (keys.has('affinity')) {
+    if (!screeningInclusionService.hasAffinity({ source: null }, candPlain, jobPlain)) return false;
+  }
+
+  const pm = computeParameterMatches(candPlain, jobPlain);
+  for (const [filterKey, paramKey] of Object.entries(FILTER_TO_PARAM)) {
+    const st = pm[paramKey];
+    if (keys.has(filterKey) && (st === 'missing' || st === 'mismatch' || st === 'gap')) return false;
+  }
+
+  return true;
+}
+
+/** API response: never expose large embedding vectors. */
+function candidateForSonarResponse(candidatePlain) {
+  if (!candidatePlain || typeof candidatePlain !== 'object') return candidatePlain;
+  const { embedding: _emb, ...rest } = candidatePlain;
+  return rest;
+}
+
+/** Distance hard-filter needs engine geo breakdown (async path). */
+function passesDistanceHardFilter(breakdown, filterKeys) {
+  if (!filterKeys.includes('distance')) return true;
+  if (!breakdown) return true;
+  const geoScore = breakdown.geoScore ?? breakdown.geo;
+  const geoKm = breakdown.geoDistance;
+  if (typeof geoScore === 'number' && geoScore < 55) return false;
+  if (typeof geoKm === 'number' && Number.isFinite(geoKm) && geoKm > 60) return false;
+  return true;
+}
+
 /**
  * Sonar: vector-ranked candidates not yet linked to the job (and not screening-rejected for this job).
+ * Scores via full matching engine: S_final = max(0, S_core − penalties).
  */
 async function runSonarScan(jobId, body = {}) {
   const limit = Math.min(Math.max(parseInt(body.limit, 10) || 20, 5), 50);
@@ -52,14 +107,15 @@ async function runSonarScan(jobId, body = {}) {
   const useVector = body.useVector !== false;
   const filterKeys = Array.isArray(body.hardFilters) ? body.hardFilters.map((x) => String(x).trim()) : [];
 
-  const job = await Job.findByPk(jobId);
+  const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
   if (!job) {
     const err = new Error('Job not found');
     err.status = 404;
     throw err;
   }
+  await jobService.hydrateJobSkills(job);
 
-  const jobPlain = job.get({ plain: true });
+  const jobPlain = jobService.toPlainJobForMatchScore(job);
   const settings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
 
   const linkedRows = await JobCandidate.findAll({
@@ -79,49 +135,6 @@ async function runSonarScan(jobId, body = {}) {
     console.warn('[jobSonarService] JobCandidateScreening load skipped', e.message || e);
   }
 
-  const passesHardFilters = (candPlain) => {
-    if (!filterKeys.length) return true;
-    const keys = new Set(filterKeys);
-
-    if (keys.has('license') || keys.has('age') || keys.has('scope')) {
-      const hard = screeningInclusionService.checkHardRequirements(candPlain, jobPlain, settings);
-      if (keys.has('license') && hard.reasons.includes('license')) return false;
-      if (keys.has('age') && hard.reasons.some((r) => r === 'age_unknown' || r === 'age_min' || r === 'age_max')) {
-        return false;
-      }
-      if (keys.has('scope') && hard.reasons.includes('mandatory_skill')) return false;
-    }
-
-    if (keys.has('salary')) {
-      const jMax = Number(jobPlain.salaryMax);
-      const cMin = candPlain.salaryMin != null ? Number(candPlain.salaryMin) : NaN;
-      if (Number.isFinite(jMax) && Number.isFinite(cMin) && cMin > jMax * 1.15) return false;
-    }
-
-    if (keys.has('affinity')) {
-      if (!screeningInclusionService.hasAffinity({ source: null }, candPlain, jobPlain)) return false;
-    }
-
-    if (keys.has('gender') && jobPlain.gender && String(jobPlain.gender).trim() !== 'לא משנה') {
-      const g = candPlain.gender ? String(candPlain.gender).trim() : '';
-      const jg = String(jobPlain.gender).trim();
-      if (g && jg && g !== jg) return false;
-    }
-
-    if (keys.has('mobility') && jobPlain.mobility === true && !candPlain.mobility) return false;
-
-    if (keys.has('hours')) {
-      const jt = Array.isArray(jobPlain.jobType) ? jobPlain.jobType.join(',') : String(jobPlain.jobType || '');
-      const pref = Array.isArray(candPlain.preferredWorkModels)
-        ? candPlain.preferredWorkModels.join(',')
-        : '';
-      if (jt.includes('מלאה') && pref && !/מלאה|full/i.test(pref)) return false;
-    }
-
-    return true;
-  };
-
-  // Load admin engine config + job embedding once (both are cached in-process)
   let engineConfig = null;
   let jobEmb = [];
   try {
@@ -133,17 +146,35 @@ async function runSonarScan(jobId, body = {}) {
     console.warn('[jobSonarService] engine config/embedding load skipped:', e.message || e);
   }
 
-  /**
-   * Re-score a candidate plain object with the full matching engine.
-   * Falls back to the provided `fallbackPct` if scoring fails.
-   */
-  async function fullScore(candidatePlain, fallbackPct) {
-    if (!engineConfig) return { matchPct: fallbackPct, breakdown: null };
+  async function scoreCandidatePlain(candidatePlain, fallbackPct, intentOpts = {}) {
+    if (!engineConfig) {
+      return {
+        matchPct: fallbackPct,
+        breakdown: null,
+        parameterMatches: null,
+      };
+    }
     try {
-      const result = await computeFullMatchScore(candidatePlain, jobPlain, jobEmb, engineConfig, null);
-      return { matchPct: Math.round(result.finalScore), breakdown: result.breakdown };
+      const result = await computeMatchPackage(
+        candidatePlain,
+        jobPlain,
+        jobEmb,
+        engineConfig,
+        null,
+        intentOpts,
+      );
+      return {
+        matchPct: Math.round(result.matchScore),
+        breakdown: result.scoreBreakdown,
+        parameterMatches: result.parameterMatches,
+      };
     } catch (e) {
-      return { matchPct: fallbackPct, breakdown: null };
+      console.warn('[jobSonarService] computeMatchPackage failed', candidatePlain?.id, e.message || e);
+      return {
+        matchPct: fallbackPct,
+        breakdown: null,
+        parameterMatches: null,
+      };
     }
   }
 
@@ -159,45 +190,79 @@ async function runSonarScan(jobId, body = {}) {
       maxLimitCap: 400,
     });
 
+    const prelim = [];
     for (const row of raw) {
       const id = row.id != null ? String(row.id) : '';
       if (!id || linkedSet.has(id) || rejectedSet.has(id)) continue;
       const sim = typeof row.similarity === 'number' ? row.similarity : -1;
       const vectorPct = cosineToMatchPercent(sim);
-      // Cheap gate: drop only very weak embeddings; composite score can still qualify someone below this.
       const vectorFloor = Math.min(55, Math.max(22, minPct - 28));
       if (vectorPct < vectorFloor) continue;
       const { similarity: _sim, ...candidateRest } = row;
-      if (!passesHardFilters(candidateRest)) continue;
-      const { matchPct, breakdown } = await fullScore(candidateRest, vectorPct);
+      if (!passesHardFilters(candidateRest, jobPlain, filterKeys, settings)) continue;
+      prelim.push({ id, vectorPct, sim, candidateRest });
+    }
+
+    const heavyRows = await candidateService.findManyWithTagsForMatchScore(prelim.map((p) => p.id));
+    const heavyById = new Map(
+      heavyRows.map((r) => [String(r.id), candidateService.toPlainCandidateForMatchScore(r)]),
+    );
+    const intentByCandidate = await buildIntentOptionsByCandidateIds(prelim.map((p) => p.id));
+
+    for (const { id, vectorPct, sim, candidateRest } of prelim) {
+      const candidatePlain = heavyById.get(id) || candidateRest;
+      const intentOpts = intentByCandidate.get(id) || {};
+      const { matchPct, breakdown, parameterMatches } = await scoreCandidatePlain(
+        candidatePlain,
+        vectorPct,
+        intentOpts,
+      );
+      if (!passesDistanceHardFilter(breakdown, filterKeys)) continue;
+
       const passesComposite = matchPct >= minPct;
       const passesVector = vectorPct >= minPct;
-      // Inclusion: keep candidates that pass either the weighted engine OR raw vector floor —
-      // embeddings often beat tags/geo, so requiring composite ≥ threshold alone is too strict.
-      // BUT the headline score we display MUST be the weighted engine score so the UI never
-      // silently falls back to cosine similarity (which would hide low tag/geo/experience fit).
       if (!passesComposite && !passesVector) continue;
+
       ranked.push({
-        candidate: candidateRest,
+        candidate: candidateForSonarResponse(candidatePlain),
         matchPercentage: matchPct,
         engineMatchPct: matchPct,
         vectorSimilarity: sim,
         scoreBreakdown: breakdown,
+        parameterMatches,
       });
     }
   } else {
     const all = await candidateService.list();
+    const eligible = [];
     for (const c of all) {
       const id = c.id != null ? String(c.id) : '';
       if (!id || linkedSet.has(id) || rejectedSet.has(id)) continue;
-      if (!passesHardFilters(c)) continue;
-      const { matchPct, breakdown } = await fullScore(c, typeof c.matchScore === 'number' ? c.matchScore : 0);
+      if (!passesHardFilters(c, jobPlain, filterKeys, settings)) continue;
+      eligible.push(id);
+    }
+
+    const heavyRows = await candidateService.findManyWithTagsForMatchScore(eligible);
+    const intentByCandidate = await buildIntentOptionsByCandidateIds(eligible);
+    for (const row of heavyRows) {
+      const candidatePlain = candidateService.toPlainCandidateForMatchScore(row);
+      const id = String(candidatePlain.id);
+      const fallback = typeof candidatePlain.matchScore === 'number' ? candidatePlain.matchScore : 0;
+      const intentOpts = intentByCandidate.get(id) || {};
+      const { matchPct, breakdown, parameterMatches } = await scoreCandidatePlain(
+        candidatePlain,
+        fallback,
+        intentOpts,
+      );
+      if (!passesDistanceHardFilter(breakdown, filterKeys)) continue;
       if (matchPct < minPct) continue;
       ranked.push({
-        candidate: { ...c },
+        candidate: candidateForSonarResponse(candidatePlain),
         matchPercentage: matchPct,
+        engineMatchPct: matchPct,
         vectorSimilarity: null,
         scoreBreakdown: breakdown,
+        parameterMatches,
       });
     }
   }
@@ -211,6 +276,12 @@ async function runSonarScan(jobId, body = {}) {
       title: jobPlain.title,
       client: jobPlain.client,
     },
+    engineConfig: engineConfig
+      ? {
+          mainWeights: engineConfig.mainWeights,
+          isExperienceEnabled: engineConfig.isExperienceEnabled !== false,
+        }
+      : null,
     rows,
   };
 }
@@ -218,4 +289,6 @@ async function runSonarScan(jobId, body = {}) {
 module.exports = {
   runSonarScan,
   buildJobSonarQuery,
+  passesHardFilters,
+  passesDistanceHardFilter,
 };

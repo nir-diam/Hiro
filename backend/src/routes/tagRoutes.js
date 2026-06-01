@@ -10,6 +10,7 @@ router.get('/rebuild-embeddings', tagController.rebuildEmbeddings);
 router.get('/:id', tagController.get);
 router.post('/:id/rebuild-embedding', tagController.rebuildEmbedding);
 router.get('/:id/candidates', tagController.listTagCandidates);
+router.get('/:id/jobs', tagController.listTagJobs);
 router.get('/:id/history', tagController.getHistory);
 router.post('/', tagController.create);
 router.put('/:id', tagController.update);

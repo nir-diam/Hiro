@@ -74,7 +74,7 @@ function jobSkillRowToChipRow(s: ScreeningJobSkillRow): Pick<JobTagChipRow, 'lab
   const key = typeof s.key === 'string' ? s.key.trim() : '';
   const labelBase = name || key;
   if (!labelBase) return null;
-  const suf = mode === 'mandatory' ? ' (חובה)' : mode === 'negative' ? ' (שלילי)' : '';
+  const suf = mode === 'negative' ? ' (שלילי)' : '';
   return { label: `${labelBase}${suf}`, mode };
 }
 
@@ -281,6 +281,13 @@ function poolMatchesLabel(pool: string[], jobLabel: string): boolean {
   return pool.some((chip) => chipsRelate(chip, core));
 }
 
+/** Strict version: consistent with the chip-highlight logic (uses chipsRelateForCandidateHighlight). */
+function poolMatchesLabelStrict(pool: string[], jobLabel: string): boolean {
+  const core = stripCompareLabel(jobLabel);
+  if (!core) return false;
+  return pool.some((chip) => chipsRelateForCandidateHighlight(chip, core));
+}
+
 function chipVisualState(label: string, mode: JobTagChipRow['mode'], candPool: string[]): TagMatchChipState {
   if (mode === 'normal') return 'neutral';
   const negative = mode === 'negative';
@@ -297,7 +304,7 @@ function skillRowMode(s: ScreeningJobSkillRow): JobTagChipRow['mode'] {
 }
 
 function jobSkillCategoryFromRow(s: ScreeningJobSkillRow): TagCategoryKey {
-  const tt = normJobTagType(s.tagType);
+  const tt = normJobTagType(s.tagType ?? s.raw_type ?? s.rawType);
   if (tt === 'role') return 'role';
   if (tt === 'seniority') return 'seniority';
   if (tt === 'certification') return 'certification';
@@ -348,15 +355,6 @@ function collectJobTagChipsByCategory(job: JobTagMatchInput): Record<TagCategory
     addJobChip(b, jobSkillCategoryFromRow(s), chip, s);
   }
 
-  if (job.title?.trim()) addJobChip(b, 'role', { label: job.title.trim(), mode: 'mandatory' });
-  if (job.role?.trim())
-    addJobChip(b, 'role', { label: `תפקיד במשרה: ${job.role.trim()}`, mode: 'mandatory' });
-  if (job.field?.trim())
-    addJobChip(b, 'industry', { label: `תחום: ${job.field.trim()}`, mode: 'mandatory' });
-  if (job.filterPosition?.trim())
-    addJobChip(b, 'role', { label: job.filterPosition.trim(), mode: 'mandatory' });
-  if (job.filterNotes?.trim()) addJobChip(b, 'role', { label: job.filterNotes.trim(), mode: 'mandatory' });
-
   const langArr = Array.isArray(job.languages) ? job.languages : [];
   for (const jl of langArr) {
     if (!jl || typeof jl !== 'object') continue;
@@ -364,17 +362,9 @@ function collectJobTagChipsByCategory(job: JobTagMatchInput): Record<TagCategory
     if (!nm) continue;
     const mandatory = jl.mandatory === true || normJobSkillMode(jl.level) === 'mandatory';
     addJobChip(b, 'language', {
-      label: mandatory ? `${nm} (חובה)` : nm,
+      label: nm,
       mode: mandatory ? 'mandatory' : 'normal',
     });
-  }
-
-  for (const r of jobRequirementsLines(job)) {
-    if (looksLikeEducationRequirement(r)) addJobChip(b, 'education', { label: r, mode: 'mandatory' });
-    else if (looksLikeToolBullet(r)) addJobChip(b, 'tool', { label: r, mode: 'mandatory' });
-    else if (/שפה|עברית|אנגלית|english|arabic|ערבית|français|צרפתית|שפות/i.test(r))
-      addJobChip(b, 'language', { label: r, mode: 'mandatory' });
-    else addJobChip(b, 'role', { label: r, mode: 'mandatory' });
   }
 
   (Object.keys(b) as TagCategoryKey[]).forEach((k) => {
@@ -468,7 +458,6 @@ function collectCandidatePoolsDetailed(candidate: unknown): {
   }
   const c = candidate as Record<string, unknown>;
 
-  if (typeof c.title === 'string' && c.title.trim()) p.role.push(c.title.trim());
   if (typeof c.field === 'string' && c.field.trim())
     p.industry.push(`תחום: ${c.field.trim()}`);
 
@@ -563,7 +552,7 @@ function collectCandidatePoolsDetailed(candidate: unknown): {
   }
 
   const skillObj = c.skills;
-  if (skillObj && typeof skillObj === 'object') {
+  if (skillObj && typeof skillObj === 'object' && !(Array.isArray(detailArr) && detailArr.length > 0)) {
     const so = skillObj as Record<string, unknown>;
     const softArr = so.soft;
     if (Array.isArray(softArr)) {
@@ -619,17 +608,25 @@ function collectCandidateNinePools(candidate: unknown): Record<TagCategoryKey, s
 }
 
 function buildJobTagMatchCategories(job: JobTagMatchInput, candidate: unknown): TagMatchCategory[] {
-  const { labels: candPools } = collectCandidatePoolsDetailed(candidate);
+  const { labels: candPools, weighted: candWeighted } = collectCandidatePoolsDetailed(candidate);
   const jobBuckets = collectJobTagChipsByCategory(job);
 
   const out: TagMatchCategory[] = [];
   for (const { key, name } of TAG_MATCH_CATEGORY_ORDER) {
     const rows = jobBuckets[key];
     if (!rows.length) continue;
-    const pool = candPools[key];
+    const pool =
+      key === 'role'
+        ? candWeighted.role.map((t) => t.label).filter(Boolean)
+        : candPools[key];
     const chips = rows.map((row) => {
       const state = chipVisualState(row.label, row.mode, pool);
-      const satisfiesRequirement = poolMatchesLabel(pool, row.label);
+      // Language uses loose matching (substring); all other categories use strict matching
+      // so the card colour is always consistent with the highlighted chips.
+      const satisfiesRequirement =
+        key === 'language'
+          ? poolMatchesLabel(pool, row.label)
+          : poolMatchesLabelStrict(pool, row.label);
       return {
         label: row.label,
         state,
@@ -638,21 +635,24 @@ function buildJobTagMatchCategories(job: JobTagMatchInput, candidate: unknown): 
         jobWeightEstimated: row.structuralWeightEstimated,
       };
     });
-    const candidateTags = pool.map((label) => ({
+    // תפקיד: show only candidate_tag rows typed as role — not title / inferred labels.
+    const displayLabels =
+      key === 'role'
+        ? candWeighted.role.map((t) => t.label).filter(Boolean)
+        : pool;
+    const candidateTags = displayLabels.map((label) => ({
       label,
-      matchesJob: rows.some((row) =>
-        chipsRelateForCandidateHighlight(label, stripCompareLabel(row.label)),
-      ),
+      matchesJob: rows.some((row) => {
+        const jobLabel = stripCompareLabel(row.label);
+        // Language: use the looser chipsRelate so "אנגלית (רמה גבוהה)" correctly
+        // highlights against job tag "אנגלית" (6 Hebrew chars, below strict threshold).
+        if (key === 'language') return chipsRelate(label, jobLabel);
+        return chipsRelateForCandidateHighlight(label, jobLabel);
+      }),
     }));
-    out.push({ name, chips, candidateTags });
+    out.push({ name, key, chips, candidateTags });
   }
   return out;
-}
-
-function jobRequirementsLines(job: JobTagMatchInput): string[] {
-  return Array.isArray(job.requirements)
-    ? job.requirements.map((r) => String(r).trim()).filter(Boolean)
-    : [];
 }
 
 function looksLikeEducationRequirement(line: string): boolean {
