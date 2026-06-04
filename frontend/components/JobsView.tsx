@@ -17,6 +17,7 @@ import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import JobsAIAnalysisModal from './JobsAIAnalysisModal'; // New Import
 import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
@@ -482,7 +483,6 @@ const JobsView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [jobs, setJobs] = useState<Job[]>([]);
     const [loadingJobs, setLoadingJobs] = useState(false);
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -588,9 +588,26 @@ const JobsView: React.FC = () => {
     ], [t]);
 
     const defaultVisibleColumns = useMemo(() => ['rating', 'health', 'title', 'priority', 'client', 'status', 'associatedCandidates', 'waitingForScreening', 'activeProcess', 'openDate', 'recruiter'], []);
-    const [visibleColumns, setVisibleColumns] = useState(defaultVisibleColumns);
+    const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('jobs_list', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
 
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
+
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
@@ -973,20 +990,8 @@ const JobsView: React.FC = () => {
     }), [jobs]);
 
     const handleColumnToggle = (columnId: string) => {
-      setVisibleColumns(prev => {
-        const isCurrentlyVisible = prev.some(c => c === columnId);
-        if(isCurrentlyVisible) {
-          return prev.length > 1 ? prev.filter(c => c !== columnId) : prev;
-        } else {
-          const columnToAdd = allColumns.find(c => c.id === columnId);
-          if (columnToAdd) {
-                const newColumns = [...prev, columnId];
-                newColumns.sort((a, b) => allColumns.findIndex(c => c.id === a) - allColumns.findIndex(c => c.id === b));
-                return newColumns;
-            }
-            return prev;
-        }
-      })
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
     
     const handleDragStart = (index: number, colId: string) => { 

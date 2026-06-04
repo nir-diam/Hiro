@@ -17,6 +17,7 @@ router.get('/by-user/:userId', candidateController.getByUser);
 // Place specific routes BEFORE the generic '/:id' to avoid param capture
 router.get('/rebuild-embeddings', candidateController.rebuildAllEmbeddings);
 router.post('/search/free', candidateController.freeSearch);
+router.post('/search/list', optionalAuth, candidateController.listPost);
 router.post('/ai', candidateController.createFromAi);
 
 router.post('/:id/generate-experience-summary', candidateController.generateExperienceSummary);

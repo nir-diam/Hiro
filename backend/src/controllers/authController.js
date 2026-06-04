@@ -3,13 +3,20 @@ const User = require('../models/User');
 const Client = require('../models/Client');
 const { serializeAuthUser } = require('../services/permissionService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
+const userPreferencesService = require('../services/userPreferencesService');
 
 const serializeAuthUserWithUsage = async (user) => {
   const base = serializeAuthUser(user);
   const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
   const clientId = base.clientId || effectiveClientId || null;
   const autoDisconnect = await clientUsageSettingService.getAutoDisconnectForClient(clientId);
-  return { ...base, clientId, autoDisconnect };
+  let uiPreferences = userPreferencesService.DEFAULT_PREFERENCES;
+  try {
+    uiPreferences = await userPreferencesService.getForUser(user.id);
+  } catch (err) {
+    console.warn('[auth] uiPreferences load failed', err?.message || err);
+  }
+  return { ...base, clientId, autoDisconnect, uiPreferences };
 };
 
 const login = async (req, res) => {

@@ -27,6 +27,9 @@ import {
 } from '../services/messageTemplatesApi';
 import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
 import { sendNotificationEmail } from '../services/emailSendApi';
+import { ComplexQueryBuilder, type ComplexFilterRule } from './ComplexQueryComponents';
+import { complexRulesHaveValue, serializeComplexRulesForApi } from '../utils/complexQuery';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -153,15 +156,6 @@ function buildCampaignTemplateDisplayLabel(
 
 // --- TYPES ---
 type SourceType = 'job_application' | 'portal_signup' | 'campaign' | 'import';
-type Operator = 'AND' | 'OR' | 'NOT';
-
-interface ComplexFilterRule {
-    id: string;
-    operator: Operator;
-    field: string;
-    value?: string;
-    textValue?: string;
-}
 
 interface AdminCandidate {
     id: string;
@@ -181,6 +175,8 @@ interface AdminCandidate {
     companySize?: string;
     salaryExpectation?: number;
     age?: number;
+    matchedTerms?: string[];
+    matchReasons?: { field: string; term: string; source?: string; snippet?: string }[];
 }
 
 const jobScopeOptions = ['משרה מלאה', 'משרה חלקית', 'משמרות', 'פרילנס', 'היברידי'];
@@ -752,9 +748,6 @@ const AdminCandidatesView: React.FC = () => {
     const [isSearching, setIsSearching] = useState(false);
     const [error, setError] = useState<string | null>(null);
     
-    // View Config
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    
     // Sorting Config
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
 
@@ -772,9 +765,25 @@ const AdminCandidatesView: React.FC = () => {
     ];
 
     const defaultVisibleColumns = ['select', 'name', 'source', 'contact', 'location', 'status', 'completeness', 'updated', 'actions'];
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
+    const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('admin_candidates', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
 
@@ -805,6 +814,19 @@ const AdminCandidatesView: React.FC = () => {
     
     // Complex Query Builder State
     const [complexRules, setComplexRules] = useState<ComplexFilterRule[]>([]);
+    const [debouncedComplexRules, setDebouncedComplexRules] = useState<ComplexFilterRule[]>([]);
+    const skipComplexDebounceOnceRef = useRef(false);
+    useEffect(() => {
+        if (skipComplexDebounceOnceRef.current) {
+            skipComplexDebounceOnceRef.current = false;
+            return;
+        }
+        const handle = window.setTimeout(() => {
+            setDebouncedComplexRules(complexRules);
+        }, 1000);
+        return () => window.clearTimeout(handle);
+    }, [complexRules]);
+    const [appliedAdvanced, setAppliedAdvanced] = useState(false);
 
     const [mainFieldInput, setMainFieldInput] = useState('');
     const [companyFilters, setCompanyFilters] = useState<{
@@ -846,7 +868,32 @@ const AdminCandidatesView: React.FC = () => {
         companySize: c.companySize || '',
         salaryExpectation: Number(c.salaryExpectation || c.salaryMin || 0),
         age: c.age ? Number(c.age) : undefined,
+        matchedTerms: Array.isArray(c.matchedTerms) ? c.matchedTerms.map(String) : undefined,
+        matchReasons: Array.isArray(c.matchReasons) ? c.matchReasons : undefined,
     }), []);
+
+    const buildAdminAdvPayload = useCallback((rules: ComplexFilterRule[]) => {
+        const statusMap: Record<string, string> = {
+            active: 'active',
+            passive: 'inactive',
+            blacklisted: 'inactive',
+        };
+        return {
+            tags: searchParams.mainFieldTags,
+            locations: searchParams.locations.map((l) => ({ type: l.type, value: l.value })),
+            jobScopes: searchParams.jobScopes,
+            jobScopeAll: false,
+            interestRole: searchParams.interestRole,
+            ageMin: searchParams.ageMin,
+            ageMax: searchParams.ageMax,
+            salaryMin: searchParams.salaryMin,
+            salaryMax: searchParams.salaryMax,
+            hasDegree: searchParams.hasDegree,
+            lastUpdated: searchParams.lastUpdated,
+            statusFilter: searchParams.status !== 'all' ? statusMap[searchParams.status] || '' : '',
+            complexRules: serializeComplexRulesForApi(rules),
+        };
+    }, [searchParams]);
 
     const stats = useMemo(() => ({
         total: totalCandidates,
@@ -962,7 +1009,7 @@ const AdminCandidatesView: React.FC = () => {
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
-    const loadCandidates = useCallback(async () => {
+    const loadCandidates = useCallback(async (opts?: { forceAdvanced?: boolean }) => {
         if (!apiBase) return;
         setIsLoading(true);
         setError(null);
@@ -977,6 +1024,12 @@ const AdminCandidatesView: React.FC = () => {
             }
             if (tagFilterId) {
                 params.set('tagId', tagFilterId);
+            }
+            const rulesForAdv = opts?.forceAdvanced ? complexRules : debouncedComplexRules;
+            const shouldSendAdv =
+                appliedAdvanced || opts?.forceAdvanced || complexRulesHaveValue(debouncedComplexRules);
+            if (shouldSendAdv) {
+                params.set('adv', JSON.stringify(buildAdminAdvPayload(rulesForAdv)));
             }
             const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`);
             if (!res.ok) throw new Error('Failed to load candidates');
@@ -995,11 +1048,27 @@ const AdminCandidatesView: React.FC = () => {
         } finally {
             setIsLoading(false);
         }
-    }, [apiBase, mapCandidate, page, pageSize, searchTerm, tagFilterId]);
+    }, [
+        apiBase,
+        mapCandidate,
+        page,
+        pageSize,
+        searchTerm,
+        tagFilterId,
+        appliedAdvanced,
+        buildAdminAdvPayload,
+        debouncedComplexRules,
+        complexRules,
+    ]);
 
     useEffect(() => {
         loadCandidates();
     }, [loadCandidates]);
+
+    useEffect(() => {
+        if (!complexRulesHaveValue(debouncedComplexRules)) return;
+        setPage(1);
+    }, [debouncedComplexRules]);
 
 
 
@@ -1099,40 +1168,52 @@ const AdminCandidatesView: React.FC = () => {
         return () => clearTimeout(handle);
     }, [searchTerm, runAdvancedSearch]);
 
-    // Filter Logic
+    // Filter Logic — when appliedAdvanced, list rows come from GET /api/candidates?adv= (server-side only).
     const filteredCandidates = useMemo(() => {
         const useWorkedAtCompany = workedAtCompanySearchResults != null;
-        const useRemote = searchResults.length > 0 && searchTerm.trim().length >= 3;
+        const useRemote =
+            !appliedAdvanced && searchResults.length > 0 && searchTerm.trim().length >= 3;
         const base = useWorkedAtCompany
             ? workedAtCompanySearchResults
             : useRemote
                 ? searchResults
                 : candidates;
-        let filtered = base.filter(c => {
-            const matchesSearch = useRemote || !searchTerm ||
-                                  c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                                  c.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                                  (c.phone || '').includes(searchTerm);
+
+        const matchesCompanyFilters = (c: AdminCandidate) => {
+            const { industry, sizes } = companyFilters;
+            const industryMatch = !industry || c.industry === industry;
+            const sizeMatch = sizes.length === 0 || (c.companySize && sizes.includes(c.companySize));
+            return industryMatch && sizeMatch;
+        };
+
+        let filtered = base.filter((c) => {
             if (workedAtCompanyCandidateIds && workedAtCompanyCandidateIds.size) {
                 const backendId = c.backendId || c.id;
                 if (!backendId || !workedAtCompanyCandidateIds.has(backendId)) return false;
             }
 
-            const matchesSource = searchParams.sourceType === 'all' || c.sourceType === searchParams.sourceType;
-            const matchesLocation = searchParams.locations.length === 0 || 
-                searchParams.locations.some(loc => 
-                    (loc.type === 'city' && c.location === loc.value) || 
-                    (loc.type === 'region')
+            if (appliedAdvanced) {
+                return matchesCompanyFilters(c);
+            }
+
+            const matchesSearch =
+                useRemote ||
+                !searchTerm ||
+                c.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                c.email.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                (c.phone || '').includes(searchTerm);
+
+            const matchesSource =
+                searchParams.sourceType === 'all' || c.sourceType === searchParams.sourceType;
+            const matchesLocation =
+                searchParams.locations.length === 0 ||
+                searchParams.locations.some(
+                    (loc) =>
+                        (loc.type === 'city' && c.location === loc.value) ||
+                        (loc.type === 'region'),
                 );
 
-            const matchesCompanyFilters = () => {
-                const { industry, sizes } = companyFilters;
-                const industryMatch = !industry || c.industry === industry;
-                const sizeMatch = sizes.length === 0 || (c.companySize && sizes.includes(c.companySize));
-                return industryMatch && sizeMatch;
-            };
-
-            return matchesSearch && matchesSource && matchesLocation && matchesCompanyFilters();
+            return matchesSearch && matchesSource && matchesLocation && matchesCompanyFilters(c);
         });
 
         // Sorting
@@ -1164,7 +1245,17 @@ const AdminCandidatesView: React.FC = () => {
         }
         
         return filtered;
-    }, [searchTerm, searchParams, companyFilters, sortConfig, candidates, searchResults, workedAtCompanyCandidateIds, workedAtCompanySearchResults]);
+    }, [
+        searchTerm,
+        searchParams,
+        companyFilters,
+        sortConfig,
+        candidates,
+        searchResults,
+        workedAtCompanyCandidateIds,
+        workedAtCompanySearchResults,
+        appliedAdvanced,
+    ]);
 
     // Handlers
     const handleSelectAll = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1236,6 +1327,7 @@ const AdminCandidatesView: React.FC = () => {
         });
         setMainFieldInput('');
         setComplexRules([]);
+        setAppliedAdvanced(false);
         setCompanyFilters({ sizes: [], sectors: [], industry: '', field: '' });
         setWorkedAtCompanyFilters({
             organizationId: '',
@@ -1248,25 +1340,14 @@ const AdminCandidatesView: React.FC = () => {
         setWorkedAtCompanySearchResults(null);
     };
     
-    // --- Complex Rules Logic ---
-    const handleAddRule = (operator: Operator) => {
-        const newRule: ComplexFilterRule = {
-            id: Date.now().toString(),
-            operator,
-            field: 'general',
-            value: ''
-        };
-        setComplexRules(prev => [...prev, newRule]);
+    const handleApplyAdvancedSearch = () => {
+        skipComplexDebounceOnceRef.current = true;
+        setDebouncedComplexRules(complexRules);
+        setAppliedAdvanced(true);
+        setPage(1);
+        setIsAdvancedSearchOpen(false);
+        void loadCandidates({ forceAdvanced: true });
     };
-
-    const handleRemoveRule = (id: string) => {
-        setComplexRules(prev => prev.filter(r => r.id !== id));
-    };
-    
-    const handleRuleChange = (id: string, field: keyof ComplexFilterRule, value: string) => {
-        setComplexRules(prev => prev.map(r => r.id === id ? { ...r, [field]: value } : r));
-    };
-
 
     const campaignRecipients = useMemo(() => {
         const pool = filteredCandidates.filter((c) => (selectedIds.size > 0 ? selectedIds.has(c.id) : true));
@@ -1302,20 +1383,8 @@ const AdminCandidatesView: React.FC = () => {
 
     // Column Management
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => {
-            if (prev.includes(columnId)) {
-                return prev.length > 1 ? prev.filter(id => id !== columnId) : prev;
-            } else {
-                // Insert maintaining order
-                const newCols = [...prev, columnId];
-                 newCols.sort((a, b) => {
-                    const indexA = allColumns.findIndex(c => c.id === a);
-                    const indexB = allColumns.findIndex(c => c.id === b);
-                    return indexA - indexB;
-                });
-                return newCols;
-            }
-        });
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
 
     const handleDragStart = (index: number, colId: string) => {
@@ -1376,6 +1445,11 @@ const AdminCandidatesView: React.FC = () => {
                         <div>
                             <p className="font-bold text-text-default text-base">{candidate.name}</p>
                             <p className="text-xs text-text-muted">{candidate.title}</p>
+                            {candidate.matchReasons && candidate.matchReasons.length > 0 && (
+                                <p className="text-[10px] text-red-700 mt-0.5 font-medium line-clamp-1">
+                                    {candidate.matchReasons.slice(0, 2).map((r) => `«${r.term}»`).join(' · ')}
+                                </p>
+                            )}
                         </div>
                     </div>
                 );
@@ -1723,54 +1797,10 @@ const AdminCandidatesView: React.FC = () => {
 
                         </div>
                         
-                        {/* COMPLEX QUERY BUILDER */}
-                        <div className="bg-bg-subtle/40 rounded-xl p-3 border border-border-default/50 mt-2">
-                             <div className="flex items-center gap-2 mb-2">
-                                 <FunnelIcon className="w-4 h-4 text-primary-500" />
-                                 <h4 className="text-xs font-bold text-primary-700 uppercase tracking-wide">שאילתות מורכבות (שכבת סינון נוספת)</h4>
-                             </div>
-                             
-                             {complexRules.length > 0 && (
-                                <div className="space-y-2 mb-3">
-                                    {complexRules.map((rule, idx) => (
-                                        <div key={rule.id} className="flex items-center gap-2 bg-white p-2 rounded-lg border border-border-default shadow-sm animate-fade-in text-sm">
-                                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${rule.operator === 'AND' ? 'bg-blue-100 text-blue-700' : rule.operator === 'OR' ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'}`}>
-                                                {rule.operator === 'AND' ? 'וגם' : rule.operator === 'OR' ? 'או' : 'ללא'}
-                                            </span>
-                                            <input 
-                                                type="text" 
-                                                placeholder="שדה..." 
-                                                value={rule.field || ''}
-                                                onChange={(e) => setComplexRules(prev => prev.map(r => r.id === rule.id ? { ...r, field: e.target.value } : r))}
-                                                className="bg-bg-subtle/50 px-2 py-1 rounded border border-border-default text-xs w-24 outline-none focus:border-primary-300"
-                                            />
-                                            <span className="text-text-muted">=</span>
-                                            <input 
-                                                type="text" 
-                                                placeholder="ערך..." 
-                                                value={rule.value || ''}
-                                                onChange={(e) => setComplexRules(prev => prev.map(r => r.id === rule.id ? { ...r, value: e.target.value } : r))}
-                                                className="bg-bg-subtle/50 px-2 py-1 rounded border border-border-default text-xs flex-grow outline-none focus:border-primary-300"
-                                            />
-                                            
-                                            <button onClick={() => handleRemoveRule(rule.id)} className="text-text-subtle hover:text-red-500 p-1"><XMarkIcon className="w-3.5 h-3.5"/></button>
-                                        </div>
-                                    ))}
-                                </div>
-                             )}
-
-                             <div className="flex gap-2">
-                                 <button onClick={() => handleAddRule('AND')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 text-xs font-bold border border-blue-200 hover:bg-blue-100 transition-colors">
-                                     <PlusIcon className="w-3 h-3" /> וגם (AND)
-                                 </button>
-                                 <button onClick={() => handleAddRule('OR')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-50 text-orange-700 text-xs font-bold border border-orange-200 hover:bg-orange-100 transition-colors">
-                                     <PlusIcon className="w-3 h-3" /> או (OR)
-                                 </button>
-                                 <button onClick={() => handleAddRule('NOT')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-700 text-xs font-bold border border-red-200 hover:bg-red-100 transition-colors">
-                                     <MinusIcon className="w-3 h-3" /> ללא (NOT)
-                                 </button>
-                             </div>
-                        </div>
+                        <ComplexQueryBuilder
+                            rules={complexRules}
+                            onChange={setComplexRules}
+                        />
                         
                         <div className="flex justify-between items-center pt-2 mt-2 border-t border-border-default">
                              <div className="flex items-center gap-2">
@@ -1782,7 +1812,11 @@ const AdminCandidatesView: React.FC = () => {
                                     <span>שמור כרשימה אישית</span>
                                 </button>
                             </div>
-                            <button onClick={() => setIsAdvancedSearchOpen(false)} className="bg-primary-600 text-white font-bold py-2 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 text-sm">
+                            <button
+                                type="button"
+                                onClick={handleApplyAdvancedSearch}
+                                className="bg-primary-600 text-white font-bold py-2 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 text-sm"
+                            >
                                 הצג תוצאות
                             </button>
                         </div>
@@ -1919,7 +1953,13 @@ const AdminCandidatesView: React.FC = () => {
                                 {filteredCandidates.map(candidate => (
                                     <tr 
                                         key={candidate.id} 
-                                        onClick={() => navigate(`/admin/candidates/${candidate.id}`)}
+                                        onClick={() => navigate(`/admin/candidates/${candidate.id}`, {
+                                            state: {
+                                                matchedTerms: candidate.matchedTerms?.length
+                                                    ? candidate.matchedTerms
+                                                    : undefined,
+                                            },
+                                        })}
                                         className={`group hover:bg-bg-hover transition-colors cursor-pointer ${selectedIds.has(candidate.id) ? 'bg-primary-50/40' : ''}`}
                                     >
                                         {visibleColumns.map(colId => (

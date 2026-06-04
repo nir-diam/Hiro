@@ -11,6 +11,7 @@ import {
 } from './Icons';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import ActivityLogModal from './ActivityLogModal';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
@@ -784,7 +785,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         };
     }, [apiBase, activeTab, clients]);
 
-    const [viewMode, setViewMode] = useState<'table' | 'grid' | 'board'>('table');
+    const { viewMode, setViewMode } = useScreenTablePreferences('clients_list', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns: [],
+    });
     const [activePipelineId, setActivePipelineId] = useState<string>('all'); // Changed default to 'all'
     const [activeStageId, setActiveStageId] = useState<string>('all'); // New State for Stage Filter
     const [selectedClient, setSelectedClient] = useState<Client | null>(null);

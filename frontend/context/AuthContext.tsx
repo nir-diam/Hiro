@@ -15,6 +15,7 @@ export type AuthUser = {
     effectivePermissions?: Record<string, boolean>;
     /** Per-tenant module toggles from `clients.modules` (admin). */
     tenantModules?: Record<string, boolean>;
+    uiPreferences?: Record<string, unknown>;
 };
 
 type AuthContextValue = {

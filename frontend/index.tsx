@@ -9,6 +9,7 @@ import { SavedSearchesProvider } from './context/SavedSearchesContext';
 import { DevModeProvider } from './context/DevModeContext';
 import { LanguageProvider } from './context/LanguageContext';
 import { AuthProvider } from './context/AuthContext';
+import { UserPreferencesProvider } from './context/UserPreferencesContext';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -25,7 +26,9 @@ root.render(
             <SavedSearchesProvider>
               <HashRouter>
                 <AuthProvider>
-                  <App />
+                  <UserPreferencesProvider>
+                    <App />
+                  </UserPreferencesProvider>
                 </AuthProvider>
               </HashRouter>
             </SavedSearchesProvider>

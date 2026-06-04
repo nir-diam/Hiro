@@ -1,12 +1,18 @@
+const path = require('path');
+const { PutObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const organizationService = require('../services/organizationService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
+const { createS3Client, buildPublicUrl } = require('../services/s3Service');
 const axios = require('axios');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const Candidate = require('../models/Candidate');
 const Organization = require('../models/Organization');
 
 const { sendSingleTurnChat } = require('../services/geminiService');
+const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
+const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
 
 const fallbackCompanyPrompt = (companyNames, mainFieldOptions = []) => {
  
@@ -28,10 +34,12 @@ Use Google Search and your internal knowledge to provide real, accurate data for
    - LOCATION ACCURACY: Provide the specific City name in Hebrew (e.g., 'פתח תקווה', 'הרצליה', 'איירפורט סיטי'). Do NOT use general districts.
    -  DATA ENRICHMENT: Every object MUST include exhaustive 'tags' (Hebrew) and 'techTags' (English) based on the company's activity and job requirements.
 
-2. *MAINFIELD (CRITICAL):*
+2. *INDUSTRY HIERARCHY (CRITICAL):*
 
-   - 'mainField' MUST be exactly one of these values (copy verbatim, do not invent): ${mainFieldJson}.
-   - Choose the single best match for the company's primary industry. Do NOT create or paraphrase any other value.
+   - 'mainField' (תעשיית אם): MUST be exactly one of these parent picklist values (copy verbatim): ${mainFieldJson}.
+   - 'subField' (תעשייה ראשית / תת-תחום): Hebrew label for the company's primary sub-domain under that mainField. If unknown, use null.
+   - 'secondaryField' (תחום עיסוק משני): optional free Hebrew text for additional business areas; null if none.
+   - Do NOT invent or paraphrase mainField values outside the list above.
 
 DATA SPECIFICATIONS:
 - description: 2-3 sentences in Hebrew about the company's core business.
@@ -59,7 +67,9 @@ JSON STRUCTURE:
 
     "mainField": "MUST be exactly one of: ${mainFieldJson}",
 
-    "subField": "Industry Secondary in Hebrew",
+    "subField": "Primary sub-industry in Hebrew (under mainField) or null",
+
+    "secondaryField": "Additional business areas in Hebrew or null",
 
     "employeeCount": "estimate range",
 
@@ -130,6 +140,39 @@ const buildCompanyPrompt = async (companyNames) => {
   return fallbackCompanyPrompt(companyNames, mainFieldOptions);
 };
 
+const LOGO_ALLOWED_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);
+
+const createLogoUploadUrl = async (req, res) => {
+  const { fileName, contentType, organizationId } = req.body || {};
+  if (!fileName || !contentType) {
+    return res.status(400).json({ message: 'fileName and contentType are required' });
+  }
+  if (!String(contentType).toLowerCase().startsWith('image/')) {
+    return res.status(400).json({ message: 'contentType must be an image' });
+  }
+  try {
+    const safeName = path.basename(String(fileName));
+    const ext = path.extname(safeName).toLowerCase();
+    if (ext && !LOGO_ALLOWED_EXT.has(ext)) {
+      return res.status(400).json({ message: 'Unsupported image type' });
+    }
+    const orgSegment =
+      organizationId && String(organizationId).trim()
+        ? String(organizationId).trim()
+        : 'new';
+    const key = `organizations/logos/${orgSegment}/${Date.now()}-${safeName}`;
+    const client = createS3Client();
+    const command = new PutObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: key,
+    });
+    const uploadUrl = await getSignedUrl(client, command, { expiresIn: 60 * 5 });
+    res.json({ uploadUrl, key, publicUrl: buildPublicUrl(key) });
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to generate upload URL' });
+  }
+};
+
 const list = async (_req, res) => {
   const orgs = await organizationService.list();
   res.json(orgs);
@@ -183,23 +226,46 @@ const parseExperienceYear = (s) => {
   return match ? parseInt(match[1], 10) : null;
 };
 
-// Compute years in company from experience entries that match org name/aliases
-const yearsInCompanyForOrg = (experience, orgName, aliases = []) => {
+// Experience rows matching org name/aliases (for users tab)
+const experienceMetaAtOrg = (experience, orgName, aliases = []) => {
   const names = new Set([
     (orgName || '').trim().toLowerCase(),
     ...(Array.isArray(aliases) ? aliases : []).map((a) => String(a).trim().toLowerCase()).filter(Boolean),
   ]);
-  if (!names.size) return null;
-  let totalYears = 0;
+  if (!names.size) {
+    return { roleAtOrg: null, isCurrent: false, yearsInCompany: null, yearsSinceLeft: null };
+  }
   const exp = Array.isArray(experience) ? experience : [];
+  const currentYear = new Date().getFullYear();
+  let roleAtOrg = null;
+  let isCurrent = false;
+  let totalYears = 0;
+  let yearsSinceLeft = null;
+
   for (const item of exp) {
     const company = String(item?.company || '').trim().toLowerCase();
     if (!company || !names.has(company)) continue;
+    roleAtOrg =
+      item.title || item.role || item.position || roleAtOrg;
     const start = parseExperienceYear(item.startDate);
-    const end = parseExperienceYear(item.endDate);
-    if (start != null && end != null && end >= start) totalYears += end - start;
+    const endIsPresent = /present|כיום/i.test(String(item?.endDate || ''));
+    const end = endIsPresent ? currentYear : parseExperienceYear(item.endDate);
+    if (endIsPresent) isCurrent = true;
+    if (start != null && end != null && end >= start) {
+      totalYears += end - start;
+      if (!endIsPresent) {
+        const since = currentYear - end;
+        if (yearsSinceLeft == null || since < yearsSinceLeft) yearsSinceLeft = since;
+      }
+    }
   }
-  return totalYears > 0 ? totalYears : null;
+
+  return {
+    roleAtOrg,
+    isCurrent,
+    yearsInCompany: totalYears > 0 ? totalYears : null,
+    yearsSinceLeft,
+  };
 };
 
 // List candidates linked to an organization via CandidateOrganization
@@ -231,7 +297,11 @@ const listCandidates = async (req, res) => {
         ...(Array.isArray(experience) ? experience : []),
         ...(Array.isArray(workExperience) ? workExperience : []),
       ];
-      rest.yearsInCompany = yearsInCompanyForOrg(combinedExperience, orgName, aliases);
+      const meta = experienceMetaAtOrg(combinedExperience, orgName, aliases);
+      rest.roleAtOrg = meta.roleAtOrg;
+      rest.isCurrent = meta.isCurrent;
+      rest.yearsInCompany = meta.yearsInCompany;
+      rest.yearsSinceLeft = meta.yearsSinceLeft;
       return rest;
     });
 
@@ -296,67 +366,6 @@ const enrich = async (req, res) => {
       }
     };
 
-    const verifyLogoUrl = async (logoUrl) => {
-      if (!logoUrl) return null;
-      try {
-        const res = await axios.head(logoUrl, { timeout: 5000 });
-        const contentType = res.headers['content-type'] || '';
-        if (contentType.startsWith('image/')) return logoUrl;
-        return null;
-      } catch {
-        return null;
-      }
-    };
-
-    const searchOfficialWebsite = async (companyName) => {
-      if (!companyName) return null;
-
-      const name = String(companyName).trim();
-      const query = /[\u0590-\u05FF]/.test(name)
-        ? `${name} האתר הרשמי`
-        : `${name} official website`;
-
-      try {
-        const response = await axios.get('https://serpapi.com/search.json', {
-          params: {
-            engine: 'google',
-            q: query,
-            api_key: process.env.SERPAPI_KEY,
-            num: 5,
-          },
-          timeout: 10000,
-        });
-
-        const results = response.data?.organic_results;
-        if (!results?.length) return null;
-
-        const companySlug = String(companyName).toLowerCase().replace(/\s/g, '');
-        const official = results.find(
-          (r) => r.link && r.link.toLowerCase().includes(companySlug)
-        );
-
-        const chosen = official || results[0];
-        if (!chosen?.link) return null;
-
-        const domain = getDomain(chosen.link);
-        const logoDevToken = process.env.LOGODEV_TOKEN;
-        const logoUrl =
-          domain && logoDevToken
-            ? `https://img.logo.dev/${domain}?token=${logoDevToken}`
-            : null;
-        const logo = logoUrl ? await verifyLogoUrl(logoUrl) : null;
-
-        return {
-          link: chosen.link,
-          domain,
-          logo,
-        };
-      } catch (err) {
-        console.error('[organization-enrich] SerpAPI search failed:', err.response?.data || err.message);
-        return null;
-      }
-    };
-
     const searchLinkedinUrl = async (companyName) => {
       if (!companyName) return null;
 
@@ -373,8 +382,8 @@ const enrich = async (req, res) => {
           timeout: 10000,
         });
 
-        const results = response.data?.organic_results;
-        if (!results || !results.length) return null;
+        const results = filterSerpOrganicResults(response.data?.organic_results);
+        if (!results.length) return null;
 
         // Prefer official LinkedIn company pages
         const companyResult =
@@ -407,29 +416,15 @@ const enrich = async (req, res) => {
           const companyName = rawName.trim();
           if (!companyName) return null;
 
-          let website = '';
-            
-
-          let logo = typeof item.logo === 'string' ? item.logo : '';
-
-          const official = await searchOfficialWebsite(companyName);
-          if (official?.link) {
-            website = official.link;
-          }
-          if (official?.logo) {
-            logo = official.logo;
-          }
-
-          // Fallback: Google favicon if Logo.dev did not return a valid image
-          if (!logo && website) {
+          let logo = typeof item.logo === 'string' ? item.logo.trim() : '';
+          if (!logo && item.website) {
             try {
-              const hostname = new URL(website).hostname;
+              const hostname = new URL(item.website).hostname;
               logo = `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
             } catch {
               logo = '';
             }
           }
-
 
           //HERE!!! — mainField from item; subField = LLM picks one from PicklistCategoryValues of this mainField
           const mainField = item.mainField || '';
@@ -467,8 +462,8 @@ Example: {"subField":"..."}`;
           item.subField = subField;
 
           // People Data Labs company enrich (by domain) — fills employeeCount, foundedYear, linkedinUrl, address, growthTrend, etc.
-          const domainForPdl = website ? getDomain(website) : null;
-          if (domainForPdl && process.env.PDL_API_KEY) {
+          const domainForPdl = item.website ? getDomain(item.website) : null;
+          if (false &&domainForPdl && process.env.PDL_API_KEY) {
             try {
               const pdlRes = await axios.get('https://api.peopledatalabs.com/v5/company/enrich', {
                 params: {
@@ -479,8 +474,11 @@ Example: {"subField":"..."}`;
               });
               const pdl = pdlRes.data;
               if (pdl && pdl.status === 200) {
-                if (pdl.employee_count != null) item.employeeCount = String(pdl.employee_count);
-                if (pdl.size) item.employeeCount = item.employeeCount || pdl.size;
+                const fromSize = pdl.size ? normalizeEmployeeCount(pdl.size) : null;
+                const fromCount =
+                  pdl.employee_count != null ? normalizeEmployeeCount(pdl.employee_count) : null;
+                const normalized = fromSize || fromCount;
+                if (normalized) item.employeeCount = normalized;
                 if (pdl.founded != null) item.foundedYear = String(pdl.founded);
                 if (pdl.linkedin_url) {
                   const lu = pdl.linkedin_url.trim();
@@ -518,7 +516,13 @@ Example: {"subField":"..."}`;
             }
           }
 
-          const enriched = { ...item, website: website || item.website, logo };
+          if (item.employeeCount != null && item.employeeCount !== '') {
+            const bucket = normalizeEmployeeCount(item.employeeCount);
+            if (bucket) item.employeeCount = bucket;
+            else delete item.employeeCount;
+          }
+
+          const enriched = { ...item , logo : logo || item.logo };
 
           return {
             companyId,
@@ -543,5 +547,14 @@ Example: {"subField":"..."}`;
   }
 };
 
-module.exports = { list, get, create, update, remove, enrich, listCandidates };
+module.exports = {
+  list,
+  get,
+  create,
+  update,
+  remove,
+  enrich,
+  listCandidates,
+  createLogoUploadUrl,
+};
 

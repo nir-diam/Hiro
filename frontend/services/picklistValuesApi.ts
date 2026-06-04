@@ -28,6 +28,70 @@ export const JOB_SCOPE_MULTI_FALLBACK: PicklistValueRow[] = [
 /** Organization sector / type (AdminCompaniesView מגזר) — `PicklistCategory.key`. */
 export const SECTOR_PICKLIST_KEY = 'sector';
 
+/** תעשיית אם (mainField) — parent category; children are subcategories with domain values (subField). */
+export const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
+
+export type PicklistSubcategoryRow = {
+    id: string;
+    name: string;
+    description?: string | null;
+};
+
+export async function fetchPicklistSubcategories(
+    apiBase: string,
+    parentCategoryId: string,
+): Promise<PicklistSubcategoryRow[]> {
+    const root = (apiBase || '').replace(/\/$/, '');
+    const id = String(parentCategoryId || '').trim();
+    if (!root || !id) return [];
+    try {
+        const res = await fetch(`${root}/api/picklists/categories/${encodeURIComponent(id)}/subcategories`, {
+            credentials: 'include',
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) return [];
+        const data: unknown = await res.json();
+        if (!Array.isArray(data)) return [];
+        return data.map((row: Record<string, unknown>) => ({
+            id: String(row.id ?? ''),
+            name: String(row.name ?? '').trim(),
+            description: row.description != null ? String(row.description) : null,
+        })).filter((r) => r.id && r.name);
+    } catch {
+        return [];
+    }
+}
+
+export async function fetchPicklistCategoryValues(
+    apiBase: string,
+    categoryId: string,
+): Promise<PicklistValueRow[]> {
+    const root = (apiBase || '').replace(/\/$/, '');
+    const id = String(categoryId || '').trim();
+    if (!root || !id) return [];
+    try {
+        const res = await fetch(`${root}/api/picklists/categories/${encodeURIComponent(id)}/values`, {
+            credentials: 'include',
+            cache: 'no-store',
+            headers: { Accept: 'application/json' },
+        });
+        if (!res.ok) return [];
+        const data: unknown = await res.json();
+        if (!Array.isArray(data)) return [];
+        return data
+            .map((row: Record<string, unknown>) => ({
+                id: String(row.id ?? ''),
+                label: String(row.label ?? ''),
+                value: String(row.value ?? ''),
+                displayName: row.displayName != null ? String(row.displayName) : null,
+            }))
+            .filter((r) => r.id && (r.label || r.value));
+    } catch {
+        return [];
+    }
+}
+
 /** When picklist is empty or category missing: matches legacy hardcoded options + filters. */
 export const SECTOR_PICKLIST_FALLBACK: PicklistValueRow[] = [
     { id: '_fb_hitech', label: 'הייטק', value: 'הייטק', displayName: null },

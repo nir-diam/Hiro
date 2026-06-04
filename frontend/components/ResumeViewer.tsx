@@ -274,6 +274,8 @@ interface ResumeViewerProps {
     onUploadResume?: (file: File) => Promise<void>;
     onResumeUploaded?: (updated: any) => void;
     candidateId?: string | null;
+    /** Complex-query terms to highlight in parsed CV text (red). */
+    highlightKeywords?: string[];
 }
 
 interface EmailUploadRecord {
@@ -295,6 +297,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   onUploadResume,
   onResumeUploaded,
   candidateId: candidateIdProp,
+  highlightKeywords = [],
 }) => {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'resume' | 'email'>('resume');
@@ -820,6 +823,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
                                     searchTextSavedAt={candidateSearchTextSavedAt}
                                     resumeUploadedAt={candidateResumeUploadedAt}
                                     tagDetails={candidateTagDetails}
+                                    highlightKeywords={highlightKeywords}
                                     createdAt={candidateCreatedAt}
                                     updatedAt={candidateUpdatedAt}
                                     candidateId={candidateIdentifier}

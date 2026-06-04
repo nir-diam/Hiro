@@ -307,6 +307,10 @@ const normalizeCandidatePayload = (payload: any) => {
 const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const params = useParams();
     const location = useLocation();
+    const searchHighlightKeywords = useMemo(() => {
+        const st = location.state as { matchedTerms?: string[] } | null;
+        return Array.isArray(st?.matchedTerms) ? st.matchedTerms.filter(Boolean) : [];
+    }, [location.state]);
     const urlId = params.candidateId;
     const navigate = useNavigate();
     console.log('ProfilePageWrapper render', { urlId, params });
@@ -758,6 +762,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                                 fullData={formData}
                                 onOpenMessageModal={props.openMessageModal}
                                 candidateId={formData.backendId || urlId || null}
+                                highlightKeywords={searchHighlightKeywords}
                             />
                         </div>
                     </>

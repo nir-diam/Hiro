@@ -11,6 +11,7 @@ import {
     TagIcon, ArrowPathIcon, PlusIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import TagSelectorModal, { type TagOption } from './TagSelectorModal';
@@ -710,7 +711,6 @@ const AdminJobsView: React.FC = () => {
     const [tagFilterMeta, setTagFilterMeta] = useState<{ id: string; label: string } | null>(null);
     const [isAdvancedFilterOpen, setIsAdvancedFilterOpen] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [activeContextTab, setActiveContextTab] = useState<'all' | 'public' | 'tags'>('all');
     const [jobs, setJobs] = useState<any[]>([]);
     const [loadingJobs, setLoadingJobs] = useState(false);
@@ -765,9 +765,26 @@ const AdminJobsView: React.FC = () => {
     const [selectedJob, setSelectedJob] = useState<any | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
 
+    const allColumnIds = useMemo(() => allColumnsDef.map((c) => c.id), []);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('admin_jobs', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
+
     // Column Management
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
@@ -951,15 +968,8 @@ const AdminJobsView: React.FC = () => {
     }, []);
 
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => {
-            if (prev.includes(columnId)) {
-                return prev.length > 1 ? prev.filter(id => id !== columnId) : prev;
-            } else {
-                const newCols = [...prev, columnId];
-                newCols.sort((a, b) => allColumnsDef.findIndex(c => c.id === a) - allColumnsDef.findIndex(c => c.id === b));
-                return newCols;
-            }
-        });
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
 
     const handleDragStart = (index: number, colId: string) => {

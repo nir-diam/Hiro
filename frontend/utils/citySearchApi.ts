@@ -22,6 +22,79 @@ export function regionFromRow(row: CitySearchRow): string {
     return (row.column4 || row.region || 'ערים').trim() || 'ערים';
 }
 
+export type LocationGroup = { region: string; cities: string[] };
+
+export function rowsToLocationGroups(rows: CitySearchRow[]): LocationGroup[] {
+    const byRegion = new Map<string, Set<string>>();
+    for (const row of rows) {
+        const name = cityNameFromRow(row);
+        if (!name) continue;
+        const region = regionFromRow(row);
+        if (!byRegion.has(region)) byRegion.set(region, new Set());
+        byRegion.get(region)!.add(name);
+    }
+    return Array.from(byRegion.entries())
+        .map(([region, cities]) => ({
+            region,
+            cities: Array.from(cities).sort((a, b) => a.localeCompare(b, 'he')),
+        }))
+        .sort((a, b) => a.region.localeCompare(b.region, 'he'));
+}
+
+export function filterLocationGroups(groups: LocationGroup[], search: string): LocationGroup[] {
+    const q = String(search || '').trim().toLowerCase();
+    if (!q) return groups;
+    return groups
+        .map((group) => {
+            const regionMatch = group.region.toLowerCase().includes(q);
+            const matchedCities = group.cities.filter((city) => city.toLowerCase().includes(q));
+            if (regionMatch) return group;
+            if (matchedCities.length > 0) {
+                return { region: group.region, cities: matchedCities };
+            }
+            return null;
+        })
+        .filter((g): g is LocationGroup => g != null);
+}
+
+/** All cities grouped by area (no search query). */
+export async function fetchAllCityGroups(): Promise<LocationGroup[]> {
+    const url = `${API_BASE}/api/cities`;
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = (await res.json()) as CitySearchRow[];
+    if (!Array.isArray(data)) return [];
+    return rowsToLocationGroups(data);
+}
+
+export function buildCityToRegionMap(groups: LocationGroup[]): Map<string, string> {
+    const map = new Map<string, string>();
+    for (const group of groups) {
+        for (const city of group.cities) {
+            map.set(city, group.region);
+        }
+    }
+    return map;
+}
+
+export function groupCityNamesByRegion(
+    cityNames: string[],
+    cityToRegion: Map<string, string>,
+): LocationGroup[] {
+    const byRegion = new Map<string, string[]>();
+    for (const name of cityNames) {
+        const region = cityToRegion.get(name) || 'אחר';
+        if (!byRegion.has(region)) byRegion.set(region, []);
+        byRegion.get(region)!.push(name);
+    }
+    return Array.from(byRegion.entries())
+        .map(([region, cities]) => ({
+            region,
+            cities: [...cities].sort((a, b) => a.localeCompare(b, 'he')),
+        }))
+        .sort((a, b) => a.region.localeCompare(b.region, 'he'));
+}
+
 /** Flat city options from `/api/cities` (deduped by id). */
 export async function fetchCitySearchOptions(search: string): Promise<CitySearchOption[]> {
     const q = String(search || '').trim();
@@ -80,4 +153,44 @@ export function candidateCityDisplay(data: { address?: string | null; location?:
 export function candidateCityPatch(city: string): { address: string; location: string } {
     const v = String(city ?? '').trim();
     return { address: v, location: v };
+}
+
+export type LocationItemLike = {
+    type: 'region' | 'city' | 'radius';
+    value: string;
+    radius?: number;
+};
+
+/** Collapse full-region city lists into a single region item (keeps adv payloads small). */
+export function compressLocationItems(
+    items: LocationItemLike[],
+    groups: LocationGroup[],
+): LocationItemLike[] {
+    if (!items.length) return items;
+
+    const radiusItems = items.filter((l) => l.type === 'radius');
+    const explicitRegions = new Set(
+        items.filter((l) => l.type === 'region').map((l) => l.value),
+    );
+    const cities = new Set(items.filter((l) => l.type === 'city').map((l) => l.value));
+
+    if (groups.length) {
+        for (const group of groups) {
+            if (explicitRegions.has(group.region)) {
+                for (const c of group.cities) cities.delete(c);
+                continue;
+            }
+            if (!group.cities.length) continue;
+            if (group.cities.every((c) => cities.has(c))) {
+                for (const c of group.cities) cities.delete(c);
+                explicitRegions.add(group.region);
+            }
+        }
+    }
+
+    return [
+        ...Array.from(explicitRegions).map((value) => ({ type: 'region' as const, value })),
+        ...Array.from(cities).map((value) => ({ type: 'city' as const, value })),
+        ...radiusItems,
+    ];
 }

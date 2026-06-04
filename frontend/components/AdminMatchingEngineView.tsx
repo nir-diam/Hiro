@@ -1719,6 +1719,15 @@ const AdminMatchingEngineView: React.FC = () => {
                                         <div className="h-2.5 bg-bg-subtle rounded-full overflow-hidden">
                                             <div className="h-full bg-rose-500 rounded-full transition-all duration-1000" style={{ width: `${simResult.breakdown.intent}%` }}></div>
                                         </div>
+                                        {simResult.breakdown.intentType && (() => {
+                                            const tierId = simResult.breakdown.intentType === 'category' ? 'cluster' : simResult.breakdown.intentType;
+                                            const tier = intentWeights.find((w) => w.id === tierId);
+                                            return tier ? (
+                                                <p className="text-[10px] text-text-muted leading-tight">
+                                                    רמת זיקה: {tier.label} (משקל מוגדר: {tier.value})
+                                                </p>
+                                            ) : null;
+                                        })()}
                                     </div>
 
                                     {/* Age Gap Penalty */}
@@ -1780,7 +1789,16 @@ const AdminMatchingEngineView: React.FC = () => {
                                     </div>
                                     <p className="opacity-90">
                                         ציון ההתאמה הסופי חושב על סמך נתוני המועמד והמשרה בפועל.
-                                        {simResult.breakdown.intentType && <span className="block mt-1">זיקה למשרה: <strong>{simResult.breakdown.intentType}</strong>.</span>}
+                                        {simResult.breakdown.intentType && (() => {
+                                            const tierId = simResult.breakdown.intentType === 'category' ? 'cluster' : simResult.breakdown.intentType;
+                                            const tier = intentWeights.find((w) => w.id === tierId);
+                                            return (
+                                                <span className="block mt-1">
+                                                    זיקה למשרה: {tier?.label || simResult.breakdown.intentType}
+                                                    {tier ? ` (${simResult.breakdown.intent}%)` : ''}.
+                                                </span>
+                                            );
+                                        })()}
                                         {simResult.breakdown.candidateYears > 0 && <span className="block mt-1">שנות ניסיון המועמד: <strong>{simResult.breakdown.candidateYears}</strong>{simResult.breakdown.requiredYears > 0 ? ` (נדרש: ${simResult.breakdown.requiredYears})` : ''}.</span>}
                                         {simResult.breakdown.geoMissing && <span className="font-bold text-amber-700 block mt-1"> ניקוד גיאוגרפי: ברירת מחדל (כתובת לא זמינה).</span>}
                                         {simResult.breakdown.salaryPenalty > 0 && <span className="font-bold text-rose-700 block mt-1"> קנס פער שכר: {simResult.breakdown.salaryPenalty} נקודות.</span>}

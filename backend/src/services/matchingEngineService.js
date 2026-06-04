@@ -14,7 +14,7 @@ const GLOBAL_KEY = 'global';
 
 const DEFAULT_CONFIG = {
   mainWeights: { vector: 20, tags: 35, geo: 20, experience: 15, intent: 10 },
-  intentWeights: { exact: 100, role: 80, cluster: 50, category: 20, different: 0 },
+  intentWeights: { exact: 100, role: 80, cluster: 50, different: 0 },
   tagWeights: {
     role: 100, seniority: 80, skill: 70, tool: 60,
     industry: 50, education: 40, language: 30, soft_skill: 20, certification: 20,
@@ -146,6 +146,17 @@ function serializePreset(row) {
   };
 }
 
+/** Map legacy `category` → `cluster` so admin sliders match scoring. */
+function normalizeIntentWeightsMap(iw) {
+  if (!iw || typeof iw !== 'object' || Array.isArray(iw)) return iw;
+  const out = { ...iw };
+  if (out.cluster == null && out.category != null) {
+    out.cluster = out.category;
+  }
+  delete out.category;
+  return out;
+}
+
 /** Deep-enough merge for preset overrides on top of global engine config */
 function mergeEngineConfig(base, patch) {
   if (!patch || typeof patch !== 'object') return base;
@@ -153,7 +164,10 @@ function mergeEngineConfig(base, patch) {
     ...base,
     ...patch,
     mainWeights: { ...(base.mainWeights || {}), ...(patch.mainWeights || {}) },
-    intentWeights: { ...(base.intentWeights || {}), ...(patch.intentWeights || {}) },
+    intentWeights: normalizeIntentWeightsMap({
+      ...(base.intentWeights || {}),
+      ...(patch.intentWeights || {}),
+    }),
     tagWeights: {
       ...(typeof base.tagWeights === 'object' && base.tagWeights && !Array.isArray(base.tagWeights)
         ? base.tagWeights

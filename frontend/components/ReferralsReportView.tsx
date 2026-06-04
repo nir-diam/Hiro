@@ -13,6 +13,7 @@ import { type Job } from './JobsView';
 import type { Candidate } from './CandidatesListView';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 type ReferralStatus =
   | 'חדש'
@@ -620,6 +621,28 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         [t],
     );
 
+    const referralsDefaultCols = useMemo(
+        () => ['status', 'candidateName', 'jobTitle', 'clientName', 'referralDate', 'coordinator'],
+        [],
+    );
+    const referralsAllColumnIds = useMemo(() => allColumns.map((c) => String(c.id)), [allColumns]);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('referrals_general', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns: referralsDefaultCols,
+        allColumnIds: referralsAllColumnIds,
+    });
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
+
     // Data State
     const [referrals, setReferrals] = useState<Referral[]>([]);
     const [referralsLoading, setReferralsLoading] = useState(false);
@@ -651,15 +674,6 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         lastUpdatedBys: [] as string[],
     });
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [visibleColumns, setVisibleColumns] = useState<string[]>([
-        'status',
-        'candidateName',
-        'jobTitle',
-        'clientName',
-        'referralDate',
-        'coordinator',
-    ]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Referral; direction: 'asc' | 'desc' } | null>(null);
@@ -1170,7 +1184,8 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     };
     
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => prev.includes(columnId) ? prev.filter(id => id !== columnId) : [...prev, columnId]);
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
     
     const handleDragStart = (index: number, colId: string) => {

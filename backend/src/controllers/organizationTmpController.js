@@ -49,8 +49,24 @@ const listHistory = async (_req, res) => {
   res.json(entries);
 };
 
+const shouldLinkCandidateToOrg = (entry, payload, actionType) => {
+  if (!entry.candidateId) return false;
+  if (actionType === 'create') return true;
+  if (actionType !== 'link') return false;
+  const isCompany =
+    typeof payload.isCompany === 'boolean' ? payload.isCompany : entry.isCompany;
+  return isCompany !== false;
+};
+
 const resolve = async (req, res) => {
-  const { ids, add = false, actionType = 'delete', flags = [], resolvedValue } = req.body || {};
+  const {
+    ids,
+    add = false,
+    actionType = 'delete',
+    flags = [],
+    resolvedValue,
+    organizationId,
+  } = req.body || {};
   if (!Array.isArray(ids) || ids.length === 0) {
     return res.status(400).json({ message: 'Missing ids array' });
   }
@@ -62,7 +78,7 @@ const resolve = async (req, res) => {
 
   const removedIds = [];
   const seenNames = new Set();
-  const candidateOrgLinks = []; // { candidateId, orgName }
+  const candidateIdsToLink = new Set();
 
   for (const entry of entries) {
     const payload = {};
@@ -88,17 +104,8 @@ const resolve = async (req, res) => {
     const normalized = (entry.name || '').trim().toLowerCase();
     if (normalized) seenNames.add(normalized);
 
-    // If this tmp entry belongs to a candidate and we are linking/creating a real company,
-    // remember to create CandidateOrganization after we resolve the actual organization id.
-    const isCompany =
-      typeof payload.isCompany === 'boolean' ? payload.isCompany : entry.isCompany;
-    if (entry.candidateId && isCompany && (actionType === 'link' || actionType === 'create')) {
-      // For link/create, resolvedValue (existing company name) is the canonical target if provided,
-      // otherwise fall back to the tmp entry name.
-      const orgName = (resolvedValue || entry.name || '').trim();
-      if (orgName) {
-        candidateOrgLinks.push({ candidateId: entry.candidateId, orgName });
-      }
+    if (shouldLinkCandidateToOrg(entry, payload, actionType)) {
+      candidateIdsToLink.add(entry.candidateId);
     }
   }
 
@@ -112,37 +119,50 @@ const resolve = async (req, res) => {
     }
   }
 
-  // Create CandidateOrganization rows for resolved companies (only real Organization records)
-  if (candidateOrgLinks.length) {
-    // Group by organization name to avoid redundant lookups
-    const orgNameMap = new Map(); // nameLower -> Organization instance
-    for (const link of candidateOrgLinks) {
-      const key = link.orgName.toLowerCase();
-      if (!orgNameMap.has(key)) {
-        // Find organization by name (case-insensitive)
-        // We only consider real organizations table, not tmp.
-        // If not found we silently skip.
+  let linkedOrganizationId = null;
+  let linkedCandidateCount = 0;
+
+  if (
+    (actionType === 'link' || actionType === 'create') &&
+    candidateIdsToLink.size > 0
+  ) {
+    let org = null;
+    if (organizationId) {
+      org = await Organization.findByPk(organizationId);
+    }
+    if (!org) {
+      const nameCandidates = [];
+      if (resolvedValue) nameCandidates.push(String(resolvedValue).trim());
+      for (const entry of entries) {
+        if (entry.name) nameCandidates.push(String(entry.name).trim());
+      }
+      for (const name of nameCandidates) {
+        if (!name) continue;
         // eslint-disable-next-line no-await-in-loop
-        const org = await Organization.findOne({
-          where: { name: { [Op.iLike]: link.orgName } },
+        org = await Organization.findOne({
+          where: { name: { [Op.iLike]: name } },
         });
-        if (org) orgNameMap.set(key, org);
+        if (org) break;
       }
     }
-
-    // Create links
-    for (const link of candidateOrgLinks) {
-      const key = link.orgName.toLowerCase();
-      const org = orgNameMap.get(key);
-      if (!org || !org.id) continue;
-      // eslint-disable-next-line no-await-in-loop
-      await CandidateOrganization.findOrCreate({
-        where: { candidateId: link.candidateId, organizationId: org.id },
-      });
+    if (org?.id) {
+      linkedOrganizationId = org.id;
+      for (const candidateId of candidateIdsToLink) {
+        // eslint-disable-next-line no-await-in-loop
+        await CandidateOrganization.findOrCreate({
+          where: { candidateId, organizationId: org.id },
+        });
+        linkedCandidateCount += 1;
+      }
     }
   }
 
-  res.json({ success: true, removed: removedIds });
+  res.json({
+    success: true,
+    removed: removedIds,
+    organizationId: linkedOrganizationId,
+    linkedCandidates: linkedCandidateCount,
+  });
 };
 
 module.exports = { list, resolve, listHistory };

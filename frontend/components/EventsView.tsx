@@ -9,6 +9,7 @@ import {
 import EventFormModal from './EventFormModal';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import { fetchEventTypes, filterEventTypesForContext, LEGACY_MANUAL_EVENT_TYPE_NAMES } from '../services/eventTypesApi';
 import { eventTypeChipClasses, normalizeEventTypes } from '../utils/eventTypeChips';
 import { hebrewDescriptionChangeLine, hebrewLinkedListChangeLine } from '../utils/eventHistoryText';
@@ -263,7 +264,6 @@ const EventsView: React.FC<EventsViewProps> = ({
         fromDate: '',
         toDate: '',
     });
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingEvent, setEditingEvent] = useState<Event | null>(null);
     const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -282,20 +282,28 @@ const EventsView: React.FC<EventsViewProps> = ({
     ], [t]);
     
     const defaultVisibleColumns = useMemo(() => allColumns.map(c => c.id), [allColumns]);
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
+    const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('candidate_events', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
 
-    // Update visible columns if language changes
     useEffect(() => {
-        setVisibleColumns(prev => {
-             // Keep IDs, just re-render to update labels via allColumns which is a dependency
-             return prev; 
-        });
-    }, [t]);
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
 
     useEffect(() => {
         if (!apiBase || !hasPersistedCandidate) {
@@ -702,15 +710,8 @@ const EventsView: React.FC<EventsViewProps> = ({
     ]);
 
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => {
-            if (prev.includes(columnId)) {
-                return prev.length > 1 ? prev.filter(id => id !== columnId) : prev;
-            } else {
-                const newCols = [...prev, columnId];
-                newCols.sort((a, b) => allColumns.findIndex(c => c.id === a) - allColumns.findIndex(c => c.id === b));
-                return newCols;
-            }
-        });
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
 
     const handleDragStart = (index: number, colId: string) => { dragItemIndex.current = index; setDraggingColumn(colId); };

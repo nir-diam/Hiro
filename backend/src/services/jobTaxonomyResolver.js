@@ -15,11 +15,23 @@ function norm(s) {
     .replace(/\s+/g, ' ');
 }
 
+/** Strip gender slash forms so `מנהל/ת` matches `מנהל`. */
+function normRoleKey(s) {
+  return norm(String(s ?? '').replace(/\/ת/g, '').replace(/\//g, ' '));
+}
+
 function partialMatch(a, b) {
   const x = norm(a);
   const y = norm(b);
   if (!x || !y) return false;
   return x === y || x.includes(y) || y.includes(x);
+}
+
+function rolesMatch(a, b) {
+  if (partialMatch(a, b)) return true;
+  const x = normRoleKey(a);
+  const y = normRoleKey(b);
+  return Boolean(x && y && (x === y || x.includes(y) || y.includes(x)));
 }
 
 /**
@@ -101,9 +113,9 @@ function findRoleInIndex(index, roleStr, category) {
     : index.allRoles;
 
   for (const row of pool) {
-    if (norm(row.value) === r || partialMatch(row.value, roleStr)) return row;
+    if (norm(row.value) === r || rolesMatch(row.value, roleStr)) return row;
     for (const syn of row.synonyms) {
-      if (norm(syn) === r || partialMatch(syn, roleStr)) return row;
+      if (norm(syn) === r || rolesMatch(syn, roleStr)) return row;
     }
   }
   return direct || null;
@@ -123,7 +135,10 @@ function resolveJobTaxonomy(job, index = taxonomyCache) {
   }
 
   const category = findCategoryInIndex(index, job?.field);
-  const roleRow = findRoleInIndex(index, job?.role, category);
+  let roleRow = findRoleInIndex(index, job?.role, category);
+  if (!roleRow && job?.role) {
+    roleRow = findRoleInIndex(index, job.role, null);
+  }
 
   if (roleRow) {
     return {
@@ -144,6 +159,18 @@ function resolveJobTaxonomy(job, index = taxonomyCache) {
   }
 
   return { jobId, categoryId: null, clusterId: null, roleId: null };
+}
+
+/**
+ * Taxonomy IDs stored on field_interest JobCandidate.workflowMeta (no real job row).
+ */
+function taxonomyFromWorkflowMeta(wm) {
+  if (!wm || typeof wm !== 'object' || Array.isArray(wm)) return null;
+  const categoryId = wm.categoryId ? String(wm.categoryId) : null;
+  const clusterId = wm.clusterId ? String(wm.clusterId) : null;
+  const roleId = wm.roleId ? String(wm.roleId) : null;
+  if (!categoryId && !clusterId && !roleId) return null;
+  return { jobId: null, categoryId, clusterId, roleId };
 }
 
 /**
@@ -217,6 +244,7 @@ module.exports = {
   loadTaxonomyIndex,
   invalidateTaxonomyCache,
   resolveJobTaxonomy,
+  taxonomyFromWorkflowMeta,
   buildLinkedJobsForIntent,
   findOpenJobsForFieldSelection,
 };

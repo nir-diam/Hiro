@@ -9,6 +9,7 @@ import {
 import Drawer from './Drawer';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 // --- TYPES ---
 interface Contact {
@@ -127,8 +128,22 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     const [contactToDelete, setContactToDelete] = useState<Contact | null>(null);
     const [formData, setFormData] = useState<Contact | null>(null);
 
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
+    const allColumnIds = useMemo(
+        () => ['select', 'name', 'role', 'actions', 'phone', 'mobilePhone', 'email', 'isActive', 'system_access'],
+        [],
+    );
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('clients_contacts', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
@@ -168,6 +183,10 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         if (!sortConfig || sortConfig.key !== key) return null;
         return <span className="text-text-subtle">{sortConfig.direction === 'asc' ? '▲' : '▼'}</span>;
     };
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -234,15 +253,8 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
     }, [filteredContacts, sortConfig]);
 
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => {
-            if (prev.includes(columnId)) {
-                return prev.length > 1 ? prev.filter(id => id !== columnId) : prev;
-            } else {
-                const newCols = [...prev, columnId];
-                newCols.sort((a, b) => allColumns.findIndex(c => c.id === a) - allColumns.findIndex(c => c.id === b));
-                return newCols;
-            }
-        });
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
 
     const handleDragStart = (index: number, colId: string) => { dragItemIndex.current = index; setDraggingColumn(colId); };

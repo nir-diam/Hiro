@@ -94,6 +94,7 @@ export const CvFilesVersionsPanel: React.FC<{
     searchTextSavedAt?: string | null;
     resumeUploadedAt?: string | null;
     tagDetails?: TagDetailForHighlight[];
+    highlightKeywords?: string[];
     createdAt?: string | null;
     updatedAt?: string | null;
     candidateId?: string | null;
@@ -110,6 +111,7 @@ export const CvFilesVersionsPanel: React.FC<{
     searchTextSavedAt,
     resumeUploadedAt,
     tagDetails = [],
+    highlightKeywords = [],
     createdAt,
     updatedAt,
     candidateId,
@@ -381,6 +383,7 @@ export const CvFilesVersionsPanel: React.FC<{
                         <ParsedSearchTextWithTags
                             searchText={activeDisplayText}
                             tagDetails={tagDetails}
+                            highlightKeywords={highlightKeywords}
                             createdAtLabel={parsedCreatedLabel}
                             onEdit={activeDisplayText && candidateId ? openEditor : undefined}
                             onDownloadPdf={() => downloadActiveAsPdf()}

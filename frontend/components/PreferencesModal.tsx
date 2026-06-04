@@ -3,6 +3,8 @@ import React, { useRef, useEffect, useId } from 'react';
 import { XMarkIcon, SunIcon, MoonIcon, PaintBrushIcon, ViewColumnsIcon, Bars3BottomLeftIcon, GlobeAmericasIcon, ArrowUturnLeftIcon } from './Icons';
 import { useTheme, Theme } from '../context/ThemeContext';
 import { useLanguage } from '../context/LanguageContext';
+import { useUserPreferences } from '../context/UserPreferencesContext';
+import { DEFAULT_GLOBAL_PREFERENCES } from '../utils/userPreferences';
 
 interface PreferencesModalProps {
   onClose: () => void;
@@ -22,8 +24,13 @@ const themes: { name: Theme; label: string; color: string }[] = [
 ];
 
 const PreferencesModal: React.FC<PreferencesModalProps> = ({ onClose }) => {
-  const { theme, setTheme, mode, setMode, fontSize, setFontSize, density, setDensity } = useTheme();
+  const { theme, setTheme: setThemeLocal, mode, setMode: setModeLocal, fontSize, setFontSize: setFontSizeLocal, density, setDensity: setDensityLocal } = useTheme();
   const { language, setLanguage, t } = useLanguage();
+  const { updateGlobal, flushGlobal } = useUserPreferences();
+  const setTheme = (v: Theme) => updateGlobal({ theme: v });
+  const setMode = (v: Parameters<typeof setModeLocal>[0]) => updateGlobal({ mode: v });
+  const setFontSize = (v: Parameters<typeof setFontSizeLocal>[0]) => updateGlobal({ fontSize: v });
+  const setDensity = (v: Parameters<typeof setDensityLocal>[0]) => updateGlobal({ density: v });
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
 
@@ -38,11 +45,12 @@ const PreferencesModal: React.FC<PreferencesModalProps> = ({ onClose }) => {
   }, [onClose]);
 
   const handleReset = () => {
-      setTheme('purple');
-      setMode('light');
-      setFontSize('base');
-      setDensity('comfortable');
+      updateGlobal({ ...DEFAULT_GLOBAL_PREFERENCES });
       setLanguage('he');
+  };
+
+  const handleClose = () => {
+      void flushGlobal().finally(() => onClose());
   };
 
   return (
@@ -50,7 +58,7 @@ const PreferencesModal: React.FC<PreferencesModalProps> = ({ onClose }) => {
       {/* Backdrop - Transparent enough to see changes */}
       <div 
         className="absolute inset-0 bg-black/20 backdrop-blur-[1px] transition-opacity" 
-        onClick={onClose}
+        onClick={handleClose}
       ></div>
 
       {/* Side Panel (Drawer) - Opening from LEFT in RTL context (Right side visually if dir=rtl is set on body, but we want it opposite to nav usually. Let's stick to 'left-0' for this design to not cover the nav if nav is right) */}
@@ -68,7 +76,7 @@ const PreferencesModal: React.FC<PreferencesModalProps> = ({ onClose }) => {
               </h2>
               <p className="text-xs text-text-muted mt-1">התאם את המערכת להעדפותיך</p>
           </div>
-          <button onClick={onClose} className="p-2 rounded-full text-text-subtle hover:bg-bg-hover hover:text-text-default transition-colors" aria-label="סגור">
+          <button onClick={handleClose} className="p-2 rounded-full text-text-subtle hover:bg-bg-hover hover:text-text-default transition-colors" aria-label="סגור">
             <XMarkIcon className="w-6 h-6" />
           </button>
         </header>

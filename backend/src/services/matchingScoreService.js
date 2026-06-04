@@ -882,12 +882,27 @@ function buildLinkedInfoFromJobCandidate(jcPlain) {
 const INTENT_TIER_PRIORITY = {
   exact: 4,
   role: 3,
-  category: 2,
+  cluster: 2,
+  category: 2, // legacy alias → cluster
   different: 1,
 };
 
+/** UI + engine use `cluster`; older configs may still store `category`. */
+function intentWeightValue(intentWeights, tierId) {
+  const row = (id) => intentWeights.find((iw) => iw.id === id);
+  if (tierId === 'cluster' || tierId === 'category') {
+    const cluster = row('cluster');
+    if (cluster != null && cluster.value != null) return Number(cluster.value);
+    const legacy = row('category');
+    if (legacy != null && legacy.value != null) return Number(legacy.value);
+    return 0;
+  }
+  const hit = row(tierId);
+  return hit != null && hit.value != null ? Number(hit.value) : 0;
+}
+
 function pickBestIntentTier(tiers, intentWeights) {
-  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  const w = (id) => intentWeightValue(intentWeights, id);
   let best = { score: w('different'), intentType: 'different', priority: 0 };
   for (const tier of tiers) {
     const priority = INTENT_TIER_PRIORITY[tier.intentType] ?? 0;
@@ -900,9 +915,16 @@ function pickBestIntentTier(tiers, intentWeights) {
 }
 
 function compareTaxonomyToTarget(linkedTax, targetTax, intentWeights) {
-  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  const w = (id) => intentWeightValue(intentWeights, id);
   if (!targetTax || !linkedTax) {
     return { score: w('different'), intentType: 'different' };
+  }
+  if (
+    targetTax.roleId &&
+    linkedTax.roleId &&
+    targetTax.roleId === linkedTax.roleId
+  ) {
+    return { score: w('exact'), intentType: 'exact' };
   }
   if (
     targetTax.clusterId &&
@@ -916,13 +938,13 @@ function compareTaxonomyToTarget(linkedTax, targetTax, intentWeights) {
     linkedTax.categoryId &&
     targetTax.categoryId === linkedTax.categoryId
   ) {
-    return { score: w('category'), intentType: 'category' };
+    return { score: w('cluster'), intentType: 'cluster' };
   }
   return { score: w('different'), intentType: 'different' };
 }
 
 function fallbackIntentFromProfile(candidate, job, intentWeights) {
-  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  const w = (id) => intentWeightValue(intentWeights, id);
   const candField = norm(candidate.field || '');
   const candTitle = norm(candidate.title || '');
   const jobField = norm(job.field || '');
@@ -934,7 +956,7 @@ function fallbackIntentFromProfile(candidate, job, intentWeights) {
     (candTitle === jobRole || candTitle.includes(jobRole) || jobRole.includes(candTitle));
 
   if (fieldMatch && roleMatch) return { score: w('role'), intentType: 'role' };
-  if (fieldMatch || roleMatch) return { score: w('category'), intentType: 'category' };
+  if (fieldMatch || roleMatch) return { score: w('cluster'), intentType: 'cluster' };
   return { score: w('different'), intentType: 'different' };
 }
 
@@ -952,7 +974,7 @@ function fallbackIntentFromProfile(candidate, job, intentWeights) {
  * @returns {{ score: number, intentType: string }}
  */
 function computeIntentScore(candidate, job, linkedInfo, intentWeights, options = {}) {
-  const w = (id) => intentWeights.find((iw) => iw.id === id)?.value ?? 0;
+  const w = (id) => intentWeightValue(intentWeights, id);
   const targetId = job?.id != null ? String(job.id) : '';
   const index = options.taxonomyIndex || null;
   const targetTax = options.targetTaxonomy
@@ -967,15 +989,13 @@ function computeIntentScore(candidate, job, linkedInfo, intentWeights, options =
 
   for (const lj of linkedJobs) {
     const lid = lj?.jobId != null ? String(lj.jobId) : '';
-    if (!lid || lid === targetId) {
-      if (lid === targetId) {
-        tiers.push({ intentType: 'exact', score: w('exact') });
-      }
+    if (lid && lid === targetId) {
+      tiers.push({ intentType: 'exact', score: w('exact') });
       continue;
     }
     const lt = lj.taxonomy
       || (index ? resolveJobTaxonomy({ id: lid, field: lj.field, role: lj.role }, index) : null);
-    tiers.push(compareTaxonomyToTarget(lt, targetTax, intentWeights));
+    if (lt) tiers.push(compareTaxonomyToTarget(lt, targetTax, intentWeights));
   }
 
   if (tiers.length) {
@@ -1235,6 +1255,18 @@ async function buildIntentOptionsByCandidateIds(candidateIds) {
     include: [{ model: Job, as: 'job', attributes: ['id', 'field', 'role'], required: false }],
   });
 
+  const interestLinks = await JobCandidate.findAll({
+    where: {
+      candidateId: { [Op.in]: ids },
+      jobId: null,
+      source: 'field_interest',
+    },
+    attributes: ['id', 'candidateId', 'workflowMeta', 'source'],
+  });
+
+  const { taxonomyFromWorkflowMeta } = require('./jobTaxonomyResolver');
+
+  /** @type {Map<string, Array<{ id: string, field?: string, role?: string, _taxonomyFromMeta?: object }>>} */
   const jobsByCandidate = new Map();
   for (const link of links) {
     const cid = String(link.candidateId);
@@ -1244,6 +1276,24 @@ async function buildIntentOptionsByCandidateIds(candidateIds) {
     if (job?.id) jobsByCandidate.get(cid).push(job);
   }
 
+  for (const link of interestLinks) {
+    const plain = link.get ? link.get({ plain: true }) : link;
+    const wm =
+      plain.workflowMeta && typeof plain.workflowMeta === 'object' && !Array.isArray(plain.workflowMeta)
+        ? plain.workflowMeta
+        : {};
+    const tax = taxonomyFromWorkflowMeta(wm);
+    if (!tax) continue;
+    const cid = String(plain.candidateId);
+    if (!jobsByCandidate.has(cid)) jobsByCandidate.set(cid, []);
+    jobsByCandidate.get(cid).push({
+      id: `interest-${plain.id}`,
+      field: wm.category != null ? String(wm.category) : undefined,
+      role: wm.role != null ? String(wm.role) : undefined,
+      _taxonomyFromMeta: tax,
+    });
+  }
+
   const taxonomyIndex = await loadTaxonomyIndex();
   for (const cid of ids) {
     const jobs = jobsByCandidate.get(cid) || [];
@@ -1251,7 +1301,7 @@ async function buildIntentOptionsByCandidateIds(candidateIds) {
       jobId: String(j.id),
       field: j.field,
       role: j.role,
-      taxonomy: resolveJobTaxonomy(j, taxonomyIndex),
+      taxonomy: j._taxonomyFromMeta || resolveJobTaxonomy(j, taxonomyIndex),
     }));
     out.set(cid, { linkedJobs, taxonomyIndex });
   }

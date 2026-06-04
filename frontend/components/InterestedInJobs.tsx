@@ -2,10 +2,12 @@
 import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, ArrowPathIcon, InformationCircleIcon, CheckCircleIcon, CalendarIcon, NoSymbolIcon, ArrowUturnLeftIcon, ArchiveBoxIcon, TargetIcon, SparklesIcon, XMarkIcon, Cog6ToothIcon, TableCellsIcon, Squares2X2Icon } from './Icons';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import FieldInterestJobPickerModal, { type FieldInterestPreviewJob } from './FieldInterestJobPickerModal';
 import UpdateStatusModal from './UpdateStatusModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { Job } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 
 type Status = 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'חדש';
@@ -359,9 +361,10 @@ const InterestedInJobs: React.FC<{
     const [recalculatingId, setRecalculatingId] = useState<string | null>(null);
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
     const [fieldInterestSaving, setFieldInterestSaving] = useState(false);
-    
-    // New state for advanced table features & modals
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+    const [fieldInterestPreview, setFieldInterestPreview] = useState<{
+        selection: SelectedJobField;
+        jobs: FieldInterestPreviewJob[];
+    } | null>(null);
     
     const allColumns = useMemo(() => [
         { id: 'jobTitle', header: t('interested_jobs.col_jobTitle') },
@@ -375,7 +378,19 @@ const InterestedInJobs: React.FC<{
     ], [t]);
 
     const defaultVisibleColumns = useMemo(() => allColumns.map(c => c.id), [allColumns]);
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultVisibleColumns);
+    const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('candidate_submissions', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
@@ -489,6 +504,12 @@ const InterestedInJobs: React.FC<{
 
     // Column management logic
      useEffect(() => {
+        if (!isSettingsOpen) {
+            persistColumnsNow();
+        }
+    }, [isSettingsOpen, persistColumnsNow]);
+
+     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
           if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
             setIsSettingsOpen(false);
@@ -503,15 +524,8 @@ const InterestedInJobs: React.FC<{
     }, []);
 
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => {
-            if (prev.includes(columnId)) {
-                return prev.length > 1 ? prev.filter(id => id !== columnId) : prev;
-            } else {
-                const newCols = [...prev, columnId];
-                newCols.sort((a, b) => allColumns.findIndex(c => c.id === a) - allColumns.findIndex(c => c.id === b));
-                return newCols;
-            }
-        });
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
 
     const handleDragStart = (index: number, colId: string) => { dragItemIndex.current = index; setDraggingColumn(colId); };
@@ -543,6 +557,61 @@ const InterestedInJobs: React.FC<{
         }
     };
 
+    const fieldInterestAuthHeaders = useCallback((): Record<string, string> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        return {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        };
+    }, []);
+
+    const buildFieldInterestBody = (selection: SelectedJobField, extra?: Record<string, unknown>) => ({
+        category: selection.category,
+        fieldType: selection.fieldType,
+        role: selection.role,
+        categoryId: selection.categoryId,
+        clusterId: selection.clusterId,
+        roleId: selection.roleId,
+        ...extra,
+    });
+
+    const applyLinkedJobsResponse = useCallback((rows: unknown) => {
+        if (Array.isArray(rows)) {
+            setJobs(rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
+        } else {
+            void reloadLinkedJobs();
+        }
+    }, [reloadLinkedJobs]);
+
+    const commitFieldInterest = useCallback(
+        async (selection: SelectedJobField, jobIds?: string[]) => {
+            const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
+            if (!apiBase || !id) {
+                throw new Error(t('interested_jobs.no_candidate') || 'לא נבחר מועמד');
+            }
+            const body = buildFieldInterestBody(
+                selection,
+                jobIds !== undefined ? { jobIds } : {},
+            );
+            const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/field-interest`, {
+                method: 'POST',
+                credentials: 'include',
+                headers: fieldInterestAuthHeaders(),
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                const errBody = await res.json().catch(() => ({}));
+                throw new Error(
+                    (errBody as { message?: string }).message || 'שמירת התעניינות בתחום נכשלה',
+                );
+            }
+            const rows: unknown = await res.json();
+            applyLinkedJobsResponse(rows);
+        },
+        [apiBase, candidateId, t, fieldInterestAuthHeaders, applyLinkedJobsResponse],
+    );
+
     const handleFieldSelected = async (selectedField: SelectedJobField | null) => {
         if (!selectedField) {
             setIsJobFieldSelectorOpen(false);
@@ -557,43 +626,64 @@ const InterestedInJobs: React.FC<{
         setFieldInterestSaving(true);
         setLinkedJobsError(null);
         try {
-            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-            const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/field-interest`, {
+            const previewRes = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/field-interest`, {
                 method: 'POST',
                 credentials: 'include',
-                headers: {
-                    'Content-Type': 'application/json',
-                    Accept: 'application/json',
-                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                },
-                body: JSON.stringify({
-                    category: selectedField.category,
-                    fieldType: selectedField.fieldType,
-                    role: selectedField.role,
-                    categoryId: selectedField.categoryId,
-                    clusterId: selectedField.clusterId,
-                    roleId: selectedField.roleId,
-                }),
+                headers: fieldInterestAuthHeaders(),
+                body: JSON.stringify(buildFieldInterestBody(selectedField, { preview: true })),
             });
-            if (!res.ok) {
-                const errBody = await res.json().catch(() => ({}));
+            if (!previewRes.ok) {
+                const errBody = await previewRes.json().catch(() => ({}));
                 throw new Error(
-                    (errBody as { message?: string }).message || 'שמירת התעניינות בתחום נכשלה',
+                    (errBody as { message?: string }).message || 'טעינת משרות מתאימות נכשלה',
                 );
             }
-            const rows: unknown = await res.json();
-            if (Array.isArray(rows)) {
-                setJobs(rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
-            } else {
-                await reloadLinkedJobs();
+            const previewPayload = (await previewRes.json()) as {
+                mode?: string;
+                jobs?: LinkedJobApiRow[];
+            };
+            const previewJobs = (Array.isArray(previewPayload.jobs) ? previewPayload.jobs : []).filter(
+                (row) => row.jobId != null && String(row.jobId).trim() !== '',
+            );
+
+            if (previewJobs.length === 0) {
+                await commitFieldInterest(selectedField);
+                setIsJobFieldSelectorOpen(false);
+                return;
             }
+
+            setFieldInterestPreview({
+                selection: selectedField,
+                jobs: previewJobs.map((row) => ({
+                    jobId: String(row.jobId),
+                    matchScore: row.matchScore,
+                    job: row.job as FieldInterestPreviewJob['job'],
+                })),
+            });
+            setIsJobFieldSelectorOpen(false);
         } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : 'שגיאה';
             setLinkedJobsError(msg);
-            console.error('[InterestedInJobs] field-interest save failed', err);
+            console.error('[InterestedInJobs] field-interest preview failed', err);
+            setIsJobFieldSelectorOpen(false);
         } finally {
             setFieldInterestSaving(false);
-            setIsJobFieldSelectorOpen(false);
+        }
+    };
+
+    const handleFieldInterestPickerConfirm = async (selectedJobIds: string[]) => {
+        if (!fieldInterestPreview) return;
+        setFieldInterestSaving(true);
+        setLinkedJobsError(null);
+        try {
+            await commitFieldInterest(fieldInterestPreview.selection, selectedJobIds);
+            setFieldInterestPreview(null);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : 'שגיאה';
+            setLinkedJobsError(msg);
+            console.error('[InterestedInJobs] field-interest commit failed', err);
+        } finally {
+            setFieldInterestSaving(false);
         }
     };
 
@@ -964,6 +1054,35 @@ const InterestedInJobs: React.FC<{
                 onChange={handleFieldSelected}
                 isModalOpen={isJobFieldSelectorOpen}
                 setIsModalOpen={setIsJobFieldSelectorOpen}
+            />
+
+            <FieldInterestJobPickerModal
+                isOpen={fieldInterestPreview != null}
+                roleLabel={
+                    fieldInterestPreview
+                        ? `${fieldInterestPreview.selection.category} › ${fieldInterestPreview.selection.role}`
+                        : ''
+                }
+                jobs={fieldInterestPreview?.jobs ?? []}
+                saving={fieldInterestSaving}
+                onClose={() => {
+                    if (!fieldInterestSaving) setFieldInterestPreview(null);
+                }}
+                onConfirm={handleFieldInterestPickerConfirm}
+                labels={{
+                    title: t('interested_jobs.picker_title'),
+                    subtitle: t('interested_jobs.picker_subtitle'),
+                    colJob: t('interested_jobs.col_jobTitle'),
+                    colCompany: t('interested_jobs.col_company'),
+                    colLocation: t('interested_jobs.col_location'),
+                    colMatch: t('interested_jobs.col_matchScore'),
+                    selectAll: t('interested_jobs.picker_select_all'),
+                    clearAll: t('interested_jobs.picker_clear_all'),
+                    cancel: t('interested_jobs.picker_cancel'),
+                    confirm: t('interested_jobs.picker_confirm'),
+                    confirmCount: t('interested_jobs.picker_selected_count'),
+                    empty: t('interested_jobs.picker_empty'),
+                }}
             />
 
             {editingInterest && (

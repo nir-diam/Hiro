@@ -2,6 +2,7 @@
 import React, { useRef, useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { XMarkIcon, MagnifyingGlassIcon } from './Icons';
+import { BUSINESS_FIELD_CATEGORY_ID } from '../services/picklistValuesApi';
 
 interface CompanyFilters {
     sizes: string[];
@@ -41,7 +42,6 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
     const [industries, setIndustries] = useState<IndustryCategory[]>([]);
     const [fields, setFields] = useState<FieldValue[]>([]);
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
 
     // Changed click outside logic: Now using a backdrop div with onClick instead of document listener
     // This is safer with createPortal and avoids issues with event bubbling order

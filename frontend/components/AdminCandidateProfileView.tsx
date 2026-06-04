@@ -1,6 +1,6 @@
 
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import { 
     AvatarIcon, ArrowLeftIcon, PhoneIcon, MapPinIcon, EnvelopeIcon, 
     BriefcaseIcon, UserIcon, ClockIcon, DocumentTextIcon, 
@@ -91,6 +91,11 @@ const TagMetricHelp: React.FC<{ label: string; ariaLabel: string; children: Reac
 const AdminCandidateProfileView: React.FC = () => {
     const { candidateId } = useParams<{ candidateId: string }>();
     const navigate = useNavigate();
+    const location = useLocation();
+    const searchHighlightKeywords = useMemo(() => {
+        const st = location.state as { matchedTerms?: string[] } | null;
+        return Array.isArray(st?.matchedTerms) ? st.matchedTerms.filter(Boolean) : [];
+    }, [location.state]);
     const [activeTab, setActiveTab] = useState<'overview' | 'resume' | 'logs'>('overview');
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [candidate, setCandidate] = useState<any | null>(null);
@@ -696,7 +701,8 @@ const AdminCandidateProfileView: React.FC = () => {
                             }} 
                             fullData={candidate}
                             resumeFileUrl={resumeUrl}
-                            className="h-full border-0 shadow-none" 
+                            className="h-full border-0 shadow-none"
+                            highlightKeywords={searchHighlightKeywords}
                         />
                     </div>
                 )}

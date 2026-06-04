@@ -10,7 +10,7 @@ import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 import { useLanguage } from '../context/LanguageContext';
 
 interface UnmatchedCompany {
-    id: number;
+    id: string;
     name: string; // The wrong name
     source: string;
     candidateId?: string | null;
@@ -149,11 +149,11 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([]);
 
     // Flags for manual isCompany overrides
-    const [companyFlags, setCompanyFlags] = useState<Record<number, boolean>>({});
+    const [companyFlags, setCompanyFlags] = useState<Record<string, boolean>>({});
     
     // Selection State
     const [selected, setSelected] = useState<UnmatchedCompany | null>(null);
-    const [checkedIds, setCheckedIds] = useState<Set<number>>(new Set());
+    const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
     
     // UI State
     const [searchTerm, setSearchTerm] = useState('');
@@ -246,15 +246,17 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     };
 
     const resolveTmpEntries = async (
-        ids: number[],
+        ids: string[],
         add: boolean,
         actionType: 'link' | 'create' | 'delete',
-        flags: { id: number; isCompany?: boolean }[],
+        flags: { id: string; isCompany?: boolean }[],
         resolvedValue?: string,
+        organizationId?: string,
     ) => {
         if (!ids.length) return;
         const payload: Record<string, any> = { ids, add, actionType, flags };
         if (resolvedValue) payload.resolvedValue = resolvedValue;
+        if (organizationId) payload.organizationId = organizationId;
         const res = await fetch(`${apiBase}/api/organizations/tmp/resolve`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -303,7 +305,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     };
     
     // Handlers
-    const handleToggleCheck = (e: React.MouseEvent, id: number) => {
+    const handleToggleCheck = (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
         setCheckedIds(prev => {
             const newSet = new Set(prev);
@@ -366,7 +368,13 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             }
             await addAliasToOrganization(selectedExistingCompany.id, selected.name);
             showNotification(`${selectedItemsForAction.length} חברות מוזגו בהצלחה ל-${selectedExistingCompany.name}`);
-            await finalizeAction(false, 'link', selectedItemsForAction, selectedExistingCompany.name);
+            await finalizeAction(
+                false,
+                'link',
+                selectedItemsForAction,
+                selectedExistingCompany.name,
+                selectedExistingCompany.id,
+            );
         } else if (action === 'create') {
             setIsCreateModalOpen(true);
         } else if (action === 'delete') {
@@ -382,6 +390,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         actionType: 'link' | 'create' | 'delete',
         items: UnmatchedCompany[],
         resolvedValue?: string,
+        organizationId?: string,
     ) => {
          const idsToRemove = items.map(u => u.id);
          const flagPayload = items
@@ -401,9 +410,19 @@ const AdminCompanyCorrectionsView: React.FC = () => {
          setSelectedExistingCompany(null);
 
         try {
-            await resolveTmpEntries(idsToRemove, add, actionType, flagPayload, resolvedValue);
+            await resolveTmpEntries(
+                idsToRemove,
+                add,
+                actionType,
+                flagPayload,
+                resolvedValue,
+                organizationId,
+            );
              await loadUnmatched();
              await loadHistory();
+             if (actionType === 'link' || actionType === 'create') {
+                 await loadOrganizationsData();
+             }
          } catch (err: any) {
              showNotification(err.message || 'הפעולה נכשלה', 'error');
          } finally {
@@ -434,11 +453,19 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                 const body = await res.text().catch(() => '');
                 throw new Error(body || 'יצירת החברה נכשלה');
             }
+            const created = await res.json();
+            const orgId = typeof created?.id === 'string' ? created.id : undefined;
+            const tmpNames = selectedItemsForAction
+                .map((item) => item.name?.trim())
+                .filter((name): name is string => Boolean(name && name !== data.name));
+            if (orgId && tmpNames.length) {
+                await addAliasToOrganization(orgId, tmpNames[0]);
+            }
+            await finalizeAction(true, 'create', selectedItemsForAction, data.name, orgId);
         } catch (err: any) {
             showNotification(err.message || 'יצירת החברה נכשלה', 'error');
             return;
         }
-        await finalizeAction(true, 'create', selectedItemsForAction, data.name);
     };
 
     const handleSelectForMerge = (company: { id: string; name: string }) => {

@@ -4,6 +4,7 @@ const CandidateOrganization = require('../models/CandidateOrganization');
 const { sendChat } = require('./geminiService');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const picklistService = require('./picklistService');
+const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 
 const list = async () => {
   const orgs = await Organization.findAll();
@@ -81,6 +82,10 @@ const sanitizePayload = (payload) => {
       else out[key] = n;
     }
   });
+  if ('employeeCount' in out && out.employeeCount != null && out.employeeCount !== '') {
+    const bucket = normalizeEmployeeCount(out.employeeCount);
+    out.employeeCount = bucket || null;
+  }
   return out;
 };
 

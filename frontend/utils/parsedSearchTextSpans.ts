@@ -60,8 +60,25 @@ export function collectSearchTextHighlightSpans(
     return merged;
 }
 
+/** Red highlight spans for complex-query keyword matches in parsed CV text. */
+export function collectKeywordHighlightSpans(text: string, keywords: string[]): TextHighlightSpan[] {
+    const details: TagDetailForHighlight[] = (keywords || [])
+        .map((term) => String(term || '').trim())
+        .filter((t) => t.length >= 2)
+        .map((term) => ({
+            tagKey: term,
+            displayNameHe: term,
+            rawType: 'search_hit',
+            quote: term,
+        }));
+    return collectSearchTextHighlightSpans(text, details);
+}
+
 export function chipClassForRawType(rawType?: string): string {
     const rt = String(rawType || '').toLowerCase();
+    if (rt === 'search_hit') {
+        return 'bg-red-200 text-red-900 border-red-400 font-bold';
+    }
     if (/role|seniority/.test(rt)) {
         return 'bg-secondary-200 text-secondary-800 border-secondary-300';
     }

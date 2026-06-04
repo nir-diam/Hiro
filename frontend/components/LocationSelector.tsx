@@ -1,5 +1,14 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon, MinusIcon, MapPinIcon, EyeIcon, XMarkIcon } from './Icons';
+import {
+    buildCityToRegionMap,
+    compressLocationItems,
+    fetchAllCityGroups,
+    filterLocationGroups,
+    groupCityNamesByRegion,
+    rowsToLocationGroups,
+    type CitySearchRow,
+} from '../utils/citySearchApi';
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string) || '';
 
@@ -15,8 +24,146 @@ export interface LocationGroup {
     cities: string[];
 }
 
-// No mock data – regions/cities come from backend /api/cities (search 2+ chars)
+// Full hierarchy loaded from GET /api/cities (see LocationSelector)
 export const locationHierarchy: LocationGroup[] = [];
+
+const REGION_PREVIEW_LIMIT = 10;
+
+type AreaCityGroupsPanelProps = {
+    groups: LocationGroup[];
+    expandedRegions: Set<string>;
+    onToggleRegionExpand: (region: string) => void;
+    regionShowAll: Set<string>;
+    onToggleRegionShowAll: (region: string) => void;
+    isCitySelected: (city: string) => boolean;
+    toggleCity: (city: string) => void;
+    isRegionFullySelected: (region: string, cities: string[]) => boolean;
+    isRegionPartiallySelected: (region: string, cities: string[]) => boolean;
+    toggleRegion: (region: string, cities: string[]) => void;
+    emptyMessage?: string;
+    loading?: boolean;
+    className?: string;
+    showRegionSelect?: boolean;
+};
+
+const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
+    groups,
+    expandedRegions,
+    onToggleRegionExpand,
+    regionShowAll,
+    onToggleRegionShowAll,
+    isCitySelected,
+    toggleCity,
+    isRegionFullySelected,
+    isRegionPartiallySelected,
+    toggleRegion,
+    emptyMessage = 'לא נמצאו תוצאות',
+    loading = false,
+    className = '',
+    showRegionSelect = true,
+}) => {
+    if (loading) {
+        return <div className="p-4 text-center text-text-muted text-sm">טוען...</div>;
+    }
+    if (!groups.length) {
+        return <div className="p-4 text-center text-text-muted text-sm">{emptyMessage}</div>;
+    }
+    return (
+        <div className={`overflow-y-auto custom-scrollbar p-1 ${className}`}>
+            {groups.map((group) => {
+                const isExpanded = expandedRegions.has(group.region);
+                const showAll = regionShowAll.has(group.region);
+                const visibleCities = showAll ? group.cities : group.cities.slice(0, REGION_PREVIEW_LIMIT);
+                const hiddenCount = Math.max(0, group.cities.length - visibleCities.length);
+                const fullySelected = isRegionFullySelected(group.region, group.cities);
+                const partiallySelected = isRegionPartiallySelected(group.region, group.cities);
+
+                return (
+                    <div key={group.region} className="mb-1">
+                        <div className="flex items-center gap-1">
+                            <button
+                                type="button"
+                                onClick={() => onToggleRegionExpand(group.region)}
+                                className="flex-1 flex items-center justify-between p-2 hover:bg-bg-hover rounded-lg transition-colors text-right min-w-0"
+                            >
+                                <div className="flex items-center gap-2 min-w-0">
+                                    <div className={`transition-transform duration-200 flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`}>
+                                        <ChevronDownIcon className="w-3 h-3 text-text-muted" />
+                                    </div>
+                                    <span className="text-xs font-bold text-text-default truncate">{group.region}</span>
+                                </div>
+                                <span className="text-[10px] text-text-muted bg-bg-subtle px-1.5 py-0.5 rounded flex-shrink-0">
+                                    {group.cities.length}
+                                </span>
+                            </button>
+                            {showRegionSelect && (
+                                <div
+                                    className={`w-5 h-5 rounded border flex items-center justify-center cursor-pointer transition-colors flex-shrink-0 ${
+                                        fullySelected
+                                            ? 'bg-primary-600 border-primary-600'
+                                            : partiallySelected
+                                              ? 'bg-primary-100 border-primary-600'
+                                              : 'border-border-default bg-white hover:border-primary-400'
+                                    }`}
+                                    onClick={() => toggleRegion(group.region, group.cities)}
+                                    title="בחר/בטל את כל האזור"
+                                >
+                                    {fullySelected && <CheckIcon className="w-3.5 h-3.5 text-white" />}
+                                    {partiallySelected && <MinusIcon className="w-3.5 h-3.5 text-primary-600" />}
+                                </div>
+                            )}
+                        </div>
+                        {isExpanded && (
+                            <div className="mr-6 pt-1 pb-2">
+                                <div className="flex flex-wrap gap-1.5">
+                                    {visibleCities.map((name) => {
+                                        const selected = isCitySelected(name);
+                                        return (
+                                            <button
+                                                key={name}
+                                                type="button"
+                                                onClick={() => toggleCity(name)}
+                                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] shadow-sm border transition-colors ${
+                                                    selected
+                                                        ? 'bg-primary-600 border-primary-600 text-white'
+                                                        : 'bg-white border-border-default text-text-default hover:border-primary-400 hover:bg-primary-50'
+                                                }`}
+                                                title={selected ? 'הסר מהבחירה' : 'הוסף לבחירה'}
+                                            >
+                                                {selected && <CheckIcon className="w-3 h-3" />}
+                                                {name}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                                {hiddenCount > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => onToggleRegionShowAll(group.region)}
+                                        className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                    >
+                                        + עוד {hiddenCount} יישובים
+                                        <ChevronDownIcon className="w-3 h-3" />
+                                    </button>
+                                )}
+                                {showAll && group.cities.length > REGION_PREVIEW_LIMIT && (
+                                    <button
+                                        type="button"
+                                        onClick={() => onToggleRegionShowAll(group.region)}
+                                        className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                    >
+                                        הצג פחות
+                                        <ChevronDownIcon className="w-3 h-3 rotate-180" />
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                    </div>
+                );
+            })}
+        </div>
+    );
+};
 
 interface LocationSelectorProps {
     selectedLocations: LocationItem[];
@@ -43,24 +190,23 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
     const [searchTerm, setSearchTerm] = useState('');
     const [expandedRegions, setExpandedRegions] = useState<Set<string>>(new Set());
 
-    // Backend cities API results (אזורים וערים) – fetched when search >= 2 chars
-    const [cityResults, setCityResults] = useState<LocationGroup[]>([]);
-    const [citiesLoading, setCitiesLoading] = useState(false);
+    // Full cities hierarchy from GET /api/cities (grouped by area)
+    const [allCityGroups, setAllCityGroups] = useState<LocationGroup[]>([]);
+    const [allCitiesLoading, setAllCitiesLoading] = useState(false);
+    const [regionShowAll, setRegionShowAll] = useState<Set<string>>(new Set());
 
-    // Radius Logic – city input options from backend /api/cities
+    // Radius tab – separate from regions tab (search API, flat chips in radius)
     const [radiusCity, setRadiusCity] = useState('');
     const [radiusDist, setRadiusDist] = useState(20);
-    const [radiusCityOptions, setRadiusCityOptions] = useState<string[]>([]);
     const [radiusCityOptionsLoading, setRadiusCityOptionsLoading] = useState(false);
-    // Radius Logic – central-city search results grouped by region (matches "regions" tab pattern)
     const [radiusCityGroups, setRadiusCityGroups] = useState<LocationGroup[]>([]);
     const [expandedRadiusRegions, setExpandedRadiusRegions] = useState<Set<string>>(new Set());
     const [radiusRegionShowAll, setRadiusRegionShowAll] = useState<Set<string>>(new Set());
-    // Radius Logic – cities inside chosen radius (for chips selection)
-    const [radiusAreaCities, setRadiusAreaCities] = useState<string[]>([]);
+    const [radiusAreaGroups, setRadiusAreaGroups] = useState<LocationGroup[]>([]);
     const [selectedRadiusAreaCities, setSelectedRadiusAreaCities] = useState<string[]>([]);
     const [radiusAreaLoading, setRadiusAreaLoading] = useState(false);
-    const [showAllRadiusArea, setShowAllRadiusArea] = useState(false);
+    const [expandedRadiusAreaRegions, setExpandedRadiusAreaRegions] = useState<Set<string>>(new Set());
+    const [radiusAreaRegionShowAll, setRadiusAreaRegionShowAll] = useState<Set<string>>(new Set());
     const [radiusCitiesFilter, setRadiusCitiesFilter] = useState('');
 
     const containerRef = useRef<HTMLDivElement>(null);
@@ -76,45 +222,151 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
 
+    const cityToRegion = useMemo(() => buildCityToRegionMap(allCityGroups), [allCityGroups]);
+
     // Helpers
-    const isCitySelected = (city: string) => selectedLocations.some(l => l.type === 'city' && l.value === city);
-    const isRegionFullySelected = (regionName: string, cities: string[]) => {
-        return cities.every(city => isCitySelected(city));
+    const isRegionSelected = (regionName: string) =>
+        selectedLocations.some((l) => l.type === 'region' && l.value === regionName);
+
+    const isCitySelected = (city: string) => {
+        if (selectedLocations.some((l) => l.type === 'city' && l.value === city)) return true;
+        const region = cityToRegion.get(city);
+        return region != null && isRegionSelected(region);
     };
+
+    const isRegionFullySelected = (regionName: string, cities: string[]) => {
+        if (isRegionSelected(regionName)) return true;
+        return cities.length > 0 && cities.every((city) => isCitySelected(city));
+    };
+
     const isRegionPartiallySelected = (regionName: string, cities: string[]) => {
-        const selectedCount = cities.filter(city => isCitySelected(city)).length;
+        if (isRegionSelected(regionName)) return false;
+        const selectedCount = cities.filter((city) => isCitySelected(city)).length;
         return selectedCount > 0 && selectedCount < cities.length;
     };
 
     const toggleRegion = (regionName: string, cities: string[]) => {
-        let newSelection = selectedLocations.filter(l => l.type !== 'radius');
-        const allSelected = isRegionFullySelected(regionName, cities);
-        
-        if (allSelected) {
-            newSelection = newSelection.filter(l => !cities.includes(l.value));
+        let newSelection = selectedLocations.filter((l) => l.type !== 'radius');
+
+        if (isRegionSelected(regionName) || isRegionFullySelected(regionName, cities)) {
+            newSelection = newSelection.filter(
+                (l) =>
+                    !(l.type === 'region' && l.value === regionName) &&
+                    !(l.type === 'city' && cities.includes(l.value)),
+            );
         } else {
-            const citiesToAdd = cities.filter(city => !isCitySelected(city));
-            const newItems = citiesToAdd.map(city => ({ type: 'city', value: city } as LocationItem));
-            newSelection = [...newSelection, ...newItems];
+            newSelection = newSelection.filter(
+                (l) => !(l.type === 'city' && cities.includes(l.value)),
+            );
+            newSelection.push({ type: 'region', value: regionName });
         }
         onChange(newSelection);
     };
 
     const toggleCity = (city: string) => {
-        let newSelection = selectedLocations.filter(l => l.type !== 'radius');
+        let newSelection = selectedLocations.filter((l) => l.type !== 'radius');
+        const region = cityToRegion.get(city);
+        const group = region ? allCityGroups.find((g) => g.region === region) : undefined;
+
         if (isCitySelected(city)) {
-            newSelection = newSelection.filter(l => l.value !== city);
+            if (region && isRegionSelected(region) && group) {
+                newSelection = newSelection.filter(
+                    (l) => !(l.type === 'region' && l.value === region),
+                );
+                const toAdd = group.cities
+                    .filter((c) => c !== city)
+                    .map((c) => ({ type: 'city' as const, value: c }));
+                newSelection = [
+                    ...newSelection.filter(
+                        (l) => !(l.type === 'city' && group.cities.includes(l.value)),
+                    ),
+                    ...toAdd,
+                ];
+            } else {
+                newSelection = newSelection.filter((l) => !(l.type === 'city' && l.value === city));
+            }
         } else {
+            newSelection = newSelection.filter((l) => !(l.type === 'city' && l.value === city));
             newSelection.push({ type: 'city', value: city });
+            if (group && group.cities.every((c) => isCitySelected(c) || c === city)) {
+                newSelection = newSelection.filter(
+                    (l) => !(l.type === 'city' && group.cities.includes(l.value)),
+                );
+                newSelection.push({ type: 'region', value: group.region });
+            }
         }
         onChange(newSelection);
     };
 
+    const confirmSelection = () => {
+        const compressed = compressLocationItems(selectedLocations, allCityGroups);
+        if (JSON.stringify(compressed) !== JSON.stringify(selectedLocations)) {
+            onChange(compressed);
+        }
+        setIsOpen(false);
+    };
+
     const toggleExpand = (regionName: string) => {
-        setExpandedRegions(prev => {
+        setExpandedRegions((prev) => {
             const next = new Set(prev);
             if (next.has(regionName)) next.delete(regionName);
             else next.add(regionName);
+            return next;
+        });
+    };
+
+    const toggleRegionShowAll = (regionName: string) => {
+        setRegionShowAll((prev) => {
+            const next = new Set(prev);
+            if (next.has(regionName)) next.delete(regionName);
+            else next.add(regionName);
+            return next;
+        });
+    };
+
+    const isRadiusAreaCitySelected = (city: string) => selectedRadiusAreaCities.includes(city);
+
+    const toggleRadiusAreaCity = (city: string) => {
+        setSelectedRadiusAreaCities((prev) =>
+            prev.includes(city) ? prev.filter((n) => n !== city) : [...prev, city],
+        );
+    };
+
+    const isRadiusAreaRegionFullySelected = (_region: string, cities: string[]) =>
+        cities.length > 0 && cities.every((c) => isRadiusAreaCitySelected(c));
+
+    const isRadiusAreaRegionPartiallySelected = (_region: string, cities: string[]) => {
+        const count = cities.filter((c) => isRadiusAreaCitySelected(c)).length;
+        return count > 0 && count < cities.length;
+    };
+
+    const toggleRadiusAreaRegionSelection = (_region: string, cities: string[]) => {
+        const allSelected = isRadiusAreaRegionFullySelected(_region, cities);
+        setSelectedRadiusAreaCities((prev) => {
+            if (allSelected) {
+                const remove = new Set(cities);
+                return prev.filter((n) => !remove.has(n));
+            }
+            const next = new Set(prev);
+            cities.forEach((c) => next.add(c));
+            return Array.from(next);
+        });
+    };
+
+    const toggleRadiusAreaRegionExpand = (region: string) => {
+        setExpandedRadiusAreaRegions((prev) => {
+            const next = new Set(prev);
+            if (next.has(region)) next.delete(region);
+            else next.add(region);
+            return next;
+        });
+    };
+
+    const toggleRadiusAreaRegionShowAll = (region: string) => {
+        setRadiusAreaRegionShowAll((prev) => {
+            const next = new Set(prev);
+            if (next.has(region)) next.delete(region);
+            else next.add(region);
             return next;
         });
     };
@@ -151,56 +403,30 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
         setIsOpen(false);
     };
 
-    // Fetch from backend /api/cities when user types 2+ characters
+    // Load full cities hierarchy when dropdown opens
     useEffect(() => {
-        const q = searchTerm.trim();
-        if (q.length < 2) { 
-            setCityResults([]);
-            return;
-        }
+        if (!isOpen || allCityGroups.length > 0) return;
         let cancelled = false;
-        setCitiesLoading(true);
-        const url = `${API_BASE}/api/cities?search=${encodeURIComponent(q)}`;
-        fetch(url)
-            .then((res) => res.json())
-            .then((data) => {
-                if (cancelled || !Array.isArray(data)) {
-                    return;
-                }
-                const byRegion = new Map<string, Set<string>>();
-                const records = data as Array<{ cityName?: string; city?: string; column4?: string }>;
-                for (const row of records) {
-                    const name = (row.cityName || row.city || '').trim();
-                    if (!name) continue;
-                    const region = (row.column4 || 'ערים').trim() || 'ערים';
-                    if (!byRegion.has(region)) byRegion.set(region, new Set());
-                    byRegion.get(region)!.add(name);
-                }
-                const groups: LocationGroup[] = Array.from(byRegion.entries()).map(([region, cities]) => ({
-                    region,
-                    cities: Array.from(cities).sort((a, b) => a.localeCompare(b)),
-                }));
-                setCityResults(groups);
+        setAllCitiesLoading(true);
+        fetchAllCityGroups()
+            .then((groups) => {
+                if (!cancelled) setAllCityGroups(groups);
             })
             .catch(() => {
-                if (!cancelled) setCityResults([]);
+                if (!cancelled) setAllCityGroups([]);
             })
             .finally(() => {
-                if (!cancelled) setCitiesLoading(false);
+                if (!cancelled) setAllCitiesLoading(false);
             });
         return () => {
             cancelled = true;
         };
-    }, [searchTerm]);
+    }, [isOpen, allCityGroups.length]);
 
-    // Radius tab: fetch city options from backend for "עיר מרכזית" datalist (search 2+ chars).
-    // Builds two parallel structures from the same response:
-    //   • radiusCityOptions – flat name list (kept for backward compat / radius-area logic)
-    //   • radiusCityGroups  – grouped by region for the new expandable display
+    // Radius tab: fetch central-city options when user types 2+ characters
     useEffect(() => {
         const q = radiusCity.trim();
         if (q.length < 2) {
-            setRadiusCityOptions([]);
             setRadiusCityGroups([]);
             return;
         }
@@ -212,31 +438,10 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                 .then((res) => res.json())
                 .then((data) => {
                     if (cancelled || !Array.isArray(data)) return;
-                    const names = new Set<string>();
-                    const byRegion = new Map<string, Set<string>>();
-                    const records = data as Array<{ cityName?: string; city?: string; column4?: string; region?: string }>;
-                    for (const row of records) {
-                        const name = (row.cityName || row.city || '').trim();
-                        if (!name) continue;
-                        names.add(name);
-                        const region = (row.column4 || row.region || 'ערים').trim() || 'ערים';
-                        if (!byRegion.has(region)) byRegion.set(region, new Set());
-                        byRegion.get(region)!.add(name);
-                    }
-                    const groups: LocationGroup[] = Array.from(byRegion.entries())
-                        .map(([region, cities]) => ({
-                            region,
-                            cities: Array.from(cities).sort((a, b) => a.localeCompare(b)),
-                        }))
-                        .sort((a, b) => a.region.localeCompare(b.region));
-                    setRadiusCityOptions(Array.from(names).sort((a, b) => a.localeCompare(b)));
-                    setRadiusCityGroups(groups);
+                    setRadiusCityGroups(rowsToLocationGroups(data as CitySearchRow[]));
                 })
                 .catch(() => {
-                    if (!cancelled) {
-                        setRadiusCityOptions([]);
-                        setRadiusCityGroups([]);
-                    }
+                    if (!cancelled) setRadiusCityGroups([]);
                 })
                 .finally(() => {
                     if (!cancelled) setRadiusCityOptionsLoading(false);
@@ -248,7 +453,6 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
         };
     }, [radiusCity]);
 
-    // Auto-expand all region groups whenever new results arrive (matches the regions-tab UX).
     useEffect(() => {
         if (radiusCityGroups.length > 0) {
             setExpandedRadiusRegions(new Set(radiusCityGroups.map((g) => g.region)));
@@ -274,14 +478,40 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
         });
     };
 
-    const filteredHierarchy = useMemo(() => cityResults, [cityResults]);
+    const filteredHierarchy = useMemo(
+        () => filterLocationGroups(allCityGroups, searchTerm),
+        [allCityGroups, searchTerm],
+    );
 
-    // Radius tab: fetch list of cities inside radius from backend when city or radius changes
+    const summaryGroups = useMemo(() => {
+        const regionItems = selectedLocations.filter((l) => l.type === 'region');
+        const names = selectedLocations
+            .filter((l) => l.type === 'city')
+            .map((l) => l.value);
+        const fromRegions = regionItems.flatMap((r) => {
+            const group = allCityGroups.find((g) => g.region === r.value);
+            return group ? group.cities : [r.value];
+        });
+        return groupCityNamesByRegion([...names, ...fromRegions], cityToRegion);
+    }, [selectedLocations, cityToRegion, allCityGroups]);
+
+    const filteredRadiusAreaGroups = useMemo(
+        () => filterLocationGroups(radiusAreaGroups, radiusCitiesFilter),
+        [radiusAreaGroups, radiusCitiesFilter],
+    );
+
+    const radiusAreaCityCount = useMemo(
+        () => radiusAreaGroups.reduce((sum, g) => sum + g.cities.length, 0),
+        [radiusAreaGroups],
+    );
+
+    // Radius tab: fetch cities inside radius when center city or distance changes
     useEffect(() => {
         const center = radiusCity.trim();
         if (center.length < 2) {
-            setRadiusAreaCities([]);
+            setRadiusAreaGroups([]);
             setSelectedRadiusAreaCities([]);
+            setExpandedRadiusAreaRegions(new Set());
             return;
         }
         let cancelled = false;
@@ -292,45 +522,51 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                 .then((res) => res.json())
                 .then((data) => {
                     if (cancelled || !Array.isArray(data)) return;
-                    const names = new Set<string>();
-                    const records = data as Array<{ cityName?: string; city?: string }>;
-                    for (const row of records) {
-                        const name = (row.cityName || row.city || '').trim();
-                        if (name) names.add(name);
-                    }
-                    const list = Array.from(names).sort((a, b) => a.localeCompare(b));
-                    setRadiusAreaCities(list);
-                    setSelectedRadiusAreaCities(list);
-                    setShowAllRadiusArea(false);
+                    const groups = rowsToLocationGroups(data as CitySearchRow[]);
+                    const names = groups.flatMap((g) => g.cities);
+                    setRadiusAreaGroups(groups);
+                    setSelectedRadiusAreaCities(names);
+                    setExpandedRadiusAreaRegions(new Set(groups.map((g) => g.region)));
+                    setRadiusAreaRegionShowAll(new Set());
                 })
                 .catch(() => {
                     if (!cancelled) {
-                        setRadiusAreaCities([]);
+                        setRadiusAreaGroups([]);
                         setSelectedRadiusAreaCities([]);
                     }
                 })
                 .finally(() => {
                     if (!cancelled) setRadiusAreaLoading(false);
                 });
-        }, 300);
+        }, 200);
         return () => {
             cancelled = true;
             clearTimeout(t);
         };
     }, [radiusCity, radiusDist]);
 
+    // Expand matching areas only while user is searching (default: collapsed)
     useEffect(() => {
-        if (filteredHierarchy.length > 0) {
-            setExpandedRegions(new Set(filteredHierarchy.map((g) => g.region)));
-        }
-    }, [filteredHierarchy]);
+        const q = searchTerm.trim();
+        if (!q || filteredHierarchy.length === 0) return;
+        setExpandedRegions(new Set(filteredHierarchy.map((g) => g.region)));
+        setRegionShowAll(new Set());
+    }, [searchTerm, filteredHierarchy]);
 
     // Display Logic
     const radiusSelection = selectedLocations.find(l => l.type === 'radius');
-    const selectedCityNames = useMemo(
-        () => selectedLocations.filter((l) => l.type === 'city').map((l) => l.value),
-        [selectedLocations],
-    );
+    const selectedCityNames = useMemo(() => {
+        const names: string[] = [];
+        for (const loc of selectedLocations) {
+            if (loc.type === 'city') names.push(loc.value);
+            else if (loc.type === 'region') {
+                const group = allCityGroups.find((g) => g.region === loc.value);
+                if (group) names.push(...group.cities);
+                else names.push(loc.value);
+            }
+        }
+        return names;
+    }, [selectedLocations, allCityGroups]);
     let displayValue = placeholder;
     
     if (summarizeAsCityNames) {
@@ -366,7 +602,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                 </button>
 
                 {/* Eye Icon for Summary (Only if multiple items selected) */}
-                {selectedLocations.length > 0 && !radiusSelection && (
+                {selectedCityNames.length > 0 && (
                     <div className="flex items-center border-r border-border-subtle pr-1 h-6">
                          <button
                             type="button"
@@ -438,62 +674,25 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                         />
                                     </div>
                                 </div>
-                                <div className="p-2 space-y-1">
-                                    {searchTerm.trim().length < 2 && (
-                                        <div className="p-4 text-center text-text-muted text-sm">הקלד לפחות 2 תווים לחיפוש ערים ואזורים</div>
-                                    )}
-                                    {searchTerm.trim().length >= 2 && citiesLoading && (
-                                        <div className="p-4 text-center text-text-muted text-sm">טוען...</div>
-                                    )}
-                                    {searchTerm.trim().length >= 2 && !citiesLoading && filteredHierarchy.length > 0 && filteredHierarchy.map(group => {
-                                        const isFullySelected = isRegionFullySelected(group.region, group.cities);
-                                        const isPartiallySelected = isRegionPartiallySelected(group.region, group.cities);
-                                        const isExpanded = expandedRegions.has(group.region);
-
-                                        return (
-                                            <div key={group.region} className="rounded-lg overflow-hidden">
-                                                <div className={`flex items-center justify-between p-2 rounded-lg hover:bg-bg-hover cursor-pointer transition-colors ${isExpanded ? 'bg-primary-50/50' : ''}`} onClick={() => toggleExpand(group.region)}>
-                                                    <div className="flex items-center gap-2 flex-1">
-                                                        <ChevronDownIcon className={`w-3.5 h-3.5 text-text-muted transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
-                                                        <span className="font-bold text-sm text-text-default">{group.region}</span>
-                                                    </div>
-                                                    <div className="flex items-center" onClick={(e) => e.stopPropagation()}>
-                                                        <div 
-                                                            className={`w-5 h-5 rounded border flex items-center justify-center cursor-pointer transition-colors ${
-                                                                isFullySelected ? 'bg-primary-600 border-primary-600' : 
-                                                                isPartiallySelected ? 'bg-primary-100 border-primary-600' : 
-                                                                'border-border-default bg-white hover:border-primary-400'
-                                                            }`}
-                                                            onClick={() => toggleRegion(group.region, group.cities)}
-                                                        >
-                                                            {isFullySelected && <CheckIcon className="w-3.5 h-3.5 text-white" />}
-                                                            {isPartiallySelected && <MinusIcon className="w-3.5 h-3.5 text-primary-600" />}
-                                                        </div>
-                                                    </div>
-                                                </div>
-
-                                                {isExpanded && (
-                                                    <div className="mr-3 pl-2 border-r-2 border-border-default space-y-0.5 mt-1 mb-2">
-                                                        {group.cities.map(city => {
-                                                            const selected = isCitySelected(city);
-                                                            return (
-                                                                <div key={city} className="flex items-center justify-between p-1.5 pr-3 hover:bg-bg-hover rounded-md cursor-pointer group/city" onClick={() => toggleCity(city)}>
-                                                                    <span className={`text-sm ${selected ? 'text-primary-700 font-medium' : 'text-text-muted'}`}>{city}</span>
-                                                                    <div className={`w-4 h-4 rounded border flex items-center justify-center transition-colors ${selected ? 'bg-primary-600 border-primary-600' : 'border-border-default bg-white group-hover/city:border-primary-400'}`}>
-                                                                        {selected && <CheckIcon className="w-3 h-3 text-white" />}
-                                                                    </div>
-                                                                </div>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                )}
-                                            </div>
-                                        );
-                                    })}
-                                    {searchTerm.trim().length >= 2 && !citiesLoading && filteredHierarchy.length === 0 && (
-                                        <div className="p-4 text-center text-text-muted text-sm">לא נמצאו תוצאות</div>
-                                    )}
-                                </div>
+                                <AreaCityGroupsPanel
+                                    groups={filteredHierarchy}
+                                    expandedRegions={expandedRegions}
+                                    onToggleRegionExpand={toggleExpand}
+                                    regionShowAll={regionShowAll}
+                                    onToggleRegionShowAll={toggleRegionShowAll}
+                                    isCitySelected={isCitySelected}
+                                    toggleCity={toggleCity}
+                                    isRegionFullySelected={isRegionFullySelected}
+                                    isRegionPartiallySelected={isRegionPartiallySelected}
+                                    toggleRegion={toggleRegion}
+                                    loading={allCitiesLoading}
+                                    emptyMessage={
+                                        allCityGroups.length === 0 && !allCitiesLoading
+                                            ? 'לא ניתן לטעון ערים'
+                                            : 'לא נמצאו תוצאות'
+                                    }
+                                    className="max-h-[320px]"
+                                />
                             </>
                         )}
 
@@ -551,18 +750,18 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                         <div className="mr-6 pt-1 pb-2">
                                                             <div className="flex flex-wrap gap-1.5">
                                                                 {visibleCities.map((name) => {
-                                                                    const isSelected = isCitySelected(name);
+                                                                    const isSelected = radiusCity === name;
                                                                     return (
                                                                         <button
                                                                             key={name}
                                                                             type="button"
-                                                                            onClick={() => toggleCity(name)}
+                                                                            onClick={() => setRadiusCity(name)}
                                                                             className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] shadow-sm border transition-colors ${
                                                                                 isSelected
                                                                                     ? 'bg-primary-600 border-primary-600 text-white'
                                                                                     : 'bg-white border-border-default text-text-default hover:border-primary-400 hover:bg-primary-50'
                                                                             }`}
-                                                                            title={isSelected ? 'הסר מהבחירה' : 'הוסף לבחירה'}
+                                                                            title="בחר כעיר מרכזית"
                                                                         >
                                                                             {isSelected && <CheckIcon className="w-3 h-3" />}
                                                                             {name}
@@ -623,12 +822,12 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                             </button>
                                         </div>
                                     </div>
-                                    <input 
-                                        type="range" 
-                                        min="1" 
-                                        max="100" 
-                                        step="1" 
-                                        value={radiusDist} 
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="100"
+                                        step="1"
+                                        value={radiusDist}
                                         onChange={(e) => setRadiusDist(Number(e.target.value))}
                                         className="w-full accent-primary-600 h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer"
                                     />
@@ -636,79 +835,60 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                         <span>5 ק"מ</span>
                                         <span>100 ק"מ</span>
                                     </div>
+                                </div>
 
-                                    {/* Free filter for radius cities */}
-                                    {!radiusAreaLoading && selectedRadiusAreaCities.length > 0 && (
-                                        <div className="mt-3 max-w-md">
-                                            <div className="relative">
-                                                <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2.5 top-1/2 -translate-y-1/2" />
-                                                <input
-                                                    type="text"
-                                                    placeholder="סנן רשימה..."
-                                                    value={radiusCitiesFilter}
-                                                    onChange={(e) => setRadiusCitiesFilter(e.target.value)}
-                                                    className="w-full bg-bg-subtle/30 border border-border-default rounded-md py-1.5 pl-2 pr-8 text-xs focus:ring-1 focus:ring-primary-500 outline-none"
-                                                />
-                                            </div>
-                                        </div>
+                                <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                        <label className="text-sm font-bold text-text-default">
+                                            3. יישובים בטווח ({radiusDist} ק&quot;מ)
+                                        </label>
+                                        {!radiusAreaLoading && radiusAreaCityCount > 0 && (
+                                            <span className="text-[10px] text-text-muted bg-bg-subtle px-1.5 py-0.5 rounded">
+                                                {selectedRadiusAreaCities.length} / {radiusAreaCityCount}
+                                            </span>
+                                        )}
+                                    </div>
+                                    {radiusCity.trim().length < 2 && (
+                                        <p className="text-xs text-text-muted">בחר עיר מרכזית כדי לראות יישובים בטווח</p>
                                     )}
-
-                                    {/* Cities inside radius – selectable chips */}
-                                    {radiusAreaLoading && radiusCity.trim().length >= 2 && (
-                                        <div className="mt-3 text-xs text-text-muted">טוען יישובים בטווח...</div>
-                                    )}
-                                    {!radiusAreaLoading && selectedRadiusAreaCities.length > 0 && (
-                                        <div className="mr-6 pt-1 pb-2">
-                                            <div className="flex flex-wrap gap-1.5">
-                                                {(
-                                                    radiusCitiesFilter.trim()
-                                                        ? selectedRadiusAreaCities.filter((name) =>
-                                                              name.toLowerCase().includes(radiusCitiesFilter.toLowerCase()),
-                                                          )
-                                                        : showAllRadiusArea
-                                                        ? selectedRadiusAreaCities
-                                                        : selectedRadiusAreaCities.slice(0, 10)
-                                                ).map((name) => (
-                                                    <span
-                                                        key={name}
-                                                        className="inline-flex items-center gap-1 bg-white border border-border-default px-2 py-1 rounded-md text-[11px] text-text-default shadow-sm group"
-                                                    >
-                                                        {name}
-                                                        <button
-                                                            type="button"
-                                                            className="text-text-subtle hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"
-                                                            title="הסר מהרשימה"
-                                                            onClick={() =>
-                                                                setSelectedRadiusAreaCities((prev) =>
-                                                                    prev.filter((n) => n !== name),
-                                                                )
-                                                            }
-                                                        >
-                                                            <XMarkIcon className="w-3 h-3" />
-                                                        </button>
-                                                    </span>
-                                                ))}
-                                            </div>
-                                            {radiusCitiesFilter.trim().length === 0 &&
-                                                selectedRadiusAreaCities.length > 10 && (
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setShowAllRadiusArea((prev) => !prev)}
-                                                    className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
-                                                >
-                                                    {showAllRadiusArea
-                                                        ? 'הצג פחות'
-                                                        : `+ עוד ${selectedRadiusAreaCities.length - 10} יישובים`}
-                                                    <ChevronDownIcon
-                                                        className={`w-3 h-3 ${showAllRadiusArea ? 'rotate-180' : ''}`}
+                                    {radiusCity.trim().length >= 2 && (
+                                        <>
+                                            {!radiusAreaLoading && radiusAreaGroups.length > 0 && (
+                                                <div className="relative mb-2 max-w-md">
+                                                    <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2.5 top-1/2 -translate-y-1/2" />
+                                                    <input
+                                                        type="text"
+                                                        placeholder="סנן רשימה..."
+                                                        value={radiusCitiesFilter}
+                                                        onChange={(e) => setRadiusCitiesFilter(e.target.value)}
+                                                        className="w-full bg-bg-subtle/30 border border-border-default rounded-md py-1.5 pl-2 pr-8 text-xs focus:ring-1 focus:ring-primary-500 outline-none"
                                                     />
-                                                </button>
+                                                </div>
                                             )}
-                                        </div>
+                                            <AreaCityGroupsPanel
+                                                groups={filteredRadiusAreaGroups}
+                                                expandedRegions={expandedRadiusAreaRegions}
+                                                onToggleRegionExpand={toggleRadiusAreaRegionExpand}
+                                                regionShowAll={radiusAreaRegionShowAll}
+                                                onToggleRegionShowAll={toggleRadiusAreaRegionShowAll}
+                                                isCitySelected={isRadiusAreaCitySelected}
+                                                toggleCity={toggleRadiusAreaCity}
+                                                isRegionFullySelected={isRadiusAreaRegionFullySelected}
+                                                isRegionPartiallySelected={isRadiusAreaRegionPartiallySelected}
+                                                toggleRegion={toggleRadiusAreaRegionSelection}
+                                                loading={radiusAreaLoading}
+                                                emptyMessage={
+                                                    radiusAreaLoading
+                                                        ? 'טוען יישובים בטווח...'
+                                                        : 'אין יישובים בטווח זה'
+                                                }
+                                                className="max-h-52"
+                                            />
+                                        </>
                                     )}
                                 </div>
 
-                                <button 
+                                <button
                                     onClick={applyRadius}
                                     disabled={!radiusCity}
                                     className="w-full bg-primary-600 text-white font-bold py-2.5 rounded-xl hover:bg-primary-700 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
@@ -723,7 +903,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                         <button onClick={() => onChange([])} className="text-xs font-bold text-text-muted hover:text-red-500 transition-colors">
                             נקה בחירה
                         </button>
-                        <button onClick={() => setIsOpen(false)} className="bg-primary-600 text-white text-xs font-bold py-2 px-5 rounded-lg hover:bg-primary-700 transition shadow-sm">
+                        <button onClick={confirmSelection} className="bg-primary-600 text-white text-xs font-bold py-2 px-5 rounded-lg hover:bg-primary-700 transition shadow-sm">
                             אישור ({selectedLocations.length})
                         </button>
                     </div>
@@ -731,23 +911,56 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
             )}
             
             {/* Summary Bubble Popover */}
-            {isSummaryOpen && selectedLocations.length > 0 && (
-                 <div className="absolute top-full left-0 mt-1 bg-white border border-border-default rounded-xl shadow-2xl z-50 w-64 p-3 animate-fade-in">
+            {isSummaryOpen && selectedCityNames.length > 0 && (
+                 <div className="absolute top-full left-0 mt-1 bg-white border border-border-default rounded-xl shadow-2xl z-50 w-72 p-3 animate-fade-in">
                     <div className="flex justify-between items-center mb-2 pb-2 border-b border-border-default">
                         <span className="text-sm font-bold text-text-default">ערים ואזורים שנבחרו</span>
-                        <button onClick={() => setIsSummaryOpen(false)}><XMarkIcon className="w-4 h-4 text-text-muted hover:text-text-default"/></button>
+                        <button type="button" onClick={() => setIsSummaryOpen(false)}><XMarkIcon className="w-4 h-4 text-text-muted hover:text-text-default"/></button>
                     </div>
-                    <div className="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto">
-                        {selectedLocations.map((loc, i) => (
-                            <span key={i} className="inline-flex items-center gap-1 text-xs bg-primary-50 text-primary-700 px-2 py-1 rounded-md border border-primary-100">
-                                {loc.value}
-                                <button onClick={() => {
-                                    const newLocs = selectedLocations.filter(l => l.value !== loc.value);
-                                    onChange(newLocs);
-                                    if(newLocs.length === 0) setIsSummaryOpen(false);
-                                }} className="hover:text-primary-900"><XMarkIcon className="w-3 h-3"/></button>
-                            </span>
-                        ))}
+                    {radiusSelection && (
+                        <p className="text-xs text-text-muted mb-2 pb-2 border-b border-border-subtle">
+                            רדיוס: {radiusSelection.value} · {radiusSelection.radius} ק&quot;מ
+                        </p>
+                    )}
+                    <div className="max-h-56 overflow-y-auto custom-scrollbar space-y-3">
+                        {summaryGroups.length > 0 ? (
+                            summaryGroups.map((group) => (
+                                <div key={group.region}>
+                                    <p className="text-xs font-bold text-text-default mb-1.5">{group.region}</p>
+                                    <div className="flex flex-wrap gap-1.5 mr-1">
+                                        {group.cities.map((city) => (
+                                            <span
+                                                key={city}
+                                                className="inline-flex items-center gap-1 text-xs bg-primary-50 text-primary-700 px-2 py-1 rounded-md border border-primary-100"
+                                            >
+                                                {city}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        const newLocs = selectedLocations.filter(
+                                                            (l) => !(l.type === 'city' && l.value === city),
+                                                        );
+                                                        onChange(newLocs);
+                                                        if (newLocs.length === 0) setIsSummaryOpen(false);
+                                                    }}
+                                                    className="hover:text-primary-900"
+                                                >
+                                                    <XMarkIcon className="w-3 h-3" />
+                                                </button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))
+                        ) : (
+                            <div className="flex flex-wrap gap-1.5">
+                                {selectedLocations.map((loc, i) => (
+                                    <span key={i} className="inline-flex items-center gap-1 text-xs bg-primary-50 text-primary-700 px-2 py-1 rounded-md border border-primary-100">
+                                        {loc.value}
+                                    </span>
+                                ))}
+                            </div>
+                        )}
                     </div>
                 </div>
             )}

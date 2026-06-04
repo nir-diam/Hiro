@@ -50,6 +50,11 @@ const User = sequelize.define(
       type: DataTypes.UUID,
       allowNull: true,
     },
+    uiPreferences: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: {},
+    },
   },
   {
     tableName: 'users',

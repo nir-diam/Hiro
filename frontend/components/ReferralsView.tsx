@@ -7,6 +7,7 @@ import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import { type Job } from './JobsView';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 type Status = 'התקבל לעבודה' | 'נדחה' | 'בהמתנה' | 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'נשלחו קו"ח' | 'נשלחו קורות חיים';
 
@@ -235,8 +236,6 @@ const ReferralsView: React.FC<{
     const [activeReferrals, setActiveReferrals] = useState<ActiveReferral[]>([]);
     const [activeReferralsLoading, setActiveReferralsLoading] = useState(false);
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
-    
     // Columns definitions using useMemo to react to language changes
     const allActiveColumns = useMemo(() => [
         { id: 'status', header: t('referrals_view.col_status') },
@@ -250,20 +249,24 @@ const ReferralsView: React.FC<{
     ], [t]);
 
     const defaultVisibleColumns = useMemo(() => allActiveColumns.map(c => c.id as string), [allActiveColumns]);
-    const [visibleColumns, setVisibleColumns] = useState<string[]>(() => defaultVisibleColumns);
-    const activeColumnIdsKey = useMemo(() => allActiveColumns.map((c) => c.id).join(','), [allActiveColumns]);
+    const allColumnIds = useMemo(() => allActiveColumns.map((c) => c.id as string), [allActiveColumns]);
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns,
+        setVisibleColumns,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('candidate_referrals', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns,
+        allColumnIds,
+    });
+    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
     useEffect(() => {
-        setVisibleColumns((prev) => {
-            const order = allActiveColumns.map((c) => c.id as string);
-            const next = prev.filter((id) => order.includes(id));
-            for (const id of order) {
-                if (!next.includes(id)) next.push(id);
-            }
-            return next.length ? next : order;
-        });
-    }, [activeColumnIdsKey, allActiveColumns]);
-    const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [isStatusModalOpen, setIsStatusModalOpen] = useState(false);
     const [editingReferral, setEditingReferral] = useState<ActiveReferral | null>(null);
@@ -505,14 +508,8 @@ const ReferralsView: React.FC<{
     const toggleRow = (id: string) => setExpandedRowId(prevId => (prevId === id ? null : id));
 
     const handleColumnToggle = (columnId: string) => {
-        setVisibleColumns(prev => {
-            if (prev.includes(columnId)) return prev.length > 1 ? prev.filter(id => id !== columnId) : prev;
-            else {
-                const newCols = [...prev, columnId];
-                newCols.sort((a, b) => allActiveColumns.findIndex(c => c.id === a) - allActiveColumns.findIndex(c => c.id === b));
-                return newCols;
-            }
-        });
+        if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
+        toggleColumnPref(columnId);
     };
     
     // Drag handlers...

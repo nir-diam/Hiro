@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { ArrowDownTrayIcon, PencilIcon, SparklesIcon } from './Icons';
 import {
     chipClassForRawType,
+    collectKeywordHighlightSpans,
     collectSearchTextHighlightSpans,
     type TagDetailForHighlight,
 } from '../utils/parsedSearchTextSpans';
@@ -164,12 +165,14 @@ const ParsedTagSpan: React.FC<{ text: string; detail: TagDetailForHighlight }> =
 export const ParsedSearchTextWithTags: React.FC<{
     searchText: string;
     tagDetails?: TagDetailForHighlight[];
+    /** Terms from complex-query search — highlighted in red in CV text. */
+    highlightKeywords?: string[];
     createdAtLabel?: string | null;
     onEdit?: () => void;
     onDownloadPdf?: () => void | Promise<void>;
     onDownloadDocx?: () => void | Promise<void>;
     toolbarBelowHeader?: React.ReactNode;
-}> = ({ searchText, tagDetails = [], createdAtLabel, onEdit, onDownloadPdf, onDownloadDocx, toolbarBelowHeader }) => {
+}> = ({ searchText, tagDetails = [], highlightKeywords = [], createdAtLabel, onEdit, onDownloadPdf, onDownloadDocx, toolbarBelowHeader }) => {
     const [exportBusy, setExportBusy] = useState<'pdf' | 'docx' | null>(null);
 
     const runExport = (kind: 'pdf' | 'docx', fn?: () => void | Promise<void>) => {
@@ -178,10 +181,17 @@ export const ParsedSearchTextWithTags: React.FC<{
         void Promise.resolve(fn()).finally(() => setExportBusy(null));
     };
     const plain = normalizeSearchTextLineBreaks(searchText);
-    const spans = useMemo(
-        () => collectSearchTextHighlightSpans(plain, tagDetails),
-        [plain, tagDetails],
-    );
+    const spans = useMemo(() => {
+        const tagSpans = collectSearchTextHighlightSpans(plain, tagDetails);
+        const kwSpans = collectKeywordHighlightSpans(plain, highlightKeywords);
+        const merged = [...tagSpans, ...kwSpans].sort((a, b) => a.start - b.start || b.end - a.end - (a.end - a.start));
+        const out: typeof tagSpans = [];
+        for (const span of merged) {
+            const last = out[out.length - 1];
+            if (!last || span.start >= last.end) out.push(span);
+        }
+        return out;
+    }, [plain, tagDetails, highlightKeywords]);
 
     const body = useMemo(() => {
         if (!plain) return null;

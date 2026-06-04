@@ -712,18 +712,19 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
   }
 
   if (advanced && typeof advanced === 'object' && !Array.isArray(advanced)) {
+    const panelFragments = [];
     const g = advanced.gender;
     if (g === 'male') {
-      fragments.push(`(gender ILIKE '%זכר%' OR gender ILIKE '%male%')`);
+      panelFragments.push(`(gender ILIKE '%זכר%' OR gender ILIKE '%male%')`);
     } else if (g === 'female') {
-      fragments.push(`(gender ILIKE '%נקב%' OR gender ILIKE '%female%')`);
+      panelFragments.push(`(gender ILIKE '%נקב%' OR gender ILIKE '%female%')`);
     }
 
     const statusFilter = String(advanced.statusFilter || '').trim();
     if (statusFilter === 'active') {
-      fragments.push(`"isArchived" = false`);
+      panelFragments.push(`"isArchived" = false`);
     } else if (statusFilter === 'inactive') {
-      fragments.push(`"isArchived" = true`);
+      panelFragments.push(`"isArchived" = true`);
     }
 
     if (Array.isArray(advanced.tags)) {
@@ -731,7 +732,7 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
         const t = String(tag || '').trim();
         if (!t) continue;
         const n = pushBind(binds, `%${t}%`);
-        fragments.push(`EXISTS (
+        panelFragments.push(`EXISTS (
           SELECT 1 FROM system_tags ct
           INNER JOIN tags tg ON tg.id = ct.tag_id
           WHERE ct.entity_id = candidates.id AND ct.is_active = true AND ct.type = 'candidate'
@@ -745,10 +746,23 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       for (const loc of advanced.locations) {
         const v = String(loc?.value || '').trim();
         if (!v) continue;
-        const n = pushBind(binds, `%${v}%`);
-        locParts.push(`(address ILIKE $${n} OR location ILIKE $${n})`);
+        const locType = String(loc?.type || 'city').trim().toLowerCase();
+        if (locType === 'region') {
+          const rn = pushBind(binds, v);
+          locParts.push(`EXISTS (
+            SELECT 1 FROM cities c
+            WHERE TRIM(COALESCE(c.column4, c.region, '')) ILIKE TRIM($${rn}::text)
+            AND (
+              candidates.address ILIKE '%' || TRIM(COALESCE(c.city_name, c.city, '')) || '%'
+              OR candidates.location ILIKE '%' || TRIM(COALESCE(c.city_name, c.city, '')) || '%'
+            )
+          )`);
+        } else {
+          const n = pushBind(binds, `%${v}%`);
+          locParts.push(`(address ILIKE $${n} OR location ILIKE $${n})`);
+        }
       }
-      if (locParts.length) fragments.push(`(${locParts.join(' OR ')})`);
+      if (locParts.length) panelFragments.push(`(${locParts.join(' OR ')})`);
     }
 
     if (
@@ -757,7 +771,7 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       advanced.jobScopes.length
     ) {
       const n = pushBind(binds, advanced.jobScopes);
-      fragments.push(
+      panelFragments.push(
         `("jobScope" = ANY($${n}::text[]) OR "jobScopes" && $${n}::text[])`,
       );
     }
@@ -767,11 +781,11 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       const to = String(advanced.lastUpdated.to || '').trim();
       if (from) {
         const n = pushBind(binds, from);
-        fragments.push(`"updatedAt" >= $${n}::date`);
+        panelFragments.push(`"updatedAt" >= $${n}::date`);
       }
       if (to) {
         const n = pushBind(binds, `${to}T23:59:59.999Z`);
-        fragments.push(`"updatedAt" <= $${n}::timestamptz`);
+        panelFragments.push(`"updatedAt" <= $${n}::timestamptz`);
       }
     }
 
@@ -795,7 +809,7 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
           roleEqParts.length === 1 ? roleEqParts[0] : `(${roleEqParts.join(' OR ')})`,
         );
       }
-      fragments.push(`EXISTS (
+      panelFragments.push(`EXISTS (
         SELECT 1 FROM job_candidates jc
         INNER JOIN jobs j ON j.id = jc."jobId"
         WHERE jc."candidateId" = candidates.id
@@ -826,9 +840,9 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       const unknownAge = `(NOT (${hasKnownAge}))`;
       // Checked: in range OR no parseable age. Unchecked: in range only among those with a known age (exclude unknown).
       if (includeUnknownAge) {
-        fragments.push(`(${inRange} OR ${unknownAge})`);
+        panelFragments.push(`(${inRange} OR ${unknownAge})`);
       } else {
-        fragments.push(`((${inRange}) AND (${hasKnownAge}))`);
+        panelFragments.push(`((${inRange}) AND (${hasKnownAge}))`);
       }
     }
 
@@ -846,15 +860,15 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       const inSalaryRange = `(${hasSalary} AND ${overlap})`;
       const unknownSalary = `(NOT (${hasSalary}))`;
       if (includeUnknownSalary) {
-        fragments.push(`(${inSalaryRange} OR ${unknownSalary})`);
+        panelFragments.push(`(${inSalaryRange} OR ${unknownSalary})`);
       } else {
-        fragments.push(inSalaryRange);
+        panelFragments.push(inSalaryRange);
       }
     }
 
     // השכלה: at least one active tag classified as education (link raw_type or catalog type degree/education).
     if (advanced.hasDegree === true) {
-      fragments.push(`EXISTS (
+      panelFragments.push(`EXISTS (
         SELECT 1 FROM system_tags ct
         INNER JOIN tags tg ON tg.id = ct.tag_id
         WHERE ct.entity_id = candidates.id AND ct.is_active = true AND ct.type = 'candidate'
@@ -871,7 +885,7 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
         const lang = String(lf?.language || '').trim();
         if (!lang) continue;
         const n = pushBind(binds, `%${lang}%`);
-        fragments.push(`languages::text ILIKE $${n}`);
+        panelFragments.push(`languages::text ILIKE $${n}`);
       }
     }
 
@@ -882,27 +896,29 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
     if (whRaw && !whFlexible) {
       const nEq = pushBind(binds, whRaw);
       const nLike = pushBind(binds, `%${whRaw}%`);
-      fragments.push(
+      panelFragments.push(
         `((NULLIF(TRIM(COALESCE("preferredWorkingHours", '')), '') IS NOT NULL AND (TRIM(COALESCE("preferredWorkingHours", '')) = $${nEq} OR "preferredWorkingHours" ILIKE $${nLike})) OR (NULLIF(TRIM(COALESCE("preferredWorkingHours", '')), '') IS NULL AND NULLIF(TRIM(COALESCE(availability::text, '')), '') IS NOT NULL AND (TRIM(COALESCE(availability::text, '')) = $${nEq} OR availability ILIKE $${nLike})))`,
       );
     }
 
-    if (Array.isArray(advanced.complexRules)) {
-      for (const rule of advanced.complexRules) {
-        if (rule.field === 'source' && rule.textValue) {
-          const tv = String(rule.textValue).trim();
-          if (tv) {
-            const n = pushBind(binds, `%${tv}%`);
-            fragments.push(`source ILIKE $${n}`);
-          }
-        }
+    let complexSql = null;
+    if (Array.isArray(advanced.complexRules) && advanced.complexRules.length) {
+      const { compileComplexRulesWhere, combinePanelAndComplexSql } = require('./complexQueryCompiler');
+      complexSql = compileComplexRulesWhere(advanced.complexRules, binds);
+      const panelSql = panelFragments.join(' AND ');
+      const merged = combinePanelAndComplexSql(panelSql, complexSql, advanced.complexRules);
+      if (merged) {
+        panelFragments.length = 0;
+        panelFragments.push(merged);
       }
     }
 
     if (advanced.dataIncomplete === true) {
       const n = pushBind(binds, 'חסר נתונים');
-      fragments.push(`"status" = $${n}`);
+      panelFragments.push(`"status" = $${n}`);
     }
+
+    fragments.push(...panelFragments);
   }
 
   const whereSql = fragments.join(' AND ');
@@ -1191,6 +1207,46 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
   return mappedRows;
 };
 
+/** Match justification + highlight terms for complex free-text rules (list API). */
+const enrichListRowsComplexMatchMetadata = async (mappedRows, advanced) => {
+  const rules = advanced?.complexRules;
+  if (!Array.isArray(rules) || !rules.length || !Array.isArray(mappedRows) || !mappedRows.length) {
+    return;
+  }
+  const { attachComplexMatchMetadata } = require('./complexQueryCompiler');
+  const needsCvText = rules.some((r) => r?.field === 'text');
+  const needsLastRole = rules.some((r) => r?.field === 'last_role');
+  if (needsCvText || needsLastRole) {
+    const ids = mappedRows.map((m) => m.id).filter(Boolean);
+    if (ids.length) {
+      const extraAttrs = ['id', 'searchText', 'internalNotes', 'candidateNotes'];
+      if (needsLastRole) extraAttrs.push('workExperience', 'experience', 'title');
+      const extras = await Candidate.findAll({
+        where: { id: { [Op.in]: ids } },
+        attributes: extraAttrs,
+      });
+      const byId = new Map(extras.map((r) => [String(r.id), r.get({ plain: true })]));
+      for (const m of mappedRows) {
+        const ex = byId.get(String(m.id));
+        if (ex) {
+          m.searchText = ex.searchText;
+          m.internalNotes = ex.internalNotes;
+          m.candidateNotes = ex.candidateNotes;
+          if (needsLastRole) {
+            m.workExperience = ex.workExperience;
+            m.experience = ex.experience;
+            m.title = ex.title;
+          }
+        }
+      }
+    }
+  }
+  attachComplexMatchMetadata(mappedRows, rules);
+  for (const m of mappedRows) {
+    if (m && typeof m === 'object') delete m.searchText;
+  }
+};
+
 const listPaginated = async ({
   page = 1,
   limit = 100,
@@ -1253,6 +1309,7 @@ const listPaginated = async ({
       if (lj?.scoreBreakdown) m.scoreBreakdown = lj.scoreBreakdown;
       if (lj?.parameterMatches) m.parameterMatches = lj.parameterMatches;
     }
+    await enrichListRowsComplexMatchMetadata(mappedRows, advanced);
     return { rows: mappedRows, count, page: safePage, limit: safeLimit };
   }
   const li = binds.length + 1;
@@ -1325,6 +1382,8 @@ const listPaginated = async ({
       if (lj?.parameterMatches) m.parameterMatches = lj.parameterMatches;
     }
   }
+
+  await enrichListRowsComplexMatchMetadata(mappedRows, advanced);
 
   return {
     rows: mappedRows,

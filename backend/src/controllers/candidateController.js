@@ -1502,93 +1502,157 @@ const parseResumeWithAi = async ({ resumeText }) => {
   return parsed;
 };
 
-const list = async (req, res) => {
-  try {
-    const incomingPage = Number(req.query.page) || 1;
-    const incomingLimit = Number(req.query.limit) || 100;
-    const page = Number.isFinite(incomingPage) && incomingPage > 0 ? Math.round(incomingPage) : 1;
-    const limit = Number.isFinite(incomingLimit) ? Math.round(incomingLimit) : 100;
-    const clampedLimit = Math.min(500, Math.max(10, limit));
-    const search = String(req.query.search || '').trim();
-    let advanced = null;
-    const advRaw = req.query.adv;
+const parseCandidateListParams = (req) => {
+  const fromBody =
+    req.method === 'POST' &&
+    req.body &&
+    typeof req.body === 'object' &&
+    !Array.isArray(req.body);
+  const src = fromBody ? { ...req.query, ...req.body } : req.query;
+
+  const incomingPage = Number(src.page) || 1;
+  const incomingLimit = Number(src.limit) || 100;
+  const page = Number.isFinite(incomingPage) && incomingPage > 0 ? Math.round(incomingPage) : 1;
+  const limit = Number.isFinite(incomingLimit) ? Math.round(incomingLimit) : 100;
+  const clampedLimit = Math.min(500, Math.max(10, limit));
+  const search = String(src.search || '').trim();
+
+  let advanced = null;
+  if (fromBody && src.adv != null) {
+    const parsed = src.adv;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      const encoded = JSON.stringify(parsed);
+      if (encoded.length > 64_000) {
+        const err = new Error('adv payload too large');
+        err.status = 400;
+        throw err;
+      }
+      advanced = parsed;
+    }
+  } else {
+    const advRaw = src.adv;
     if (advRaw != null && String(advRaw).trim() !== '') {
       try {
         const parsed = JSON.parse(String(advRaw));
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           const encoded = JSON.stringify(parsed);
           if (encoded.length > 16_000) {
-            return res.status(400).json({ message: 'adv payload too large' });
+            const err = new Error('adv payload too large');
+            err.status = 400;
+            throw err;
           }
           advanced = parsed;
         }
-      } catch {
-        return res.status(400).json({ message: 'Invalid adv JSON' });
+      } catch (e) {
+        if (e.status) throw e;
+        const err = new Error('Invalid adv JSON');
+        err.status = 400;
+        throw err;
       }
     }
-    const dc = req.query.dataIncomplete ?? req.query.incomplete;
-    if (dc === '1' || String(dc).toLowerCase() === 'true') {
-      advanced =
-        advanced && typeof advanced === 'object' && !Array.isArray(advanced)
-          ? { ...advanced, dataIncomplete: true }
-          : { dataIncomplete: true };
-    }
-    const jobIdRaw = req.query.jobId ?? req.query.job_id;
-    const matchJobId =
-      jobIdRaw != null && String(jobIdRaw).trim() !== '' ? String(jobIdRaw).trim() : null;
-    const tagIdRaw = req.query.tagId ?? req.query.tag_id ?? req.query.tag;
-    const filterTagId =
-      tagIdRaw != null && String(tagIdRaw).trim() !== '' ? String(tagIdRaw).trim() : null;
-    const engineScoresRaw = req.query.engineScores ?? req.query.liveScores ?? req.query.includeEngineScores;
-    const includeEngineScores =
-      engineScoresRaw === '1' ||
-      engineScoresRaw === 1 ||
-      String(engineScoresRaw || '').toLowerCase() === 'true';
-    const matchLastJobScoresRaw =
-      req.query.matchLastJobScores ?? req.query.lastJobMatchScores ?? req.query.lastJobScores;
-    const matchLastJobScoresExplicit =
-      matchLastJobScoresRaw != null && String(matchLastJobScoresRaw).trim() !== '';
-    const matchLastJobScoresDisabled =
-      matchLastJobScoresRaw === '0' ||
-      matchLastJobScoresRaw === 0 ||
-      String(matchLastJobScoresRaw || '').toLowerCase() === 'false';
-    /** Default on so list column matches simulate popup; pass `matchLastJobScores=0` for lightweight poll. */
-    const matchLastJobScores = matchLastJobScoresExplicit
-      ? !matchLastJobScoresDisabled &&
-        (matchLastJobScoresRaw === '1' ||
-          matchLastJobScoresRaw === 1 ||
-          String(matchLastJobScoresRaw || '').toLowerCase() === 'true')
-      : true;
+  }
 
-    const tenantClientId = await getStaffClientIdFromRequest(req);
-    const payload = await candidateService.listPaginated({
-      page,
-      limit: clampedLimit,
-      search,
-      advanced,
-      jobId: matchJobId,
-      tagId: filterTagId,
-      tenantClientId,
-      includeEngineScores,
-      matchLastJobScores,
-    });
-    const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
-      if (!row || typeof row !== 'object') return row;
-      const out = { ...row };
-      delete out.embedding;
-      delete out.searchText;
-      return out;
-    });
-    res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
-    res.set('Pragma', 'no-cache');
-    res.json({
-      data: safeRows,
-      total: payload.count || 0,
-      page: payload.page,
-      limit: payload.limit,
-    });
+  const dc = src.dataIncomplete ?? src.incomplete;
+  if (dc === '1' || String(dc).toLowerCase() === 'true') {
+    advanced =
+      advanced && typeof advanced === 'object' && !Array.isArray(advanced)
+        ? { ...advanced, dataIncomplete: true }
+        : { dataIncomplete: true };
+  }
+  const jobIdRaw = src.jobId ?? src.job_id;
+  const matchJobId =
+    jobIdRaw != null && String(jobIdRaw).trim() !== '' ? String(jobIdRaw).trim() : null;
+  const tagIdRaw = src.tagId ?? src.tag_id ?? src.tag;
+  const filterTagId =
+    tagIdRaw != null && String(tagIdRaw).trim() !== '' ? String(tagIdRaw).trim() : null;
+  const engineScoresRaw = src.engineScores ?? src.liveScores ?? src.includeEngineScores;
+  const includeEngineScores =
+    engineScoresRaw === '1' ||
+    engineScoresRaw === 1 ||
+    String(engineScoresRaw || '').toLowerCase() === 'true';
+  const matchLastJobScoresRaw =
+    src.matchLastJobScores ?? src.lastJobMatchScores ?? src.lastJobScores;
+  const matchLastJobScoresExplicit =
+    matchLastJobScoresRaw != null && String(matchLastJobScoresRaw).trim() !== '';
+  const matchLastJobScoresDisabled =
+    matchLastJobScoresRaw === '0' ||
+    matchLastJobScoresRaw === 0 ||
+    String(matchLastJobScoresRaw || '').toLowerCase() === 'false';
+  /** Default on so list column matches simulate popup; pass `matchLastJobScores=0` for lightweight poll. */
+  const matchLastJobScores = matchLastJobScoresExplicit
+    ? !matchLastJobScoresDisabled &&
+      (matchLastJobScoresRaw === '1' ||
+        matchLastJobScoresRaw === 1 ||
+        String(matchLastJobScoresRaw || '').toLowerCase() === 'true')
+    : true;
+
+  return {
+    page,
+    limit: clampedLimit,
+    search,
+    advanced,
+    matchJobId,
+    filterTagId,
+    includeEngineScores,
+    matchLastJobScores,
+  };
+};
+
+const runCandidateList = async (req, res) => {
+  const {
+    page,
+    limit: clampedLimit,
+    search,
+    advanced,
+    matchJobId,
+    filterTagId,
+    includeEngineScores,
+    matchLastJobScores,
+  } = parseCandidateListParams(req);
+
+  const tenantClientId = await getStaffClientIdFromRequest(req);
+  const payload = await candidateService.listPaginated({
+    page,
+    limit: clampedLimit,
+    search,
+    advanced,
+    jobId: matchJobId,
+    tagId: filterTagId,
+    tenantClientId,
+    includeEngineScores,
+    matchLastJobScores,
+  });
+  const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
+    if (!row || typeof row !== 'object') return row;
+    const out = { ...row };
+    delete out.embedding;
+    delete out.searchText;
+    return out;
+  });
+  res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.json({
+    data: safeRows,
+    total: payload.count || 0,
+    page: payload.page,
+    limit: payload.limit,
+  });
+};
+
+const list = async (req, res) => {
+  try {
+    await runCandidateList(req, res);
   } catch (err) {
     console.error('[candidateController.list]', err.message || err);
+    res.status(err.status || 400).json({ message: err.message || 'Failed to list candidates' });
+  }
+};
+
+const listPost = async (req, res) => {
+  try {
+    await runCandidateList(req, res);
+  } catch (err) {
+    console.error('[candidateController.listPost]', err.message || err);
     res.status(err.status || 400).json({ message: err.message || 'Failed to list candidates' });
   }
 };
@@ -3029,7 +3093,7 @@ const generateInternalOpinion = async (req, res) => {
   }
 };
 
-/** Taxonomy field picker → save interest, link open jobs, return scored linked-jobs rows. */
+/** Taxonomy field picker → preview or save interest, link selected open jobs, return scored linked-jobs rows. */
 const addFieldInterest = async (req, res) => {
   try {
     const candidateId = req.params.id;
@@ -3041,21 +3105,40 @@ const addFieldInterest = async (req, res) => {
     }
     const candidateJobInterestService = require('../services/candidateJobInterestService');
     const tenantClientId = await getStaffClientIdFromRequest(req);
+    const selection = {
+      category,
+      fieldType: body.fieldType != null ? String(body.fieldType).trim() : '',
+      role,
+      categoryId: body.categoryId,
+      clusterId: body.clusterId,
+      roleId: body.roleId,
+    };
+    const serviceOpts = {
+      maxJobs: body.maxJobs,
+      status: body.status,
+      tenantClientId,
+    };
+
+    const isPreview = body.preview === true || body.preview === 'true' || body.preview === 1;
+    if (isPreview) {
+      const jobs = await candidateJobInterestService.previewFieldInterest(
+        candidateId,
+        selection,
+        serviceOpts,
+      );
+      res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      return res.json({ mode: 'preview', jobs });
+    }
+
+    const commitOpts = { ...serviceOpts };
+    if (Array.isArray(body.jobIds)) {
+      commitOpts.jobIds = body.jobIds;
+    }
+
     const enriched = await candidateJobInterestService.addFieldInterestAndList(
       candidateId,
-      {
-        category,
-        fieldType: body.fieldType != null ? String(body.fieldType).trim() : '',
-        role,
-        categoryId: body.categoryId,
-        clusterId: body.clusterId,
-        roleId: body.roleId,
-      },
-      {
-        maxJobs: body.maxJobs,
-        status: body.status,
-        tenantClientId,
-      },
+      selection,
+      commitOpts,
     );
     res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
     res.status(201).json(enriched);
@@ -3762,6 +3845,7 @@ const getJobDeepInsight = async (req, res) => {
 
 module.exports = {
   list,
+  listPost,
   listByWorkedAtCompany,
   getByUser,
   get,

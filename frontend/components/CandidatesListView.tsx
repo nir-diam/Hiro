@@ -28,6 +28,7 @@ import EventFormModal, { type Event as BulkCandidateEventFormData } from './Even
 import { WorkingHoursInput } from './WorkingHoursInput';
 import type { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import { useAuth } from '../context/AuthContext';
 import { deriveLocalCandidateId } from '../utils/candidateId';
 import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
@@ -45,6 +46,9 @@ import {
 } from './MatchScoreBreakdownPanel';
 import { candidateToSonarRecord } from '../utils/sonarMatchBreakdown';
 import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
+import { ComplexQueryBuilder } from './ComplexQueryComponents';
+import { complexRulesHaveValue, serializeComplexRulesForApi, type ComplexFilterRule } from '../utils/complexQuery';
+import { fetchCandidatesListResponse } from '../utils/candidatesListApi';
 
 const MATCH_POPUP_WIDTH = 288;
 
@@ -67,17 +71,6 @@ const candidatesListFetchInit = (): RequestInit => ({
 
 /** Blue ring when an advanced filter differs from its default. */
 const advFieldModifiedClass = 'ring-2 ring-primary-500 rounded-xl';
-
-type Operator = 'AND' | 'OR' | 'NOT';
-
-interface ComplexFilterRule {
-    id: string;
-    operator: Operator;
-    field: 'referrals' | 'source' | 'status_change';
-    value?: string;
-    textValue?: string;
-    dateRange?: DateRange | null;
-}
 
 /** Snapshot sent to GET /api/candidates?adv=… when user applies advanced search */
 interface AppliedAdvancedSearchPayload {
@@ -102,7 +95,7 @@ interface AppliedAdvancedSearchPayload {
     includeUnknownSalary: boolean;
     hasDegree: boolean;
     languages: { language: string; level: string }[];
-    complexRules: { field: string; textValue?: string; value?: string; operator: string }[];
+    complexRules: Record<string, unknown>[];
     /** Matches `candidates.preferredWorkingHours` (fallback: legacy `availability`). Ignored when גמיש / empty. */
     workingHours: string;
 }
@@ -176,6 +169,9 @@ export interface Candidate {
     scoreBreakdown?: MatchScoreBreakdownData | null;
     parameterMatches?: ParameterMatchesMap | null;
   } | null;
+  /** From complex-query free-text search (API). */
+  matchedTerms?: string[];
+  matchReasons?: { field: string; term: string; source?: string; snippet?: string }[];
 }
 
 export const candidatesData: Candidate[] = [
@@ -863,12 +859,7 @@ function buildAdvancedPayloadFromPanel(
         includeUnknownSalary: searchParams.includeUnknownSalary !== false,
         hasDegree: !!searchParams.hasDegree,
         languages: languageFilters.map((l) => ({ language: l.language, level: l.level })),
-        complexRules: complexRules.map((r) => ({
-            field: r.field,
-            textValue: r.textValue,
-            value: r.value,
-            operator: r.operator,
-        })),
+        complexRules: serializeComplexRulesForApi(complexRules),
         workingHours: String(searchParams.workingHours || 'גמיש').trim() || 'גמיש',
     };
 }
@@ -1165,15 +1156,6 @@ function filterCandidatesByAdvancedClient(
             if (hoursBlob !== whRaw && !hoursBlob.includes(whRaw)) return false;
         }
 
-        if (Array.isArray(adv.complexRules)) {
-            for (const rule of adv.complexRules) {
-                if (rule.field === 'source' && rule.textValue) {
-                    const tv = String(rule.textValue).trim().toLowerCase();
-                    if (!String(c.source || '').toLowerCase().includes(tv)) return false;
-                }
-            }
-        }
-
         return true;
     });
 }
@@ -1397,7 +1379,35 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const settingsRef = useRef<HTMLDivElement>(null);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
-    const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
+
+    const globalPoolDefaultCols = useMemo(
+        () => ['name', 'matchScore', 'title', 'status', 'lastActivity', 'source', 'lastSubmissionMatch'],
+        [],
+    );
+    const globalPoolAllColumnIds = useMemo(
+        () => [
+            'name', 'matchScore', 'title', 'status', 'lastActivity', 'createDate', 'source', 'tags',
+            'location', 'industry', 'field', 'sector', 'jobScopes', 'gender', 'age', 'salaryMin',
+            'languages', 'lastSubmissionMatch',
+        ],
+        [],
+    );
+    const {
+        viewMode,
+        setViewMode,
+        visibleColumns: visibleColumnIds,
+        setVisibleColumns: setVisibleColumnIds,
+        handleColumnToggle: toggleColumnPref,
+        persistColumnsNow,
+    } = useScreenTablePreferences('global_pool', {
+        defaultLayoutMode: 'list',
+        defaultVisibleColumns: globalPoolDefaultCols,
+        allColumnIds: globalPoolAllColumnIds,
+    });
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
     const [page, setPage] = useState(() => listViewSnapshot?.page ?? 1);
     const [pageSize, setPageSize] = useState(() => listViewSnapshot?.pageSize ?? 100);
     const [totalCandidates, setTotalCandidates] = useState(() =>
@@ -1414,6 +1424,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [complexRules, setComplexRules] = useState<ComplexFilterRule[]>(
         () => listViewSnapshot?.complexRules ?? [],
     );
+    const [debouncedComplexRules, setDebouncedComplexRules] = useState<ComplexFilterRule[]>(
+        () => listViewSnapshot?.complexRules ?? [],
+    );
+    const skipComplexDebounceOnceRef = useRef(listViewSnapshot !== null);
+    const skipComplexFetchOnceRef = useRef(listViewSnapshot !== null);
+    useEffect(() => {
+        if (skipComplexDebounceOnceRef.current) {
+            skipComplexDebounceOnceRef.current = false;
+            return;
+        }
+        const handle = window.setTimeout(() => {
+            setDebouncedComplexRules(complexRules);
+        }, 1000);
+        return () => window.clearTimeout(handle);
+    }, [complexRules]);
+    const debouncedComplexRulesRef = useRef(debouncedComplexRules);
+    useEffect(() => {
+        debouncedComplexRulesRef.current = debouncedComplexRules;
+    }, [debouncedComplexRules]);
 
     const [searchParams, setSearchParams] = useState<ListSearchParamsState>(() => {
         const raw =
@@ -1724,6 +1753,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             c.preferredWorkingHours != null && String(c.preferredWorkingHours).trim() !== ''
                 ? String(c.preferredWorkingHours).trim()
                 : '',
+        matchedTerms: Array.isArray(c.matchedTerms) ? c.matchedTerms.map(String) : undefined,
+        matchReasons: Array.isArray(c.matchReasons) ? c.matchReasons : undefined,
         lastJobSubmission: ljCandidate
                 ? {
                       jobId: String(ljCandidate.jobId),
@@ -1760,23 +1791,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             if (!apiBase) return;
             setIsRemoteLoading(true);
             try {
-                const params = new URLSearchParams({
-                    page: String(opts.page),
-                    limit: String(opts.limit),
-                });
-                const st = opts.search.trim();
-                if (st) params.set('search', st);
-                if (opts.advanced != null) {
-                    params.set('adv', JSON.stringify(opts.advanced));
-                }
-                if (opts.dataIncomplete) {
-                    params.set('dataIncomplete', '1');
-                }
-                const matchJobId = String(opts.jobId || '').trim();
-                if (matchJobId) params.set('jobId', matchJobId);
-                // Engine score vs each candidate's latest submitted job (same as match popup).
-                params.set('matchLastJobScores', '1');
-                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, candidatesListFetchInit());
+                const res = await fetchCandidatesListResponse(
+                    apiBase,
+                    {
+                        page: opts.page,
+                        limit: opts.limit,
+                        search: opts.search,
+                        advanced: opts.advanced,
+                        dataIncomplete: opts.dataIncomplete,
+                        jobId: opts.jobId,
+                        matchLastJobScores: true,
+                    },
+                    candidatesListFetchInit(),
+                );
                 if (!res.ok) throw new Error('failed to load');
                 const payload = await res.json();
                 const list = Array.isArray(payload.data)
@@ -1808,15 +1835,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         [apiBase, mapCandidate, applyListMatchPatches],
     );
 
+    const resolveAdvancedPayloadForFetch = useCallback(
+        (rules: ComplexFilterRule[]) => {
+            if (appliedAdvancedFilters != null || complexRulesHaveValue(rules)) {
+                return buildAdvancedPayloadFromPanel(searchParams, languageFilters, rules);
+            }
+            return null;
+        },
+        [appliedAdvancedFilters, searchParams, languageFilters],
+    );
+
     const fetchCandidates = useCallback(() => {
         return fetchCandidatesList({
             page,
             limit: pageSize,
             search: debouncedSearchTerm,
-            advanced:
-                appliedAdvancedFilters == null
-                    ? null
-                    : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
         });
@@ -1824,10 +1858,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         page,
         pageSize,
         debouncedSearchTerm,
-        appliedAdvancedFilters,
-        searchParams,
-        languageFilters,
-        complexRules,
+        resolveAdvancedPayloadForFetch,
         fetchCandidatesList,
         showIncompleteOnly,
         selectedJobId,
@@ -1851,26 +1882,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             return;
         }
 
-        const buildParams = (pageNum: number) => {
-            const params = new URLSearchParams({
-                page: String(pageNum),
-                limit: String(CANDIDATES_EXPORT_PAGE_SIZE),
-            });
-            const st = debouncedSearchTerm.trim();
-            if (st) params.set('search', st);
-            if (appliedAdvancedFilters != null) {
-                params.set(
-                    'adv',
-                    JSON.stringify(buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules)),
-                );
-            }
-            if (showIncompleteOnly) {
-                params.set('dataIncomplete', '1');
-            }
-            const mj = selectedJobId.trim();
-            if (mj) params.set('jobId', mj);
-            return params;
-        };
+        const buildListRequest = (pageNum: number) => ({
+            page: pageNum,
+            limit: CANDIDATES_EXPORT_PAGE_SIZE,
+            search: debouncedSearchTerm,
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
+        });
 
         const parseListPayload = (payload: { data?: unknown[]; rows?: unknown[]; total?: number }) => {
             const list = Array.isArray(payload?.data)
@@ -1920,8 +1939,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     }
                 };
 
-                const res1 = await fetch(
-                    `${apiBase}/api/candidates?${buildParams(1).toString()}`,
+                const res1 = await fetchCandidatesListResponse(
+                    apiBase,
+                    buildListRequest(1),
                     candidatesListFetchInit(),
                 );
                 if (!res1.ok) throw new Error('failed');
@@ -1934,8 +1954,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 ingestChunk(firstList);
                 const pages = Math.ceil(total / CANDIDATES_EXPORT_PAGE_SIZE);
                 for (let p = 2; p <= pages && want.size > 0; p++) {
-                    const res = await fetch(
-                        `${apiBase}/api/candidates?${buildParams(p).toString()}`,
+                    const res = await fetchCandidatesListResponse(
+                        apiBase,
+                        buildListRequest(p),
                         candidatesListFetchInit(),
                     );
                     if (!res.ok) throw new Error('failed');
@@ -1988,10 +2009,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [
         apiBase,
         debouncedSearchTerm,
-        appliedAdvancedFilters,
-        searchParams,
-        languageFilters,
-        complexRules,
+        resolveAdvancedPayloadForFetch,
         showIncompleteOnly,
         exportSearchHeaderLabels,
         mapCandidate,
@@ -2012,22 +2030,19 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             if (cancelled || inFlight) return;
             inFlight = true;
             try {
-                const params = new URLSearchParams({ page: String(page), limit: String(pageSize) });
-                const st = debouncedSearchTerm.trim();
-                if (st) params.set('search', st);
-                if (appliedAdvancedFilters != null) {
-                    params.set(
-                        'adv',
-                        JSON.stringify(
-                            buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
-                        ),
-                    );
-                }
-                if (showIncompleteOnly) params.set('dataIncomplete', '1');
-                const pollJobId = selectedJobId.trim();
-                if (pollJobId) params.set('jobId', pollJobId);
-                params.set('matchLastJobScores', '0');
-                const res = await fetch(`${apiBase}/api/candidates?${params.toString()}`, candidatesListFetchInit());
+                const res = await fetchCandidatesListResponse(
+                    apiBase,
+                    {
+                        page,
+                        limit: pageSize,
+                        search: debouncedSearchTerm,
+                        advanced: resolveAdvancedPayloadForFetch(debouncedComplexRules),
+                        dataIncomplete: showIncompleteOnly,
+                        jobId: selectedJobId.trim(),
+                        matchLastJobScores: false,
+                    },
+                    candidatesListFetchInit(),
+                );
                 if (cancelled) return;
                 if (res.status === 304) return;
                 if (!res.ok) return;
@@ -2061,10 +2076,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         pageSize,
         suspendListPolling,
         debouncedSearchTerm,
-        appliedAdvancedFilters,
-        searchParams,
-        languageFilters,
-        complexRules,
+        resolveAdvancedPayloadForFetch,
         showIncompleteOnly,
         selectedJobId,
     ]);
@@ -2101,6 +2113,38 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         void fetchCandidates();
     }, [page, pageSize, fetchCandidates]);
 
+    /** Complex-query textarea: wait 1s after typing, then search with `adv` (no per-keystroke GET). */
+    useEffect(() => {
+        if (!apiBase || suspendListPolling) return;
+        if (skipComplexFetchOnceRef.current) {
+            skipComplexFetchOnceRef.current = false;
+            return;
+        }
+        if (!complexRulesHaveValue(debouncedComplexRules)) return;
+        suppressNextListFetchEffectRef.current = true;
+        if (page !== 1) {
+            setPage(1);
+        }
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRules),
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
+        });
+    }, [
+        apiBase,
+        debouncedComplexRules,
+        suspendListPolling,
+        pageSize,
+        debouncedSearchTerm,
+        resolveAdvancedPayloadForFetch,
+        fetchCandidatesList,
+        showIncompleteOnly,
+        selectedJobId,
+    ]);
+
     /** Refetch with engine scores when the job filter changes (popup already scores via simulate). */
     useEffect(() => {
         if (!hasInitiallyLoaded || suspendListPolling) return;
@@ -2112,10 +2156,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             page: 1,
             limit: pageSize,
             search: debouncedSearchTerm,
-            advanced:
-                appliedAdvancedFilters == null
-                    ? null
-                    : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
         });
@@ -2125,10 +2166,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         suspendListPolling,
         pageSize,
         debouncedSearchTerm,
-        appliedAdvancedFilters,
-        searchParams,
-        languageFilters,
-        complexRules,
+        resolveAdvancedPayloadForFetch,
         showIncompleteOnly,
         fetchCandidatesList,
     ]);
@@ -2220,42 +2258,30 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         { id: 'lastSubmissionMatch', header: t('col.last_submission_match') },
     ], [t]);
 
-    // Use a subset for default visibility (rest via Customize columns)
-    const defaultVisibleColumns = useMemo(
-        () => ['name', 'matchScore', 'title', 'status', 'lastActivity', 'source', 'lastSubmissionMatch'],
-        [],
+    const columns = useMemo(
+        () =>
+            visibleColumnIds
+                .map((id) => allColumns.find((c) => c.id === id))
+                .filter((c): c is (typeof allColumns)[number] => Boolean(c)),
+        [visibleColumnIds, allColumns],
     );
-    const [columns, setColumns] = useState(allColumns.filter(c => defaultVisibleColumns.includes(c.id)));
 
     /** Ensure new columns appear once for sessions that still hold pre-change visibility in React state. */
     const LAST_SUBMISSION_COLUMN_SEEN_KEY = 'hiro.candidates.column.lastSubmissionMatch.v1';
     useEffect(() => {
         if (typeof sessionStorage === 'undefined') return;
         if (sessionStorage.getItem(LAST_SUBMISSION_COLUMN_SEEN_KEY)) return;
-        const addCol = allColumns.find((c) => c.id === 'lastSubmissionMatch');
-        if (!addCol) return;
-        setColumns((prev) => {
-            if (prev.some((c) => c.id === 'lastSubmissionMatch')) {
-                sessionStorage.setItem(LAST_SUBMISSION_COLUMN_SEEN_KEY, '1');
-                return prev;
-            }
+        if (visibleColumnIds.includes('lastSubmissionMatch')) {
             sessionStorage.setItem(LAST_SUBMISSION_COLUMN_SEEN_KEY, '1');
-            const src = prev.findIndex((c) => c.id === 'source');
-            const next = [...prev];
-            if (src >= 0) next.splice(src + 1, 0, addCol);
-            else next.push(addCol);
-            return next;
-        });
-    }, [allColumns]);
-
-    // Effect to update columns when language changes
-    useEffect(() => {
-        // Re-construct the currently visible columns with new translations
-        setColumns(prevColumns => {
-            const visibleIds = prevColumns.map(c => c.id);
-            return allColumns.filter(c => visibleIds.includes(c.id));
-        });
-    }, [allColumns]);
+            return;
+        }
+        sessionStorage.setItem(LAST_SUBMISSION_COLUMN_SEEN_KEY, '1');
+        const src = visibleColumnIds.indexOf('source');
+        const next = [...visibleColumnIds];
+        if (src >= 0) next.splice(src + 1, 0, 'lastSubmissionMatch');
+        else next.push('lastSubmissionMatch');
+        setVisibleColumnIds(next);
+    }, [visibleColumnIds, setVisibleColumnIds]);
 
     // ... (Keep existing sorting/filtering logic and handlers) ...
      const requestSort = (key: keyof Candidate | 'lastSubmissionMatch') => {
@@ -2883,25 +2909,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setLanguageFilters(prev => prev.filter(f => f.language !== languageToRemove));
     };
     
-    const handleAddRule = (operator: Operator) => {
-        const newRule: ComplexFilterRule = {
-            id: Date.now().toString(),
-            operator,
-            field: 'referrals',
-            value: '',
-            dateRange: null
-        };
-        setComplexRules(prev => [...prev, newRule]);
-    };
-
-    const handleRemoveRule = (id: string) => {
-        setComplexRules(prev => prev.filter(r => r.id !== id));
-    };
-
-    const handleRuleChange = (id: string, updates: Partial<ComplexFilterRule>) => {
-        setComplexRules(prev => prev.map(r => r.id === id ? { ...r, ...updates } : r));
-    };
-
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
           if (settingsRef.current && !settingsRef.current.contains(event.target as Node)) {
@@ -2988,13 +2995,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     };
 
     const handleColumnToggle = (columnId: string) => {
-        const isVisible = columns.some(c => c.id === columnId);
-        if (isVisible) {
-            if (columns.length > 1) setColumns(prev => prev.filter(c => c.id !== columnId));
-        } else {
-            const columnToAdd = allColumns.find(c => c.id === columnId);
-            if (columnToAdd) setColumns(prev => [...prev, columnToAdd]);
-        }
+        if (visibleColumnIds.includes(columnId) && visibleColumnIds.length <= 1) return;
+        toggleColumnPref(columnId);
     };
     
     const handleDragStart = (index: number, colId: string) => { 
@@ -3003,11 +3005,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     };
     const handleDragEnter = (index: number) => {
         if (dragItemIndex.current === null || dragItemIndex.current === index) return;
-        const newColumns = [...columns];
-        const draggedItem = newColumns.splice(dragItemIndex.current, 1)[0];
-        newColumns.splice(index, 0, draggedItem);
+        const newIds = [...visibleColumnIds];
+        const draggedItem = newIds.splice(dragItemIndex.current, 1)[0];
+        newIds.splice(index, 0, draggedItem);
         dragItemIndex.current = index;
-        setColumns(newColumns);
+        setVisibleColumnIds(newIds);
     };
     const handleDragEnd = () => { 
         dragItemIndex.current = null; 
@@ -3020,6 +3022,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const handleShowResults = () => {
         const snapshot = buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules);
+        skipComplexDebounceOnceRef.current = true;
+        setDebouncedComplexRules(complexRules);
+        debouncedComplexRulesRef.current = complexRules;
         suppressNextListFetchEffectRef.current = true;
         setAppliedAdvancedFilters(snapshot);
         setPage(1);
@@ -3058,6 +3063,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setSearchParams(createDefaultListSearchParams());
         setLanguageFilters([]);
         setComplexRules([]);
+        setDebouncedComplexRules([]);
+        debouncedComplexRulesRef.current = [];
         setAdditionalFilters([]);
         setLoadedSearch(null);
         setUrlSearchParams((prev) => {
@@ -3084,6 +3091,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         // Clear free search
         setSearchTerm('');
         setDebouncedSearchTerm('');
+        setComplexRules([]);
+        setDebouncedComplexRules([]);
+        debouncedComplexRulesRef.current = [];
         setAppliedAdvancedFilters(null);
         setPage(1);
         setSuspendListPolling(false);
@@ -3120,7 +3130,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 return;
             }
             const search = location.search || '';
-            navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`);
+            navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`, {
+                state: {
+                    matchedTerms: candidate.matchedTerms?.length ? candidate.matchedTerms : undefined,
+                },
+            });
         },
         [selectionMode, handleSelect, navigate, getCandidateRouteId, location.search],
     );
@@ -3191,6 +3205,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                          {candidate.professionalSummary && (
                             <p className="text-xs text-text-muted mt-2 mr-[48px] line-clamp-2 max-w-[400px] leading-relaxed">
                                 {candidate.professionalSummary}
+                            </p>
+                         )}
+                         {candidate.matchReasons && candidate.matchReasons.length > 0 && (
+                            <p className="text-[11px] text-red-700 mt-1.5 mr-[48px] line-clamp-2 max-w-[420px] font-medium">
+                                {candidate.matchReasons.slice(0, 2).map((r) => `«${r.term}»`).join(' · ')}
                             </p>
                          )}
                     </div>
@@ -3671,74 +3690,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         </div>
                     </div>
                     
-                    <div className={`bg-bg-subtle/40 rounded-xl p-3 border border-border-default/50 mt-2 ${advFieldModified.complexRules ? advFieldModifiedClass : ''}`}>
-                         <div className="flex items-center gap-2 mb-2">
-                             <FunnelIcon className="w-4 h-4 text-primary-500" />
-                             <h4 className="text-xs font-bold text-primary-700 uppercase tracking-wide">{t('filter.complex_queries')}</h4>
-                         </div>
-                         
-                         {complexRules.length > 0 && (
-                            <div className="space-y-2 mb-3">
-                                {complexRules.map((rule, idx) => (
-                                    <div key={rule.id} className="flex items-center gap-2 bg-white p-2 rounded-lg border border-border-default shadow-sm animate-fade-in text-sm">
-                                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${rule.operator === 'AND' ? 'bg-blue-100 text-blue-700' : rule.operator === 'OR' ? 'bg-orange-100 text-orange-700' : 'bg-red-100 text-red-700'}`}>
-                                            {rule.operator === 'AND' ? 'וגם' : rule.operator === 'OR' ? 'או' : 'ללא'}
-                                        </span>
-                                        <select 
-                                            value={rule.field} 
-                                            onChange={(e) => handleRuleChange(rule.id, { field: e.target.value as any })}
-                                            className="bg-transparent font-semibold outline-none text-text-default cursor-pointer text-xs"
-                                        >
-                                            <option value="referrals">הפניות למשרה</option>
-                                            <option value="source">מקור גיוס</option>
-                                            <option value="status_change">שינוי סטטוס</option>
-                                        </select>
-                                        
-                                        {rule.field === 'referrals' && (
-                                             <div className="flex items-center gap-2 flex-grow">
-                                                <input 
-                                                    type="text" 
-                                                    placeholder="שם משרה/מזהה..." 
-                                                    value={rule.value || ''}
-                                                    onChange={(e) => handleRuleChange(rule.id, { value: e.target.value })}
-                                                    className="bg-bg-subtle/50 px-2 py-1 rounded border border-border-default text-xs flex-grow outline-none focus:border-primary-300"
-                                                />
-                                                <DateRangeSelector 
-                                                    value={rule.dateRange || null} 
-                                                    onChange={(val) => handleRuleChange(rule.id, { dateRange: val })} 
-                                                    placeholder="מתי?"
-                                                    className="min-w-[120px]"
-                                                />
-                                             </div>
-                                        )}
-                                        {rule.field === 'source' && (
-                                            <input 
-                                                type="text" 
-                                                placeholder="מקור (למשל LinkedIn)..." 
-                                                value={rule.textValue || ''}
-                                                onChange={(e) => handleRuleChange(rule.id, { textValue: e.target.value })}
-                                                className="bg-bg-subtle/50 px-2 py-1 rounded border border-border-default text-xs flex-grow outline-none focus:border-primary-300"
-                                            />
-                                        )}
-                                        
-                                        <button onClick={() => handleRemoveRule(rule.id)} className="text-text-subtle hover:text-red-500 p-1"><XMarkIcon className="w-3.5 h-3.5"/></button>
-                                    </div>
-                                ))}
-                            </div>
-                         )}
-
-                         <div className="flex gap-2">
-                             <button onClick={() => handleAddRule('AND')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 text-xs font-bold border border-blue-200 hover:bg-blue-100 transition-colors">
-                                 <PlusIcon className="w-3 h-3" /> וגם (AND)
-                             </button>
-                             <button onClick={() => handleAddRule('OR')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-orange-50 text-orange-700 text-xs font-bold border border-orange-200 hover:bg-orange-100 transition-colors">
-                                 <PlusIcon className="w-3 h-3" /> או (OR)
-                             </button>
-                             <button onClick={() => handleAddRule('NOT')} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-50 text-red-700 text-xs font-bold border border-red-200 hover:bg-red-100 transition-colors">
-                                 <MinusIcon className="w-3 h-3" /> ללא (NOT)
-                             </button>
-                         </div>
-                    </div>
+                    <ComplexQueryBuilder
+                        rules={complexRules}
+                        onChange={setComplexRules}
+                        className={advFieldModified.complexRules ? advFieldModifiedClass : ''}
+                        title={t('filter.complex_queries')}
+                    />
 
                     <div className="mt-4 pt-3 border-t border-border-default flex flex-wrap justify-between items-center gap-3">
                         <div className="flex flex-wrap items-center gap-2">

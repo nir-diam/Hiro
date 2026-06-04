@@ -11,6 +11,7 @@ const {
   computeFullMatchScore,
   computeTagScore,
   computeGeoScore,
+  computeIntentScore,
   resolveGeoRegionId,
   invalidateCityCache,
 } = require('../matchingScoreService');
@@ -181,6 +182,64 @@ describe('computeFullMatchScore formula', () => {
     ], {});
     expect(result.score).toBeLessThan(100);
     expect(Object.keys(result.breakdown).length).toBeGreaterThan(0);
+  });
+
+  it('uses cluster intent weight for same category / different cluster (not legacy category:20)', () => {
+    const weights = [
+      { id: 'exact', value: 100 },
+      { id: 'role', value: 80 },
+      { id: 'cluster', value: 50 },
+      { id: 'different', value: 0 },
+    ];
+    const result = computeIntentScore(
+      {},
+      { id: 'job-b', field: 'Retail', role: 'Cashier' },
+      null,
+      weights,
+      {
+        targetTaxonomy: { categoryId: 'cat-1', clusterId: 'cl-b' },
+        linkedJobs: [
+          { jobId: 'job-a', taxonomy: { categoryId: 'cat-1', clusterId: 'cl-a' } },
+        ],
+      },
+    );
+    expect(result.intentType).toBe('cluster');
+    expect(result.score).toBe(50);
+  });
+
+  it('scores exact when linked and target share roleId (field_interest meta)', () => {
+    const weights = [
+      { id: 'exact', value: 100 },
+      { id: 'role', value: 80 },
+      { id: 'cluster', value: 50 },
+      { id: 'different', value: 0 },
+    ];
+    const roleId = '29885c80-7be4-43ac-999b-5fe0404ed084';
+    const result = computeIntentScore(
+      {},
+      { id: 'job-target', field: 'healthcare_pharmaceuticals', role: 'מנהל צוות מכירות' },
+      null,
+      weights,
+      {
+        targetTaxonomy: {
+          categoryId: '786dbbc6-65ec-4199-850e-4a4b50e81af3',
+          clusterId: '313d13b1-49e0-4196-8428-f7b48fd5813c',
+          roleId,
+        },
+        linkedJobs: [
+          {
+            jobId: 'interest-ab10',
+            taxonomy: {
+              categoryId: '786dbbc6-65ec-4199-850e-4a4b50e81af3',
+              clusterId: '313d13b1-49e0-4196-8428-f7b48fd5813c',
+              roleId,
+            },
+          },
+        ],
+      },
+    );
+    expect(result.intentType).toBe('exact');
+    expect(result.score).toBe(100);
   });
 
   it('returns zero core when all main weights are zero', async () => {
