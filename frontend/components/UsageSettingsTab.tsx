@@ -86,6 +86,7 @@ const initialSettings = {
     billingStatusParent: false,
     billingStatusAccepted: false,
     matchingEnginePresetId: null as number | null,
+    tagCorrectionAgentEnabled: true,
 };
 
 function mergeUsageFromApi(
@@ -128,6 +129,10 @@ function mergeUsageFromApi(
                 : data.matchingEnginePresetId === null
                   ? null
                   : prev.matchingEnginePresetId ?? null,
+        tagCorrectionAgentEnabled:
+            typeof data.tagCorrectionAgentEnabled === 'boolean'
+                ? data.tagCorrectionAgentEnabled
+                : prev.tagCorrectionAgentEnabled,
     };
 }
 
@@ -155,6 +160,7 @@ function toSavePayload(s: typeof initialSettings): ClientUsageSettingsDto {
         billingStatusParent: s.billingStatusParent,
         billingStatusAccepted: s.billingStatusAccepted,
         matchingEnginePresetId: s.matchingEnginePresetId ?? null,
+        tagCorrectionAgentEnabled: Boolean(s.tagCorrectionAgentEnabled),
     };
 }
 
@@ -260,6 +266,7 @@ const UsageSettingsTab: React.FC<{ clientId: string | null }> = ({ clientId }) =
                         <CheckboxRow label={t('company_settings.logo_on_cv')} name="logoOnCv" checked={settings.logoOnCv} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.no_location_fix')} name="candidateNoLocationToFix" checked={settings.candidateNoLocationToFix} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.no_tag_fix')} name="candidateNoTagToFix" checked={settings.candidateNoTagToFix} onChange={handleChange} />
+                        <CheckboxRow label={t('company_settings.tag_correction_agent')} name="tagCorrectionAgentEnabled" checked={settings.tagCorrectionAgentEnabled} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.cv_preview')} name="showCvPreview" checked={settings.showCvPreview} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.job_alerts')} name="jobAlerts" checked={settings.jobAlerts} onChange={handleChange} />
                         <CheckboxRow label={t('company_settings.welcome_email')} name="autoThanksEmail" checked={settings.autoThanksEmail} onChange={handleChange} />

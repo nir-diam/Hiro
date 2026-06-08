@@ -8,6 +8,7 @@ dotenv.config(); // fallback to default .env resolution
 const express = require('express');
 const corsMiddleware = require('./middleware/corsMiddleware');
 const { connectDb } = require('./config/db');
+const { connectRedis } = require('./config/redis');
 const authRoutes = require('./routes/authRoutes');
 const clientRoutes = require('./routes/clientRoutes');
 const organizationRoutes = require('./routes/organizationRoutes');
@@ -78,6 +79,15 @@ app.use('/api/admin/matching-engine', matchingEngineRoutes);
 const start = async () => {
   try {
     await connectDb();
+    await connectRedis().catch((err) => {
+      console.warn('[server] Redis connection failed (non-fatal):', err.message);
+    });
+    try {
+      const promptService = require('./services/promptService');
+      await promptService.ensureById('tag_correction_agent');
+    } catch (promptErr) {
+      console.warn('[server] tag_correction_agent prompt seed failed', promptErr?.message || promptErr);
+    }
     app.listen(port, () => {
       console.log(`API listening on port ${port}`);
     });

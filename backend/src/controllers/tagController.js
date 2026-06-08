@@ -9,6 +9,18 @@ const Job = require('../models/Job');
 const { sequelize } = require('../config/db');
 const candidateTagService = require('../services/candidateTagService');
 const tagEmbeddingService = require('../services/tagEmbeddingService');
+const tagCorrectionAgentService = require('../services/tagCorrectionAgentService');
+const tagAiDecisionResolveService = require('../services/tagAiDecisionResolveService');
+const TagAiDecision = require('../models/TagAiDecision');
+
+const loadAiQueuedPendingTagIds = async () => {
+  const rows = await TagAiDecision.findAll({
+    where: { reviewStatus: 'pending_review' },
+    attributes: ['pendingTagId'],
+    raw: true,
+  });
+  return [...new Set(rows.map((row) => row.pendingTagId).filter(Boolean))];
+};
 
 const enrich = async (req, res) => {
   try {
@@ -312,8 +324,17 @@ const listPending = async (req, res) => {
     const type = typeof req.query.type === 'string' ? req.query.type.trim() : '';
     const rawMinUsage = Number(req.query.minUsage);
     const minUsage = Number.isFinite(rawMinUsage) ? Math.max(1, rawMinUsage) : 1;
+    const excludeAiQueued =
+      req.query.excludeAiQueued === '0' || req.query.excludeAiQueued === 'false'
+        ? false
+        : true;
+
+    const aiQueuedTagIds = excludeAiQueued ? await loadAiQueuedPendingTagIds() : [];
 
     const parts = [{ status: 'pending' }];
+    if (aiQueuedTagIds.length) {
+      parts.push({ id: { [Op.notIn]: aiQueuedTagIds } });
+    }
     if (type && type !== 'all') {
       parts.push({ type });
     }
@@ -375,9 +396,13 @@ const listPending = async (req, res) => {
       return plain;
     });
 
+    const manualPendingWhere = aiQueuedTagIds.length
+      ? { status: 'pending', id: { [Op.notIn]: aiQueuedTagIds } }
+      : { status: 'pending' };
+
     const [totalPending, pendingUsageSum] = await Promise.all([
-      Tag.count({ where: { status: 'pending' } }),
-      Tag.sum('usageCount', { where: { status: 'pending' } }).then((v) => Number(v) || 0),
+      Tag.count({ where: manualPendingWhere }),
+      Tag.sum('usageCount', { where: manualPendingWhere }).then((v) => Number(v) || 0),
     ]);
 
     res.json({
@@ -397,10 +422,11 @@ const listPending = async (req, res) => {
   }
 };
 
-const resolvePending = async (req, res) => {
-  const { ids = [], action, targetTagId } = req.body || {};
+const resolvePendingTags = async ({ ids = [], action, targetTagId } = {}) => {
   if (!Array.isArray(ids) || !ids.length) {
-    return res.status(400).json({ message: 'No tag IDs provided' });
+    const err = new Error('No tag IDs provided');
+    err.status = 400;
+    throw err;
   }
 
   const entries = await Tag.findAll({
@@ -410,14 +436,18 @@ const resolvePending = async (req, res) => {
     },
   });
   if (!entries.length) {
-    return res.status(404).json({ message: 'No matching pending tags found' });
+    const err = new Error('No matching pending tags found');
+    err.status = 404;
+    throw err;
   }
 
   let targetTag = null;
   if (action === 'link') {
     targetTag = await Tag.findByPk(targetTagId);
     if (!targetTag) {
-      return res.status(404).json({ message: 'Target tag not found' });
+      const err = new Error('Target tag not found');
+      err.status = 404;
+      throw err;
     }
   }
 
@@ -474,8 +504,7 @@ const resolvePending = async (req, res) => {
     await SystemTag.destroy({ where: candidateTagFilter });
   }
 
-  try {
-    for (const entry of entries) {
+  for (const entry of entries) {
       const suggestedName = String(entry.displayNameHe || entry.tagKey || '').trim();
 
       if (action === 'create') {
@@ -549,13 +578,97 @@ const resolvePending = async (req, res) => {
       }
     }
 
-    const affectedIds = entries.map((entry) => entry.id).filter(Boolean);
-    affectedIds.forEach((tagId) => tagEmbeddingService.scheduleTagEmbedding({ id: tagId }));
+  const affectedIds = entries.map((entry) => entry.id).filter(Boolean);
+  affectedIds.forEach((tagId) => tagEmbeddingService.scheduleTagEmbedding({ id: tagId }));
 
-    res.json({ success: true });
+  return { success: true };
+};
+
+const resolvePending = async (req, res) => {
+  try {
+    const result = await resolvePendingTags(req.body || {});
+    res.json(result);
   } catch (err) {
     console.error('[tagController] resolvePending error', err);
-    res.status(500).json({ message: 'Failed to resolve pending tags' });
+    res.status(err.status || 500).json({ message: err.message || 'Failed to resolve pending tags' });
+  }
+};
+
+const getCorrectionAgentSettings = async (_req, res) => {
+  try {
+    const agentEnabled = await tagCorrectionAgentService.isPlatformAgentEnabled();
+    res.json({ agentEnabled });
+  } catch (err) {
+    console.error('[tagController.getCorrectionAgentSettings]', err);
+    res.status(500).json({ message: 'Failed to load agent settings' });
+  }
+};
+
+const putCorrectionAgentSettings = async (req, res) => {
+  try {
+    const data = await tagCorrectionAgentService.setPlatformAgentEnabled(
+      Boolean(req.body?.agentEnabled),
+    );
+    res.json(data);
+  } catch (err) {
+    console.error('[tagController.putCorrectionAgentSettings]', err);
+    res.status(500).json({ message: 'Failed to save agent settings' });
+  }
+};
+
+const listAiDecisions = async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 50;
+    const decision = req.query.decision || 'all';
+    const date = req.query.date || '';
+    const reviewStatus = req.query.reviewStatus || 'pending_review';
+    const listOpts = { page, limit, decision, date, reviewStatus };
+
+    let payload = await tagCorrectionAgentService.listDecisions(listOpts);
+    let backfill = null;
+
+    const autoBackfill =
+      req.query.autoBackfill === '1' ||
+      req.query.autoBackfill === 'true';
+    if (autoBackfill && payload.total === 0 && reviewStatus === 'pending_review') {
+      const agentOn = await tagCorrectionAgentService.isPlatformAgentEnabled();
+      if (agentOn) {
+        const batch = Math.min(30, Math.max(5, Number(req.query.backfillLimit) || 20));
+        backfill = await tagCorrectionAgentService.backfillPendingWithoutDecisions(batch);
+        payload = await tagCorrectionAgentService.listDecisions(listOpts);
+      }
+    }
+
+    res.json({ ...payload, backfill });
+  } catch (err) {
+    console.error('[tagController.listAiDecisions]', err);
+    res.status(500).json({ message: 'Failed to load AI tag decisions' });
+  }
+};
+
+const resolveAiDecisions = async (req, res) => {
+  try {
+    const { decisionIds = [], action, targetTagId } = req.body || {};
+    const result = await tagAiDecisionResolveService.applyReviewerActions(
+      { decisionIds, action, targetTagId },
+      resolvePendingTags,
+    );
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.resolveAiDecisions]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to resolve AI decisions' });
+  }
+};
+
+const backfillAiDecisions = async (req, res) => {
+  try {
+    const limit = Number(req.body?.limit) || Number(req.query?.limit) || 40;
+    const result = await tagCorrectionAgentService.backfillPendingWithoutDecisions(limit);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.backfillAiDecisions]', err);
+    res.status(500).json({ message: 'Failed to backfill AI decisions' });
   }
 };
 
@@ -597,5 +710,11 @@ module.exports = {
   getHistory,
   rebuildEmbeddings,
   rebuildEmbedding,
+  resolvePendingTags,
+  getCorrectionAgentSettings,
+  putCorrectionAgentSettings,
+  listAiDecisions,
+  resolveAiDecisions,
+  backfillAiDecisions,
 };
 

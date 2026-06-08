@@ -44,7 +44,15 @@ describe('findTagByNameOrAlias', () => {
 
     expect(result).toBe(fakeTag);
     expect(mockQuery).toHaveBeenCalledTimes(1);
+    expect(String(mockQuery.mock.calls[0][0])).toContain('ORDER BY');
+    expect(String(mockQuery.mock.calls[0][0])).toContain("'active' THEN 0");
     expect(Tag.findByPk).toHaveBeenCalledWith('tag-1');
+  });
+
+  it('passes status filter when requested', async () => {
+    mockQuery.mockResolvedValue([]);
+    await findTagByNameOrAlias('excel', { status: 'active' });
+    expect(String(mockQuery.mock.calls[0][0])).toContain('status::text');
   });
 });
 

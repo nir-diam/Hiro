@@ -6,6 +6,15 @@ dotenv.config();
 const MODEL = 'gemini-3-flash-preview';
 const fetchImpl = (typeof fetch !== 'undefined') ? fetch : ((...args) => import('node-fetch').then(({ default: f }) => f(...args)));
 
+/** Prefer GEMINI_* keys — GOOGLE_API_KEY is often a separate key (e.g. Search) blocked on Generative Language API. */
+const resolveGeminiApiKey = () =>
+  process.env.GEMINI_API_KEY ||
+  process.env.GEMINI_KEY ||
+  process.env.GIMINI_KEY ||
+  process.env.API_KEY ||
+  process.env.GOOGLE_API_KEY ||
+  '';
+
 /**
  * Pull text out of a Gemini response. Gemini may split a single answer across
  * multiple `parts` (especially under JSON-mode + tight maxOutputTokens), so we
@@ -191,5 +200,5 @@ const sendSingleTurnChat = async ({ apiKey, systemPrompt, message }) => {
   return `לא התקבלה תשובה מהמודל. ${safety ? `הערת מערכת: ${safety}` : 'נסה שוב או נסה לקצר את ההודעה.'}`;
 };
 
-module.exports = { sendChat, sendSingleTurnChat };
+module.exports = { sendChat, sendSingleTurnChat, resolveGeminiApiKey, MODEL };
 

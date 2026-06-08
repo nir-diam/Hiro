@@ -3,6 +3,7 @@ const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const candidateService = require('./candidateService');
 const jobService = require('./jobService');
+const { persistSonarResults } = require('./matchingCacheService');
 const { searchCandidates } = require('./vectorSearchService');
 const screeningInclusionService = require('./screeningInclusionService');
 const clientUsageSettingService = require('./clientUsageSettingService');
@@ -269,6 +270,11 @@ async function runSonarScan(jobId, body = {}) {
 
   ranked.sort((a, b) => b.matchPercentage - a.matchPercentage);
   const rows = ranked.slice(0, limit);
+
+  // Persist scores to Redis (non-blocking — does not delay the API response)
+  persistSonarResults(jobId, ranked).catch((e) => {
+    console.warn('[jobSonarService] Redis persist failed (non-fatal):', e.message);
+  });
 
   return {
     job: {

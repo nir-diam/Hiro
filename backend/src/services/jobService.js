@@ -1,4 +1,6 @@
 const { Op } = require('sequelize');
+const redis = require('./redisService');
+const { invalidateJobMatches, invalidateJobInAllCandidateOpportunities } = require('./matchingCacheService');
 const Job = require('../models/Job');
 const Prompt = require('../models/Prompt');
 const { sendChat } = require('./geminiService');
@@ -79,6 +81,26 @@ const JOB_ANALYZE_SKILL_QUOTE_APPENDIX = `
   * "quote" is REQUIRED on every skill object and is in ADDITION to "tag_reason".
 `;
 
+const JOB_KEY = (id) => `job:${id}`;
+const JOB_TTL = 60 * 60; // 1 hour
+
+const jobCacheSet = async (job) => {
+  try {
+    const plain = job?.get ? job.get({ plain: true }) : job;
+    if (plain?.id) await redis.set(JOB_KEY(plain.id), plain, { ttlSeconds: JOB_TTL });
+  } catch (e) {
+    console.warn('[jobService] redis set failed (non-fatal):', e.message);
+  }
+};
+
+const jobCacheDel = async (id) => {
+  try {
+    await redis.del(JOB_KEY(id));
+  } catch (e) {
+    console.warn('[jobService] redis del failed (non-fatal):', e.message);
+  }
+};
+
 const pickPreferredWorkingHoursRawFromParsed = (parsed) => {
   if (!parsed || typeof parsed !== 'object') return null;
   const keys = [
@@ -150,7 +172,16 @@ const list = async ({ tagId = null } = {}) => {
   return rows;
 };
 
-const getById = async (id) => {
+const getById = async (id, { skipCache = false } = {}) => {
+  if (!skipCache) {
+    try {
+      const cached = await redis.get(JOB_KEY(id));
+      if (cached) return cached;
+    } catch (e) {
+      console.warn('[jobService] redis get failed (non-fatal):', e.message);
+    }
+  }
+
   const job = await Job.findByPk(id, {
     attributes: { exclude: ['skills'] },
   });
@@ -160,6 +191,7 @@ const getById = async (id) => {
     throw err;
   }
   await hydrateJobSkills(job);
+  await jobCacheSet(job);
   return job;
 };
 
@@ -169,7 +201,9 @@ const create = async (payload) => {
   if (Array.isArray(skills)) {
     await syncTagsForJob(job.id, skills);
   }
-  return hydrateJobSkills(job);
+  await hydrateJobSkills(job);
+  await jobCacheSet(job);
+  return job;
 };
 
 const update = async (id, payload) => {
@@ -184,12 +218,19 @@ const update = async (id, payload) => {
   if (hasSkills) {
     await syncTagsForJob(existing.id, skills || []);
   }
-  return hydrateJobSkills(existing);
+  await hydrateJobSkills(existing);
+  await jobCacheSet(existing);
+  // Job changed → wipe its candidate matches + remove it from every candidate's opportunities
+  invalidateJobMatches(id).catch(() => {});
+  invalidateJobInAllCandidateOpportunities(id).catch(() => {});
+  return existing;
 };
 
 const remove = async (id) => {
-  const job = await getById(id);
-  await job.destroy();
+  const job = await getById(id, { skipCache: true });
+  const instance = job?.destroy ? job : await Job.findByPk(id);
+  if (instance?.destroy) await instance.destroy();
+  await jobCacheDel(id);
 };
 
 const findByPostingCode = async (code) => {

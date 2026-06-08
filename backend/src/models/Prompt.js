@@ -1,6 +1,7 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 
+/** Built-in prompt ids include `tag_correction_agent` (see promptService DEFAULT_PROMPTS + migration). */
 const Prompt = sequelize.define(
   'Prompt',
   {

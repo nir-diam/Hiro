@@ -3,8 +3,11 @@ const Job = require('../models/Job');
 const JobCategory = require('../models/JobCategory');
 const JobCluster = require('../models/JobCluster');
 const JobRole = require('../models/JobRole');
+const redis = require('./redisService');
 
 const OPEN_JOB_STATUSES = ['פתוחה', 'מוקפאת'];
+const TAXONOMY_REDIS_KEY = 'taxonomy:index';
+const TAXONOMY_TTL = 24 * 60 * 60; // 24 hours — taxonomy changes rarely
 
 let taxonomyCache = null;
 
@@ -35,10 +38,35 @@ function rolesMatch(a, b) {
 }
 
 /**
+ * Rebuild Maps from the serialisable plain data (Redis stores plain objects, not Maps).
+ */
+function rebuildTaxonomyIndex(plain) {
+  const categoryByNormName = new Map(plain.categoryEntries || []);
+  const roleByNormValue = new Map(plain.roleEntries || []);
+  return {
+    categories: plain.categories,
+    allRoles: plain.allRoles,
+    categoryByNormName,
+    roleByNormValue,
+  };
+}
+
+/**
  * @returns {Promise<{ categories: object[], roleByNormValue: Map, categoryByNormName: Map }>}
  */
 async function loadTaxonomyIndex() {
   if (taxonomyCache) return taxonomyCache;
+
+  // Try Redis before hitting the DB
+  try {
+    const cached = await redis.get(TAXONOMY_REDIS_KEY);
+    if (cached) {
+      taxonomyCache = rebuildTaxonomyIndex(cached);
+      return taxonomyCache;
+    }
+  } catch (e) {
+    console.warn('[jobTaxonomyResolver] redis get failed (non-fatal):', e.message);
+  }
 
   const categories = await JobCategory.findAll({
     order: [['name', 'ASC']],
@@ -78,11 +106,27 @@ async function loadTaxonomyIndex() {
   }
 
   taxonomyCache = { categories, categoryByNormName, roleByNormValue, allRoles };
+
+  // Persist to Redis — Maps are serialised as entry arrays
+  try {
+    await redis.set(TAXONOMY_REDIS_KEY, {
+      categories: categories.map((c) => (c.get ? c.get({ plain: true }) : c)),
+      allRoles,
+      categoryEntries: [...categoryByNormName.entries()],
+      roleEntries: [...roleByNormValue.entries()],
+    }, { ttlSeconds: TAXONOMY_TTL });
+  } catch (e) {
+    console.warn('[jobTaxonomyResolver] redis set failed (non-fatal):', e.message);
+  }
+
   return taxonomyCache;
 }
 
 function invalidateTaxonomyCache() {
   taxonomyCache = null;
+  redis.del(TAXONOMY_REDIS_KEY).catch((e) => {
+    console.warn('[jobTaxonomyResolver] redis del failed (non-fatal):', e.message);
+  });
 }
 
 function findCategoryInIndex(index, fieldStr) {

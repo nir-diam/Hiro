@@ -1,9 +1,23 @@
 const { Op } = require('sequelize');
+const redis = require('./redisService');
 const JobCandidate = require('../models/JobCandidate');
 const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const { resolveStatusGroup } = require('../utils/recruitmentStatusGroups');
+
+const JC_JOB_KEY = (jobId) => `jobcandidates:job:${jobId}`;
+const JC_CANDIDATE_KEY = (candidateId) => `jobcandidates:candidate:${candidateId}`;
+const JC_TTL = 5 * 60; // 5 minutes — high-churn data, short TTL
+
+const jcCacheInvalidate = async (jobId, candidateId) => {
+  try {
+    const keys = [jobId && JC_JOB_KEY(jobId), candidateId && JC_CANDIDATE_KEY(candidateId)].filter(Boolean);
+    if (keys.length) await redis.del(...keys);
+  } catch (e) {
+    console.warn('[jobCandidateService] redis del failed (non-fatal):', e.message);
+  }
+};
 
 const candidateAttributes = [
   'id',
@@ -47,6 +61,14 @@ const buildCandidateView = (record) => {
 
 const listForJob = async (jobId) => {
   if (!jobId) return [];
+
+  try {
+    const cached = await redis.get(JC_JOB_KEY(jobId));
+    if (cached) return cached;
+  } catch (e) {
+    console.warn('[jobCandidateService] redis get failed (non-fatal):', e.message);
+  }
+
   const records = await JobCandidate.findAll({
     where: { jobId },
     order: [['createdAt', 'DESC']],
@@ -59,7 +81,15 @@ const listForJob = async (jobId) => {
       },
     ],
   });
-  return records.map(buildCandidateView).filter((payload) => payload.id);
+  const result = records.map(buildCandidateView).filter((payload) => payload.id);
+
+  try {
+    await redis.set(JC_JOB_KEY(jobId), result, { ttlSeconds: JC_TTL });
+  } catch (e) {
+    console.warn('[jobCandidateService] redis set failed (non-fatal):', e.message);
+  }
+
+  return result;
 };
 
 const { syntheticJobFromWorkflowMeta } = require('../utils/jobCandidateInterestUtils');
@@ -67,6 +97,14 @@ const { syntheticJobFromWorkflowMeta } = require('../utils/jobCandidateInterestU
 /** Job rows linked to a candidate (התעניינות במשרה) — from job_candidates + jobs. */
 const listForCandidate = async (candidateId) => {
   if (!candidateId) return [];
+
+  try {
+    const cached = await redis.get(JC_CANDIDATE_KEY(candidateId));
+    if (cached) return cached;
+  } catch (e) {
+    console.warn('[jobCandidateService] redis get failed (non-fatal):', e.message);
+  }
+
   const records = await JobCandidate.findAll({
     where: {
       candidateId,
@@ -81,7 +119,7 @@ const listForCandidate = async (candidateId) => {
       ['createdAt', 'DESC'],
     ],
   });
-  return records.map((jc) => {
+  const result = records.map((jc) => {
     const plain = jc.get({ plain: true });
     const wm =
       plain.workflowMeta && typeof plain.workflowMeta === 'object' && !Array.isArray(plain.workflowMeta)
@@ -108,6 +146,14 @@ const listForCandidate = async (candidateId) => {
     }
     return { ...rowBase, job };
   });
+
+  try {
+    await redis.set(JC_CANDIDATE_KEY(candidateId), result, { ttlSeconds: JC_TTL });
+  } catch (e) {
+    console.warn('[jobCandidateService] redis set failed (non-fatal):', e.message);
+  }
+
+  return result;
 };
 
 const associateCandidateWithJob = async ({
@@ -168,6 +214,9 @@ const associateCandidateWithJob = async ({
       /* ignore link meta sync failures */
     }
   }
+
+  // Invalidate cached lists so next read reflects new association
+  await jcCacheInvalidate(record.jobId, record.candidateId);
 
   return record;
 };

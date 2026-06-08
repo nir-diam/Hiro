@@ -1,5 +1,7 @@
 const { Op, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
+const redis = require('./redisService');
+const { invalidateCandidateOpportunities, invalidateCandidateInAllJobMatches } = require('./matchingCacheService');
 const Candidate = require('../models/Candidate');
 const RecruitmentSource = require('../models/RecruitmentSource');
 const SystemTag = require('../models/SystemTag');
@@ -14,6 +16,25 @@ const cityService = require('./cityService');
 const { normalizeOriginalTextHistory } = require('../utils/parsedTextHistory');
 /** Lazy-require matchingScoreService + vectorSearchService inside scoring helpers to avoid circular load:
  * vectorSearchService → candidateService → matchingScoreService → vectorSearchService */
+
+const CANDIDATE_KEY = (id) => `candidate:${id}`;
+const CANDIDATE_TTL = 60 * 60; // 1 hour
+
+const cacheSet = async (candidate) => {
+  try {
+    if (candidate?.id) await redis.set(CANDIDATE_KEY(candidate.id), candidate, { ttlSeconds: CANDIDATE_TTL });
+  } catch (e) {
+    console.warn('[candidateService] redis set failed (non-fatal):', e.message);
+  }
+};
+
+const cacheDel = async (id) => {
+  try {
+    await redis.del(CANDIDATE_KEY(id));
+  } catch (e) {
+    console.warn('[candidateService] redis del failed (non-fatal):', e.message);
+  }
+};
 
 // Parse year from experience date string (YYYY-MM, YYYY, or "Present")
 const parseExperienceYear = (s) => {
@@ -1451,6 +1472,16 @@ const listByWorkedAtOrganization = async ({
 };
 
 const getById = async (id, opts = {}) => {
+  // Cache-aside: return from Redis when available (skip DB + join round-trip)
+  if (!opts.skipCache) {
+    try {
+      const cached = await redis.get(CANDIDATE_KEY(id));
+      if (cached) return cached;
+    } catch (e) {
+      console.warn('[candidateService] redis get failed (non-fatal):', e.message);
+    }
+  }
+
   const candidate = await Candidate.findByPk(id, { include: includeCandidateTags });
   if (!candidate) {
     const err = new Error('Candidate not found');
@@ -1469,6 +1500,9 @@ const getById = async (id, opts = {}) => {
     lj && typeof lj.matchScore === 'number' && Number.isFinite(lj.matchScore) ? lj.matchScore : null;
   if (lj?.scoreBreakdown) row.scoreBreakdown = lj.scoreBreakdown;
   if (lj?.parameterMatches) row.parameterMatches = lj.parameterMatches;
+
+  // Populate cache for next request
+  await cacheSet(row);
   return row;
 };
 
@@ -1522,16 +1556,19 @@ const create = async (payload) => {
   normalizePreferredWorkingHoursInPayload(cleanPayload);
   await applyCandidateCityFromCatalog(cleanPayload);
   syncCandidateNameForCreate(cleanPayload);
+  let created;
   try {
-    return await Candidate.create(cleanPayload);
+    created = await Candidate.create(cleanPayload);
   } catch (err) {
     if (!isCityValidationError(err)) throw err;
     // eslint-disable-next-line no-console
     console.warn('[candidateService] create blocked by city validation, retrying with null city');
     cleanPayload.address = null;
     cleanPayload.location = null;
-    return Candidate.create(cleanPayload);
+    created = await Candidate.create(cleanPayload);
   }
+  await cacheSet(created.toJSON ? created.toJSON() : created);
+  return created;
 };
 
 const sanitizeEmbedding = (emb) => {
@@ -1659,9 +1696,14 @@ const update = async (id, payload) => {
     cleanPayload.location = null;
     await candidate.update(cleanPayload);
   }
-  return mapCandidateWithTags(
+  const updated = mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
+  await cacheSet(updated);
+  // Profile changed → remove stale scores from every job:*:matches + wipe their opportunities
+  invalidateCandidateOpportunities(id).catch(() => {});
+  invalidateCandidateInAllJobMatches(id).catch(() => {});
+  return updated;
 };
 
 /** Save edited parsed CV text: archive previous searchText into originalText, set new searchText. */
@@ -1691,15 +1733,19 @@ const saveParsedTextVersion = async (id, text) => {
     originalText: history,
     searchTextSavedAt: now,
   });
+  // CV text changed → embedding will be rebuilt → old scores are stale everywhere
+  invalidateCandidateOpportunities(id).catch(() => {});
+  invalidateCandidateInAllJobMatches(id).catch(() => {});
   return mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
 };
 
 const remove = async (id) => {
-  const candidate = await getById(id);
+  const candidate = await fetchInstanceById(id);
   await candidate.update({ isDeleted: true });
-  return candidate;
+  await cacheDel(id);
+  return candidate.toJSON ? candidate.toJSON() : candidate;
 };
 
 const searchFree = async ({ query, limit = 50 }) => {

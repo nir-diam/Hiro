@@ -11,6 +11,7 @@ const jobTagTypeWhere = (where = {}) => ({ ...where, type: SYSTEM_TAG_TYPE_JOB }
 const Tag = require('../models/Tag');
 const Job = require('../models/Job');
 const Candidate = require('../models/Candidate');
+const User = require('../models/User');
 const tagScoringEngine = require('./tagScoringEngine');
 
 if (!SystemTag.associations?.tag) {
@@ -225,19 +226,23 @@ const buildSynonymMatchLiteral = (lowerTrimmed) => {
   );
 };
 
-const findTagByNameOrAlias = async (name) => {
+const findTagByNameOrAlias = async (name, options = {}) => {
   const trimmed = (name || '').trim();
   if (!trimmed) return null;
 
   const lowerTrimmed = trimmed.toLowerCase();
   const escaped = sequelize.escape(lowerTrimmed);
+  const statusFilter = options.status
+    ? `AND lower(trim(COALESCE(status::text, ''))) = lower(${sequelize.escape(String(options.status))})`
+    : '';
 
   // Prefer raw query so synonym/alias match is reliable (no Sequelize alias or literal issues)
   const rows = await sequelize.query(
     `
         SELECT id
     FROM public.tags
-    WHERE lower(trim(COALESCE(display_name_he, '')::text)) = lower(${escaped})
+    WHERE (
+      lower(trim(COALESCE(display_name_he, '')::text)) = lower(${escaped})
       OR lower(trim(COALESCE(display_name_en, '')::text)) = lower(${escaped})
       OR lower(trim(COALESCE(tag_key, '')::text)) = lower(${escaped})
       OR EXISTS (
@@ -252,6 +257,16 @@ const findTagByNameOrAlias = async (name) => {
           FROM unnest(COALESCE(aliases, ARRAY[]::text[])) AS alias
           WHERE lower(trim(COALESCE(alias, '')::text)) = lower(${escaped})
       )
+    )
+    ${statusFilter}
+    ORDER BY
+      CASE lower(COALESCE(status::text, ''))
+        WHEN 'active' THEN 0
+        WHEN 'draft' THEN 1
+        WHEN 'pending' THEN 2
+        ELSE 3
+      END,
+      usage_count DESC NULLS LAST
     LIMIT 1;
     `,
     { type: QueryTypes.SELECT }
@@ -261,6 +276,20 @@ const findTagByNameOrAlias = async (name) => {
     return Tag.findByPk(row.id);
   }
   return null;
+};
+
+/** If a pending duplicate exists but an active catalog tag matches, prefer the active tag. */
+const preferActiveCatalogTag = async (found, searchTargets = []) => {
+  if (!found) return found;
+  if (String(found.status || '').toLowerCase() === 'active') return found;
+
+  for (const target of searchTargets) {
+    const trimmed = String(target || '').trim();
+    if (!trimmed) continue;
+    const active = await findTagByNameOrAlias(trimmed, { status: 'active' });
+    if (active) return active;
+  }
+  return found;
 };
 
 const doesTagNameOrAliasExist = async (name) => Boolean(await findTagByNameOrAlias(name));
@@ -302,9 +331,38 @@ const findFuzzyTag = async (value) => {
 const ensureTagRecord = async (tagKey, defaults = {}) => {
   if (!tagKey) return null;
   const searchTargets = [tagKey, defaults.displayNameHe, defaults.displayNameEn];
+  const contextSample =
+    defaults.contextSample ||
+    defaults.context ||
+    defaults.quote ||
+    defaults.tag_reason ||
+    '';
+
   for (const target of searchTargets) {
     const found = await findTagByNameOrAlias(target);
-    if (found) return { tag: found, created: false };
+    if (found) {
+      const catalogTag = await preferActiveCatalogTag(found, searchTargets);
+      if (String(catalogTag.status).toLowerCase() === 'pending') {
+        try {
+          const tagCorrectionAgentService = require('./tagCorrectionAgentService');
+          tagCorrectionAgentService.schedulePendingIfNeeded(catalogTag.id, contextSample, {
+            clientId: defaults.clientId || null,
+          });
+        } catch (err) {
+          console.warn('[ensureTagRecord] schedule pending if needed failed', err?.message || err);
+        }
+      }
+      return { tag: catalogTag, created: false };
+    }
+  }
+
+  for (const target of searchTargets) {
+    const trimmed = String(target || '').trim();
+    if (!trimmed) continue;
+    const active = await findTagByNameOrAlias(trimmed, { status: 'active' });
+    if (active) {
+      return { tag: active, created: false };
+    }
   }
   // NEVER RETURN THIS CODE!!!
   //const fuzzy = await findFuzzyTag(defaults.displayNameHe || defaults.displayNameEn || tagKey);
@@ -334,6 +392,16 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     source: defaults.source || 'ai',
     status: 'pending',
   });
+
+  try {
+    const tagCorrectionAgentService = require('./tagCorrectionAgentService');
+    tagCorrectionAgentService.scheduleDecisionForPendingTag(tag.id, contextSample, {
+      clientId: defaults.clientId || null,
+    });
+  } catch (err) {
+    console.warn('[ensureTagRecord] tag correction agent schedule failed', err?.message || err);
+  }
+
   return { tag, created: true };
 };
 
@@ -624,12 +692,25 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
 
   await SystemTag.destroy({ where: candidateTagTypeWhere({ entity_id: candidateId }) });
 
+  let clientId = null;
+  try {
+    const candidate = await Candidate.findByPk(candidateId, { attributes: ['userId'] });
+    if (candidate?.userId) {
+      const user = await User.findByPk(candidate.userId, { attributes: ['clientId'] });
+      clientId = user?.clientId || null;
+    }
+  } catch {
+    clientId = null;
+  }
+
   // Resolve each payload to a tag (find existing or create pending). Deduplicate by tag.id.
   const resolved = await Promise.all(
     payloads.map(async (payload) => {
       const { tag, created } = await ensureTagRecord(payload.tagKey, {
         displayNameHe: payload.name,
         type: payload.raw_type || 'role',
+        contextSample: payload.quote || payload.context || payload.tag_reason || '',
+        clientId,
       });
       return tag ? { tag, created, payload } : null;
     }),

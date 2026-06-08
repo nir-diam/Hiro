@@ -52,6 +52,8 @@ const connectDb = async () => {
   require('../models/RecruitmentStatus');
   require('../models/RecruitmentSource');
   require('../models/MatchingEngineConfig');
+  require('../models/TagAiDecision');
+  require('../models/TagCorrectionPlatformSettings');
 
   const User = require('../models/User');
   const Client = require('../models/Client');

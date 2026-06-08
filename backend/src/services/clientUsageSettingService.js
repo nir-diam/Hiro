@@ -25,6 +25,7 @@ const DEFAULTS = {
   billingStatusParent: false,
   billingStatusAccepted: false,
   matchingEnginePresetId: null,
+  tagCorrectionAgentEnabled: true,
 };
 
 const toDto = (row) => {
@@ -58,6 +59,7 @@ const toDto = (row) => {
       plain.matchingEnginePresetId != null && Number.isFinite(Number(plain.matchingEnginePresetId))
         ? Number(plain.matchingEnginePresetId)
         : null,
+    tagCorrectionAgentEnabled: plain.tagCorrectionAgentEnabled !== false,
   };
 };
 
@@ -374,6 +376,10 @@ const upsert = async (clientId, body) => {
     billingStatusParent: Boolean(body.billingStatusParent),
     billingStatusAccepted: Boolean(body.billingStatusAccepted),
     matchingEnginePresetId,
+    tagCorrectionAgentEnabled:
+      body.tagCorrectionAgentEnabled !== undefined
+        ? Boolean(body.tagCorrectionAgentEnabled)
+        : prevPlain.tagCorrectionAgentEnabled !== false,
   };
 
   if (row) {

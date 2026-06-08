@@ -38,6 +38,7 @@ export type ClientUsageSettingsDto = {
     billingStatusAccepted: boolean;
     /** matching_engine_configs preset id; null = first eligible preset for this client */
     matchingEnginePresetId?: number | null;
+    tagCorrectionAgentEnabled?: boolean;
 };
 
 export async function fetchClientUsageSettings(clientId: string): Promise<ClientUsageSettingsDto> {

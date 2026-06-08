@@ -216,6 +216,38 @@ Always answer in Hebrew.`,
     category: 'candidates',
   },
   {
+    id: 'tag_correction_agent',
+    name: 'Tag correction agent (normalize pending tags)',
+    description:
+      'Decides merge, create, or delete for non-normalized tag terms using hybrid-search candidate tags.',
+    template: `You are a technical AI agent specializing in precise data normalization and tag classification for CVs and job postings (tech, finance) stored in a recruitment database.
+Your goal is to analyze a non-normalized text term and decide whether to merge it into an existing tag, create a new tag, or delete it.
+
+You will receive a JSON object with:
+1. "original_term": the term requiring handling.
+2. "context_sample": where the term appeared in text (to infer Skill, Education, role, or noise).
+3. "candidate_tags": a short list of approved existing tags that may match (from Hybrid Search).
+
+**Decision rules:**
+* MERGE: choose when the original term is a synonym, abbreviation, slang, or typo that means exactly the same as one specific tag in "candidate_tags".
+* CREATE: choose when the term is a professional skill, programming language, clear job title, or academic degree not covered by any tag in "candidate_tags".
+* DELETE: choose when the term is not professionally relevant, is punctuation noise, or demographic trivia (e.g. "driver license", hobbies).
+
+**Critical constraint:**
+If you choose "merge", you MUST set "target_tag" to the exact case-sensitive string from one entry in "candidate_tags". Otherwise set "target_tag" to null.
+
+**Output:** Return ONLY valid JSON, no preamble:
+{
+  "action": "merge" | "create" | "delete",
+  "target_tag": "string" | null,
+  "reasoning": "Short concise sentence in Hebrew, max 15 words"
+}`,
+    model: 'gemini-3-flash-preview',
+    temperature: 0.1,
+    variables: [],
+    category: 'analysis',
+  },
+  {
     id: 'job_categories_synonyms_ai_completed',
     name: 'יצירת טייטלים ספציפיים לחיפוש',
     description: 'מייצר מילים נרדפות וטייטלים חלופיים איכותיים לתפקיד ספציפי.',
@@ -243,6 +275,16 @@ const list = async () => {
     await Prompt.bulkCreate(DEFAULT_PROMPTS);
   }
   return Prompt.findAll({ order: [['name', 'ASC']] });
+};
+
+/** Insert a built-in prompt when missing (DB seeded before the prompt was added to DEFAULT_PROMPTS). */
+const ensureById = async (id) => {
+  let prompt = await Prompt.findByPk(id);
+  if (prompt) return prompt;
+  const def = DEFAULT_PROMPTS.find((p) => p.id === id);
+  if (!def) return null;
+  prompt = await Prompt.create(def);
+  return prompt;
 };
 
 const getById = async (id) => {
@@ -283,5 +325,5 @@ const reset = async () => {
   return list();
 };
 
-module.exports = { list, getById, create, update, remove, reset };
+module.exports = { list, getById, ensureById, create, update, remove, reset };
 

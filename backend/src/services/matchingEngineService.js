@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const MatchingEngineConfig = require('../models/MatchingEngineConfig');
+const { invalidateAllMatchCaches } = require('./matchingCacheService');
 const { DEFAULT_PENALTY_POLICIES } = require('./matchingPenaltyService');
 
 /**
@@ -66,6 +67,10 @@ async function updateConfig(incoming) {
   const base = created ? DEFAULT_CONFIG : row.config;
   row.config = mergeEngineConfig(base, incoming || {});
   await row.save();
+  // All cached match scores are now stale — wipe every job:*:matches and candidate:*:opportunities
+  invalidateAllMatchCaches().catch((e) =>
+    console.warn('[matchingEngineService] Redis invalidation failed (non-fatal):', e.message),
+  );
   return normalizeEngineConfig(row.config);
 }
 
@@ -124,6 +129,10 @@ async function updatePreset(id, { label, description, clientIds, config } = {}) 
   if (clientIds   !== undefined) row.clientIds   = clientIds;
   if (config      !== undefined) row.config      = config;
   await row.save();
+  // Preset config changed → all clients using this preset have stale scores
+  invalidateAllMatchCaches().catch((e) =>
+    console.warn('[matchingEngineService] Redis invalidation after updatePreset failed (non-fatal):', e.message),
+  );
   return serializePreset(row);
 }
 
@@ -131,6 +140,12 @@ async function deletePreset(id) {
   const deleted = await MatchingEngineConfig.destroy({
     where: { id, type: 'preset' },
   });
+  if (deleted > 0) {
+    // Clients that used this preset now fall back to global config → stale scores
+    invalidateAllMatchCaches().catch((e) =>
+      console.warn('[matchingEngineService] Redis invalidation after deletePreset failed (non-fatal):', e.message),
+    );
+  }
   return deleted > 0;
 }
 
@@ -303,7 +318,11 @@ function resolveMainWeights(mainWeights, options = {}) {
   return { vector: vW, tags: tW, geo: gW, experience: eW, intent: iW };
 }
 
-/** Global row + optional preset override when job client UUID is listed on a preset */
+/**
+ * Global row + optional preset override + per-job Redis weight sliders.
+ * Priority (highest wins):
+ *   job-specific Redis weights  >  client preset  >  global config
+ */
 async function resolveEngineConfigForJob(jobPlain, options = {}) {
   const globalCfg = normalizeEngineConfig(await getConfig());
   let merged = globalCfg;
@@ -316,6 +335,33 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
   } catch (e) {
     console.warn('[matchingEngineService] resolveEngineConfigForJob', e.message || e);
   }
+
+  // Merge per-job Redis weight sliders on top (highest priority)
+  const jobId = jobPlain?.id != null ? String(jobPlain.id) : '';
+  if (jobId) {
+    try {
+      const { getJobWeights } = require('./matchingCacheService');
+      const jobWeights = await getJobWeights(jobId);
+      if (jobWeights && typeof jobWeights === 'object' && Object.keys(jobWeights).length) {
+        // jobWeights keys match mainWeights fields (semantic→vector, geo, skills→tags, salaryPenalty, etc.)
+        const weightPatch = {};
+        if (jobWeights.semantic   != null) weightPatch.vector     = jobWeights.semantic;
+        if (jobWeights.vector     != null) weightPatch.vector     = jobWeights.vector;
+        if (jobWeights.geo        != null) weightPatch.geo        = jobWeights.geo;
+        if (jobWeights.skills     != null) weightPatch.tags       = jobWeights.skills;
+        if (jobWeights.tags       != null) weightPatch.tags       = jobWeights.tags;
+        if (jobWeights.experience != null) weightPatch.experience = jobWeights.experience;
+        if (jobWeights.intent     != null) weightPatch.intent     = jobWeights.intent;
+        if (Object.keys(weightPatch).length) {
+          merged = mergeEngineConfig(merged, { mainWeights: weightPatch });
+        }
+        if (jobWeights.salaryPenalty != null) merged.salaryPenalty = jobWeights.salaryPenalty;
+      }
+    } catch (e) {
+      console.warn('[matchingEngineService] per-job Redis weights load failed (non-fatal):', e.message);
+    }
+  }
+
   merged.mainWeights = resolveMainWeights(merged.mainWeights, {
     allowVectorOnly: Boolean(presetRow?.id),
   });

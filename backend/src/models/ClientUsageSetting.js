@@ -70,6 +70,12 @@ const ClientUsageSetting = sequelize.define(
       allowNull: true,
       field: 'matching_engine_preset_id',
     },
+    tagCorrectionAgentEnabled: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+      field: 'tag_correction_agent_enabled',
+    },
   },
   {
     tableName: 'client_usage_settings',
