@@ -2,16 +2,20 @@ const { Op } = require('sequelize');
 const MatchingEngineConfig = require('../models/MatchingEngineConfig');
 const { invalidateAllMatchCaches } = require('./matchingCacheService');
 const { DEFAULT_PENALTY_POLICIES } = require('./matchingPenaltyService');
-
-/**
- * Preset CRUD + global row (`getConfig` / `updateConfig` / `createPreset` / …) only touch `matching_engine_configs`.
- * They do not read or write `client_usage_settings`.
- *
- * The only link to `client_usage_settings` here is a **read** in `findMatchingPresetRowForJob` (used by
- * `resolveEngineConfigForJob` at scoring time) for `matching_engine_preset_id` — not invoked by admin save routes.
- */
+const redisService = require('./redisService');
+const { isRedisAvailable } = require('../config/redis');
 
 const GLOBAL_KEY = 'global';
+
+// ── In-process cache for global config — cleared when admin saves ──────────────
+let _globalConfigCache = null;
+let _globalConfigCacheAt = 0;
+const GLOBAL_CONFIG_CACHE_MS = 30_000; // 30 s
+
+// ── Redis cache TTLs ──────────────────────────────────────────────────────────
+const ENGINE_CONFIG_CACHE_TTL = 300;   // 5 min — per-job resolved config
+const engineConfigCacheKey = (jobId, tenantId) =>
+  `engine-config:${jobId}:${tenantId || 'default'}`;
 
 const DEFAULT_CONFIG = {
   mainWeights: { vector: 20, tags: 35, geo: 20, experience: 15, intent: 10 },
@@ -48,6 +52,10 @@ function normalizeEngineConfig(cfg) {
 }
 
 async function getConfig() {
+  const now = Date.now();
+  if (_globalConfigCache && now - _globalConfigCacheAt < GLOBAL_CONFIG_CACHE_MS) {
+    return _globalConfigCache;
+  }
   let row = await MatchingEngineConfig.findOne({ where: { configKey: GLOBAL_KEY } });
   if (!row) {
     row = await MatchingEngineConfig.create({
@@ -56,7 +64,10 @@ async function getConfig() {
       config: DEFAULT_CONFIG,
     });
   }
-  return normalizeEngineConfig(row.config);
+  const cfg = normalizeEngineConfig(row.config);
+  _globalConfigCache = cfg;
+  _globalConfigCacheAt = now;
+  return cfg;
 }
 
 async function updateConfig(incoming) {
@@ -67,6 +78,8 @@ async function updateConfig(incoming) {
   const base = created ? DEFAULT_CONFIG : row.config;
   row.config = mergeEngineConfig(base, incoming || {});
   await row.save();
+  // Bust in-process config cache
+  _globalConfigCache = null;
   // All cached match scores are now stale — wipe every job:*:matches and candidate:*:opportunities
   invalidateAllMatchCaches().catch((e) =>
     console.warn('[matchingEngineService] Redis invalidation failed (non-fatal):', e.message),
@@ -324,6 +337,16 @@ function resolveMainWeights(mainWeights, options = {}) {
  *   job-specific Redis weights  >  client preset  >  global config
  */
 async function resolveEngineConfigForJob(jobPlain, options = {}) {
+  const jobId = jobPlain?.id != null ? String(jobPlain.id) : '';
+  const tenantId = options.tenantClientId ? String(options.tenantClientId).trim() : '';
+
+  // Redis cache — the resolved config rarely changes between requests
+  if (jobId && isRedisAvailable()) {
+    const cacheKey = engineConfigCacheKey(jobId, tenantId);
+    const cached = await redisService.get(cacheKey);
+    if (cached && typeof cached === 'object' && cached.mainWeights) return cached;
+  }
+
   const globalCfg = normalizeEngineConfig(await getConfig());
   let merged = globalCfg;
   let presetRow = null;
@@ -337,13 +360,11 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
   }
 
   // Merge per-job Redis weight sliders on top (highest priority)
-  const jobId = jobPlain?.id != null ? String(jobPlain.id) : '';
   if (jobId) {
     try {
       const { getJobWeights } = require('./matchingCacheService');
       const jobWeights = await getJobWeights(jobId);
       if (jobWeights && typeof jobWeights === 'object' && Object.keys(jobWeights).length) {
-        // jobWeights keys match mainWeights fields (semantic→vector, geo, skills→tags, salaryPenalty, etc.)
         const weightPatch = {};
         if (jobWeights.semantic   != null) weightPatch.vector     = jobWeights.semantic;
         if (jobWeights.vector     != null) weightPatch.vector     = jobWeights.vector;
@@ -365,6 +386,14 @@ async function resolveEngineConfigForJob(jobPlain, options = {}) {
   merged.mainWeights = resolveMainWeights(merged.mainWeights, {
     allowVectorOnly: Boolean(presetRow?.id),
   });
+
+  // Store in Redis for subsequent requests
+  if (jobId && isRedisAvailable()) {
+    redisService.set(engineConfigCacheKey(jobId, tenantId), merged, {
+      ttlSeconds: ENGINE_CONFIG_CACHE_TTL,
+    }).catch(() => {});
+  }
+
   return merged;
 }
 

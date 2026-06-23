@@ -19,7 +19,7 @@ import {
 } from './Icons';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import ResumeViewer from './ResumeViewer';
-import { InternalOpinionEditorModal, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
+import { InternalOpinionEditorModal, OpinionQuillEditor, copyRichHtmlToClipboard } from './InternalOpinionEditorModal';
 import { useLanguage } from '../context/LanguageContext';
 import { buildParsedScreeningCvHtmlForPdf, renderScreeningCvHtmlToPdfBase64 } from '../utils/screeningCvPdfExport';
 import type { LocationItem } from './LocationSelector';
@@ -1290,6 +1290,15 @@ const CandidateScreeningView: React.FC<{
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
         if (token) headers.Authorization = `Bearer ${token}`;
+
+        const { answers } = getScreeningForJob(job);
+        const screeningAnswers = (job.screeningQuestions || []).map((sq, i) => ({
+          question: sq.question,
+          answer: answers[i] ?? '',
+        }));
+
+        const currentDraftHtml = internalOpinionByJobId[String(job.id)] || '';
+
         try {
           const res = await fetch(`${apiBase}/api/candidates/${candidateId}/generate-internal-opinion`, {
             method: 'POST',
@@ -1299,6 +1308,8 @@ const CandidateScreeningView: React.FC<{
               jobTitle: job.title,
               jobDescription: job.description,
               requirements: job.requirements,
+              screeningAnswers,
+              currentDraft: currentDraftHtml,
             }),
           });
           const data = await res.json().catch(() => ({}));
@@ -1308,7 +1319,7 @@ const CandidateScreeningView: React.FC<{
           return { html: null, errorMessage: 'שגיאת רשת.' };
         }
       },
-      [candidateId]
+      [candidateId, getScreeningForJob, internalOpinionByJobId]
     );
 
     const handleGenerateInternalOpinion = useCallback(
@@ -1557,16 +1568,10 @@ const CandidateScreeningView: React.FC<{
         const jid = String(id);
         const job = jobs.find((j) => String(j.id) === String(id));
         const list = job ? contactsListFromScreeningJob(job) : [];
-        if (list.length === 0) {
-          alert('למשרה אחת או יותר מהנבחרות לא הוגדרו אנשי קשר. הוסיפו אנשי קשר בכרטיס המשרה ואז נסו שוב.');
-          return;
-        }
+       
         const map = selectedContactsByJob[jid];
         const n = map ? Object.entries(map).filter(([, v]) => v).length : 0;
-        if (n === 0) {
-          alert('יש לבחור לפחות איש קשר אחד לכל משרה.');
-          return;
-        }
+        
       }
 
       const jobsPayload = jobs.filter((j) => jobIds.includes(j.id));
@@ -2024,20 +2029,7 @@ const CandidateScreeningView: React.FC<{
                                                     ))}
                                                 </div>
                                             </div>
-                                            <div>
-                                                <h5 className="font-bold text-text-muted mb-1 text-xs uppercase flex items-center gap-1">
-                                                    <PhoneIcon className="w-3 h-3" />
-                                                    התרשמות טלפונית
-                                                </h5>
-                                                <textarea
-                                                    rows={2}
-                                                    placeholder="רשום התרשמות משיחה טלפונית..."
-                                                    value={getScreeningForJob(job).telephoneImpression}
-                                                    onChange={(e) => updateTelephoneImpression(job, e.target.value)}
-                                                    className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-primary-500 focus:border-primary-500 resize-none"
-                                                />
-                                            </div>
-                                            <div className="pt-2">
+                                            <div className="pt-2 border-t border-border-default mt-4 relative">
                                                 <div className="flex justify-between items-center mb-2">
                                                     <h5 className="font-bold text-text-muted text-xs uppercase">חוות דעת פנימית</h5>
                                                     <div className="flex gap-2">
@@ -2045,41 +2037,32 @@ const CandidateScreeningView: React.FC<{
                                                             type="button"
                                                             disabled={loadingOpinionForJobId === job.id}
                                                             onClick={(e) => { e.stopPropagation(); handleGenerateInternalOpinion(job); }}
-                                                            className="text-[10px] font-bold text-primary-600 hover:text-primary-700 flex items-center gap-1 bg-primary-50 px-2 py-1 rounded-md border border-primary-100 transition-colors disabled:opacity-50"
+                                                            className="text-[10px] font-bold text-primary-600 hover:text-primary-700 flex items-center gap-1 bg-primary-50 px-2 py-1 rounded-md border border-primary-100 transition-colors disabled:opacity-50 z-10"
                                                         >
                                                             <SparklesIcon className="w-3 h-3" />
                                                             {loadingOpinionForJobId === job.id ? 'מייצר...' : 'הפק חוות דעת AI'}
                                                         </button>
                                                         <button
                                                             type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                openOpinionEditor(job);
-                                                            }}
-                                                            className="text-[10px] font-bold text-text-muted hover:text-text-default flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md border border-border-default transition-colors"
+                                                            onClick={(e) => { e.stopPropagation(); openOpinionEditor(job); }}
+                                                            className="text-[10px] font-bold text-text-muted hover:text-text-default flex items-center gap-1 bg-bg-subtle px-2 py-1 rounded-md border border-border-default transition-colors z-10"
                                                         >
                                                             <ArrowsPointingOutIcon className="w-3 h-3" />
                                                             ערוך והרחב
                                                         </button>
-                                                        <button
-                                                            type="button"
-                                                            onClick={(e) => {
-                                                                e.stopPropagation();
-                                                                handleReportOpinionIssue();
-                                                            }}
-                                                            className="text-[10px] font-bold text-red-600 hover:text-red-700 flex items-center gap-1 bg-red-50 px-2 py-1 rounded-md border border-red-100 transition-colors"
-                                                            title="דווח על אי-דיוק"
-                                                        >
-                                                            <ExclamationTriangleIcon className="w-3 h-3" />
-                                                            דווח
-                                                        </button>
                                                     </div>
                                                 </div>
-                                                <div className="w-full bg-white border border-border-default rounded-xl p-4 text-sm text-text-default cursor-pointer hover:border-primary-300 transition-all shadow-sm relative group max-h-[400px] overflow-y-auto custom-scrollbar">
-                                                    <div className="prose prose-sm max-w-none opacity-80" dangerouslySetInnerHTML={{ __html: internalOpinionByJobId[String(job.id)] || '<p class="text-text-muted">לחץ על &quot;הפק חוות דעת AI&quot; כדי ליצור חוות דעת.</p>' }} />
-                                                    <div className="sticky bottom-0 right-0 flex justify-end pt-2">
-                                                        <span className="text-[10px] font-bold text-text-muted bg-white/90 backdrop-blur-sm px-2 py-0.5 rounded-md border border-border-default">לחץ לכיווץ</span>
-                                                    </div>
+                                                <div className="w-full bg-white border border-border-default rounded-xl overflow-hidden shadow-sm relative focus-within:border-primary-500 focus-within:ring-1 focus-within:ring-primary-500 transition-all">
+                                                    <OpinionQuillEditor
+                                                        jobId={String(job.id)}
+                                                        value={internalOpinionByJobId[String(job.id)] || ''}
+                                                        onChange={(html) => setInternalOpinionByJobId(prev => ({ ...prev, [String(job.id)]: html }))}
+                                                        placeholder={'רשמו כאן את חוות הדעת, או לחצו על לחצן ״הפק חוות דעת AI״...'}
+                                                        showToolbar={false}
+                                                        minHeight="160px"
+                                                        rtl
+                                                        className="border-none [&_.ql-container]:border-none [&_.ql-editor]:min-h-[160px] [&_.ql-editor]:text-sm [&_.ql-editor]:text-right"
+                                                    />
                                                 </div>
                                             </div>
                                         </div>
@@ -2435,7 +2418,7 @@ const CandidateScreeningView: React.FC<{
                       <button
                         type="button"
                         onClick={() => void handleConfirmSendCv()}
-                        disabled={sendCvSubmitting || sendCvSendDisabled}
+                        disabled={sendCvSubmitting}
                         className="px-8 py-2.5 font-bold text-white bg-primary-600 hover:bg-primary-700 rounded-xl shadow-lg shadow-primary-200 transition-all transform active:scale-95 flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
                       >
                         <span>{sendCvSubmitting ? 'שולח...' : 'אשר ושלח'}</span>

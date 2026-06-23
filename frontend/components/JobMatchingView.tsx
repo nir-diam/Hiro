@@ -65,6 +65,10 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [clientOptions, setClientOptions] = useState<string[]>([]);
   const [cityOptions, setCityOptions] = useState<string[]>([]);
 
+  // Prevents double-fetch when parent re-renders and candidateId prop transitions
+  // from a temporary value (e.g. formData.id) to the settled backendId.
+  const loadedForIdRef = useRef<string | null>(null);
+
   // ── ui ──
   const [searchTerm, setSearchTerm] = useState('');
   const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(true);
@@ -104,14 +108,13 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
   // ─── load ──────────────────────────────────────────────────────────────────
 
-  const loadJobs = useCallback(async () => {
+  const loadJobsCore = useCallback(async () => {
     if (!candidateId) return;
     setLoading(true);
     setError(null);
     try {
       const rows = await fetchJobMatches(candidateId, { limit: 50 });
       setJobs(rows);
-      // Seed assignedJobs from already-linked results
       const linked = new Set<string>(
         rows.filter((j) => j.matchType === 'application' && j.jobCandidateId).map((j) => j.id),
       );
@@ -122,6 +125,20 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
       setLoading(false);
     }
   }, [candidateId]);
+
+  // Auto-load on mount — guarded so a prop transition (temp id → real backendId) doesn't double-fetch.
+  const loadJobs = useCallback(async () => {
+    if (!candidateId) return;
+    if (loadedForIdRef.current === candidateId) return;
+    loadedForIdRef.current = candidateId;
+    await loadJobsCore();
+  }, [candidateId, loadJobsCore]);
+
+  // Manual refresh — always re-fetches regardless of the guard.
+  const refreshJobs = useCallback(() => {
+    loadedForIdRef.current = null;
+    loadJobsCore();
+  }, [loadJobsCore]);
 
   useEffect(() => { loadJobs(); }, [loadJobs]);
 
@@ -640,7 +657,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               <span>הוספת תפקיד</span>
             </button>
             <button
-              onClick={loadJobs}
+              onClick={refreshJobs}
               disabled={loading}
               className="flex items-center gap-2 bg-primary-100/70 text-primary-700 font-semibold py-2 px-4 rounded-lg hover:bg-primary-200 transition disabled:opacity-50"
             >
@@ -760,7 +777,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
         {error && !loading && (
           <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 px-4 py-3 text-sm flex items-center justify-between">
             <span>{error}</span>
-            <button onClick={loadJobs} className="text-red-600 font-semibold underline text-xs">נסה שוב</button>
+            <button onClick={refreshJobs} className="text-red-600 font-semibold underline text-xs">נסה שוב</button>
           </div>
         )}
 

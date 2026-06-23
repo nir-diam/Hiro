@@ -78,6 +78,8 @@ const Job = sequelize.define(
     },
     aiRawDescription: DataTypes.TEXT,
     events: { type: DataTypes.JSONB, defaultValue: [] },
+    // Cached embedding vector (computed once on create/update, avoids Gemini calls during sonar scans)
+    embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {
     tableName: 'jobs',

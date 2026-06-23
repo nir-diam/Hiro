@@ -63,7 +63,7 @@ const isIrrelevantSerpOrganicResult = (result) => {
   return false;
 };
 
-/** Drop app-store, YouTube, and similar SerpAPI organic hits. */
+/** Drop app-store, YouTube, and similar organic search hits. */
 const filterSerpOrganicResults = (results) => {
   if (!Array.isArray(results)) return [];
   return results.filter((row) => !isIrrelevantSerpOrganicResult(row));

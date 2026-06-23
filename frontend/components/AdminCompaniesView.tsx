@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, PlusIcon, SparklesIcon, GlobeAmericasIcon, 
     MapPinIcon, Squares2X2Icon, TableCellsIcon, 
@@ -21,11 +22,11 @@ import {
 import BusinessFieldHierarchyFields from './BusinessFieldHierarchyFields';
 
 // --- Types ---
-type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'Mixed' | 'Unknown';
-type ProductType = 'Product' | 'Service' | 'Platform' | 'Project' | 'Unknown';
+type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'משולב' | 'לא ידוע';
+type ProductType = 'מוצר (Product)' | 'שירותים (Services)' | 'פלטפורמה' | 'פרויקטים' | 'לא ידוע';
 type GrowthIndicator = 'Growing' | 'Stable' | 'Shrinking' | 'Unknown';
-type DataConfidence = 'High' | 'Medium' | 'Low' | 'Pending Review'; 
-type CorporateStructure = 'Independent' | 'Parent' | 'Subsidiary';
+type DataConfidence = 'High' | 'Medium' | 'Low' | 'Pending Review';
+type CorporateStructure = 'חברה עצמאית (ללא שיוך)' | 'חברת אם (Parent/Holding)' | 'חברת בת (Subsidiary)';
 
 type CompanyId = string | number;
 
@@ -43,15 +44,18 @@ interface Company {
     linkedinUrl: string;    
     
     // Hard Facts
-    foundedYear: string;    
+    foundedYear: string;
     location: string; // HQ City
     hqCountry: string;
+    address?: string;  // Physical address
+    activityStatus?: 'פעילה' | 'לא פעילה' | 'בפירוק' | 'לא ידוע';
     
     // Scale
     employeeCount: string;
     
     // Business Logic
     mainField: string; // תעשיית אם (parent picklist)
+    mainField2: string[]; // שני תחומים ראשיים נוספים
     subField: string;  // תעשייה ראשית / תת-תחום (child picklist)
     secondaryField: string; // תחום עיסוק משני (free text)
     businessModel: BusinessModel;
@@ -75,6 +79,8 @@ interface Company {
     // Meta
     dataConfidence: DataConfidence;
     lastVerified: string;
+    /** Candidates linked via candidate_organizations */
+    candidateCount?: number;
 
     isSelected?: boolean;
 }
@@ -103,27 +109,60 @@ const addCompaniesTool: FunctionDeclaration = {
     }
 };
 
-const BM: BusinessModel[] = ['B2B', 'B2C', 'B2G', 'Mixed', 'Unknown'];
-const PT: ProductType[] = ['Product', 'Service', 'Platform', 'Project', 'Unknown'];
+const BM: BusinessModel[] = ['B2B', 'B2C', 'B2G', 'משולב', 'לא ידוע'];
+const PT: ProductType[] = ['מוצר (Product)', 'שירותים (Services)', 'פלטפורמה', 'פרויקטים', 'לא ידוע'];
 const GI: GrowthIndicator[] = ['Growing', 'Stable', 'Shrinking', 'Unknown'];
-const CS: CorporateStructure[] = ['Independent', 'Parent', 'Subsidiary'];
+const CS: CorporateStructure[] = ['חברה עצמאית (ללא שיוך)', 'חברת אם (Parent/Holding)', 'חברת בת (Subsidiary)'];
 const DC: DataConfidence[] = ['High', 'Medium', 'Low', 'Pending Review'];
 
+function normalizeBusinessModel(s: string): BusinessModel {
+    if (BM.includes(s as BusinessModel)) return s as BusinessModel;
+    const u = s.toLowerCase();
+    if ((u.includes('b2b') && u.includes('b2c')) || u.includes('mixed') || u.includes('משולב') || u.includes('hybrid')) return 'משולב';
+    if (u.includes('b2b')) return 'B2B';
+    if (u.includes('b2c')) return 'B2C';
+    if (u.includes('b2g')) return 'B2G';
+    return 'לא ידוע';
+}
 function asBusinessModel(v: unknown): BusinessModel {
-    const s = String(v || '');
-    return (BM.includes(s as BusinessModel) ? s : 'Unknown') as BusinessModel;
+    return normalizeBusinessModel(String(v || ''));
+}
+function normalizeProductType(s: string): ProductType {
+    if (PT.includes(s as ProductType)) return s as ProductType;
+    const u = s.toLowerCase();
+    if (u.includes('platform') || u.includes('פלטפורמ')) return 'פלטפורמה';
+    if (u.includes('project') || u.includes('פרויקט')) return 'פרויקטים';
+    if (u.includes('service') || u.includes('שירות')) return 'שירותים (Services)';
+    if (u.includes('product') || u.includes('מוצר')) return 'מוצר (Product)';
+    return 'לא ידוע';
 }
 function asProductType(v: unknown): ProductType {
-    const s = String(v || '');
-    return (PT.includes(s as ProductType) ? s : 'Unknown') as ProductType;
+    return normalizeProductType(String(v || ''));
 }
 function asGrowthIndicator(v: unknown): GrowthIndicator {
     const s = String(v || '');
     return (GI.includes(s as GrowthIndicator) ? s : 'Unknown') as GrowthIndicator;
 }
+function normalizeCorporateStructure(s: string): CorporateStructure {
+    if (CS.includes(s as CorporateStructure)) return s as CorporateStructure;
+    const u = s.toLowerCase();
+    if (u.includes('parent') || u.includes('holding') || u.includes('חברת אם')) return 'חברת אם (Parent/Holding)';
+    if (u.includes('subsidiary') || u.includes('חברת בת')) return 'חברת בת (Subsidiary)';
+    if (u.includes('independent') || u.includes('עצמאי') || u.includes('ללא שיוך')) return 'חברה עצמאית (ללא שיוך)';
+    return 'חברה עצמאית (ללא שיוך)';
+}
 function asCorporateStructure(v: unknown): CorporateStructure {
-    const s = String(v || '');
-    return (CS.includes(s as CorporateStructure) ? s : 'Independent') as CorporateStructure;
+    return normalizeCorporateStructure(String(v || ''));
+}
+function normalizeClassification(s: string): string {
+    const VALID = ['פרטית', 'ציבורית (בורסאית)', 'ממשלתית', 'מלכ"ר'];
+    if (VALID.includes(s)) return s;
+    const u = s.toLowerCase();
+    if (u.includes('ציבורי') || u.includes('public') || u.includes('בורסאי')) return 'ציבורית (בורסאית)';
+    if (u.includes('ממשלת') || u.includes('government')) return 'ממשלתית';
+    if (u.includes('מלכ') || u.includes('nonprofit') || u.includes('non-profit')) return 'מלכ"ר';
+    if (u.includes('פרטי') || u.includes('private')) return 'פרטית';
+    return s;
 }
 function asDataConfidence(v: unknown): DataConfidence {
     const s = String(v || '');
@@ -218,12 +257,18 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         hqCountry: String(o.hqCountry ?? ''),
         employeeCount: coerceEmployeeCountBucket(o.employeeCount),
         mainField: String(o.mainField ?? ''),
+        mainField2: Array.isArray(o.mainField2) ? (o.mainField2 as unknown[]).map(String) : [],
         subField: String(o.subField ?? ''),
-        secondaryField: String(o.secondaryField ?? ''),
+        secondaryField: (() => {
+            const sf = String(o.secondaryField ?? '');
+            const sub = String(o.subField ?? '');
+            // Discard secondaryField if it duplicates subField (stale bad data)
+            return sf && sf !== sub ? sf : '';
+        })(),
         businessModel: asBusinessModel(o.businessModel),
         productType: asProductType(o.productType),
         type: String(o.type ?? ''),
-        classification: String(o.classification ?? ''),
+        classification: normalizeClassification(String(o.classification ?? '')),
         structure: asCorporateStructure(o.structure),
         parentCompany: o.parentCompany != null && o.parentCompany !== '' ? String(o.parentCompany) : undefined,
         subsidiaries:
@@ -234,6 +279,11 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         techTags: Array.isArray(techTags) ? techTags.map(String) : [],
         dataConfidence: asDataConfidence(o.dataConfidence),
         lastVerified: String(o.lastVerified ?? ''),
+        activityStatus: (o.activityStatus as Company['activityStatus']) || 'לא ידוע',
+        address: o.address != null && o.address !== '' ? String(o.address) : '',
+        candidateCount: typeof o.candidateCount === 'number' && Number.isFinite(o.candidateCount)
+            ? o.candidateCount
+            : Number(o.candidateCount) || 0,
     };
 }
 
@@ -266,6 +316,8 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         lastVerified: c.lastVerified || null,
         tags: c.tags?.length ? c.tags : [],
         techTags: c.techTags?.length ? c.techTags : [],
+        activityStatus: c.activityStatus || null,
+        address: c.address || null,
     };
 }
 
@@ -345,9 +397,28 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         aliases: Array.isArray(raw.aliases) ? raw.aliases.map(String) : c.aliases,
         description: (typeof raw.description === 'string' && raw.description) || c.description,
         mainField: (typeof raw.mainField === 'string' && raw.mainField) || c.mainField,
+        mainField2: Array.isArray(raw.mainField2) && raw.mainField2.length
+            ? (raw.mainField2 as unknown[]).map(String)
+            : c.mainField2,
         subField: (typeof raw.subField === 'string' && raw.subField) || c.subField,
-        secondaryField:
-            (typeof raw.secondaryField === 'string' && raw.secondaryField) || c.secondaryField,
+        secondaryField: (() => {
+            const rawSf = typeof raw.secondaryField === 'string' ? raw.secondaryField : '';
+            const resolvedMain = (typeof raw.mainField === 'string' && raw.mainField) || c.mainField;
+            const resolvedMf2: string[] = Array.isArray(raw.mainField2) && raw.mainField2.length
+                ? (raw.mainField2 as unknown[]).map(String)
+                : c.mainField2 ?? [];
+            const resolvedSub = (typeof raw.subField === 'string' && raw.subField) || c.subField;
+
+            // 1. Use LLM secondaryField if it's distinct from subField
+            if (rawSf && rawSf !== resolvedSub) return rawSf;
+
+            // 2. Derive from mainField2 entries that are not the primary mainField
+            const extras = resolvedMf2.filter((f) => f.trim() !== (resolvedMain || '').trim());
+            if (extras.length > 0) return extras.join(', ');
+
+            // 3. Keep existing DB value if still distinct from subField
+            return c.secondaryField && c.secondaryField !== resolvedSub ? c.secondaryField : '';
+        })(),
         employeeCount: coerceEmployeeCountBucket(raw.employeeCount) || c.employeeCount,
         website: (typeof raw.website === 'string' && raw.website) || c.website,
         logo: (typeof raw.logo === 'string' && raw.logo.trim() ? raw.logo.trim() : undefined) || c.logo,
@@ -356,7 +427,7 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         location: (typeof raw.location === 'string' && raw.location) || c.location,
         hqCountry: (typeof raw.hqCountry === 'string' && raw.hqCountry) || c.hqCountry,
         type: (typeof raw.type === 'string' && raw.type) || c.type,
-        classification: (typeof raw.classification === 'string' && raw.classification) || c.classification,
+        classification: (typeof raw.classification === 'string' && raw.classification) ? normalizeClassification(raw.classification) : c.classification,
         businessModel:
             raw.businessModel != null && String(raw.businessModel) !== '' ? asBusinessModel(raw.businessModel) : c.businessModel,
         productType:
@@ -376,6 +447,8 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         techTags: Array.isArray(raw.techTags) && raw.techTags.length ? (raw.techTags as unknown[]).map(String) : c.techTags,
         dataConfidence: raw.dataConfidence != null && raw.dataConfidence !== '' ? asDataConfidence(raw.dataConfidence) : 'Pending Review',
         lastVerified: new Date().toISOString().split('T')[0],
+        activityStatus: (typeof raw.activityStatus === 'string' && raw.activityStatus) ? raw.activityStatus as Company['activityStatus'] : c.activityStatus,
+        address: (typeof raw.address === 'string' && raw.address) || c.address,
     };
 }
 
@@ -417,6 +490,7 @@ const allColumnsDef = [
     { id: 'location', label: 'מיקום' },
     { id: 'dataConfidence', label: 'אמינות' },
     { id: 'techTags', label: 'טכנולוגיות' },
+    { id: 'candidateCount', label: 'משתמשים' },
     { id: 'lastVerified', label: 'עודכן' },
 ];
 
@@ -456,6 +530,7 @@ const CompanyUsersTab: React.FC<{ companyName: string; organizationId?: CompanyI
     organizationId,
 }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const navigate = useNavigate();
     const [users, setUsers] = useState<CompanyUser[]>([]);
     const [loading, setLoading] = useState(false);
     const [fetchError, setFetchError] = useState<string | null>(null);
@@ -603,7 +678,11 @@ const CompanyUsersTab: React.FC<{ companyName: string; organizationId?: CompanyI
                                 </td>
                             </tr>
                         ) : filteredUsers.length > 0 ? filteredUsers.map(user => (
-                            <tr key={user.id} className="hover:bg-bg-hover transition-colors group">
+                            <tr
+                                key={user.id}
+                                className="hover:bg-bg-hover transition-colors group cursor-pointer"
+                                onClick={() => navigate(`/candidates/${user.id}`)}
+                            >
                                 <td className="p-4">
                                     <div className="flex items-center gap-3">
                                         <AvatarIcon initials={user.name.split(' ').map(n => n[0]).join('').substring(0, 2)} size={32} fontSize={12} />
@@ -619,12 +698,20 @@ const CompanyUsersTab: React.FC<{ companyName: string; organizationId?: CompanyI
                                         </span>
                                     ) : (
                                         <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-slate-600 text-white shadow-sm">
-                                            עבר (לפני {user.yearsSinceLeft} שנים)
+                                            עבר
                                         </span>
                                     )}
                                 </td>
                                 <td className="p-4 text-left">
-                                    <button className="p-1.5 text-text-muted hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100" title="צפה בפרופיל">
+                                    <button
+                                        type="button"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            navigate(`/candidates/${user.id}`);
+                                        }}
+                                        className="p-1.5 text-text-muted hover:text-primary-600 hover:bg-primary-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100 focus:opacity-100"
+                                        title="צפה בפרופיל"
+                                    >
                                         <ArrowTopRightOnSquareIcon className="w-4 h-4" />
                                     </button>
                                 </td>
@@ -657,6 +744,44 @@ const CompanyUsersTab: React.FC<{ companyName: string; organizationId?: CompanyI
     );
 };
 
+const CompanyCandidatesListModal: React.FC<{
+    company: Company | null;
+    onClose: () => void;
+}> = ({ company, onClose }) => {
+    if (!company) return null;
+    return (
+        <div
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4"
+            onClick={onClose}
+        >
+            <div
+                className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-5xl flex flex-col max-h-[90vh] overflow-hidden border border-border-default animate-fade-in"
+                onClick={(e) => e.stopPropagation()}
+            >
+                <header className="flex items-center justify-between p-6 border-b border-border-default bg-bg-subtle/30 flex-shrink-0">
+                    <div>
+                        <h2 className="text-xl font-black text-text-default flex items-center gap-2">
+                            <UserGroupIcon className="w-6 h-6 text-primary-500" />
+                            מועמדים — {company.name}
+                        </h2>
+                        <p className="text-xs text-text-muted mt-1">
+                            {company.candidateCount ?? 0} מועמדים מקושרים לחברה זו
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors"
+                    >
+                        <XMarkIcon className="w-6 h-6" />
+                    </button>
+                </header>
+                <CompanyUsersTab companyName={company.name} organizationId={company.id} />
+            </div>
+        </div>
+    );
+};
+
 // --- Company Modal Component ---
 const CompanyModal: React.FC<{
     isOpen: boolean;
@@ -677,13 +802,15 @@ const CompanyModal: React.FC<{
         name: '', nameEn: '', legalName: '', aliases: [],
         description: '',
         mainField: '', subField: '', secondaryField: '',
+        mainField2: [],
         employeeCount: '',
         website: '', linkedinUrl: '', logo: '',
         foundedYear: '', location: '', hqCountry: 'Israel',
+        address: '', activityStatus: 'לא ידוע',
         type: 'הייטק', classification: 'פרטית',
-        businessModel: 'B2B', productType: 'Product',
+        businessModel: 'B2B', productType: 'שירותים (Services)',
         growthIndicator: 'Unknown',
-        structure: 'Independent', parentCompany: '', subsidiaries: [],
+        structure: 'חברה עצמאית (ללא שיוך)', parentCompany: '', subsidiaries: [],
         tags: [], techTags: [],
         dataConfidence: 'Medium', lastVerified: new Date().toISOString().split('T')[0]
     });
@@ -708,13 +835,15 @@ const CompanyModal: React.FC<{
                     name: '', nameEn: '', legalName: '', aliases: [],
                     description: '',
                     mainField: '', subField: '', secondaryField: '',
+        mainField2: [],
                     employeeCount: '',
                     website: '', linkedinUrl: '', logo: '',
                     foundedYear: '', location: '', hqCountry: 'Israel',
+                    address: '', activityStatus: 'לא ידוע',
                     type: 'הייטק', classification: 'פרטית',
-                    businessModel: 'B2B', productType: 'Product',
+                    businessModel: 'B2B', productType: 'שירותים (Services)',
                     growthIndicator: 'Unknown',
-                    structure: 'Independent', parentCompany: '', subsidiaries: [],
+                    structure: 'חברה עצמאית (ללא שיוך)', parentCompany: '', subsidiaries: [],
                     tags: [], techTags: [],
                     dataConfidence: 'Low', lastVerified: new Date().toISOString().split('T')[0]
                 });
@@ -980,23 +1109,44 @@ const CompanyModal: React.FC<{
                                     }
                                 />
                             </div>
+                            <div className="md:col-span-4">
+                                
+                                {(formData.mainField2 || []).length > 0 && (
+                                    <div className="flex flex-wrap gap-1 mt-1">
+                                        {(formData.mainField2 || []).map((v, i) => (
+                                            <span key={i} className="inline-flex items-center gap-1 text-[11px] bg-primary-50 text-primary-700 border border-primary-100 rounded px-2 py-0.5">
+                                                {v}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setFormData((prev) => ({
+                                                        ...prev,
+                                                        mainField2: (prev.mainField2 || []).filter((_, j) => j !== i),
+                                                    }))}
+                                                    className="hover:text-red-500 leading-none"
+                                                >×</button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                             <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">מודל עסקי</label>
                                 <select name="businessModel" value={formData.businessModel} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
                                     <option value="B2B">B2B</option>
                                     <option value="B2C">B2C</option>
                                     <option value="B2G">B2G</option>
-                                    <option value="Mixed">משולב</option>
-                                    <option value="Unknown">לא ידוע</option>
+                                    <option value="משולב">משולב</option>
+                                    <option value="לא ידוע">לא ידוע</option>
                                 </select>
                             </div>
                              <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">סוג מוצר</label>
                                 <select name="productType" value={formData.productType} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="Product">מוצר (Product)</option>
-                                    <option value="Service">שירותים (Services)</option>
-                                    <option value="Platform">פלטפורמה</option>
-                                    <option value="Project">פרויקטים</option>
+                                    <option value="מוצר (Product)">מוצר (Product)</option>
+                                    <option value="שירותים (Services)">שירותים (Services)</option>
+                                    <option value="פלטפורמה">פלטפורמה</option>
+                                    <option value="פרויקטים">פרויקטים</option>
+                                    <option value="לא ידוע">לא ידוע</option>
                                 </select>
                             </div>
                             
@@ -1014,7 +1164,7 @@ const CompanyModal: React.FC<{
                                 <label className="block text-xs font-semibold text-text-muted mb-1">סיווג משפטי</label>
                                 <select name="classification" value={formData.classification} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
                                     <option value="פרטית">פרטית</option>
-                                    <option value="ציבורית">ציבורית (בורסאית)</option>
+                                    <option value="ציבורית (בורסאית)">ציבורית (בורסאית)</option>
                                     <option value="ממשלתית">ממשלתית</option>
                                     <option value='מלכ"ר'>מלכ"ר</option>
                                 </select>
@@ -1033,20 +1183,20 @@ const CompanyModal: React.FC<{
                             <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">סוג מבנה</label>
                                 <select name="structure" value={formData.structure} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="Independent">חברה עצמאית (ללא שיוך)</option>
-                                    <option value="Parent">חברת אם (Parent/Holding)</option>
-                                    <option value="Subsidiary">חברת בת (Subsidiary)</option>
+                                    <option value="חברה עצמאית (ללא שיוך)">חברה עצמאית (ללא שיוך)</option>
+                                    <option value="חברת אם (Parent/Holding)">חברת אם (Parent/Holding)</option>
+                                    <option value="חברת בת (Subsidiary)">חברת בת (Subsidiary)</option>
                                 </select>
                             </div>
                             
-                            {formData.structure === 'Subsidiary' && (
+                            {formData.structure === 'חברת בת (Subsidiary)' && (
                                 <div>
                                     <label className="block text-xs font-semibold text-text-muted mb-1">שייכת ל (חברת האם)</label>
                                     <input type="text" name="parentCompany" value={formData.parentCompany} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="שם חברת האם..." />
                                 </div>
                             )}
 
-                             {formData.structure === 'Parent' && (
+                             {formData.structure === 'חברת אם (Parent/Holding)' && (
                                 <div className="md:col-span-2">
                                     <label className="block text-xs font-semibold text-text-muted mb-1">חברות בנות / מותגים (מופרד בפסיק)</label>
                                     <input type="text" value={subsidiariesInput} onChange={(e) => setSubsidiariesInput(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="לדוגמה: אלקטרה, אלקטרה מוצרי צריכה..." />
@@ -1090,7 +1240,20 @@ const CompanyModal: React.FC<{
                             </div>
                              <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">מטה (עיר)</label>
-                                <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="עיר, רחוב" />
+                                <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="תל אביב" />
+                            </div>
+                             <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">סטטוס פעילות</label>
+                                <select name="activityStatus" value={formData.activityStatus || 'לא ידוע'} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
+                                    <option value="פעילה">פעילה</option>
+                                    <option value="לא פעילה">לא פעילה</option>
+                                    <option value="בפירוק">בפירוק</option>
+                                    <option value="לא ידוע">לא ידוע</option>
+                                </select>
+                            </div>
+                            <div className="md:col-span-4">
+                                <label className="block text-xs font-semibold text-text-muted mb-1">כתובת פיזית</label>
+                                <input type="text" name="address" value={formData.address || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="רחוב, מספר, עיר, מיקוד" />
                             </div>
                          </div>
                     </section>
@@ -1146,6 +1309,48 @@ const CompanyModal: React.FC<{
     );
 };
 
+// ── Pagination bar shared between top and bottom ──────────────────────────
+interface CompanyPaginationBarProps {
+    currentPage: number;
+    totalCount: number;
+    pageSize: number;
+    loading: boolean;
+    onPageChange: (p: number) => void;
+    position?: 'top' | 'bottom';
+}
+const CompanyPaginationBar: React.FC<CompanyPaginationBarProps> = ({
+    currentPage, totalCount, pageSize, loading, onPageChange, position = 'bottom',
+}) => {
+    const totalPages = Math.ceil(totalCount / pageSize);
+    const from = totalCount > 0 ? (currentPage - 1) * pageSize + 1 : 0;
+    const to = Math.min(currentPage * pageSize, totalCount);
+    const isTop = position === 'top';
+    return (
+        <div className={`flex-shrink-0 flex flex-wrap items-center justify-between gap-3 px-6 py-2 ${isTop ? 'border-b' : 'border-t'} border-border-default bg-bg-card/80 backdrop-blur-sm`}>
+            <span className="text-xs text-text-muted">
+                {loading ? 'טוען…' : totalCount > 0 ? `${from}–${to} מתוך ${totalCount} חברות` : 'אין חברות'}
+            </span>
+            {totalPages > 1 && (
+                <div className="flex items-center gap-2 text-xs text-text-muted">
+                    <button
+                        type="button"
+                        disabled={currentPage <= 1}
+                        onClick={() => onPageChange(currentPage - 1)}
+                        className="px-3 py-1 rounded-full border border-border-default text-xs bg-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-bg-subtle"
+                    >קודם</button>
+                    <span className="text-text-default font-medium">{currentPage} / {totalPages}</span>
+                    <button
+                        type="button"
+                        disabled={currentPage >= totalPages}
+                        onClick={() => onPageChange(currentPage + 1)}
+                        className="px-3 py-1 rounded-full border border-border-default text-xs bg-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-bg-subtle"
+                    >הבא</button>
+                </div>
+            )}
+        </div>
+    );
+};
+
 
 const AdminCompaniesView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -1155,6 +1360,9 @@ const AdminCompaniesView: React.FC = () => {
     
     // Filters State - Expanded for Advanced Search
     const [searchTerm, setSearchTerm] = useState('');
+    const [currentPage, setCurrentPage] = useState(1);
+    const PAGE_SIZE = 50;
+    const [totalCount, setTotalCount] = useState(0);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [filters, setFilters] = useState({
         location: '',
@@ -1163,6 +1371,7 @@ const AdminCompaniesView: React.FC = () => {
         field: '',
         mainField: '',
         showPendingOnly: false,
+        showMerged: false,
         // Advanced Fields
         name: '',
         nameEn: '',
@@ -1208,6 +1417,7 @@ const AdminCompaniesView: React.FC = () => {
 
     // Modal State
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [candidatesListCompany, setCandidatesListCompany] = useState<Company | null>(null);
     const [editingCompany, setEditingCompany] = useState<Company | null>(null);
     /** Remaining orgs to review after `editingCompany` (enrich preview queue). */
     const [enrichmentPreviewQueue, setEnrichmentPreviewQueue] = useState<Company[]>([]);
@@ -1217,14 +1427,19 @@ const AdminCompaniesView: React.FC = () => {
     // Selection State
     const [selectedIds, setSelectedIds] = useState<Set<CompanyId>>(new Set());
 
-    const loadOrganizations = useCallback(async () => {
+    const loadOrganizations = useCallback(async (opts?: { includeMerged?: boolean; search?: string; page?: number }) => {
         if (!apiBase) {
             setCompanies([]);
             return;
         }
         setCompaniesLoading(true);
         try {
-            const res = await fetch(`${apiBase}/api/organizations`, {
+            const params = new URLSearchParams();
+            if (opts?.includeMerged) params.set('includeMerged', 'true');
+            params.set('page', String(opts?.page ?? 1));
+            params.set('limit', String(PAGE_SIZE));
+            if (opts?.search) params.set('search', opts.search);
+            const res = await fetch(`${apiBase}/api/organizations?${params.toString()}`, {
                 cache: 'no-store',
                 credentials: 'include',
                 headers: organizationApiHeaders(false),
@@ -1234,8 +1449,16 @@ const AdminCompaniesView: React.FC = () => {
                 throw new Error(t || `HTTP ${res.status}`);
             }
             const data: unknown = await res.json();
-            const list = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
-            setCompanies(list.map(mapOrganizationApiToCompany));
+            // Support both old array response and new { data, total } shape
+            if (data && typeof data === 'object' && !Array.isArray(data) && 'data' in (data as object)) {
+                const paged = data as { data: Record<string, unknown>[]; total: number };
+                setCompanies(paged.data.map(mapOrganizationApiToCompany));
+                setTotalCount(paged.total);
+            } else {
+                const list = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
+                setCompanies(list.map(mapOrganizationApiToCompany));
+                setTotalCount(list.length);
+            }
         } catch (e) {
             console.error('[AdminCompaniesView] load organizations', e);
             setCompanies([]);
@@ -1245,8 +1468,18 @@ const AdminCompaniesView: React.FC = () => {
     }, [apiBase]);
 
     useEffect(() => {
-        void loadOrganizations();
+        void loadOrganizations({ page: currentPage, search: searchTerm });
     }, [loadOrganizations]);
+
+    // Debounced search → reset to page 1 and reload
+    useEffect(() => {
+        const t = setTimeout(() => {
+            setCurrentPage(1);
+            void loadOrganizations({ page: 1, search: searchTerm });
+        }, 350);
+        return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [searchTerm]);
 
     const [sectorPicklistRows, setSectorPicklistRows] = useState<PicklistValueRow[]>([]);
     useEffect(() => {
@@ -1273,11 +1506,6 @@ const AdminCompaniesView: React.FC = () => {
 
     const filteredCompanies = useMemo(() => 
         companies.filter(c => {
-            // General Search
-            const matchesSearch = searchTerm === '' || 
-                                  c.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                                  c.mainField.toLowerCase().includes(searchTerm.toLowerCase());
-            
             // Quick Filters
             const matchesLocation = !filters.location || c.location.includes(filters.location);
             const matchesType = !filters.type || c.type === filters.type;
@@ -1285,6 +1513,7 @@ const AdminCompaniesView: React.FC = () => {
             const industryFilter = (filters.mainField || filters.field || '').trim();
             const matchesField = !industryFilter || c.mainField.includes(industryFilter);
             const matchesPending = !filters.showPendingOnly || c.dataConfidence === 'Pending Review';
+            const matchesMerged = filters.showMerged || c.activityStatus !== 'merged';
 
             // Advanced Filters
             const matchesName = !filters.name || c.name.includes(filters.name);
@@ -1308,12 +1537,12 @@ const AdminCompaniesView: React.FC = () => {
             const matchesTags = !filters.tags || c.tags.some(t => t.includes(filters.tags));
             const matchesTech = !filters.tech || c.techTags.some(t => t.toLowerCase().includes(filters.tech.toLowerCase()));
 
-            return matchesSearch && matchesLocation && matchesType && matchesSize && matchesField && matchesPending &&
+            return matchesLocation && matchesType && matchesSize && matchesField && matchesPending && matchesMerged &&
                    matchesName && matchesNameEn && matchesLegal && matchesWeb && matchesLinked &&
                    matchesSub && matchesSecondary && matchesBiz && matchesProd && matchesClass &&
                    matchesStruct && matchesParent && matchesFounded && matchesTags && matchesTech;
         }),
-    [companies, searchTerm, filters]);
+    [companies, filters]);
 
     // ... (Keep existing handler functions: Actions, Column Management, AI Enrichment, AI Chat - they are correct)
 
@@ -1484,12 +1713,18 @@ const AdminCompaniesView: React.FC = () => {
     
     const handleClearFilters = () => {
         setFilters({
-            location: '', type: '', size: '', field: '', mainField: '', showPendingOnly: false,
+            location: '', type: '', size: '', field: '', mainField: '', showPendingOnly: false, showMerged: false,
             name: '', nameEn: '', legalName: '', website: '', linkedin: '',
             subField: '', secondaryField: '', businessModel: '', productType: '', classification: '',
             structure: '', parent: '', founded: '', tags: '', tech: ''
         });
         setSearchTerm('');
+        setCurrentPage(1);
+    };
+
+    const handlePageChange = (newPage: number) => {
+        setCurrentPage(newPage);
+        void loadOrganizations({ page: newPage, search: searchTerm });
     };
     
     // --- Column Management Handlers ---
@@ -1656,10 +1891,10 @@ const AdminCompaniesView: React.FC = () => {
                             hqCountry: 'Israel',
                             type: 'Unknown',
                             classification: 'פרטית',
-                            businessModel: 'Unknown',
-                            productType: 'Unknown',
+                            businessModel: 'לא ידוע',
+                            productType: 'לא ידוע',
                             growthIndicator: 'Unknown',
-                            structure: 'Independent',
+                            structure: 'חברה עצמאית (ללא שיוך)',
                             tags: [],
                             techTags: [],
                             dataConfidence: 'Pending Review',
@@ -1707,6 +1942,12 @@ const AdminCompaniesView: React.FC = () => {
         }
     };
     
+    const handleOpenCompanyCandidates = (company: Company, e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!isPersistedOrganizationId(company.id)) return;
+        setCandidatesListCompany(company);
+    };
+
     // ... (Keep renderCell function)
     const renderCell = (company: Company, columnId: string) => {
          // ... existing implementation
@@ -1733,17 +1974,17 @@ const AdminCompaniesView: React.FC = () => {
              case 'structure':
                  return (
                      <div className="flex flex-col gap-1">
-                         {company.structure === 'Parent' && (
+                         {company.structure === 'חברת אם (Parent/Holding)' && (
                              <span className="inline-flex items-center gap-1 bg-purple-100 text-purple-700 px-2 py-0.5 rounded text-xs font-bold w-fit">
                                  <BuildingOffice2Icon className="w-3 h-3"/> חברת אם
                              </span>
                          )}
-                         {company.structure === 'Subsidiary' && (
+                         {company.structure === 'חברת בת (Subsidiary)' && (
                               <span className="inline-flex items-center gap-1 bg-blue-50 text-blue-700 px-2 py-0.5 rounded text-xs font-medium w-fit border border-blue-100">
                                  חברת בת
                              </span>
                          )}
-                         {company.structure === 'Independent' && <span className="text-xs text-text-muted">עצמאית</span>}
+                         {company.structure === 'חברה עצמאית (ללא שיוך)' && <span className="text-xs text-text-muted">עצמאית</span>}
                          
                          {company.subsidiaries && company.subsidiaries.length > 0 && (
                              <span className="text-[10px] text-text-subtle truncate max-w-[150px]" title={company.subsidiaries.join(', ')}>
@@ -1753,7 +1994,7 @@ const AdminCompaniesView: React.FC = () => {
                      </div>
                  );
              case 'businessModel':
-                  return company.businessModel !== 'Unknown' ? (
+                  return company.businessModel !== 'לא ידוע' ? (
                         <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${company.businessModel === 'B2B' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-orange-50 text-orange-700 border-orange-100'}`}>
                             {company.businessModel}
                         </span>
@@ -1797,6 +2038,30 @@ const AdminCompaniesView: React.FC = () => {
                          <MapPinIcon className="w-3.5 h-3.5"/> {company.location}
                     </div>
                  );
+            case 'candidateCount': {
+                const count = company.candidateCount ?? 0;
+                const canOpen = isPersistedOrganizationId(company.id);
+                return (
+                    <button
+                        type="button"
+                        disabled={!canOpen}
+                        onClick={(e) => handleOpenCompanyCandidates(company, e)}
+                        className={`flex items-center gap-1.5 ${
+                            canOpen
+                                ? 'text-primary-600 hover:text-primary-700 hover:underline cursor-pointer'
+                                : 'text-text-muted cursor-default'
+                        }`}
+                        title={
+                            canOpen
+                                ? 'לחץ לצפייה ברשימת המועמדים'
+                                : 'שמור את החברה כדי לצפות במועמדים'
+                        }
+                    >
+                        <UserGroupIcon className="w-4 h-4 flex-shrink-0" />
+                        <span className="font-semibold tabular-nums">{count}</span>
+                    </button>
+                );
+            }
             case 'lastVerified': return <span className="text-xs text-text-muted">{company.lastVerified}</span>;
             default: return (company as any)[columnId];
          }
@@ -1824,6 +2089,18 @@ const AdminCompaniesView: React.FC = () => {
                         >
                             <ExclamationTriangleIcon className="w-5 h-5"/>
                             <span>ממתינים לסקירה</span>
+                        </button>
+                        <button
+                            onClick={() => {
+                                const next = !filters.showMerged;
+                                setFilters(prev => ({ ...prev, showMerged: next }));
+                                void loadOrganizations({ includeMerged: next });
+                            }}
+                            className={`flex items-center gap-2 font-bold py-2.5 px-4 rounded-xl transition shadow-sm border ${filters.showMerged ? 'bg-slate-200 text-slate-700 border-slate-300' : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-50'}`}
+                            title="הצג/הסתר חברות שמוזגו לחברה אחרת"
+                        >
+                            <ArrowTopRightOnSquareIcon className="w-5 h-5"/>
+                            <span>כולל מוזגו</span>
                         </button>
                         <button
                             type="button"
@@ -1858,6 +2135,15 @@ const AdminCompaniesView: React.FC = () => {
                     
                     {/* Filters Container */}
                     <div className="bg-bg-card border border-border-default rounded-2xl p-4 shadow-sm flex flex-col gap-4 mb-6">
+                        {/* Pagination Top */}
+                        <CompanyPaginationBar
+                            currentPage={currentPage}
+                            totalCount={totalCount}
+                            pageSize={PAGE_SIZE}
+                            loading={companiesLoading}
+                            onPageChange={handlePageChange}
+                            position="top"
+                        />
                          <div className="flex flex-col md:flex-row gap-4">
                              {/* Search Bar */}
                              <div className="relative flex-grow">
@@ -1866,7 +2152,7 @@ const AdminCompaniesView: React.FC = () => {
                                     type="text" 
                                     placeholder="חפש לפי שם חברה, טכנולוגיות או מילות מפתח..." 
                                     value={searchTerm}
-                                    onChange={(e) => setSearchTerm(e.target.value)}
+                                    onChange={(e) => { setSearchTerm(e.target.value); }}
                                     className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-10 pr-10 text-sm focus:ring-2 focus:ring-primary-500 transition-all"
                                 />
                             </div>
@@ -1971,26 +2257,27 @@ const AdminCompaniesView: React.FC = () => {
                                     <option value="B2B">B2B</option>
                                     <option value="B2C">B2C</option>
                                     <option value="B2G">B2G</option>
+                                    <option value="משולב">משולב</option>
                                 </select>
                                 <select name="productType" value={filters.productType} onChange={handleFilterChange} className="input-field">
                                     <option value="">סוג מוצר (הכל)</option>
-                                    <option value="Product">מוצר</option>
-                                    <option value="Service">שירות</option>
-                                    <option value="Platform">פלטפורמה</option>
+                                    <option value="מוצר (Product)">מוצר</option>
+                                    <option value="שירותים (Services)">שירות</option>
+                                    <option value="פלטפורמה">פלטפורמה</option>
                                 </select>
 
                                 {/* Structure */}
                                 <select name="classification" value={filters.classification} onChange={handleFilterChange} className="input-field">
                                     <option value="">סיווג משפטי (הכל)</option>
                                     <option value="פרטית">פרטית</option>
-                                    <option value="ציבורית">ציבורית</option>
+                                    <option value="ציבורית (בורסאית)">ציבורית</option>
                                     <option value="ממשלתית">ממשלתית</option>
                                 </select>
                                 <select name="structure" value={filters.structure} onChange={handleFilterChange} className="input-field">
                                     <option value="">מבנה ארגוני (הכל)</option>
-                                    <option value="Independent">עצמאית</option>
-                                    <option value="Parent">חברת אם</option>
-                                    <option value="Subsidiary">חברת בת</option>
+                                    <option value="חברה עצמאית (ללא שיוך)">עצמאית</option>
+                                    <option value="חברת אם (Parent/Holding)">חברת אם</option>
+                                    <option value="חברת בת (Subsidiary)">חברת בת</option>
                                 </select>
                                 <input type="text" name="parent" placeholder="חברת אם" value={filters.parent} onChange={handleFilterChange} className="input-field" />
                                 <input type="text" name="founded" placeholder="שנת הקמה" value={filters.founded} onChange={handleFilterChange} className="input-field" />
@@ -2114,8 +2401,7 @@ const AdminCompaniesView: React.FC = () => {
                                                 colSpan={visibleColumns.length + 2}
                                                 className="p-12 text-center text-text-muted text-sm"
                                             >
-                                                אין ארגונים. ודא ש־<code className="text-xs">VITE_API_BASE</code> מצביע על
-                                                השרת ושהבקשה ל־<code className="text-xs">/api/organizations</code> מחזירה מערך.
+                                                אין תוצאות
                                             </td>
                                         </tr>
                                     ) : null}
@@ -2207,7 +2493,7 @@ const AdminCompaniesView: React.FC = () => {
                                     </div>
                                     
                                     <div className="flex flex-wrap gap-2 mb-4">
-                                        {company.businessModel && company.businessModel !== 'Unknown' && <span className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-100 font-bold">{company.businessModel}</span>}
+                                        {company.businessModel && company.businessModel !== 'לא ידוע' && <span className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-100 font-bold">{company.businessModel}</span>}
                                         {company.foundedYear && <span className="text-[10px] bg-gray-100 text-gray-700 px-2 py-0.5 rounded border border-gray-200">הוקמה ב-{company.foundedYear}</span>}
                                         <span className="text-[10px] bg-gray-100 text-gray-700 px-2 py-0.5 rounded border border-gray-200">{company.employeeCount} עובדים</span>
                                     </div>
@@ -2228,6 +2514,21 @@ const AdminCompaniesView: React.FC = () => {
                     )}
                 </div>
             </div>
+
+            {/* Pagination Footer — always visible, outside scroll area */}
+            <CompanyPaginationBar
+                currentPage={currentPage}
+                totalCount={totalCount}
+                pageSize={PAGE_SIZE}
+                loading={companiesLoading}
+                onPageChange={handlePageChange}
+                position="bottom"
+            />
+
+            <CompanyCandidatesListModal
+                company={candidatesListCompany}
+                onClose={() => setCandidatesListCompany(null)}
+            />
 
             <CompanyModal 
                 isOpen={isModalOpen}

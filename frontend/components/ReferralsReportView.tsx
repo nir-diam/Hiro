@@ -639,10 +639,6 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         allColumnIds: referralsAllColumnIds,
     });
 
-    useEffect(() => {
-        if (!isSettingsOpen) persistColumnsNow();
-    }, [isSettingsOpen, persistColumnsNow]);
-
     // Data State
     const [referrals, setReferrals] = useState<Referral[]>([]);
     const [referralsLoading, setReferralsLoading] = useState(false);
@@ -675,6 +671,11 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     });
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+    useEffect(() => {
+        if (!isSettingsOpen) persistColumnsNow();
+    }, [isSettingsOpen, persistColumnsNow]);
+
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: keyof Referral; direction: 'asc' | 'desc' } | null>(null);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);

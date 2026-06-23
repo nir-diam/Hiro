@@ -1,8 +1,28 @@
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
 const redis = require('./redisService');
 const { invalidateJobMatches, invalidateJobInAllCandidateOpportunities } = require('./matchingCacheService');
 const Job = require('../models/Job');
 const Prompt = require('../models/Prompt');
+
+/**
+ * Compute and persist the job embedding in the background (fire-and-forget).
+ * Called after create/update so the embedding is ready for future sonar scans.
+ */
+async function _computeAndSaveJobEmbedding(job) {
+  try {
+    const { toPlainJobForMatchScore } = module.exports;
+    const plain = toPlainJobForMatchScore(job);
+    // Delegate to getJobEmbedding which has all the text-building and caching logic
+    const { getJobEmbedding } = require('./matchingScoreService');
+    const emb = await getJobEmbedding(plain);
+    if (emb && emb.length > 0) {
+      await Job.update({ embedding: emb }, { where: { id: job.id } });
+      console.log(`[jobService] embedding stored for job ${job.id} (${emb.length}d)`);
+    }
+  } catch (e) {
+    console.warn('[jobService] background embedding compute failed (non-fatal):', e.message);
+  }
+}
 const { sendChat } = require('./geminiService');
 const cityService = require('./cityService');
 const {
@@ -172,6 +192,31 @@ const list = async ({ tagId = null } = {}) => {
   return rows;
 };
 
+const listForPicker = async () => {
+  const rows = await Job.findAll({
+    attributes: [
+      'id', 'title', 'client', 'city', 'status', 'openDate', 'healthProfile',
+      // Live counts from job_candidates — not relying on stale cached columns
+      [
+        literal(`(SELECT COUNT(*) FROM job_candidates WHERE "jobId" = "Job"."id")`),
+        'associatedCandidates',
+      ],
+      [
+        literal(`(SELECT COUNT(*) FROM job_candidates WHERE "jobId" = "Job"."id" AND status != 'חדש')`),
+        'activeProcess',
+      ],
+    ],
+    order: [['title', 'ASC']],
+  });
+  return rows.map((r) => {
+    const plain = r.get({ plain: true });
+    plain.associatedCandidates = Number(plain.associatedCandidates) || 0;
+    plain.activeProcess = Number(plain.activeProcess) || 0;
+    plain.waitingForScreening = 0; // not computed here; health fallback handles it
+    return plain;
+  });
+};
+
 const getById = async (id, { skipCache = false } = {}) => {
   if (!skipCache) {
     try {
@@ -203,6 +248,8 @@ const create = async (payload) => {
   }
   await hydrateJobSkills(job);
   await jobCacheSet(job);
+  // Compute and persist embedding in the background (non-blocking)
+  _computeAndSaveJobEmbedding(job).catch(() => {});
   return job;
 };
 
@@ -223,6 +270,8 @@ const update = async (id, payload) => {
   // Job changed → wipe its candidate matches + remove it from every candidate's opportunities
   invalidateJobMatches(id).catch(() => {});
   invalidateJobInAllCandidateOpportunities(id).catch(() => {});
+  // Recompute embedding in the background whenever job content changes
+  _computeAndSaveJobEmbedding(existing).catch(() => {});
   return existing;
 };
 
@@ -352,6 +401,7 @@ const toPlainJobForMatchScore = (job) => {
 
 module.exports = {
   list,
+  listForPicker,
   searchForPicker,
   getById,
   create,

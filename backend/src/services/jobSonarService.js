@@ -103,57 +103,45 @@ function passesDistanceHardFilter(breakdown, filterKeys) {
  * Scores via full matching engine: S_final = max(0, S_core − penalties).
  */
 async function runSonarScan(jobId, body = {}) {
+  const t0 = Date.now();
+  const lap = (label) => console.log(`[sonar ⏱] ${(Date.now()-t0).toString().padStart(5)}ms | ${label}`);
+
   const limit = Math.min(Math.max(parseInt(body.limit, 10) || 20, 5), 50);
   const minPct = Math.min(Math.max(parseInt(body.matchThresholdMin, 10) || 70, 50), 95);
   const useVector = body.useVector !== false;
   const filterKeys = Array.isArray(body.hardFilters) ? body.hardFilters.map((x) => String(x).trim()) : [];
+  const SCORE_CONCURRENCY = 12;
 
-  const job = await Job.findByPk(jobId, { attributes: { exclude: ['skills'] } });
+  console.log(`\n[sonar ▶] START jobId=${jobId} limit=${limit} minPct=${minPct}`);
+
+  const job = await Job.findByPk(jobId); // include all fields (embedding needed for getJobEmbedding)
   if (!job) {
     const err = new Error('Job not found');
     err.status = 404;
     throw err;
   }
   await jobService.hydrateJobSkills(job);
-
   const jobPlain = jobService.toPlainJobForMatchScore(job);
-  const settings = await clientUsageSettingService.resolveScreeningDefaultsForJob(job);
+  lap('job loaded + skills hydrated');
 
-  const linkedRows = await JobCandidate.findAll({
-    where: { jobId },
-    attributes: ['candidateId'],
-  });
-  const linkedSet = new Set(linkedRows.map((r) => String(r.candidateId)));
+  const [settings, linkedRows, rejRows, engineConfigResult, jobEmbResult] = await Promise.all([
+    clientUsageSettingService.resolveScreeningDefaultsForJob(job),
+    JobCandidate.findAll({ where: { jobId }, attributes: ['candidateId'] }),
+    JobCandidateScreening.findAll({ where: { jobId, screeningStatus: 'rejected' }, attributes: ['candidateId'] })
+      .catch(() => []),
+    resolveEngineConfigForJob(jobPlain),
+    getJobEmbedding(jobPlain),
+  ]);
 
-  let rejectedSet = new Set();
-  try {
-    const rej = await JobCandidateScreening.findAll({
-      where: { jobId, screeningStatus: 'rejected' },
-      attributes: ['candidateId'],
-    });
-    rejectedSet = new Set(rej.map((r) => String(r.candidateId)));
-  } catch (e) {
-    console.warn('[jobSonarService] JobCandidateScreening load skipped', e.message || e);
-  }
-
-  let engineConfig = null;
-  let jobEmb = [];
-  try {
-    [engineConfig, jobEmb] = await Promise.all([
-      resolveEngineConfigForJob(jobPlain),
-      getJobEmbedding(jobPlain),
-    ]);
-  } catch (e) {
-    console.warn('[jobSonarService] engine config/embedding load skipped:', e.message || e);
-  }
+  const linkedSet  = new Set(linkedRows.map((r) => String(r.candidateId)));
+  const rejectedSet = new Set(rejRows.map((r) => String(r.candidateId)));
+  const engineConfig = engineConfigResult;
+  const jobEmb = jobEmbResult || [];
+  lap(`settings + links + config + embedding loaded (linked=${linkedSet.size}, rejected=${rejectedSet.size})`);
 
   async function scoreCandidatePlain(candidatePlain, fallbackPct, intentOpts = {}) {
     if (!engineConfig) {
-      return {
-        matchPct: fallbackPct,
-        breakdown: null,
-        parameterMatches: null,
-      };
+      return { matchPct: fallbackPct, breakdown: null, parameterMatches: null };
     }
     try {
       const result = await computeMatchPackage(
@@ -171,11 +159,7 @@ async function runSonarScan(jobId, body = {}) {
       };
     } catch (e) {
       console.warn('[jobSonarService] computeMatchPackage failed', candidatePlain?.id, e.message || e);
-      return {
-        matchPct: fallbackPct,
-        breakdown: null,
-        parameterMatches: null,
-      };
+      return { matchPct: fallbackPct, breakdown: null, parameterMatches: null };
     }
   }
 
@@ -184,12 +168,15 @@ async function runSonarScan(jobId, body = {}) {
   if (useVector) {
     const queryText = buildJobSonarQuery(jobPlain);
     const fetchLimit = Math.min(Math.max(limit * 8, 80), 400);
+    // Pass the already-cached jobEmb — eliminates the duplicate Gemini embedding call
     const raw = await searchCandidates({
       query: queryText,
+      precomputedEmbedding: jobEmb.length > 0 ? jobEmb : undefined,
       filters: {},
       limit: fetchLimit,
       maxLimitCap: 400,
     });
+    lap(`vector search returned ${raw.length} candidates`);
 
     const prelim = [];
     for (const row of raw) {
@@ -203,36 +190,49 @@ async function runSonarScan(jobId, body = {}) {
       if (!passesHardFilters(candidateRest, jobPlain, filterKeys, settings)) continue;
       prelim.push({ id, vectorPct, sim, candidateRest });
     }
+    lap(`pre-filtered to ${prelim.length} candidates`);
 
-    const heavyRows = await candidateService.findManyWithTagsForMatchScore(prelim.map((p) => p.id));
+    const [heavyRows, intentByCandidate] = await Promise.all([
+      candidateService.findManyWithTagsForMatchScore(prelim.map((p) => p.id)),
+      buildIntentOptionsByCandidateIds(prelim.map((p) => p.id)),
+    ]);
     const heavyById = new Map(
       heavyRows.map((r) => [String(r.id), candidateService.toPlainCandidateForMatchScore(r)]),
     );
-    const intentByCandidate = await buildIntentOptionsByCandidateIds(prelim.map((p) => p.id));
+    lap(`heavy candidate data loaded (${heavyRows.length})`);
 
-    for (const { id, vectorPct, sim, candidateRest } of prelim) {
-      const candidatePlain = heavyById.get(id) || candidateRest;
-      const intentOpts = intentByCandidate.get(id) || {};
-      const { matchPct, breakdown, parameterMatches } = await scoreCandidatePlain(
-        candidatePlain,
-        vectorPct,
-        intentOpts,
-      );
-      if (!passesDistanceHardFilter(breakdown, filterKeys)) continue;
-
-      const passesComposite = matchPct >= minPct;
-      const passesVector = vectorPct >= minPct;
-      if (!passesComposite && !passesVector) continue;
-
-      ranked.push({
-        candidate: candidateForSonarResponse(candidatePlain),
-        matchPercentage: matchPct,
-        engineMatchPct: matchPct,
-        vectorSimilarity: sim,
-        scoreBreakdown: breakdown,
-        parameterMatches,
-      });
-    }
+    // Score in parallel with bounded concurrency
+    const rankedRaw = [];
+    await Promise.all(
+      Array.from({ length: SCORE_CONCURRENCY }, async () => {
+        while (prelim.length > 0) {
+          const item = prelim.shift();
+          if (!item) break;
+          const { id, vectorPct, sim, candidateRest } = item;
+          const candidatePlain = heavyById.get(id) || candidateRest;
+          const intentOpts = intentByCandidate.get(id) || {};
+          const { matchPct, breakdown, parameterMatches } = await scoreCandidatePlain(
+            candidatePlain,
+            vectorPct,
+            intentOpts,
+          );
+          if (!passesDistanceHardFilter(breakdown, filterKeys)) continue;
+          const passesComposite = matchPct >= minPct;
+          const passesVector = vectorPct >= minPct;
+          if (!passesComposite && !passesVector) continue;
+          rankedRaw.push({
+            candidate: candidateForSonarResponse(candidatePlain),
+            matchPercentage: matchPct,
+            engineMatchPct: matchPct,
+            vectorSimilarity: sim,
+            scoreBreakdown: breakdown,
+            parameterMatches,
+          });
+        }
+      }),
+    );
+    ranked = rankedRaw;
+    lap(`scoring done (${ranked.length} above threshold)`);
   } else {
     const all = await candidateService.list();
     const eligible = [];
@@ -242,30 +242,45 @@ async function runSonarScan(jobId, body = {}) {
       if (!passesHardFilters(c, jobPlain, filterKeys, settings)) continue;
       eligible.push(id);
     }
+    lap(`non-vector: ${eligible.length} eligible candidates`);
 
-    const heavyRows = await candidateService.findManyWithTagsForMatchScore(eligible);
-    const intentByCandidate = await buildIntentOptionsByCandidateIds(eligible);
-    for (const row of heavyRows) {
-      const candidatePlain = candidateService.toPlainCandidateForMatchScore(row);
-      const id = String(candidatePlain.id);
-      const fallback = typeof candidatePlain.matchScore === 'number' ? candidatePlain.matchScore : 0;
-      const intentOpts = intentByCandidate.get(id) || {};
-      const { matchPct, breakdown, parameterMatches } = await scoreCandidatePlain(
-        candidatePlain,
-        fallback,
-        intentOpts,
-      );
-      if (!passesDistanceHardFilter(breakdown, filterKeys)) continue;
-      if (matchPct < minPct) continue;
-      ranked.push({
-        candidate: candidateForSonarResponse(candidatePlain),
-        matchPercentage: matchPct,
-        engineMatchPct: matchPct,
-        vectorSimilarity: null,
-        scoreBreakdown: breakdown,
-        parameterMatches,
-      });
-    }
+    const [heavyRows, intentByCandidate] = await Promise.all([
+      candidateService.findManyWithTagsForMatchScore(eligible),
+      buildIntentOptionsByCandidateIds(eligible),
+    ]);
+    lap(`heavy data loaded (${heavyRows.length})`);
+
+    const eligibleQueue = [...heavyRows];
+    const rankedRaw = [];
+    await Promise.all(
+      Array.from({ length: SCORE_CONCURRENCY }, async () => {
+        while (eligibleQueue.length > 0) {
+          const row = eligibleQueue.shift();
+          if (!row) break;
+          const candidatePlain = candidateService.toPlainCandidateForMatchScore(row);
+          const id = String(candidatePlain.id);
+          const fallback = typeof candidatePlain.matchScore === 'number' ? candidatePlain.matchScore : 0;
+          const intentOpts = intentByCandidate.get(id) || {};
+          const { matchPct, breakdown, parameterMatches } = await scoreCandidatePlain(
+            candidatePlain,
+            fallback,
+            intentOpts,
+          );
+          if (!passesDistanceHardFilter(breakdown, filterKeys)) continue;
+          if (matchPct < minPct) continue;
+          rankedRaw.push({
+            candidate: candidateForSonarResponse(candidatePlain),
+            matchPercentage: matchPct,
+            engineMatchPct: matchPct,
+            vectorSimilarity: null,
+            scoreBreakdown: breakdown,
+            parameterMatches,
+          });
+        }
+      }),
+    );
+    ranked = rankedRaw;
+    lap(`scoring done (${ranked.length} above threshold)`);
   }
 
   ranked.sort((a, b) => b.matchPercentage - a.matchPercentage);
@@ -275,6 +290,8 @@ async function runSonarScan(jobId, body = {}) {
   persistSonarResults(jobId, ranked).catch((e) => {
     console.warn('[jobSonarService] Redis persist failed (non-fatal):', e.message);
   });
+
+  console.log(`[sonar ✅] DONE in ${Date.now()-t0}ms — returning ${rows.length} results\n`);
 
   return {
     job: {

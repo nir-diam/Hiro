@@ -27,12 +27,16 @@ function normalizeEmpty(html: string): string {
 }
 
 /** Quill 2 + React 19: avoid `react-quill` (uses removed `findDOMNode`). */
-const OpinionQuillEditor: React.FC<{
+export const OpinionQuillEditor: React.FC<{
     jobId: string;
     value: string;
     onChange: (html: string) => void;
     placeholder?: string;
-}> = ({ jobId, value, onChange, placeholder }) => {
+    showToolbar?: boolean;
+    className?: string;
+    minHeight?: string;
+    rtl?: boolean;
+}> = ({ jobId, value, onChange, placeholder, showToolbar = true, className, minHeight, rtl }) => {
     const hostRef = useRef<HTMLDivElement>(null);
     const quillRef = useRef<QuillInstance | null>(null);
     const onChangeRef = useRef(onChange);
@@ -48,11 +52,17 @@ const OpinionQuillEditor: React.FC<{
         const quill = new Quill(host, {
             theme: 'snow',
             modules: {
-                toolbar: OPINION_QUILL_MODULES.toolbar,
+                toolbar: showToolbar ? OPINION_QUILL_MODULES.toolbar : false,
             },
             placeholder: placeholder || '',
         });
         quillRef.current = quill;
+
+        if (minHeight) quill.root.style.minHeight = minHeight;
+        if (rtl) {
+            quill.root.setAttribute('dir', 'rtl');
+            quill.root.style.textAlign = 'right';
+        }
 
         quill.clipboard.dangerouslyPasteHTML(normalizeEmpty(value));
         lastEmittedRef.current = quill.root.innerHTML;
@@ -80,7 +90,7 @@ const OpinionQuillEditor: React.FC<{
         lastEmittedRef.current = quill.root.innerHTML;
     }, [value]);
 
-    return <div className="opinion-quill-host" ref={hostRef} />;
+    return <div className={`opinion-quill-host${className ? ` ${className}` : ''}`} ref={hostRef} />;
 };
 
 function htmlToPlainText(html: string): string {

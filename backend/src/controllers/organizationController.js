@@ -2,6 +2,7 @@ const path = require('path');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const organizationService = require('../services/organizationService');
+const organizationEmbeddingService = require('../services/organizationEmbeddingService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
@@ -10,9 +11,37 @@ const CandidateOrganization = require('../models/CandidateOrganization');
 const Candidate = require('../models/Candidate');
 const Organization = require('../models/Organization');
 
-const { sendSingleTurnChat } = require('../services/geminiService');
+const { sendSingleTurnChat, sendChat, resolveGeminiApiKey } = require('../services/geminiService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
+
+// Module-level helpers so they are available before the enrich try-block
+const serperRaw = async (q, num = 5) => {
+  const response = await axios.post(
+    'https://google.serper.dev/search',
+    { q, num },
+    {
+      headers: { 'X-API-KEY': process.env.SERPDEV, 'Content-Type': 'application/json' },
+      timeout: 10000,
+    },
+  );
+  return response.data;
+};
+
+const searchSnippet = async (companyName) => {
+  if (!companyName || !process.env.SERPDEV) return null;
+  try {
+    const q = /[\u0590-\u05FF]/.test(companyName)
+      ? `${companyName} חברה`
+      : `${companyName} company`;
+    const data = await serperRaw(q, 3);
+    const top = (data?.organic || [])[0];
+    return top?.snippet ? String(top.snippet).trim() : null;
+  } catch (err) {
+    console.warn('[organization-enrich] snippet search failed', err?.message || err);
+    return null;
+  }
+};
 
 const fallbackCompanyPrompt = (companyNames, mainFieldOptions = []) => {
  
@@ -38,7 +67,7 @@ Use Google Search and your internal knowledge to provide real, accurate data for
 
    - 'mainField' (תעשיית אם): MUST be exactly one of these parent picklist values (copy verbatim): ${mainFieldJson}.
    - 'subField' (תעשייה ראשית / תת-תחום): Hebrew label for the company's primary sub-domain under that mainField. If unknown, use null.
-   - 'secondaryField' (תחום עיסוק משני): optional free Hebrew text for additional business areas; null if none.
+   - 'secondaryField' (תחום עיסוק משני): OPTIONAL free Hebrew text describing ADDITIONAL business areas beyond the primary subField. MUST NOT repeat or duplicate the subField value. If the company operates only in the primary subField area, set this to null.
    - Do NOT invent or paraphrase mainField values outside the list above.
 
 DATA SPECIFICATIONS:
@@ -81,6 +110,8 @@ JSON STRUCTURE:
 
     "location": "City Name (Hebrew)",
 
+    "address": "Full street address in Hebrew (e.g. רחוב הברזל 3, תל אביב) or null",
+
     "hqCountry": "Country (English)",
 
     "type": "one of ['הייטק', 'תעשייה', 'מסחר וקמעונאות', 'שירותים', 'פיננסים', 'נדל\"ן', 'אחר']",
@@ -103,7 +134,9 @@ JSON STRUCTURE:
 
     "techTags": ["Tech1 (English)", "Tech2 (English)"],
 
-    "dataConfidence": "one of ['High', 'Medium', 'Low']"
+    "dataConfidence": "one of ['High', 'Medium', 'Low']",
+
+    "activityStatus": "one of ['פעילה', 'לא פעילה', 'בפירוק', 'לא ידוע']"
 
   }
 
@@ -124,16 +157,38 @@ const loadCompanyPromptTemplate = async () => {
   return companyPromptTemplate;
 };
 
-const buildCompanyPrompt = async (companyNames) => {
+/**
+ * @param {Array<{name:string, website?:string|null}>} companyData
+ */
+const buildCompanyPrompt = async (companyData) => {
   const mainFieldOptions = await picklistService.getMainFieldOptionNames();
+  // Support both legacy (string[]) and new ({name,website}[]) shapes
+  const companyNames = companyData.map((c) => (typeof c === 'string' ? c : c.name));
+  // Single-company website for ${website} placeholder
+  const firstWebsite = companyData.length > 0
+    ? (typeof companyData[0] === 'string' ? '' : companyData[0].website || '')
+    : '';
+
   const template = await loadCompanyPromptTemplate();
   if (template) {
     let out = template;
+    if (out.includes('{{company_names_json}}')) {
+      out = out.replace('{{company_names_json}}', JSON.stringify(companyNames));
+    }
     if (out.includes('${companyNamesJson}')) {
       out = out.replace('${companyNamesJson}', JSON.stringify(companyNames));
     }
     if (out.includes('${mainFieldJson}')) {
       out = out.replace('${mainFieldJson}', JSON.stringify(mainFieldOptions));
+    }
+    if (out.includes('${website}')) {
+      out = out.replace('${website}', firstWebsite);
+    }
+    const firstSnippet = companyData.length > 0
+      ? (typeof companyData[0] === 'string' ? '' : companyData[0].snippet || '')
+      : '';
+    if (out.includes('${snippet}')) {
+      out = out.replace('${snippet}', firstSnippet);
     }
     return out;
   }
@@ -173,9 +228,13 @@ const createLogoUploadUrl = async (req, res) => {
   }
 };
 
-const list = async (_req, res) => {
-  const orgs = await organizationService.list();
-  res.json(orgs);
+const list = async (req, res) => {
+  const includeMerged = String(req.query.includeMerged).toLowerCase() === 'true';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const result = await organizationService.list({ includeMerged, page, limit, search });
+  res.json(result);
 };
 
 const get = async (req, res) => {
@@ -324,12 +383,42 @@ const enrich = async (req, res) => {
       return res.status(404).json({ message: 'No companies found to enrich' });
     }
 
-    const companyNames = companies.map((c) => c.name || c.title || c.company).filter(Boolean);
-    const systemPrompt = await buildCompanyPrompt(companyNames);
+    // Build company data; for each entry pre-fetch website + snippet so the LLM
+    // receives them via ${website} / ${snippet} placeholders before generating data.
+    const companyData = await Promise.all(
+      companies
+        .map((c) => ({ name: c.name || c.title || c.company, website: c.website || null, snippet: null }))
+        .filter((c) => c.name)
+        .map(async (c) => {
+          if (!c.website) {
+            try {
+              c.website = await searchWebsiteUrl(c.name);
+            } catch {
+              c.website = null;
+            }
+          }
+          try {
+            c.snippet = await searchSnippet(c.name);
+          } catch {
+            c.snippet = null;
+          }
+          return c;
+        }),
+    );
+    const companyNames = companyData.map((c) => c.name);
+
+    // Prompt now contains ${website} replaced with the discovered URL
+    const systemPrompt = await buildCompanyPrompt(companyData);
+
+    // User-turn message also carries name + website for additional context
+    const messagePayload = companyData.length === 1
+      ? JSON.stringify(companyData[0])
+      : JSON.stringify(companyData);
+
     const response = await sendSingleTurnChat({
       apiKey: process.env.GEMINI_API_KEY || process.env.API_KEY,
-      systemPrompt, 
-      message: companyNames[0],
+      systemPrompt,
+      message: messagePayload,
     });
 
     const jsonMatch = response.match(/\[\s*[\s\S]*\s*]/);
@@ -366,41 +455,229 @@ const enrich = async (req, res) => {
       }
     };
 
-    const searchLinkedinUrl = async (companyName) => {
-      if (!companyName) return null;
-
-      const query = `${companyName} linkedin`;
-
-      try {
-        const response = await axios.get('https://serpapi.com/search.json', {
-          params: {
-            engine: 'google',
-            q: query,
-            api_key: process.env.SERPAPI_KEY,
-            num: 5,
-          },
+    const serperSearch = async (q, num = 5) => {
+      const response = await axios.post(
+        'https://google.serper.dev/search',
+        { q, num },
+        {
+          headers: { 'X-API-KEY': process.env.SERPDEV, 'Content-Type': 'application/json' },
           timeout: 10000,
-        });
+        },
+      );
+      return filterSerpOrganicResults(response.data?.organic);
+    };
 
-        const results = filterSerpOrganicResults(response.data?.organic_results);
+    // Priority A: knowledgeGraph attributes (Founded / נוסד)
+    // Priority B: scan first 3 snippets for a 4-digit year near founding keywords
+    const extractFoundedYear = (serperData) => {
+      const attrs = serperData?.knowledgeGraph?.attributes || {};
+      for (const [key, val] of Object.entries(attrs)) {
+        if (/found|נוסד|הוקמ/i.test(key)) {
+          const m = String(val).match(/\b(19|20)\d{2}\b/);
+          if (m) return m[0];
+        }
+      }
+      const organic = serperData?.organic || [];
+      for (const result of organic.slice(0, 3)) {
+        const text = String(result.snippet || '');
+        if (/נוסד|הוקמ|שנת|מאז|founded|since/i.test(text)) {
+          const m = text.match(/\b(19|20)\d{2}\b/);
+          if (m) return m[0];
+        }
+      }
+      return null;
+    };
+
+    const ADDRESS_INDICATORS = /רחוב|רח׳|א\.ת|קומה|בניין|מגדל|כתובת|שד'/i;
+
+    // Extract a clean street address from a raw string that may include phone/hours noise.
+    // Looks for "כתובת:" keyword first, then falls back to street-pattern sentences.
+    const cleanAddressFromRaw = (raw) => {
+      if (!raw) return null;
+      const s = String(raw);
+
+      // Extract text after "כתובת:" stopping at noise delimiters or end
+      const afterKw = s.match(/כתובת[:\s]+(.+?)(?=\s*[|・]\s*|\s*טלפון|\s*פקס|\s*שעות|\s*$)/i);
+      if (afterKw) {
+        const candidate = afterKw[1]
+          .replace(/\s+/g, ' ')
+          .replace(/\s*\.{2,}\s*$/, '')          // trailing ellipsis
+          .replace(/[.!\s]+$/, '')                // trailing punctuation/space
+          .replace(/,\s*[\u0590-\u05FF]$/, '')    // truncated ", ת" style ending
+          .trim();
+        if (candidate.length > 5 && !/טלפון|פקס|שעות|@|http/i.test(candidate)) return candidate;
+      }
+
+      // If string already looks clean (no phone/hours), use it directly
+      if (!/טלפון|פקס|שעות|・/.test(s)) {
+        return s
+          .replace(/\s*\.{2,}\s*$/, '')
+          .replace(/[.!\s]+$/, '')
+          .replace(/,\s*[\u0590-\u05FF]$/, '')
+          .trim() || null;
+      }
+      return null;
+    };
+
+    // Extract city/location from serper data
+    const extractLocation = (serperData) => {
+      // 1. Try knowledgeGraph attributes for explicit city key
+      const attrs = serperData?.knowledgeGraph?.attributes || {};
+      for (const [key, val] of Object.entries(attrs)) {
+        if (/עיר|מיקום|location|city/i.test(key)) return String(val).trim();
+      }
+
+      // 2. Try to parse city from knowledgeGraph.address (e.g. "רח׳ כנרת 4, תל אביב")
+      const kgAddr = serperData?.knowledgeGraph?.address;
+      if (kgAddr) {
+        const cityMatch = String(kgAddr).match(/\d+\s*,\s*([\u0590-\u05FF][^,\d\n]{2,}?)(?:\s*,|\s*$)/);
+        if (cityMatch) return cityMatch[1].trim();
+      }
+
+      // 3. Scan organic snippets for city after a street number
+      const organic = serperData?.organic || [];
+      for (const result of organic.slice(0, 5)) {
+        const snippet = String(result.snippet || '');
+        if (!ADDRESS_INDICATORS.test(snippet)) continue;
+        const cityMatch = snippet.match(/(?:רחוב|רח׳)[^,\d]*\d+\s*,\s*([\u0590-\u05FF][^,\d\n]{2,}?)(?:\s*,|\s*$)/i);
+        if (cityMatch) return cityMatch[1].trim();
+      }
+
+      return null;
+    };
+
+    // Extract a clean street address from serper results.
+    const extractAddress = (serperData) => {
+      // 1. Try knowledgeGraph.address — clean it even if it contains noise
+      if (serperData?.knowledgeGraph?.address) {
+        const clean = cleanAddressFromRaw(serperData.knowledgeGraph.address);
+        if (clean) return clean;
+      }
+
+      // 2. Scan organic snippets
+      const organic = serperData?.organic || [];
+      for (const result of organic.slice(0, 5)) {
+        const snippet = String(result.title || '');
+        if (!ADDRESS_INDICATORS.test(snippet)) continue;
+
+        const clean = cleanAddressFromRaw(snippet);
+        if (clean) return clean;
+
+        // Fallback: sentence containing a street pattern
+        const m = snippet.match(/[^\n.!?]*(?:רחוב|רח׳|א\.ת|קומה|בניין|מגדל|שד')[^\n.!?]*/i);
+        if (m) return m[0].replace(/,\s*[\u0590-\u05FF]$/, '').trim();
+      }
+      return null;
+    };
+
+    const searchFoundedYear = async (companyName) => {
+      if (!companyName || !process.env.SERPDEV) return null;
+      try {
+        const isHebrew = /[\u0590-\u05FF]/.test(companyName);
+        const q = isHebrew ? `${companyName} שנת הקמה` : `${companyName} founded year`;
+        const data = await serperRaw(q, 5);
+        return extractFoundedYear(data);
+      } catch (err) {
+        console.warn('[organization-enrich] founded year search failed:', err?.message || err);
+        return null;
+      }
+    };
+
+    const searchAddress = async (companyName) => {
+      if (!companyName || !process.env.SERPDEV) return { address: null, location: null };
+      try {
+        const data = await serperRaw(`${companyName} כתובת`, 5);
+        const organic = data?.organic || [];
+
+        // Try Gemini extraction — it understands messy Hebrew snippets and titles much better than regex
+        const geminiKey = resolveGeminiApiKey();
+        if (geminiKey && organic.length) {
+          try {
+            const snippets = organic
+              .slice(0, 5)
+              .map(
+                (r, i) =>
+                  `[${i + 1}] Title: ${r.title || ''}\n    Snippet: ${r.snippet || ''}\n    Link: ${r.link || ''}`,
+              )
+              .join('\n\n');
+
+            const systemPrompt = `You extract a company's street address and city from Google search result snippets.
+Return ONLY a valid JSON object with exactly two keys:
+- "address": the street address (street name + number only, e.g. "רח׳ כנרת 4"). null if not found.
+- "city": the city name only (e.g. "איירפורט סיטי", "תל אביב"). null if not found.
+Do NOT include phone numbers, fax, hours, or any extra text.`;
+
+            const message = `Company: ${companyName}\n\nSearch results:\n${snippets}\n\nExtract street address and city.`;
+
+            const llmRes = await sendChat({
+              apiKey: geminiKey,
+              systemPrompt,
+              message,
+              responseMimeType: 'application/json',
+              responseSchema: {
+                type: 'OBJECT',
+                properties: {
+                  address: { type: 'STRING', nullable: true },
+                  city: { type: 'STRING', nullable: true },
+                },
+              },
+            });
+
+            const obj = JSON.parse(llmRes);
+            if (obj && (obj.address || obj.city)) {
+              return {
+                address: obj.address || null,
+                location: obj.city || null,
+              };
+            }
+          } catch (llmErr) {
+            console.warn('[organization-enrich] Gemini address extraction failed, falling back to regex:', llmErr?.message);
+          }
+        }
+
+        // Regex fallback if Gemini is unavailable or returned nothing
+        return {
+          address: extractAddress(data),
+          location: extractLocation(data),
+        };
+      } catch (err) {
+        console.warn('[organization-enrich] address search failed:', err?.message || err);
+        return { address: null, location: null };
+      }
+    };
+
+    const searchLinkedinUrl = async (companyName) => {
+      if (!companyName || !process.env.SERPDEV) return null;
+      try {
+        const results = await serperSearch(`${companyName} linkedin`);
         if (!results.length) return null;
-
-        // Prefer official LinkedIn company pages
         const companyResult =
-          results.find(
-            (r) =>
-              r.link &&
-              r.link.toLowerCase().includes('linkedin.com/company'),
-          ) ||
-          results.find(
-            (r) =>
-              r.link &&
-              r.link.toLowerCase().includes('linkedin.com'),
-          );
-
+          results.find((r) => r.link?.toLowerCase().includes('linkedin.com/company')) ||
+          results.find((r) => r.link?.toLowerCase().includes('linkedin.com'));
         return companyResult?.link || null;
       } catch (err) {
-        console.error('[organization-enrich] SerpAPI LinkedIn search failed:', err.response?.data || err.message);
+        console.error('[organization-enrich] LinkedIn search failed:', err.response?.data || err.message);
+        return null;
+      }
+    };
+
+    const searchWebsiteUrl = async (companyName) => {
+      if (!companyName || !process.env.SERPDEV) return null;
+      try {
+        const q = `${companyName} ${/[\u0590-\u05FF]/.test(companyName) ? 'האתר הרשמי' : 'official website'}`;
+        const EXCLUDED = ['linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com',
+                          'youtube.com', 'wikipedia.org', 'walla.co.il', 'ynet.co.il',
+                          'google.com', 'glassdoor.com', 'indeed.com', 'jobmaster.co.il'];
+        const results = await serperSearch(q);
+        if (!results.length) return null;
+        const official = results.find((r) => {
+          if (!r.link) return false;
+          const domain = r.link.toLowerCase();
+          return !EXCLUDED.some((ex) => domain.includes(ex));
+        });
+        return official?.link ? new URL(official.link).origin : null;
+      } catch (err) {
+        console.warn('[organization-enrich] website search failed', err?.message || err);
         return null;
       }
     };
@@ -416,41 +693,47 @@ const enrich = async (req, res) => {
           const companyName = rawName.trim();
           if (!companyName) return null;
 
-          let logo = typeof item.logo === 'string' ? item.logo.trim() : '';
-          if (!logo && item.website) {
-            try {
-              const hostname = new URL(item.website).hostname;
-              logo = `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
-            } catch {
-              logo = '';
-            }
-          }
+   
 
           //HERE!!! — mainField from item; subField = LLM picks one from PicklistCategoryValues of this mainField
-          const mainField = item.mainField || '';
+          let mainField = item.mainField || '';
+          const mainField2 = item.mainField2 || [];
           let subField = item.subField || '';
           try {
-            if (mainField) {
+            if (mainField2.length) {
               const subcats = await picklistService.listSubcategories(picklistService.BUSINESS_FIELD_CATEGORY_ID);
-              const mainFieldCat = (subcats || []).find((c) => (c.name || '').trim() === mainField.trim());
-              if (mainFieldCat) {
-                const vals = await picklistService.listCategoryValues(mainFieldCat.id);
-                const subFieldOptions = (vals || []).map((v) => (v.label || v.value || '').trim()).filter(Boolean);
-                if (subFieldOptions.length) {
-                  const subJson = JSON.stringify(subFieldOptions);
-                  const prompt = `Company: ${companyName}. Description: ${(item.description || '').slice(0, 300)}.
+              // For each mainField2 value, collect its subfield options and remember which value owns each option
+              const allSubFieldOptions = [];
+              const subFieldToMainField = {};
+              for (const mf of mainField2) {
+                const cat = (subcats || []).find((c) => (c.name || '').trim() === mf.trim());
+                if (!cat) continue;
+                const vals = await picklistService.listCategoryValues(cat.id);
+                for (const v of (vals || [])) {
+                  const label = (v.label || v.value || '').trim();
+                  if (label) {
+                    allSubFieldOptions.push(label);
+                    subFieldToMainField[label] = mf;
+                  }
+                }
+              }
+              if (allSubFieldOptions.length) {
+                const subJson = JSON.stringify(allSubFieldOptions);
+                const prompt = `Company: ${companyName}. Description: ${(item.description || '').slice(0, 300)}.
 Return ONLY a JSON object with one key: "subField".
 subField MUST be exactly one of (copy verbatim): ${subJson}.
 Example: {"subField":"..."}`;
-                  const llmRes = await sendSingleTurnChat({
-                    apiKey: process.env.GEMINI_API_KEY || process.env.API_KEY,
-                    systemPrompt: prompt,
-                    message: prompt,
-                  });
-                  const objMatch = llmRes.match(/\{\s*[\s\S]*\s*\}/);
-                  if (objMatch) {
-                    const obj = JSON.parse(objMatch[0]);
-                    if (obj.subField && subFieldOptions.includes(obj.subField)) subField = obj.subField;
+                const llmRes = await sendSingleTurnChat({
+                  apiKey: process.env.GEMINI_API_KEY || process.env.API_KEY,
+                  systemPrompt: prompt,
+                  message: prompt,
+                });
+                const objMatch = llmRes.match(/\{\s*[\s\S]*\s*\}/);
+                if (objMatch) {
+                  const obj = JSON.parse(objMatch[0]);
+                  if (obj.subField && allSubFieldOptions.includes(obj.subField)) {
+                    subField = obj.subField;
+                    mainField = subFieldToMainField[subField] || mainField;
                   }
                 }
               }
@@ -461,7 +744,20 @@ Example: {"subField":"..."}`;
           item.mainField = mainField;
           item.subField = subField;
 
-          // People Data Labs company enrich (by domain) — fills employeeCount, foundedYear, linkedinUrl, address, growthTrend, etc.
+          // Derive secondaryField from the extra mainField2 categories (those beyond the primary mainField)
+          // if the LLM didn't provide a distinct secondaryField value
+          if (!item.secondaryField || item.secondaryField === subField) {
+            const extraMainFields = Array.isArray(item.mainField2)
+              ? item.mainField2.filter((f) => f && f.trim() !== (mainField || '').trim())
+              : [];
+            if (extraMainFields.length > 0) {
+              item.secondaryField = extraMainFields.join(', ');
+            } else {
+              item.secondaryField = null;
+            }
+          }
+
+
           const domainForPdl = item.website ? getDomain(item.website) : null;
           if (false &&domainForPdl && process.env.PDL_API_KEY) {
             try {
@@ -507,20 +803,62 @@ Example: {"subField":"..."}`;
             }
           }
 
-          // Only search Google for LinkedIn URL if PDL did not return one
-          if (!item.linkedinUrl) {
+        
             try {
               item.linkedinUrl = await searchLinkedinUrl(companyName);
             } catch (err) {
               console.warn('[organization-enrich] linkedin search failed', err?.message || err);
             }
+
+           
+              try {
+                item.foundedYear = await searchFoundedYear(companyName);
+              } catch (err) {
+                console.warn('[organization-enrich] founded year search failed', err?.message || err);
+              }
+            
+
+              try {
+                const { address, location } = await searchAddress(companyName);
+               item.address = address;
+                item.location = location;
+              } catch (err) {
+                console.warn('[organization-enrich] address search failed', err?.message || err);
+              }
+
+
+           
+            
+
+          // Fill website from pre-fetched companyData if LLM/PDL didn't return one
+          try {
+            item.website = await searchWebsiteUrl(companyName);
+          } catch (err) {
+            console.warn('[organization-enrich] website search failed', err?.message || err);
           }
 
-          if (item.employeeCount != null && item.employeeCount !== '') {
+          try {
+            item.snippet = await searchSnippet(companyName);
+          } catch (err) {
+            console.warn('[organization-enrich] snippet search failed', err?.message || err);
+          }
+          
+
             const bucket = normalizeEmployeeCount(item.employeeCount);
             if (bucket) item.employeeCount = bucket;
             else delete item.employeeCount;
-          }
+
+
+            let logo = typeof item.logo === 'string' ? item.logo.trim() : '';
+            if (!logo && item.website) {
+              try {
+                const hostname = new URL(item.website).hostname;
+                logo = `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
+              } catch {
+                logo = '';
+              }
+            }
+          
 
           const enriched = { ...item , logo : logo || item.logo };
 
@@ -547,6 +885,34 @@ Example: {"subField":"..."}`;
   }
 };
 
+const rebuildEmbeddings = async (req, res) => {
+  try {
+    const onlyMissing = String(req.query.onlyMissing || '').toLowerCase() === 'true';
+    const stats = await organizationEmbeddingService.rebuildAllEmbeddings({ onlyMissing });
+    res.json(stats);
+  } catch (err) {
+    console.error('[organizationController.rebuildEmbeddings]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to rebuild organization embeddings' });
+  }
+};
+
+const rebuildEmbedding = async (req, res) => {
+  const { id } = req.params;
+  if (!id) {
+    return res.status(400).json({ message: 'Missing organization id' });
+  }
+  try {
+    const embedding = await organizationEmbeddingService.rebuildOrganizationEmbedding(id);
+    if (!embedding) {
+      return res.status(404).json({ message: 'Organization not found or no text to embed' });
+    }
+    res.json({ success: true, embeddingLength: embedding.length });
+  } catch (err) {
+    console.error('[organizationController.rebuildEmbedding]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to rebuild organization embedding' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -556,5 +922,7 @@ module.exports = {
   enrich,
   listCandidates,
   createLogoUploadUrl,
+  rebuildEmbeddings,
+  rebuildEmbedding,
 };
 

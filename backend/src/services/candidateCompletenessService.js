@@ -95,7 +95,12 @@ async function refreshCandidateDataStatusAfterSave(candidateId, req) {
       await instance.update({ statusExplanation: explanation });
     }
   } else {
-    await instance.update({ statusExplanation: null });
+    // Data is complete — if candidate was stuck on "חסר נתונים" auto-revert to "חדש"
+    if (prev === STATUS_INCOMPLETE) {
+      await instance.update({ status: 'חדש', statusExplanation: null });
+    } else {
+      await instance.update({ statusExplanation: null });
+    }
   }
   return instance.reload();
 }
@@ -121,7 +126,12 @@ async function refreshCandidateDataStatusForClient(candidateId, clientId) {
       await instance.update({ statusExplanation: explanation });
     }
   } else {
-    await instance.update({ statusExplanation: null });
+    // Data is complete — if candidate was stuck on "חסר נתונים" auto-revert to "חדש"
+    if (prev === STATUS_INCOMPLETE) {
+      await instance.update({ status: 'חדש', statusExplanation: null });
+    } else {
+      await instance.update({ statusExplanation: null });
+    }
   }
   return instance.reload();
 }

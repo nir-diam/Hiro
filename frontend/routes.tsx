@@ -76,6 +76,7 @@ import AdminCandidateTagsView from './components/AdminCandidateTagsView';
 import AdminJobTagsView from './components/AdminJobTagsView';
 import AdminJobFieldsView from './components/AdminJobFieldsView';
 import AdminCompaniesView from './components/AdminCompaniesView';
+import AdminCompaniesTabsView from './components/AdminCompaniesTabsView';
 import AdminPromptsView from './components/AdminPromptsView';
 import AdminMatchingEngineView from './components/AdminMatchingEngineView';
 import AdminPicklistsView from './components/AdminPicklistsView';
@@ -355,6 +356,18 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
 
     const fetchCandidateList = useCallback(async () => {
         if (!apiBase) return;
+        // Use sessionStorage to avoid re-fetching on every profile mount
+        const CACHE_KEY = 'candidateListIds';
+        try {
+            const cached = sessionStorage.getItem(CACHE_KEY);
+            if (cached) {
+                const parsed = JSON.parse(cached) as { id: string }[];
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    setCandidateList(parsed);
+                    return;
+                }
+            }
+        } catch { /* ignore parse errors */ }
         try {
             const response = await fetch(`${apiBase}/api/candidates?page=1&limit=250`, {
                 headers: { ...authHeaders() },
@@ -371,6 +384,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 .filter((item) => item && item.id)
                 .map((item) => ({ id: item.id }));
             setCandidateList(sanitized);
+            try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(sanitized)); } catch { /* quota */ }
         } catch (err) {
             console.error('Failed to fetch candidate list', err);
         }
@@ -946,13 +960,13 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                 { index: true, element: <Navigate to="clients" replace /> },
                 { path: 'clients', element: <AdminClientsView /> },
-                { path: 'companies', element: <AdminCompaniesView /> },
+                { path: 'companies', element: <AdminCompaniesTabsView /> },
+                { path: 'company-corrections', element: <Navigate to="/admin/companies" replace /> },
                 { path: 'client/new', element: <AdminClientFormView /> },
                 { path: 'client/edit/:clientId', element: <AdminClientFormView /> },
                 { path: 'jobs', element: <AdminJobsView /> },
                 { path: 'candidates', element: <AdminCandidatesView /> },
                 { path: 'candidates/:candidateId', element: <AdminCandidateProfileView /> },
-                { path: 'company-corrections', element: <AdminCompanyCorrectionsView /> },
                 {
                     path: 'tags',
                     element: <AdminTagsUnifiedView />,

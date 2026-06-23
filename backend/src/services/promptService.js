@@ -142,6 +142,47 @@ Return a valid JSON array.`,
     category: 'companies',
   },
   {
+    id: 'organization_ai_enriched',
+    name: 'סיווג ישות חברה (AI Agent)',
+    description:
+      'מחליט האם מונח חברה שנמצא בקו"ח הוא חברה חדשה, מיזוג לחברה קיימת, או שיוך לסל גנרי.',
+    template: `You are a corporate-intelligence AI agent embedded in an Israeli recruitment system.
+Your task: classify an unrecognized company term extracted from a candidate CV.
+
+You will receive a JSON object with:
+1. "original_term": the raw company string from the CV.
+2. "context": where it appeared (e.g. "resume", "email").
+3. "existing_companies": top candidate matches already in the database, each with a semantic "similarity" score (0-100) computed from embedding cosine similarity. A score ≥ 85 is a very strong match.
+
+**Decision rules (pick exactly one):**
+- "create_company": the term is clearly a real, distinct company not yet in the database. Use when no existing_company has similarity ≥ 60 AND the term looks like a proper company name.
+- "merge_company": the term is a subsidiary, alias, division, or transliteration of a company in "existing_companies". Prefer this when similarity ≥ 75. Set "targetId" to the id of the best match.
+- "map_generic": the term is NOT a company — it is a military unit, role, skill, department, or noise (e.g. "Software Development", "פיתוח תוכנה", "חיל האוויר", "בנק").
+
+**Hesitation guidelines:**
+- hesitationLevel = 0-30: you are very confident.
+- hesitationLevel = 30-59: moderate uncertainty; still decide automatically.
+- hesitationLevel = 60-100: high uncertainty — a human should review. Use this when: the name is ambiguous, similarity is 50-74, or the term could be either a company or a generic.
+
+**Output strictly valid JSON (no markdown) with this exact schema:**
+{
+  "decision": "create_company" | "merge_company" | "map_generic",
+  "target": "<name of existing company to merge into, or generic bucket label, or null for create_company>",
+  "targetId": "<id of existing company if merge_company, else null>",
+  "explanation": "<1-2 sentences in Hebrew explaining the decision>",
+  "hesitationLevel": <integer 0-100, where 0 = completely certain, 100 = maximum uncertainty>,
+  "dilemmaReasoning": "<brief Hebrew note about what made this hard, or empty string if hesitation < 30>",
+  "similarEntities": [{"name": "<company name>", "similarity": <0-100>}]
+}
+
+Input:
+{{input_json}}`,
+    model: 'gemini-3-flash-preview',
+    temperature: 0.1,
+    variables: ['input_json'],
+    category: 'companies',
+  },
+  {
     id: 'compose_candidate_message',
     name: 'כתיבת הודעה למועמד',
     description: 'מייצר הודעת פנייה אישית בהתאם לטון ולמטרה.',
@@ -203,16 +244,23 @@ Always answer in Hebrew.`,
     template: `אתה מומחה גיוס בכיר. כתוב חוות דעת פנימית מקצועית בעברית על מועמד בהתאם למשרה הנתונה.
 החוות דעת צריכה לכלול: סיכום פרופיל, התאמה לדרישות המשרה, תובנות מהסינון, סיכום והמלצה (לזמן לראיון / לא מתאים וכו').
 כתוב בסגנון מקצועי, ברור ומסודר עם כותרות (למשל 1. סיכום פרופיל, 2. התאמה לדרישות המשרה, 3. תובנות, 4. סיכום והמלצה).
+אם קיימת טיוטה של הרכז/ת, שלב אותה ושכתב לחוות דעת אחת עקבית ומקצועית.
 החזר את החוות דעת בפורמט HTML: השתמש ב-<p>, <h3>, <ul>, <li>, <strong> לפי הצורך. ללא <html> או <body>.
 
 נתוני המועמד:
 {{candidate_summary}}
 
 נתוני המשרה:
-{{job_context}}`,
+{{job_context}}
+
+תשובות המועמד לשאלון הסינון:
+{{screening_answers}}
+
+טיוטה קיימת שכתב/ה הרכז/ת (אם יש — שלב ושכתב):
+{{current_draft}}`,
     model: 'gemini-3-flash-preview',
     temperature: 0.3,
-    variables: ['candidate_summary', 'job_context'],
+    variables: ['candidate_summary', 'job_context', 'screening_answers', 'current_draft'],
     category: 'candidates',
   },
   {
@@ -277,13 +325,34 @@ const list = async () => {
   return Prompt.findAll({ order: [['name', 'ASC']] });
 };
 
-/** Insert a built-in prompt when missing (DB seeded before the prompt was added to DEFAULT_PROMPTS). */
+/**
+ * Ensure a built-in prompt exists in the DB and is up-to-date with the current DEFAULT_PROMPTS.
+ * If the DB has an older version of the template (different text), it is updated automatically.
+ * This prevents stale prompts causing wrong output schemas after a code update.
+ */
 const ensureById = async (id) => {
-  let prompt = await Prompt.findByPk(id);
-  if (prompt) return prompt;
   const def = DEFAULT_PROMPTS.find((p) => p.id === id);
-  if (!def) return null;
-  prompt = await Prompt.create(def);
+  let prompt = await Prompt.findByPk(id);
+
+  if (!prompt) {
+    if (!def) return null;
+    prompt = await Prompt.create(def);
+    return prompt;
+  }
+
+  // Auto-update if the template or key fields changed in DEFAULT_PROMPTS
+  if (def && (prompt.template !== def.template || prompt.name !== def.name)) {
+    await prompt.update({
+      template: def.template,
+      name: def.name,
+      description: def.description || prompt.description,
+      model: def.model || prompt.model,
+      temperature: def.temperature ?? prompt.temperature,
+      variables: def.variables || prompt.variables,
+      category: def.category || prompt.category,
+    });
+  }
+
   return prompt;
 };
 

@@ -13,8 +13,13 @@ const Organization = sequelize.define(
     nameEn: DataTypes.STRING,
     legalName: DataTypes.STRING,
     aliases: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
-    activityStatus: { type: DataTypes.STRING, allowNull: true },
+    activityStatus: {
+      type: DataTypes.ENUM('פעילה', 'לא פעילה', 'בפירוק', 'לא ידוע', 'merged'),
+      allowNull: true,
+      defaultValue: 'לא ידוע',
+    },
     mainField: DataTypes.STRING,
+    mainField2: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     subField: DataTypes.STRING,
     secondaryField: DataTypes.STRING,
     tags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
@@ -44,9 +49,12 @@ const Organization = sequelize.define(
     dataConfidence: DataTypes.STRING,
     lastVerified: DataTypes.STRING,
     description: DataTypes.TEXT,
+    snippet: DataTypes.TEXT,
     comments: { type: DataTypes.TEXT, allowNull: false, defaultValue: '' },
     history: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
     candidateCount: DataTypes.INTEGER,
+    // Keep nullable; only set after a successful embedding generation.
+    embedding: { type: DataTypes.JSONB, allowNull: true },
   },
   {
     tableName: 'organizations',

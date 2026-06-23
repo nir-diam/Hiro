@@ -1,4 +1,4 @@
-const { getRedisClient } = require('../config/redis');
+const { getRedisClient, isRedisAvailable } = require('../config/redis');
 
 /**
  * Store a value under `key`.
@@ -8,6 +8,7 @@ const { getRedisClient } = require('../config/redis');
  * @param {number} [opts.ttlSeconds]  - expire after N seconds (omit for no expiry)
  */
 const set = async (key, value, { ttlSeconds } = {}) => {
+  if (!isRedisAvailable()) return;
   const client = getRedisClient();
   const serialised = typeof value === 'string' ? value : JSON.stringify(value);
 
@@ -25,6 +26,7 @@ const set = async (key, value, { ttlSeconds } = {}) => {
  * @returns {Promise<*|null>}
  */
 const get = async (key) => {
+  if (!isRedisAvailable()) return null;
   const client = getRedisClient();
   const raw = await client.get(key);
   if (raw === null) return null;
@@ -42,6 +44,7 @@ const get = async (key) => {
  * @returns {Promise<number>} number of keys actually deleted
  */
 const del = async (...keys) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   return client.del(...keys);
 };
@@ -62,6 +65,7 @@ const update = async (key, value, opts = {}) => set(key, value, opts);
  * @returns {Promise<boolean>}
  */
 const exists = async (key) => {
+  if (!isRedisAvailable()) return false;
   const client = getRedisClient();
   const count = await client.exists(key);
   return count > 0;
@@ -74,6 +78,7 @@ const exists = async (key) => {
  * @returns {Promise<boolean>} true if the TTL was applied
  */
 const expire = async (key, ttlSeconds) => {
+  if (!isRedisAvailable()) return false;
   const client = getRedisClient();
   const result = await client.expire(key, ttlSeconds);
   return result === 1;
@@ -86,6 +91,7 @@ const expire = async (key, ttlSeconds) => {
  * @returns {Promise<number>}
  */
 const ttl = async (key) => {
+  if (!isRedisAvailable()) return -2;
   const client = getRedisClient();
   return client.ttl(key);
 };
@@ -98,6 +104,7 @@ const ttl = async (key) => {
  * @returns {Promise<number>} new value after increment
  */
 const increment = async (key, amount = 1) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   return amount === 1 ? client.incr(key) : client.incrby(key, amount);
 };
@@ -109,6 +116,7 @@ const increment = async (key, amount = 1) => {
  * @returns {Promise<string[]>}
  */
 const keys = async (pattern) => {
+  if (!isRedisAvailable()) return [];
   const client = getRedisClient();
   return client.keys(pattern);
 };
@@ -123,6 +131,7 @@ const keys = async (pattern) => {
  * @param {string} member
  */
 const zadd = async (key, score, member) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   return client.zadd(key, score, member);
 };
@@ -134,6 +143,7 @@ const zadd = async (key, score, member) => {
  */
 const zaddMany = async (key, entries) => {
   if (!entries?.length) return 0;
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   const flat = entries.flatMap(({ score, member }) => [score, member]);
   return client.zadd(key, ...flat);
@@ -148,6 +158,7 @@ const zaddMany = async (key, entries) => {
  * @returns {Promise<string[] | Array<{ member: string, score: number }>>}
  */
 const zrevrange = async (key, start = 0, stop = 49, withScores = false) => {
+  if (!isRedisAvailable()) return [];
   const client = getRedisClient();
   if (withScores) {
     const raw = await client.zrevrange(key, start, stop, 'WITHSCORES');
@@ -166,6 +177,7 @@ const zrevrange = async (key, start = 0, stop = 49, withScores = false) => {
  * @param {...string} members
  */
 const zrem = async (key, ...members) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   return client.zrem(key, ...members);
 };
@@ -177,6 +189,7 @@ const zrem = async (key, ...members) => {
  * @returns {Promise<number|null>}
  */
 const zscore = async (key, member) => {
+  if (!isRedisAvailable()) return null;
   const client = getRedisClient();
   const raw = await client.zscore(key, member);
   return raw === null ? null : parseFloat(raw);
@@ -188,6 +201,7 @@ const zscore = async (key, member) => {
  * @returns {Promise<number>}
  */
 const zcard = async (key) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   return client.zcard(key);
 };
@@ -200,6 +214,7 @@ const zcard = async (key) => {
  * @returns {Promise<Array<{ member: string, score: number }>>}
  */
 const zrangebyscore = async (key, min, max) => {
+  if (!isRedisAvailable()) return [];
   const client = getRedisClient();
   const raw = await client.zrangebyscore(key, min, max, 'WITHSCORES');
   const result = [];
@@ -218,6 +233,7 @@ const zrangebyscore = async (key, min, max) => {
  * @param {*} value
  */
 const hset = async (key, field, value) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   const serialised = typeof value === 'object' ? JSON.stringify(value) : String(value);
   return client.hset(key, field, serialised);
@@ -229,6 +245,7 @@ const hset = async (key, field, value) => {
  * @param {Record<string, *>} data
  */
 const hmset = async (key, data) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   const flat = Object.entries(data).flatMap(([f, v]) => [
     f,
@@ -244,6 +261,7 @@ const hmset = async (key, data) => {
  * @returns {Promise<*|null>}
  */
 const hget = async (key, field) => {
+  if (!isRedisAvailable()) return null;
   const client = getRedisClient();
   const raw = await client.hget(key, field);
   if (raw === null) return null;
@@ -257,6 +275,7 @@ const hget = async (key, field) => {
  * @returns {Promise<Record<string, *>|null>}
  */
 const hgetall = async (key) => {
+  if (!isRedisAvailable()) return null;
   const client = getRedisClient();
   const raw = await client.hgetall(key);
   if (!raw) return null;
@@ -273,6 +292,7 @@ const hgetall = async (key) => {
  * @param {...string} fields
  */
 const hdel = async (key, ...fields) => {
+  if (!isRedisAvailable()) return 0;
   const client = getRedisClient();
   return client.hdel(key, ...fields);
 };

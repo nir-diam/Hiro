@@ -18,7 +18,52 @@ jest.mock('../../config/db', () => ({
 }));
 
 const Tag = require('../../models/Tag');
-const { findTagByNameOrAlias } = require('../candidateTagService');
+const {
+  findTagByNameOrAlias,
+  resolveIncomingTagType,
+  normalizeCandidateTagType,
+} = require('../candidateTagService');
+
+describe('resolveIncomingTagType', () => {
+  it('keeps explicit certification from LLM', () => {
+    expect(
+      resolveIncomingTagType({
+        raw_type: 'certification',
+        name: 'תעודה בניהול רכש',
+        context: 'Degree',
+      }),
+    ).toBe('certification');
+  });
+
+  it('promotes Hebrew certificate wording from degree to certification', () => {
+    expect(
+      resolveIncomingTagType({
+        raw_type: 'degree',
+        name: 'תעודת ניהול רכש ולוגיסטיקה',
+        context: 'Degree',
+      }),
+    ).toBe('certification');
+  });
+
+  it('keeps academic degree when text mentions תואר', () => {
+    expect(
+      resolveIncomingTagType({
+        raw_type: 'degree',
+        name: 'תואר ראשון במנהל עסקים',
+      }),
+    ).toBe('degree');
+  });
+});
+
+describe('normalizeCandidateTagType', () => {
+  it('maps education alias to degree', () => {
+    expect(normalizeCandidateTagType('education')).toBe('degree');
+  });
+
+  it('maps certificate alias to certification', () => {
+    expect(normalizeCandidateTagType('certificate')).toBe('certification');
+  });
+});
 
 describe('findTagByNameOrAlias', () => {
   beforeEach(() => {

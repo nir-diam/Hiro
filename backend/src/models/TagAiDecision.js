@@ -11,7 +11,7 @@ const TagAiDecision = sequelize.define(
     },
     pendingTagId: {
       type: DataTypes.UUID,
-      allowNull: false,
+      allowNull: true,
       field: 'pending_tag_id',
     },
     originalTerm: {
@@ -67,6 +67,16 @@ const TagAiDecision = sequelize.define(
       allowNull: true,
       field: 'resolved_at',
     },
+    hesitationLevel: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      field: 'hesitation_level',
+    },
+    dilemmaReasoning: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'dilemma_reasoning',
+    },
   },
   {
     tableName: 'tag_ai_decisions',
@@ -76,3 +86,6 @@ const TagAiDecision = sequelize.define(
 );
 
 module.exports = TagAiDecision;
+
+const Tag = require('./Tag');
+TagAiDecision.belongsTo(Tag, { foreignKey: 'pending_tag_id', as: 'pendingTag' });

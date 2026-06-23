@@ -707,8 +707,19 @@ const postJobSonarScan = async (req, res) => {
   }
 };
 
+const listForPicker = async (req, res) => {
+  try {
+    const rows = await jobService.listForPicker();
+    res.set('Cache-Control', 'private, max-age=30');
+    res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
+  }
+};
+
 module.exports = {
   list,
+  listForPicker,
   listForCompose,
   get,
   create,

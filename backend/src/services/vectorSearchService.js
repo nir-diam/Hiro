@@ -1,6 +1,23 @@
 const candidateService = require('./candidateService');
-const { embedText } = require('./embeddingService');
+const { embedText, embedTextCached } = require('./embeddingService');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
+
+// In-memory candidate list cache — avoids re-fetching 600+ rows on every sonar scan
+const CAND_LIST_CACHE_TTL_MS = 60_000; // 60 s
+let _candListCache = null;
+let _candListCacheAt = 0;
+
+async function getCandidateListCached() {
+  const now = Date.now();
+  if (_candListCache && now - _candListCacheAt < CAND_LIST_CACHE_TTL_MS) {
+    return _candListCache;
+  }
+  // Use slim query (no tags JOIN) — 10x faster than list()
+  const list = await candidateService.listSlimForVectorSearch();
+  _candListCache = list;
+  _candListCacheAt = now;
+  return list;
+}
 
 const buildSearchDocument = (candidate, extraText = '') => {
   if (!candidate) return '';
@@ -75,11 +92,12 @@ const embedCandidateAndSave = async (candidateId, extraText = '') => {
   }
   const updatePayload = { embedding };
   if (extraText && extraText.trim()) {
-    // persist a truncated version to allow keyword match later
     updatePayload.searchText = normalizeResumeSearchText(extraText).slice(0, 50000);
     updatePayload.searchTextSavedAt = new Date();
   }
   await candidateService.update(candidateId, updatePayload);
+  // Bust the candidate list cache so the new embedding is picked up
+  _candListCache = null;
   return embedding;
 };
 
@@ -115,14 +133,29 @@ const normalizeEmbedding = (emb) => {
   return [];
 };
 
-const searchCandidates = async ({ query, filters = {}, limit = 20, maxLimitCap = 20 }) => {
-  console.log('[vectorSearch] start', { query, filters, limit });
-  const qEmbedding = await embedText(query || '');
-  console.log('[vectorSearch] query embedding length', qEmbedding.length);
+/**
+ * Search candidates by semantic similarity.
+ * @param {object} opts
+ * @param {string}  [opts.query]         - text to embed (ignored when precomputedEmbedding is supplied)
+ * @param {number[]} [opts.precomputedEmbedding] - pass an already-computed embedding to skip Gemini call
+ * @param {object}  [opts.filters]
+ * @param {number}  [opts.limit]
+ * @param {number}  [opts.maxLimitCap]
+ */
+const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, limit = 20, maxLimitCap = 20 }) => {
+  let qEmbedding;
+  if (precomputedEmbedding && Array.isArray(precomputedEmbedding) && precomputedEmbedding.length > 0) {
+    qEmbedding = precomputedEmbedding;
+    console.log('[vectorSearch] using pre-computed embedding length', qEmbedding.length);
+  } else {
+    console.log('[vectorSearch] start', { query: (query || '').slice(0, 80), filters, limit });
+    qEmbedding = await embedTextCached(query || '');
+    console.log('[vectorSearch] query embedding length', qEmbedding.length);
+  }
   if (!qEmbedding.length) return [];
 
-  // Basic filter: fetch all then filter in-memory (keeps code simple without pgvector)
-  const all = await candidateService.list();
+  // Use cached candidate list to avoid repeated DB round-trips
+  const all = await getCandidateListCached();
   const filtered = all.filter((c) => {
     if (filters.status && c.status !== filters.status) return false;
     if (filters.city && !(c.address || '').toLowerCase().includes(filters.city.toLowerCase())) return false;

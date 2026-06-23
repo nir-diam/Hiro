@@ -34,6 +34,7 @@ const referenceInfoRoutes = require('./routes/referenceInfoRoutes');
 const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateAdminRoutes } = require('./routes/messageTemplateRoutes');
 const matchingEngineRoutes = require('./routes/matchingEngineRoutes');
 const recruitmentSourceRoutes = require('./routes/recruitmentSourceRoutes');
+const savedSearchRoutes = require('./routes/savedSearchRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -75,6 +76,7 @@ app.use('/api/recruitment-sources', recruitmentSourceRoutes);
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
 app.use('/api/admin/matching-engine', matchingEngineRoutes);
+app.use('/api/saved-searches', savedSearchRoutes);
 
 const start = async () => {
   try {

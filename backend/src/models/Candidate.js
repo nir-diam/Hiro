@@ -54,6 +54,9 @@ const Candidate = sequelize.define(
     salaryMax: DataTypes.INTEGER,
     workExperience: { type: DataTypes.JSONB, defaultValue: [] },
     industryAnalysis: { type: DataTypes.JSONB, defaultValue: {} },
+    /** Denormalized array of all companies/experiences for cross-experience search.
+     *  Each entry: { company, industry, sector, companySize, isCurrent, startDate, endDate } */
+    companyExperiences: { type: DataTypes.JSONB, defaultValue: [] },
     education: { type: DataTypes.JSONB, defaultValue: [] },
     internalNotes: DataTypes.TEXT,
     candidateNotes: DataTypes.TEXT,

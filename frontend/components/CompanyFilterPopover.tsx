@@ -1,14 +1,15 @@
 
-import React, { useRef, useEffect, useMemo, useState } from 'react';
+import React, { useRef, useEffect, useMemo, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { XMarkIcon, MagnifyingGlassIcon } from './Icons';
 import { BUSINESS_FIELD_CATEGORY_ID } from '../services/picklistValuesApi';
 
-interface CompanyFilters {
+export interface CompanyFilters {
     sizes: string[];
     sectors: string[];
-    industry: string;
-    field: string;
+    industries: string[];
+    fields: string[];
+    roles: string[];
 }
 
 interface CompanyFilterPopoverProps {
@@ -18,319 +19,372 @@ interface CompanyFilterPopoverProps {
     onApply?: () => void;
 }
 
-const companySizeOptions = ['1-50', '51-200', '200-1000', '1000+'];
+const companySizeOptions = [
+    { value: '1-50',      label: '1–50' },
+    { value: '51-200',    label: '51–200' },
+    { value: '200-1000',  label: '200–1,000' },
+    { value: '1000+',     label: '1,000+' },
+];
+
 const companySectorOptions = ['פרטי', 'ציבורי', 'ממשלתי', 'מלכ"ר'];
 
-type IndustryCategory = {
-    id: string;
-    name: string;
-    description?: string;
+type IndustryCategory = { id: string; name: string };
+type FieldValue      = { id: string; label: string; value: string; displayName?: string | null };
+
+const authHeader = (): Record<string, string> => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
 };
 
-type FieldValue = {
-    id: string;
+const CheckItem: React.FC<{
     label: string;
-    value: string;
-    displayName?: string | null;
-};
-
+    checked: boolean;
+    onToggle: () => void;
+    className?: string;
+}> = ({ label, checked, onToggle, className = '' }) => (
+    <button
+        onClick={onToggle}
+        className={`w-full text-right px-3 py-2 rounded-lg text-sm transition-all flex items-center gap-2.5 group ${
+            checked
+                ? 'bg-primary-50 text-primary-700 font-bold border border-primary-100'
+                : 'text-text-default hover:bg-bg-hover font-medium border border-transparent'
+        } ${className}`}
+    >
+        <span className={`flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center transition-colors ${
+            checked ? 'bg-primary-600 border-primary-600' : 'border-border-strong bg-white group-hover:border-primary-400'
+        }`}>
+            {checked && (
+                <svg viewBox="0 0 10 8" className="w-2.5 h-2.5 fill-white">
+                    <path d="M1 4l2.5 2.5L9 1" stroke="white" strokeWidth="1.5" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+            )}
+        </span>
+        <span className="truncate flex-1">{label}</span>
+    </button>
+);
 
 const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, filters, setFilters, onApply }) => {
     const popoverRef = useRef<HTMLDivElement>(null);
-    const [industrySearchTerm, setIndustrySearchTerm] = useState('');
-    const [fieldSearchTerm, setFieldSearchTerm] = useState('');
-    const [industries, setIndustries] = useState<IndustryCategory[]>([]);
-    const [fields, setFields] = useState<FieldValue[]>([]);
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
-    // Changed click outside logic: Now using a backdrop div with onClick instead of document listener
-    // This is safer with createPortal and avoids issues with event bubbling order
-    useEffect(() => {
-        const handleEsc = (event: KeyboardEvent) => {
-            if (event.key === 'Escape') {
-                onClose();
-            }
-        };
-        window.addEventListener('keydown', handleEsc);
-        return () => window.removeEventListener('keydown', handleEsc);
-    }, [onClose]);
-    
-    const handleSizeToggle = (size: string) => {
-        setFilters(prev => ({
-            ...prev,
-            sizes: prev.sizes.includes(size) ? prev.sizes.filter(s => s !== size) : [...prev.sizes, size]
-        }));
-    };
+    // ── Internal draft — only committed to parent on Apply ────────────────────
+    const [draft, setDraft] = useState<CompanyFilters>(() => ({ ...filters }));
 
-    const handleFilterChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-        const { name, value } = e.target;
-        setFilters(prev => ({ ...prev, [name]: value ? [value] : [] }));
-    };
+    // Search state per column
+    const [industrySearch, setIndustrySearch] = useState('');
+    const [fieldSearch,    setFieldSearch]    = useState('');
 
-    const handleIndustrySelect = (industryName: string) => {
-        const newIndustry = filters.industry === industryName ? '' : industryName;
-        setFilters(prev => ({ ...prev, industry: newIndustry, field: '' }));
-    };
+    // Data
+    const [industries, setIndustries] = useState<IndustryCategory[]>([]);
+    const [fieldMap,   setFieldMap]   = useState<Record<string, FieldValue[]>>({});
 
-    const handleFieldSelect = (fieldName: string) => {
-        const newField = filters.field === fieldName ? '' : fieldName;
-        setFilters(prev => ({ ...prev, field: newField }));
-    };
+    // Stable ref tracking which industry IDs have already been (or are being) fetched
+    const fetchedRef = useRef<Set<string>>(new Set());
 
-    const handleClear = () => {
-        setFilters({ sizes: [], sectors: [], industry: '', field: '' });
-    };
-
-    // Load industries (subcategories) from picklists for the BUSINESS_FIELD_CATEGORY_ID
+    // ── Load industries ───────────────────────────────────────────────────────
     useEffect(() => {
         if (!apiBase) return;
-        const controller = new AbortController();
-        (async () => {
-            try {
-                const res = await fetch(
-                    `${apiBase}/api/picklists/categories/${BUSINESS_FIELD_CATEGORY_ID}/subcategories`,
-                    { signal: controller.signal },
-                );
-                if (!res.ok) return;
-                const data: IndustryCategory[] = await res.json();
-                setIndustries(data || []);
-            } catch {
-                // silent fail – keep empty industries
-            }
-        })();
-        return () => controller.abort();
+        const ctrl = new AbortController();
+        fetch(`${apiBase}/api/picklists/categories/${BUSINESS_FIELD_CATEGORY_ID}/subcategories`, {
+            signal: ctrl.signal,
+            headers: authHeader(),
+        })
+            .then((r) => r.ok ? r.json() : [])
+            .then((data: IndustryCategory[]) => setIndustries(data || []))
+            .catch(() => {});
+        return () => ctrl.abort();
     }, [apiBase]);
 
-    // Load fields (values) for the selected industry
-    useEffect(() => {
-        if (!apiBase || !filters.industry) {
-            setFields([]);
-            return;
+    // ── Load sub-fields — stable callback (no fieldMap dep) ──────────────────
+    const loadFieldsForIndustry = useCallback(async (ind: IndustryCategory) => {
+        if (!apiBase || fetchedRef.current.has(ind.id)) return;
+        fetchedRef.current.add(ind.id);
+        try {
+            const res = await fetch(`${apiBase}/api/picklists/categories/${ind.id}/values`, { headers: authHeader() });
+            if (!res.ok) { fetchedRef.current.delete(ind.id); return; }
+            const data: FieldValue[] = await res.json();
+            setFieldMap((prev) => ({ ...prev, [ind.id]: data || [] }));
+        } catch {
+            fetchedRef.current.delete(ind.id); // allow retry
         }
-        const selected = industries.find((i) => i.name === filters.industry);
-        if (!selected) {
-            setFields([]);
-            return;
-        }
-        const controller = new AbortController();
-        (async () => {
-            try {
-                const res = await fetch(
-                    `${apiBase}/api/picklists/categories/${selected.id}/values`,
-                    { signal: controller.signal },
-                );
-                if (!res.ok) return;
-                const data: FieldValue[] = await res.json();
-                setFields(data || []);
-            } catch {
-                // silent fail – keep empty fields
-            }
-        })();
-        return () => controller.abort();
-    }, [apiBase, filters.industry, industries]);
+    }, [apiBase]); // stable — no fieldMap in deps
 
-    const filteredIndustries = useMemo(
-        () =>
-            industries.filter((cat) =>
-                cat.name.toLowerCase().includes(industrySearchTerm.toLowerCase()),
-            ),
-        [industries, industrySearchTerm],
-    );
+    useEffect(() => {
+        const inds = industries.filter((i) => draft.industries.includes(i.name));
+        inds.forEach(loadFieldsForIndustry);
+    }, [draft.industries, industries, loadFieldsForIndustry]);
+
+    // ── ESC to close ──────────────────────────────────────────────────────────
+    useEffect(() => {
+        const h = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+        window.addEventListener('keydown', h);
+        return () => window.removeEventListener('keydown', h);
+    }, [onClose]);
+
+    // ── Computed lists ────────────────────────────────────────────────────────
+    const filteredIndustries = useMemo(() =>
+        industries.filter((i) => i.name.toLowerCase().includes(industrySearch.toLowerCase())),
+    [industries, industrySearch]);
 
     const availableFields = useMemo(() => {
-        if (!filters.industry) return [];
-        return fields.filter((field) =>
-            (field.displayName || field.label)
-                .toLowerCase()
-                .includes(fieldSearchTerm.toLowerCase()),
+        const selectedInds = industries.filter((i) => draft.industries.includes(i.name));
+        const all: FieldValue[] = [];
+        const seen = new Set<string>();
+        for (const ind of selectedInds) {
+            for (const f of (fieldMap[ind.id] || [])) {
+                const label = f.displayName || f.label;
+                if (!seen.has(label)) { seen.add(label); all.push(f); }
+            }
+        }
+        return all.filter((f) =>
+            (f.displayName || f.label).toLowerCase().includes(fieldSearch.toLowerCase()),
         );
-    }, [filters.industry, fieldSearchTerm, fields]);
+    }, [draft.industries, industries, fieldMap, fieldSearch]);
 
-    // Using Portal to break out of any overflow:hidden containers
+    // ── Draft toggle helpers (no API call, no parent state change) ────────────
+    const toggleIndustry = (name: string) =>
+        setDraft((prev) => ({
+            ...prev,
+            industries: prev.industries.includes(name)
+                ? prev.industries.filter((x) => x !== name)
+                : [...prev.industries, name],
+        }));
+
+    const toggleField = (label: string) =>
+        setDraft((prev) => ({
+            ...prev,
+            fields: prev.fields.includes(label) ? prev.fields.filter((x) => x !== label) : [...prev.fields, label],
+        }));
+
+    const toggleSize = (size: string) =>
+        setDraft((prev) => ({
+            ...prev,
+            sizes: prev.sizes.includes(size) ? prev.sizes.filter((s) => s !== size) : [...prev.sizes, size],
+        }));
+
+    const handleSectorChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const v = e.target.value;
+        setDraft((prev) => ({ ...prev, sectors: v ? [v] : [] }));
+    };
+
+    // Clear only the draft (no parent state change)
+    const handleClear = () =>
+        setDraft({ sizes: [], sectors: [], industries: [], fields: [], roles: [] }); // roles kept for API compat
+
+    // Commit draft to parent and trigger search — only on Apply click
+    const handleApply = () => {
+        setFilters(draft);
+        onApply?.();
+        onClose();
+    };
+
+    // ── Active filter counts (based on draft) ─────────────────────────────────
+    const activeCount =
+        draft.industries.length + draft.fields.length +
+        draft.sizes.length + draft.sectors.length;
+
     return createPortal(
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            {/* Backdrop */}
-            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm transition-opacity" onClick={onClose} />
-            
-            {/* Modal Content */}
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
             <div
                 ref={popoverRef}
-                className="relative bg-bg-card rounded-xl shadow-2xl border border-border-default flex flex-col w-full max-w-4xl max-h-[85vh] overflow-hidden animate-fade-in"
-                onClick={e => e.stopPropagation()}
+                className="relative bg-bg-card rounded-xl shadow-2xl border border-border-default flex flex-col w-full max-w-4xl h-[82vh] overflow-hidden animate-fade-in"
+                onClick={(e) => e.stopPropagation()}
             >
+                {/* Header */}
                 <header className="flex justify-between items-center p-4 border-b border-border-default flex-shrink-0 bg-bg-subtle/30">
                     <div>
                         <h3 className="font-bold text-lg text-text-default">סינון לפי רקע תעסוקתי</h3>
-                        <p className="text-xs text-text-muted">בחר תעשייה, גודל חברה וסקטור לסינון מועמדים</p>
+                        <p className="text-xs text-text-muted">בחר תעשיות, תחומים ומאפייני חברה לסינון מועמדים</p>
                     </div>
-                    <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors"><XMarkIcon className="w-5 h-5" /></button>
+                    <div className="flex items-center gap-3">
+                        {activeCount > 0 && (
+                            <span className="bg-primary-600 text-white text-xs font-bold rounded-full px-2.5 py-0.5">
+                                {activeCount} נבחרו
+                            </span>
+                        )}
+                        <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors">
+                            <XMarkIcon className="w-5 h-5" />
+                        </button>
+                    </div>
                 </header>
 
-                <main className="flex-grow overflow-y-auto">
-                    <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-border-default h-full min-h-[400px]">
-                        
-                        {/* Column 1: Industry List */}
-                        <div className="flex flex-col h-full overflow-hidden border-b md:border-b-0">
-                            <div className="p-3 border-b border-border-default bg-bg-subtle/20">
+                {/* Body — 3 columns */}
+                <main className="flex-1 overflow-hidden min-h-0">
+                    <div className="grid grid-cols-1 md:grid-cols-3 divide-y md:divide-y-0 md:divide-x divide-border-default h-full">
+
+                        {/* Col 1: Industries */}
+                        <div className="flex flex-col h-full overflow-hidden">
+                            <div className="px-3 pt-3 pb-2 border-b border-border-default bg-bg-subtle/20 flex-shrink-0">
+                                <p className="text-[10px] font-bold text-text-muted uppercase tracking-wide mb-2">תעשייה</p>
                                 <div className="relative">
-                                    <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                    <input 
-                                        type="text" 
-                                        placeholder="חפש תעשייה..." 
-                                        value={industrySearchTerm} 
-                                        onChange={e => setIndustrySearchTerm(e.target.value)} 
-                                        className="w-full bg-bg-input border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500" 
+                                    <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2.5 top-1/2 -translate-y-1/2" />
+                                    <input
+                                        type="text"
+                                        placeholder="חיפוש..."
+                                        value={industrySearch}
+                                        onChange={(e) => setIndustrySearch(e.target.value)}
+                                        className="w-full bg-bg-input border border-border-default rounded-lg py-1.5 pl-2.5 pr-7 text-xs focus:ring-1 focus:ring-primary-500"
                                     />
                                 </div>
                             </div>
-                            <div className="overflow-y-auto flex-grow custom-scrollbar p-2 space-y-0.5">
-                                {filteredIndustries.map(industry => (
-                                    <button 
-                                        key={industry.id} 
-                                        onClick={() => handleIndustrySelect(industry.name)} 
-                                        className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-all flex justify-between items-center group ${
-                                            filters.industry === industry.name 
-                                                ? 'bg-primary-50 text-primary-700 font-bold border border-primary-100 shadow-sm' 
-                                                : 'text-text-default hover:bg-bg-hover font-medium border border-transparent'
-                                        }`}
-                                    >
-                                        <span className="truncate">{industry.name}</span>
-                                        {filters.industry === industry.name && <div className="w-1.5 h-1.5 rounded-full bg-primary-500"></div>}
-                                    </button>
+                            <div className="overflow-y-auto flex-grow custom-scrollbar p-1.5 space-y-0.5">
+                                {filteredIndustries.map((ind) => (
+                                    <CheckItem
+                                        key={ind.id}
+                                        label={ind.name}
+                                        checked={draft.industries.includes(ind.name)}
+                                        onToggle={() => toggleIndustry(ind.name)}
+                                    />
                                 ))}
                             </div>
+                            {draft.industries.length > 0 && (
+                                <div className="px-2 py-1.5 border-t border-border-default bg-bg-subtle/30 flex-shrink-0">
+                                    <div className="flex flex-wrap gap-1">
+                                        {draft.industries.map((i) => (
+                                            <span key={i} className="inline-flex items-center gap-1 text-[10px] bg-primary-100 text-primary-700 font-bold px-2 py-0.5 rounded-full">
+                                                {i}
+                                                <button onClick={() => toggleIndustry(i)} className="hover:text-red-500"><XMarkIcon className="w-2.5 h-2.5" /></button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Column 2: Fields List (Dependent on Industry) */}
-                        <div className="flex flex-col h-full overflow-hidden border-b md:border-b-0 bg-bg-subtle/10">
-                            <div className="p-3 border-b border-border-default bg-bg-subtle/20">
+                        {/* Col 2: Sub-fields */}
+                        <div className="flex flex-col h-full overflow-hidden bg-bg-subtle/10">
+                            <div className="px-3 pt-3 pb-2 border-b border-border-default bg-bg-subtle/20 flex-shrink-0">
+                                <p className="text-[10px] font-bold text-text-muted uppercase tracking-wide mb-2">תחום</p>
                                 <div className="relative">
-                                    <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                    <input 
-                                        type="text" 
-                                        placeholder="חפש תחום..." 
-                                        value={fieldSearchTerm} 
-                                        onChange={e => setFieldSearchTerm(e.target.value)} 
-                                        disabled={!filters.industry} 
-                                        className="w-full bg-bg-input border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500 disabled:bg-bg-subtle disabled:opacity-60" 
+                                    <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2.5 top-1/2 -translate-y-1/2" />
+                                    <input
+                                        type="text"
+                                        placeholder="חיפוש..."
+                                        value={fieldSearch}
+                                        onChange={(e) => setFieldSearch(e.target.value)}
+                                        disabled={!draft.industries.length}
+                                        className="w-full bg-bg-input border border-border-default rounded-lg py-1.5 pl-2.5 pr-7 text-xs focus:ring-1 focus:ring-primary-500 disabled:opacity-50"
                                     />
                                 </div>
                             </div>
-                            <div className="overflow-y-auto flex-grow custom-scrollbar p-2 space-y-0.5">
-                                {!filters.industry ? (
-                                    <div className="flex flex-col items-center justify-center h-full text-text-muted opacity-60 p-4 text-center">
-                                        <p className="text-sm">בחר תעשייה מימין כדי לראות תחומים</p>
-                                    </div>
+                            <div className="overflow-y-auto flex-grow custom-scrollbar p-1.5 space-y-0.5">
+                                {!draft.industries.length ? (
+                                    <p className="text-center text-xs text-text-muted opacity-60 mt-8 px-3">בחר תעשייה כדי לראות תחומים</p>
                                 ) : availableFields.length === 0 ? (
-                                     <div className="flex flex-col items-center justify-center h-full text-text-muted opacity-60 p-4 text-center">
-                                        <p className="text-sm">לא נמצאו תחומים</p>
-                                    </div>
+                                    <p className="text-center text-xs text-text-muted opacity-60 mt-8">לא נמצאו תחומים</p>
                                 ) : (
-                                    availableFields.map(field => (
-                                        <button 
-                                            key={field.id} 
-                                            onClick={() => handleFieldSelect(field.displayName || field.label)} 
-                                            className={`w-full text-right px-3 py-2.5 rounded-lg text-sm transition-all flex justify-between items-center ${
-                                                filters.field === (field.displayName || field.label) 
-                                                    ? 'bg-white border-primary-200 text-primary-700 font-bold shadow-sm border' 
-                                                    : 'text-text-default hover:bg-white hover:shadow-sm font-medium border border-transparent'
-                                            }`}
-                                        >
-                                            <span className="truncate">{field.displayName || field.label}</span>
-                                            {filters.field === (field.displayName || field.label) && <div className="w-1.5 h-1.5 rounded-full bg-primary-500"></div>}
-                                        </button>
-                                    ))
+                                    availableFields.map((f) => {
+                                        const label = f.displayName || f.label;
+                                        return (
+                                            <CheckItem
+                                                key={f.id}
+                                                label={label}
+                                                checked={draft.fields.includes(label)}
+                                                onToggle={() => toggleField(label)}
+                                            />
+                                        );
+                                    })
                                 )}
                             </div>
+                            {draft.fields.length > 0 && (
+                                <div className="px-2 py-1.5 border-t border-border-default bg-bg-subtle/30 flex-shrink-0">
+                                    <div className="flex flex-wrap gap-1">
+                                        {draft.fields.map((f) => (
+                                            <span key={f} className="inline-flex items-center gap-1 text-[10px] bg-sky-100 text-sky-700 font-bold px-2 py-0.5 rounded-full">
+                                                {f}
+                                                <button onClick={() => toggleField(f)} className="hover:text-red-500"><XMarkIcon className="w-2.5 h-2.5" /></button>
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
-                        {/* Column 3: Company Properties */}
-                        <div className="flex flex-col h-full overflow-hidden p-5 space-y-6 bg-bg-subtle/5">
+                        {/* Col 3: Properties */}
+                        <div className="flex flex-col h-full overflow-hidden p-4 space-y-5 bg-bg-subtle/5">
+                            {/* Employee count */}
                             <div>
-                                <label className="block text-xs font-bold text-text-muted uppercase mb-3 tracking-wide">גודל חברה</label>
+                                <label className="block text-[10px] font-bold text-text-muted uppercase mb-2.5 tracking-wide">
+                                    מס' עובדים בחברה
+                                </label>
                                 <div className="flex flex-wrap gap-2">
-                                    {companySizeOptions.map(size => (
+                                    {companySizeOptions.map(({ value, label }) => (
                                         <button
-                                            key={size}
-                                            onClick={() => handleSizeToggle(size)}
+                                            key={value}
+                                            onClick={() => toggleSize(value)}
                                             className={`px-3 py-1.5 text-xs font-bold rounded-lg border transition-all ${
-                                                filters.sizes.includes(size)
-                                                    ? 'bg-primary-600 text-white border-primary-600 shadow-md transform scale-105'
+                                                draft.sizes.includes(value)
+                                                    ? 'bg-primary-600 text-white border-primary-600 shadow-md scale-105'
                                                     : 'bg-white text-text-default border-border-default hover:border-primary-300 hover:bg-primary-50'
                                             }`}
                                         >
-                                            {size}
+                                            {label}
                                         </button>
                                     ))}
                                 </div>
                             </div>
 
+                            {/* Sector */}
                             <div>
-                                <label className="block text-xs font-bold text-text-muted uppercase mb-3 tracking-wide">סקטור / מגזר</label>
-                                <select 
-                                    name="sectors" 
-                                    value={filters.sectors[0] || ''} 
-                                    onChange={handleFilterChange} 
-                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl p-3 focus:ring-2 focus:ring-primary-500 cursor-pointer"
+                                <label className="block text-[10px] font-bold text-text-muted uppercase mb-2.5 tracking-wide">
+                                    סקטור / מגזר
+                                </label>
+                                <select
+                                    value={draft.sectors[0] || ''}
+                                    onChange={handleSectorChange}
+                                    className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-xl p-2.5 focus:ring-2 focus:ring-primary-500 cursor-pointer"
                                 >
                                     <option value="">כל הסקטורים</option>
-                                    {companySectorOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+                                    {companySectorOptions.map((opt) => (
+                                        <option key={opt} value={opt}>{opt}</option>
+                                    ))}
                                 </select>
                             </div>
-                            
-                            {/* Selected Summary */}
-                            <div className="mt-auto bg-primary-50 border border-primary-100 rounded-xl p-3 text-xs">
-                                <span className="block font-bold text-primary-800 mb-1">סיכום בחירה:</span>
-                                <div className="space-y-1 text-primary-700">
-                                    {filters.industry && <p>• תעשייה: {filters.industry}</p>}
-                                    {filters.field && <p>• תחום: {filters.field}</p>}
-                                    {filters.sizes.length > 0 && <p>• גודל: {filters.sizes.join(', ')}</p>}
-                                    {filters.sectors.length > 0 && <p>• סקטור: {filters.sectors.join(', ')}</p>}
-                                    {!filters.industry && !filters.sizes.length && !filters.sectors.length && <p className="italic opacity-70">לא נבחרו מסננים</p>}
-                                </div>
-                            </div>
-                        </div>
 
+                            {/* Summary */}
+                            {activeCount > 0 && (
+                                <div className="mt-auto bg-primary-50 border border-primary-100 rounded-xl p-3 text-xs space-y-1 text-primary-700">
+                                    <span className="block font-bold text-primary-800 mb-1">סיכום:</span>
+                                    {draft.industries.length > 0 && <p>• תעשיות: {draft.industries.join(', ')}</p>}
+                                    {draft.fields.length > 0 && <p>• תחומים: {draft.fields.join(', ')}</p>}
+                                    {draft.sizes.length > 0 && <p>• עובדים: {draft.sizes.join(', ')}</p>}
+                                    {draft.sectors.length > 0 && <p>• סקטור: {draft.sectors.join(', ')}</p>}
+                                </div>
+                            )}
+                        </div>
                     </div>
                 </main>
 
+                {/* Footer */}
                 <footer className="flex justify-between items-center p-4 border-t border-border-default bg-bg-subtle/30 flex-shrink-0">
                     <button onClick={handleClear} className="text-sm font-bold text-text-muted hover:text-red-500 transition-colors px-2">
                         נקה הכל
                     </button>
                     <div className="flex gap-3">
-                         <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-text-muted hover:bg-bg-hover transition-colors">
+                        <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-text-muted hover:bg-bg-hover transition-colors">
                             ביטול
                         </button>
                         <button
-                            onClick={() => {
-                                if (onApply) {
-                                    onApply();
-                                }
-                                onClose();
-                            }}
+                            onClick={handleApply}
                             className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20"
                         >
-                            החל סינון
+                            החל סינון{activeCount > 0 && ` (${activeCount})`}
                         </button>
                     </div>
                 </footer>
+
                 <style>{`
-                    @keyframes fade-in {
-                        from { opacity: 0; transform: scale(0.98); }
-                        to { opacity: 1; transform: scale(1); }
-                    }
-                    .animate-fade-in { 
-                        animation: fade-in 0.2s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-                    }
-                    .custom-scrollbar::-webkit-scrollbar { width: 5px; }
-                    .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-                    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-                    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+                    @keyframes fade-in { from { opacity:0; transform:scale(0.98) } to { opacity:1; transform:scale(1) } }
+                    .animate-fade-in { animation: fade-in 0.2s cubic-bezier(0.16,1,0.3,1) forwards }
+                    .custom-scrollbar::-webkit-scrollbar { width: 4px }
+                    .custom-scrollbar::-webkit-scrollbar-track { background: transparent }
+                    .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px }
+                    .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #94a3b8 }
                 `}</style>
             </div>
         </div>,
-        document.body
+        document.body,
     );
 };
 

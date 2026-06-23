@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tag_ai_decisions (
   ai_reasoning TEXT,
   candidate_tags_snapshot JSONB NOT NULL DEFAULT '[]'::jsonb,
   review_status VARCHAR(24) NOT NULL DEFAULT 'pending_review'
-    CHECK (review_status IN ('pending_review', 'approved', 'overridden')),
+    CHECK (review_status IN ('pending_review', 'approved', 'overridden', 'manual_queue')),
   reviewer_action VARCHAR(16),
   resolved_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

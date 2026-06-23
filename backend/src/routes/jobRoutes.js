@@ -7,6 +7,7 @@ const { optionalAuth } = require('../middleware/authMiddleware');
 const router = express.Router();
 
 router.get('/', jobController.list);
+router.get('/for-picker', jobController.listForPicker);
 router.get('/for-compose', authMiddleware, attachDbUser, jobController.listForCompose);
 router.post('/log-smart-import-open', authMiddleware, attachDbUser, jobController.logSmartImportModalOpen);
 router.get('/:id/referral-client-contacts', authMiddleware, jobController.getReferralClientContacts);

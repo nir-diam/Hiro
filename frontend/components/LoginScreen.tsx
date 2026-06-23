@@ -57,6 +57,8 @@ const LoginScreen: React.FC = () => {
                 localStorage.setItem('herouser', JSON.stringify(data.user));
                 localStorage.setItem('user', JSON.stringify(data.user));
             }
+            // Notify contexts that were skipped on login page (no token) so they can now fetch
+            window.dispatchEvent(new Event('hiro:token-set'));
             await refreshUser();
             const role = (data.user as { role?: string } | undefined)?.role?.toLowerCase() || '';
             if (role === 'candidate') {

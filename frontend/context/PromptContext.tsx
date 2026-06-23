@@ -50,6 +50,12 @@ export const PromptProvider: React.FC<{ children: ReactNode }> = ({ children }) 
     }, []);
 
     useEffect(() => {
+        // Skip fetch on login page (no token) to avoid noisy 401 errors
+        const token = localStorage.getItem('token') || sessionStorage.getItem('token');
+        if (!token) {
+            setIsLoading(false);
+            return;
+        }
         loadPrompts();
     }, [loadPrompts]);
 

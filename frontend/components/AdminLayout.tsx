@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
-import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, WrenchScrewdriverIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon, ChatBubbleBottomCenterTextIcon, InformationCircleIcon, BoltIcon } from './Icons';
+import { BuildingOffice2Icon, BriefcaseIcon, UserGroupIcon, TagIcon, SquaresPlusIcon, GlobeAmericasIcon, SparklesIcon, ShieldCheckIcon, ListBulletIcon, DocumentTextIcon, ChatBubbleBottomCenterTextIcon, InformationCircleIcon, BoltIcon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
 const AdminLayout: React.FC = () => {
@@ -10,7 +10,6 @@ const AdminLayout: React.FC = () => {
     const navItems = [
         { to: '/admin/clients', label: t('admin.tab_clients'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
         { to: '/admin/companies', label: t('admin.tab_companies_db'), icon: <GlobeAmericasIcon className="w-5 h-5" /> },
-        { to: '/admin/company-corrections', label: t('admin.tab_company_corrections'), icon: <WrenchScrewdriverIcon className="w-5 h-5" /> },
         { to: '/admin/candidates', label: t('admin.tab_candidates'), icon: <UserGroupIcon className="w-5 h-5" /> },
         { to: '/admin/tags', label: 'תגיות', icon: <TagIcon className="w-5 h-5" /> },
         { to: '/admin/jobs', label: t('admin.tab_jobs'), icon: <BriefcaseIcon className="w-5 h-5" /> },

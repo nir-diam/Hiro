@@ -422,7 +422,7 @@ const listPending = async (req, res) => {
   }
 };
 
-const resolvePendingTags = async ({ ids = [], action, targetTagId } = {}) => {
+const resolvePendingTags = async ({ ids = [], action, targetTagId, aliasPriority = 3, bypassStatusCheck = false } = {}) => {
   if (!Array.isArray(ids) || !ids.length) {
     const err = new Error('No tag IDs provided');
     err.status = 400;
@@ -430,12 +430,10 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId } = {}) => {
   }
 
   const entries = await Tag.findAll({
-    where: {
-      id: ids,
-      status: 'pending',
-    },
+    where: bypassStatusCheck ? { id: ids } : { id: ids, status: 'pending' },
   });
   if (!entries.length) {
+    if (bypassStatusCheck) return { success: true }; // nothing to update — silently ok
     const err = new Error('No matching pending tags found');
     err.status = 404;
     throw err;
@@ -472,7 +470,7 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId } = {}) => {
       if (alreadyHas) {
         await row.destroy();
       } else {
-        await row.update({ tag_id: targetTag.id });
+        await row.update({ tag_id: targetTag.id, is_active: true });
       }
     }
     // Ensure target tag is linked and active for every candidate that had the pending tag
@@ -514,12 +512,7 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId } = {}) => {
         await entry.save({ fields: ['status', 'qualityState', 'source'] });
         await SystemTag.update(
           { is_active: true },
-          {
-            where: {
-              tag_id: entry.id,
-              type: { [Op.in]: [SYSTEM_TAG_TYPE_CANDIDATE, SYSTEM_TAG_TYPE_JOB] },
-            },
-          },
+          { where: { tag_id: entry.id } },
         );
         continue;
       }
@@ -563,12 +556,33 @@ const resolvePendingTags = async ({ ids = [], action, targetTagId } = {}) => {
       }
 
       if (action === 'link' && targetTag) {
+        // ── aliases (string array) ─────────────────────────────────────────
         const existingAliases = Array.isArray(targetTag.aliases) ? [...targetTag.aliases] : [];
         if (suggestedName && !existingAliases.includes(suggestedName)) {
           existingAliases.push(suggestedName);
           targetTag.aliases = existingAliases;
-          await targetTag.save({ fields: ['aliases'] });
         }
+
+        // ── synonyms (JSONB) — also record with priority metadata ──────────
+        const existingSynonyms = Array.isArray(targetTag.synonyms) ? [...targetTag.synonyms] : [];
+        const alreadyInSynonyms = existingSynonyms.some(
+          (s) => (typeof s === 'string' ? s : s?.name)?.toLowerCase() === suggestedName?.toLowerCase()
+        );
+        if (suggestedName && !alreadyInSynonyms) {
+          existingSynonyms.push({ name: suggestedName, priority: aliasPriority, type: 'alias', source: 'merge' });
+          targetTag.synonyms = existingSynonyms;
+        } else if (suggestedName && alreadyInSynonyms) {
+          // Update priority if entry already exists
+          targetTag.synonyms = existingSynonyms.map((s) => {
+            if ((typeof s === 'string' ? s : s?.name)?.toLowerCase() === suggestedName?.toLowerCase()) {
+              return typeof s === 'string' ? { name: s, priority: aliasPriority, type: 'alias', source: 'merge' } : { ...s, priority: aliasPriority };
+            }
+            return s;
+          });
+        }
+
+        await targetTag.save({ fields: ['aliases', 'synonyms'] });
+        console.log(`[resolvePendingTags] alias "${suggestedName}" (priority ${aliasPriority}) added to tag "${targetTag.displayNameHe || targetTag.tagKey}"`);
         await cleanupPendingTagCorrections(existingAliases);
       }
 
@@ -622,8 +636,9 @@ const listAiDecisions = async (req, res) => {
     const limit = Number(req.query.limit) || 50;
     const decision = req.query.decision || 'all';
     const date = req.query.date || '';
-    const reviewStatus = req.query.reviewStatus || 'pending_review';
-    const listOpts = { page, limit, decision, date, reviewStatus };
+    const reviewStatus = req.query.reviewStatus || 'all';
+    const reviewerAction = req.query.reviewerAction || '';
+    const listOpts = { page, limit, decision, date, reviewStatus, reviewerAction };
 
     let payload = await tagCorrectionAgentService.listDecisions(listOpts);
     let backfill = null;
@@ -649,9 +664,9 @@ const listAiDecisions = async (req, res) => {
 
 const resolveAiDecisions = async (req, res) => {
   try {
-    const { decisionIds = [], action, targetTagId } = req.body || {};
+    const { decisionIds = [], action, targetTagId, aliasPriority } = req.body || {};
     const result = await tagAiDecisionResolveService.applyReviewerActions(
-      { decisionIds, action, targetTagId },
+      { decisionIds, action, targetTagId, aliasPriority },
       resolvePendingTags,
     );
     res.json(result);
@@ -669,6 +684,18 @@ const backfillAiDecisions = async (req, res) => {
   } catch (err) {
     console.error('[tagController.backfillAiDecisions]', err);
     res.status(500).json({ message: 'Failed to backfill AI decisions' });
+  }
+};
+
+const backfillAutoMerge = async (req, res) => {
+  try {
+    const threshold = Number(req.body?.threshold) || Number(req.query?.threshold) || 30;
+    const limit = Number(req.body?.limit) || Number(req.query?.limit) || 200;
+    const result = await tagCorrectionAgentService.backfillAutoMergeDecisions(threshold, limit);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.backfillAutoMerge]', err);
+    res.status(500).json({ message: 'Failed to backfill auto merge decisions' });
   }
 };
 
@@ -716,5 +743,6 @@ module.exports = {
   listAiDecisions,
   resolveAiDecisions,
   backfillAiDecisions,
+  backfillAutoMerge,
 };
 

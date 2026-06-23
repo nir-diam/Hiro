@@ -98,6 +98,14 @@ interface AppliedAdvancedSearchPayload {
     complexRules: Record<string, unknown>[];
     /** Matches `candidates.preferredWorkingHours` (fallback: legacy `availability`). Ignored when גמיש / empty. */
     workingHours: string;
+    /** Company background filters — sent to backend for JSONB cross-experience search */
+    companyFilters?: {
+        industries: string[];
+        fields: string[];
+        roles: string[];
+        sizes: string[];
+        sectors: string[];
+    };
 }
 
 export interface Candidate {
@@ -128,6 +136,8 @@ export interface Candidate {
   field?: string;
   sector?: string;
   companySize?: string;
+  /** Denormalized array of all company experiences for +N tooltip */
+  companyExperiences?: { company: string; industry: string; sector: string; companySize: string; isCurrent: boolean }[];
   // Enhanced fields for display
   professionalSummary?: string;
   industryAnalysis?: {
@@ -472,6 +482,7 @@ interface TablePaginationControlsProps {
     pageSizeOptions: number[];
     onPageChange: (next: number) => void;
     onPageSizeChange: (size: number) => void;
+    prefix?: React.ReactNode;
 }
 
 const TablePaginationControls: React.FC<TablePaginationControlsProps> = ({
@@ -481,8 +492,10 @@ const TablePaginationControls: React.FC<TablePaginationControlsProps> = ({
     pageSizeOptions,
     onPageChange,
     onPageSizeChange,
+    prefix,
 }) => (
     <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+        {prefix}
         <label className="flex items-center gap-1 whitespace-nowrap">
             <span>דפים</span>
             <select
@@ -1387,7 +1400,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const globalPoolAllColumnIds = useMemo(
         () => [
             'name', 'matchScore', 'title', 'status', 'lastActivity', 'createDate', 'source', 'tags',
-            'location', 'industry', 'field', 'sector', 'jobScopes', 'gender', 'age', 'salaryMin',
+            'location', 'industry', 'field', 'sector', 'companySize', 'jobScopes', 'gender', 'age', 'salaryMin',
             'languages', 'lastSubmissionMatch',
         ],
         [],
@@ -1460,9 +1473,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [companyFilters, setCompanyFilters] = useState<{
         sizes: string[];
         sectors: string[];
-        industry: string;
-        field: string;
-    }>({ sizes: [], sectors: [], industry: '', field: '' });
+        industries: string[];
+        fields: string[];
+        roles: string[];
+    }>({ sizes: [], sectors: [], industries: [], fields: [], roles: [] });
     const companyFilterButtonRef = useRef<HTMLButtonElement>(null);
     
     const [isFilterTagModalOpen, setIsFilterTagModalOpen] = useState(false);
@@ -1490,6 +1504,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     /** Skip one auto list effect run after an imperative fetch (advanced apply / clear) to avoid duplicate GET. */
     const suppressNextListFetchEffectRef = useRef(false);
     const prevSelectedJobIdRef = useRef(selectedJobId);
+    /** Guards against StrictMode double-invoke of the initial mount fetch. */
+    const initialFetchFiredRef = useRef(false);
     /** After hydrating from session, skip the first page/dependency-driven fetch so restored rows stay visible. */
     const skipListFetchAfterHydrateRef = useRef(listViewSnapshot !== null);
 
@@ -1583,18 +1599,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         if (incomplete !== null) {
             setShowIncompleteOnly(incomplete === '1');
         }
-        const field = searchParamsFromUrl.get('field') || '';
-        const industry = searchParamsFromUrl.get('industry') || '';
-        const sizesParam = searchParamsFromUrl.get('sizes') || '';
-        const sectorsParam = searchParamsFromUrl.get('sectors') || '';
-        const sizes = sizesParam ? sizesParam.split(',').filter(Boolean) : [];
-        const sectors = sectorsParam ? sectorsParam.split(',').filter(Boolean) : [];
+        // Use '|' as separator to avoid splitting industry names that contain commas
+        // (e.g. "ביטחון, חירום ואכיפת חוק")
+        const SEP = '|';
+        const industriesParam = searchParamsFromUrl.get('industries') || searchParamsFromUrl.get('industry') || '';
+        const fieldsParam     = searchParamsFromUrl.get('fields')     || searchParamsFromUrl.get('field')    || '';
+        const rolesParam      = searchParamsFromUrl.get('roles')      || '';
+        const sizesParam      = searchParamsFromUrl.get('sizes')      || '';
+        const sectorsParam    = searchParamsFromUrl.get('sectors')    || '';
+        // Support old comma-encoded params (backward compat) and new pipe-encoded
+        const splitParam = (p: string) => p
+            ? (p.includes(SEP) ? p.split(SEP) : p.split(',')).map(s => s.trim()).filter(Boolean)
+            : [];
         setCompanyFilters((prev) => ({
             ...prev,
-            field,
-            industry,
-            sizes,
-            sectors,
+            industries: splitParam(industriesParam),
+            fields:     splitParam(fieldsParam),
+            roles:      splitParam(rolesParam),
+            sizes:      splitParam(sizesParam),
+            sectors:    splitParam(sectorsParam),
         }));
     }, [searchParamsFromUrl]);
 
@@ -1612,13 +1635,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 else params.delete('fav');
                 if (showIncompleteOnly) params.set('incomplete', '1');
                 else params.delete('incomplete');
-                if (companyFilters.field) params.set('field', companyFilters.field);
-                else params.delete('field');
-                if (companyFilters.industry) params.set('industry', companyFilters.industry);
-                else params.delete('industry');
-                if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join(','));
+                // Use '|' separator — comma appears inside Hebrew industry names
+                if (companyFilters.industries?.length) params.set('industries', companyFilters.industries.join('|'));
+                else { params.delete('industries'); params.delete('industry'); }
+                if (companyFilters.fields?.length) params.set('fields', companyFilters.fields.join('|'));
+                else { params.delete('fields'); params.delete('field'); }
+                if (companyFilters.roles?.length) params.set('roles', companyFilters.roles.join('|'));
+                else params.delete('roles');
+                if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join('|'));
                 else params.delete('sizes');
-                if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join(','));
+                if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join('|'));
                 else params.delete('sectors');
                 return params;
             },
@@ -1736,6 +1762,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         field: c.field || '',
         sector: c.sector || '',
         companySize: c.companySize || '',
+        companyExperiences: Array.isArray(c.companyExperiences) ? c.companyExperiences : [],
         professionalSummary: c.professionalSummary || '',
         industryAnalysis: c.industryAnalysis,
         resumeUrl: c.resumeUrl || '',
@@ -1835,13 +1862,58 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         [apiBase, mapCandidate, applyListMatchPatches],
     );
 
+    // Ref keeps companyFilters readable inside callbacks without adding it to dep arrays.
+    // This prevents resolveAdvancedPayloadForFetch (and therefore fetchCandidates) from
+    // getting a new reference every time the user applies company filters, which would
+    // cascade and cause every useEffect that depends on fetchCandidates to re-fire.
+    const companyFiltersRef = useRef(companyFilters);
+    companyFiltersRef.current = companyFilters; // always in sync, no extra renders
+
+    const hasActiveCompanyFilters = !!(
+        companyFilters.industries?.length ||
+        companyFilters.fields?.length ||
+        companyFilters.roles?.length ||
+        companyFilters.sizes?.length ||
+        companyFilters.sectors?.length
+    );
+    // Stable ref so the callback below can read the latest value without depending on it
+    const hasActiveCompanyFiltersRef = useRef(hasActiveCompanyFilters);
+    hasActiveCompanyFiltersRef.current = hasActiveCompanyFilters;
+
     const resolveAdvancedPayloadForFetch = useCallback(
         (rules: ComplexFilterRule[]) => {
-            if (appliedAdvancedFilters != null || complexRulesHaveValue(rules)) {
-                return buildAdvancedPayloadFromPanel(searchParams, languageFilters, rules);
+            // Read companyFilters from ref — does NOT appear in deps so this callback is
+            // stable across filter changes and won't cascade into other useEffects.
+            const cf = companyFiltersRef.current;
+            const hasActiveCF = hasActiveCompanyFiltersRef.current;
+            const hasPanel = appliedAdvancedFilters != null || complexRulesHaveValue(rules);
+            if (hasPanel) {
+                const base = buildAdvancedPayloadFromPanel(searchParams, languageFilters, rules);
+                if (hasActiveCF) {
+                    base.companyFilters = {
+                        industries: cf.industries,
+                        fields:     cf.fields,
+                        roles:      cf.roles,
+                        sizes:      cf.sizes,
+                        sectors:    cf.sectors,
+                    };
+                }
+                return base;
+            }
+            if (hasActiveCF) {
+                return {
+                    companyFilters: {
+                        industries: cf.industries,
+                        fields:     cf.fields,
+                        roles:      cf.roles,
+                        sizes:      cf.sizes,
+                        sectors:    cf.sectors,
+                    },
+                } as AppliedAdvancedSearchPayload;
             }
             return null;
         },
+        // companyFilters intentionally omitted — read via ref to keep callback stable
         [appliedAdvancedFilters, searchParams, languageFilters],
     );
 
@@ -1863,6 +1935,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         showIncompleteOnly,
         selectedJobId,
     ]);
+
+    // Refetch when company filters change (triggered by CompanyFilterPopover "Apply")
+    const prevCompanyFiltersRef = useRef(companyFilters);
+    useEffect(() => {
+        if (!hasInitiallyLoaded || suspendListPolling) return;
+        if (prevCompanyFiltersRef.current === companyFilters) return;
+        prevCompanyFiltersRef.current = companyFilters;
+        // Suppress the page useEffect from also firing a fetch when setPage(1) is called below
+        suppressNextListFetchEffectRef.current = true;
+        setPage(1);
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
+        });
+    }, [companyFilters, hasInitiallyLoaded, suspendListPolling, pageSize, debouncedSearchTerm, resolveAdvancedPayloadForFetch, fetchCandidatesList, showIncompleteOnly, selectedJobId]);
 
     const exportSearchHeaderLabels = useMemo(() => {
         const o = {} as Record<CandidatesExportFieldKey, string>;
@@ -2027,7 +2118,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         let inFlight = false;
 
         const poll = async () => {
-            if (cancelled || inFlight) return;
+            if (cancelled || inFlight || document.hidden) return;
             inFlight = true;
             try {
                 const res = await fetchCandidatesListResponse(
@@ -2039,7 +2130,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         advanced: resolveAdvancedPayloadForFetch(debouncedComplexRules),
                         dataIncomplete: showIncompleteOnly,
                         jobId: selectedJobId.trim(),
-                        matchLastJobScores: false,
+                        matchLastJobScores: true,
                     },
                     candidatesListFetchInit(),
                 );
@@ -2062,7 +2153,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
         // First poll only after 20s so initial load isn’t stacked; then every 10s.
         const t0 = window.setTimeout(poll, 20_000);
-        const id = window.setInterval(poll, 10_000);
+        const id = window.setInterval(poll, 60_000);
         return () => {
             cancelled = true;
             window.clearTimeout(t0);
@@ -2093,10 +2184,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     useEffect(() => {
         if (listViewSnapshot !== null) {
+            // If smart search panel was open in the restored session, pre-load jobs
+            if (listViewSnapshot.isSmartSearchOpen) loadJobs();
             return;
         }
+        if (initialFetchFiredRef.current) return;
+        initialFetchFiredRef.current = true;
         void fetchCandidates();
-    }, []);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Refetch when paging changes only. Do not depend on `hasInitiallyLoaded`; when it flips after the
     // initial mount fetch, deps here stay the same so we avoid a duplicate GET.
@@ -2250,6 +2345,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         { id: 'industry', header: t('col.industry') },
         { id: 'field', header: t('col.field') },
         { id: 'sector', header: t('col.sector') },
+        { id: 'companySize', header: 'מס\' עובדים' },
         { id: 'jobScopes', header: t('col.job_scopes') },
         { id: 'gender', header: t('col.gender') },
         { id: 'age', header: t('col.age') },
@@ -2762,9 +2858,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [searchParams.interestRole, searchParams.interestField]);
 
     const loadJobs = useCallback(async () => {
+        if (jobs.length > 0) return; // already loaded
         setJobsLoading(true);
         setJobsError(null);
         try {
+            const CACHE_KEY = 'candidatesListJobsFilter';
+            try {
+                const cached = sessionStorage.getItem(CACHE_KEY);
+                if (cached) {
+                    const parsed = JSON.parse(cached);
+                    if (Array.isArray(parsed) && parsed.length > 0) {
+                        setJobs(parsed);
+                        return;
+                    }
+                }
+            } catch { /* ignore */ }
+
             const base = (apiBase || '').replace(/\/$/, '');
             const url = base ? `${base}/api/jobs` : '/api/jobs';
             const res = await fetch(url, { cache: 'no-store' });
@@ -2777,22 +2886,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                   : Array.isArray(data?.data)
                     ? data.data
                     : [];
-            setJobs(jobList.map((job: any) => ({
+            const mapped = jobList.map((job: any) => ({
                 id: job.id,
                 title: job.title || job.name || 'ללא שם',
                 client: job.client != null ? String(job.client) : '',
                 status: job.status != null ? String(job.status) : undefined,
-            })));
+            }));
+            setJobs(mapped);
+            try { sessionStorage.setItem(CACHE_KEY, JSON.stringify(mapped)); } catch { /* quota */ }
         } catch (err: any) {
             setJobsError(err.message);
         } finally {
             setJobsLoading(false);
         }
-    }, [apiBase]);
+    }, [apiBase, jobs.length]);
 
-    useEffect(() => {
-        loadJobs();
-    }, [loadJobs]);
+    // Removed eager useEffect — jobs are loaded lazily when SmartSearchPanel opens (see isSmartSearchOpen toggle)
 
     const handleSliderChange = (name: string, value: number) => {
         setSearchParams(prev => ({ ...prev, [name]: value }));
@@ -2931,18 +3040,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             filtered = filtered.filter(candidate => favorites.has(candidate.id));
         }
 
-        if (companyFilters.industry) {
-            filtered = filtered.filter(c => c.industry === companyFilters.industry);
-        }
-        if (companyFilters.field) {
-            filtered = filtered.filter(c => c.field === companyFilters.field);
-        }
-        if (companyFilters.sizes && companyFilters.sizes.length > 0) {
-             filtered = filtered.filter(c => c.companySize && companyFilters.sizes.includes(c.companySize));
-        }
-        if (companyFilters.sectors && companyFilters.sectors.length > 0) {
-             filtered = filtered.filter(c => c.sector && companyFilters.sectors.includes(c.sector));
-        }
+        // Company background filtering is handled server-side via companyFilters in the adv payload
 
         // Free-text search is applied on the server via ?search= (debounced) when listing from API.
         let sortableItems = filtered;
@@ -2958,7 +3056,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
 
         return sortableItems;
-    }, [candidates, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, companyFilters]);
+    }, [candidates, sortConfig, showNeedsAttention, showFavoritesOnly, favorites]);
 
     // Server already returns paginated candidates for the selected page.
     const paginatedCandidates = useMemo(() => {
@@ -3270,6 +3368,41 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     .filter(Boolean)
                     .join(', ');
             }
+            case 'industry': {
+                const primaryIndustry = candidate.industry || '';
+                const allExps = candidate.companyExperiences || [];
+                // Collect extra industries from non-primary experiences
+                const extraIndustries = allExps
+                    .slice(1)
+                    .map((e) => e.industry)
+                    .filter((ind): ind is string => Boolean(ind) && ind !== primaryIndustry);
+                const uniqueExtra = [...new Set(extraIndustries)];
+                if (!primaryIndustry) return '';
+                return (
+                    <div className="flex items-center gap-1">
+                        <span className="truncate">{primaryIndustry}</span>
+                        {uniqueExtra.length > 0 && (
+                            <span className="relative group/pill flex-shrink-0">
+                                <span className="text-[10px] font-bold bg-bg-subtle text-text-muted border border-border-subtle rounded-full px-1.5 py-0.5 cursor-default select-none">
+                                    +{uniqueExtra.length}
+                                </span>
+                                <div className="absolute bottom-full mb-1.5 end-0 w-max max-w-[200px] bg-gray-800 text-white text-xs rounded-lg py-1.5 px-2.5 shadow-xl z-50 opacity-0 group-hover/pill:opacity-100 transition-opacity duration-150 pointer-events-none text-right">
+                                    {uniqueExtra.map((ind) => (
+                                        <div key={ind} className="py-0.5">• {ind}</div>
+                                    ))}
+                                </div>
+                            </span>
+                        )}
+                    </div>
+                );
+            }
+            case 'companySize': {
+                // Show companySize from the primary (most-recent/current) company experience
+                const primaryExp = (candidate.companyExperiences || [])[0];
+                const size = primaryExp?.companySize || candidate.companySize || '';
+                if (!size) return <span className="text-text-subtle">—</span>;
+                return <span className="text-sm">{size}</span>;
+            }
             case 'createDate':
                 return formatIntakeDateCell(candidate.createDate);
             case 'lastActivity':
@@ -3356,7 +3489,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         </div>
                         {/* SMART SEARCH TOGGLE BUTTON */}
                         <button 
-                            onClick={() => setIsSmartSearchOpen(!isSmartSearchOpen)}
+                            onClick={() => {
+                                const opening = !isSmartSearchOpen;
+                                setIsSmartSearchOpen(opening);
+                                if (opening) loadJobs();
+                            }}
                             className={`flex-shrink-0 p-3 rounded-xl border border-border-default transition-all shadow-sm flex items-center justify-center ${isSmartSearchOpen ? 'bg-purple-100 text-purple-700 border-purple-300' : 'bg-bg-card text-text-muted hover:bg-bg-subtle hover:text-purple-600'}`}
                             title="חיפוש חכם"
                         >
@@ -3447,9 +3584,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
                     <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1 sm:pb-0 w-full sm:w-auto sm:ms-auto justify-between sm:justify-end lg:justify-start">
                         <div className="flex gap-2">
-                            <button onClick={toggleSelectionMode} className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
-                                 <CheckCircleIcon className="w-5 h-5" />
-                            </button>
                              <button onClick={() => setShowNeedsAttention(!showNeedsAttention)} className={`p-3 rounded-xl border-2 transition-all flex-shrink-0 ${showNeedsAttention ? 'bg-yellow-100 text-yellow-800 border-yellow-300' : 'bg-bg-card text-text-default border-border-default hover:border-yellow-300'}`} title={t('candidates.needs_attention_tooltip')}>
                                 <ExclamationTriangleIcon className="w-5 h-5" />
                             </button>
@@ -3735,6 +3869,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 pageSizeOptions={pageSizeOptions}
                                 onPageChange={goToPage}
                                 onPageSizeChange={handlePageSizeSelect}
+                                prefix={
+                                    <button onClick={toggleSelectionMode} className={`p-1.5 rounded-lg border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
+                                        <CheckCircleIcon className="w-4 h-4" />
+                                    </button>
+                                }
                             />
                         </div>
                         <div className="overflow-x-auto">
@@ -3827,6 +3966,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 pageSizeOptions={pageSizeOptions}
                                 onPageChange={goToPage}
                                 onPageSizeChange={handlePageSizeSelect}
+                                prefix={
+                                    <button onClick={toggleSelectionMode} className={`p-1.5 rounded-lg border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
+                                        <CheckCircleIcon className="w-4 h-4" />
+                                    </button>
+                                }
                             />
                         </div>
                     </>

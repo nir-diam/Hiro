@@ -1,6 +1,7 @@
 const { Op, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const redis = require('./redisService');
+const { isRedisAvailable } = require('../config/redis');
 const { invalidateCandidateOpportunities, invalidateCandidateInAllJobMatches } = require('./matchingCacheService');
 const Candidate = require('../models/Candidate');
 const RecruitmentSource = require('../models/RecruitmentSource');
@@ -324,6 +325,48 @@ const parseEndYearForSort = (endDate) => {
   return m ? parseInt(m[1], 10) : 0;
 };
 
+/**
+ * Build the denormalized companyExperiences array from workExperience / experience.
+ * Each entry: { company, industry, sector, companySize, isCurrent, startDate, endDate }
+ * Ordered: current jobs first, then by most-recent endDate, then by longest tenure.
+ */
+const buildCompanyExperiences = (workExperience, experience) => {
+  const list = Array.isArray(workExperience) && workExperience.length
+    ? workExperience
+    : Array.isArray(experience) && experience.length
+      ? experience
+      : [];
+
+  return list
+    .filter((e) => e && String(e.company || '').trim())
+    .map((e) => {
+      const endDate = e.endDate != null ? String(e.endDate).trim() : null;
+      const startDate = e.startDate != null ? String(e.startDate).trim() : null;
+      const isCurrent = !endDate || /present|כיום/i.test(endDate) || e.isCurrent === true;
+      return {
+        company:     String(e.company || '').trim(),
+        industry:    String(e.companyIndustry || e.industry || e.companyField || '').trim(),
+        sector:      String(e.sector || e.companyType || e.orgType || e.type || '').trim(),
+        companySize: String(e.companySize || e.size || '').trim(),
+        isCurrent,
+        startDate:   startDate || null,
+        endDate:     isCurrent ? null : (endDate || null),
+      };
+    })
+    .sort((a, b) => {
+      // 1. current first
+      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+      // 2. latest endDate
+      const ea = a.endDate ? parseEndYearForSort(a.endDate) : 9999;
+      const eb = b.endDate ? parseEndYearForSort(b.endDate) : 9999;
+      if (ea !== eb) return eb - ea;
+      // 3. longest tenure
+      const la = a.startDate ? (parseEndYearForSort(a.endDate || String(new Date().getFullYear())) - parseEndYearForSort(a.startDate)) : 0;
+      const lb = b.startDate ? (parseEndYearForSort(b.endDate || String(new Date().getFullYear())) - parseEndYearForSort(b.startDate)) : 0;
+      return lb - la;
+    });
+};
+
 /** Prefer workExperience; else legacy experience JSON. Pick current job or latest by end year. */
 const pickBestExperienceRow = (payload) => {
   const wx = payload.workExperience;
@@ -419,6 +462,62 @@ const enrichGridCompanyFields = (payload) => {
   if (!gridStr(payload.companySize) && bestExp) {
     const v = gridStr(bestExp.size) || gridStr(bestExp.companySize);
     if (v) payload.companySize = v;
+  }
+};
+
+/**
+ * After mapCandidateWithTags, any row that still lacks `sector` or `companySize`
+ * is enriched by looking up companies from companyExperiences in the organizations table.
+ * organizations.classification → sector, organizations.employeeCount → companySize.
+ * Uses a single batched query to avoid N+1.
+ */
+const enrichMappedRowsWithOrgData = async (mappedRows) => {
+  if (!mappedRows || !mappedRows.length) return;
+
+  const companyNames = new Set();
+  for (const row of mappedRows) {
+    if (gridStr(row.sector) && gridStr(row.companySize)) continue;
+    const exps = row.companyExperiences;
+    if (!Array.isArray(exps)) continue;
+    for (const exp of exps) {
+      const name = String(exp.company || '').trim();
+      if (name) companyNames.add(name);
+    }
+  }
+  if (!companyNames.size) return;
+
+  const orgs = await Organization.findAll({
+    where: { name: { [Op.in]: [...companyNames] } },
+    attributes: ['name', 'aliases', 'employeeCount', 'classification'],
+  });
+
+  const orgMap = new Map();
+  for (const org of orgs) {
+    const d = org.toJSON ? org.toJSON() : org;
+    const key = String(d.name || '').trim().toLowerCase();
+    if (key) orgMap.set(key, d);
+    if (Array.isArray(d.aliases)) {
+      for (const alias of d.aliases) {
+        const akey = String(alias || '').trim().toLowerCase();
+        if (akey && !orgMap.has(akey)) orgMap.set(akey, d);
+      }
+    }
+  }
+  if (!orgMap.size) return;
+
+  for (const row of mappedRows) {
+    const needsSector = !gridStr(row.sector);
+    const needsSize = !gridStr(row.companySize);
+    if (!needsSector && !needsSize) continue;
+    const exps = row.companyExperiences;
+    if (!Array.isArray(exps) || !exps.length) continue;
+    for (const exp of exps) {
+      const orgData = orgMap.get(String(exp.company || '').trim().toLowerCase());
+      if (!orgData) continue;
+      if (needsSector && gridStr(orgData.classification)) row.sector = gridStr(orgData.classification);
+      if (needsSize && gridStr(orgData.employeeCount)) row.companySize = gridStr(orgData.employeeCount);
+      break;
+    }
   }
 };
 
@@ -527,6 +626,27 @@ const list = async () =>
   (await Candidate.findAll({ include: includeCandidateTags })).map((r) => mapCandidateWithTags(r));
 
 /**
+ * Lightweight candidate fetch for vector-search pre-filtering.
+ * Loads only scalar fields + embedding — NO tags JOIN.
+ * ~10x faster than list() for 600+ candidates.
+ */
+const VECTOR_SEARCH_ATTRIBUTES = [
+  'id', 'embedding', 'searchText',
+  'status', 'address', 'salaryMin', 'salaryMax',
+  'gender', 'mobility', 'drivingLicense', 'drivingLicenses',
+  'jobScope', 'jobScopes', 'preferredWorkingHours', 'employmentType', 'employmentTypes',
+  'birthYear', 'birthMonth', 'birthDay', 'age',
+  'title', 'professionalSummary', 'industry', 'field', 'internalTags',
+  'workExperience', 'experience', 'languages', 'skills', 'preferredWorkModels',
+  'matchAnalysis', 'source', 'isArchived', 'isDeleted',
+];
+
+const listSlimForVectorSearch = async () => {
+  const rows = await Candidate.findAll({ attributes: VECTOR_SEARCH_ATTRIBUTES });
+  return rows.map((r) => r.get({ plain: true }));
+};
+
+/**
  * GET /api/candidates grid: explicit allowlist so JSONB/array fields (languages, jobScopes) are never
  * dropped by Sequelize attribute resolution, and heavy columns stay out of the list query.
  */
@@ -580,6 +700,7 @@ const LIST_GRID_ATTRIBUTES = [
   'field',
   'industry',
   'industryAnalysis',
+  'companyExperiences',
   'isArchived',
   'isDeleted',
   'createdAt',
@@ -810,6 +931,149 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       }
     }
 
+    // Company background filter — searches ALL experiences in companyExperiences JSONB array
+    const cf = advanced.companyFilters;
+    if (cf && typeof cf === 'object') {
+      // Support both old single-value fields (industry/field) and new arrays (industries/fields)
+      const cfIndustries = Array.isArray(cf.industries) ? cf.industries.map((s) => String(s).trim()).filter(Boolean)
+        : (cf.industry ? [String(cf.industry).trim()] : []);
+      const cfFields = Array.isArray(cf.fields) ? cf.fields.map((s) => String(s).trim()).filter(Boolean)
+        : (cf.field ? [String(cf.field).trim()] : []);
+      const cfRoles    = Array.isArray(cf.roles)   ? cf.roles.map((s)   => String(s).trim()).filter(Boolean)   : [];
+      const cfSectors  = Array.isArray(cf.sectors)  ? cf.sectors.map((s)  => String(s).trim()).filter(Boolean)  : [];
+      const cfSizes    = Array.isArray(cf.sizes)     ? cf.sizes.map((s)    => String(s).trim()).filter(Boolean)  : [];
+
+      if (cfIndustries.length || cfFields.length || cfRoles.length || cfSectors.length || cfSizes.length) {
+        // Each dimension builds its own clause (OR within dimension), then all dimensions are AND'd.
+        // This ensures e.g. "tech industry AND 200+ employees" both must hold.
+        const dimensionClauses = [];
+
+        // ── INDUSTRY dimension ────────────────────────────────────────────────
+        // The user picks a taxonomy category name ("טכנולוגיה וחדשנות") but candidates store
+        // the sub-values ("הייטק", "פיתוח תוכנה") in their columns. We join picklist_category_values
+        // to match ALL values that belong to that category, plus direct name match + JSONB.
+        // We ALSO match via the organizations table: if the candidate worked at a company
+        // whose org record has that mainField, count it as a match.
+        if (cfIndustries.length) {
+          const indOrs = cfIndustries.map((indName) => {
+            const n = pushBind(binds, indName.trim());
+            const n2 = pushBind(binds, indName.trim()); // separate bind for org join
+            return `(
+              candidates.industry ILIKE '%' || $${n} || '%'
+              OR candidates.field   ILIKE '%' || $${n} || '%'
+              OR EXISTS (
+                SELECT 1 FROM picklist_category_values pcv
+                INNER JOIN picklist_categories pc ON pc.id = pcv."categoryId"
+                WHERE LOWER(TRIM(pc.name)) = LOWER(TRIM($${n}))
+                  AND pc."parentId" = '16c81e14-316d-403d-951a-263d02f57f4b'
+                  AND (
+                    candidates.industry ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
+                    OR candidates.field ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
+                    OR EXISTS (
+                      SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                      WHERE ce->>'industry' ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
+                    )
+                  )
+              )
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
+                WHERE LOWER(TRIM(o."mainField")) = LOWER(TRIM($${n2}))
+                   OR o."secondaryField" ILIKE '%' || $${n2} || '%'
+              )
+            )`;
+          });
+          dimensionClauses.push(`(${indOrs.join(' OR ')})`);
+        }
+
+        // ── FIELD (sub-domain) dimension ──────────────────────────────────────
+        if (cfFields.length) {
+          const fieldOrs = cfFields.map((f) => {
+            const nf = pushBind(binds, `%${f}%`);
+            const nf2 = pushBind(binds, `%${f}%`);
+            const nf3 = pushBind(binds, `%${f}%`);
+            return `(
+              candidates.field ILIKE $${nf}
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                WHERE ce->>'industry' ILIKE $${nf2}
+              )
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
+                WHERE o."subField" ILIKE $${nf3}
+                   OR o."secondaryField" ILIKE $${nf3}
+              )
+            )`;
+          });
+          dimensionClauses.push(`(${fieldOrs.join(' OR ')})`);
+        }
+
+        // ── ROLE dimension ────────────────────────────────────────────────────
+        if (cfRoles.length) {
+          const roleOrs = cfRoles.map((role) => {
+            const n = pushBind(binds, `%${role}%`);
+            return `(tg.tag_key ILIKE $${n} OR tg.display_name_he ILIKE $${n} OR tg.display_name_en ILIKE $${n})`;
+          });
+          dimensionClauses.push(`EXISTS (
+            SELECT 1 FROM system_tags ct
+            INNER JOIN tags tg ON tg.id = ct.tag_id
+            WHERE ct.entity_id = candidates.id AND ct.is_active = true AND ct.type = 'candidate'
+              AND ct.raw_type IN ('role', 'seniority', 'domain', 'industry')
+              AND (${roleOrs.join(' OR ')})
+          )`);
+        }
+
+        // ── SECTOR dimension ──────────────────────────────────────────────────
+        if (cfSectors.length) {
+          const sectorOrs = cfSectors.map((s) => {
+            const ns = pushBind(binds, s);
+            const ns2 = pushBind(binds, s);
+            const ns3 = pushBind(binds, s);
+            return `(
+              candidates.sector ILIKE $${ns}
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                WHERE ce->>'sector' ILIKE $${ns2}
+              )
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
+                WHERE o.classification ILIKE $${ns3}
+              )
+            )`;
+          });
+          dimensionClauses.push(`(${sectorOrs.join(' OR ')})`);
+        }
+
+        // ── COMPANY SIZE dimension ────────────────────────────────────────────
+        if (cfSizes.length) {
+          const sizeOrs = cfSizes.map((sz) => {
+            const nsz = pushBind(binds, sz);
+            const nsz2 = pushBind(binds, sz);
+            const nsz3 = pushBind(binds, sz);
+            return `(
+              candidates."companySize" = $${nsz}
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                WHERE ce->>'companySize' = $${nsz2}
+              )
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
+                WHERE o."employeeCount" = $${nsz3}
+              )
+            )`;
+          });
+          dimensionClauses.push(`(${sizeOrs.join(' OR ')})`);
+        }
+
+        if (dimensionClauses.length) {
+          panelFragments.push(dimensionClauses.join(' AND '));
+        }
+      }
+    }
+
     const roleRaw = normalizeInterestSearchText(advanced.interestRole || '');
     const interestFieldRaw = normalizeInterestSearchText(advanced.interestField || '');
 
@@ -964,42 +1228,55 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
   const jid = jobId && String(jobId).trim();
   if (!jid || !Array.isArray(modelRows) || modelRows.length === 0) return scores;
 
-  let jobRow;
-  let jobService;
-  try {
-    jobService = require('./jobService');
-    jobRow = await jobService.getById(jid);
-  } catch (err) {
-    console.warn('[candidateService.scoreCandidatesAgainstJob] bad jobId', err.message || err);
-    return scores;
-  }
-  if (!jobRow) return scores;
+  // ── per-request in-memory cache keyed by jid so parallel callers for the same
+  //    job don't redundantly hit DB / Redis for job data, config, and embedding ──
+  if (!scoreCandidatesAgainstJob._jobCache) scoreCandidatesAgainstJob._jobCache = new Map();
+  const _jc = scoreCandidatesAgainstJob._jobCache;
 
-  if (!Array.isArray(jobRow.skills) || !jobRow.skills.length) {
+  let cached = _jc.get(jid);
+  if (!cached) {
+    let jobRow, jobPlain, config, jobEmb;
+    let jobService;
     try {
-      await jobService.hydrateJobSkills(jobRow);
-    } catch {
-      /* same as simulate — score with whatever skills exist */
+      jobService = require('./jobService');
+      jobRow = await jobService.getById(jid);
+    } catch (err) {
+      console.warn('[candidateService.scoreCandidatesAgainstJob] bad jobId', err.message || err);
+      return scores;
     }
-  }
-  const jobPlain = jobService.toPlainJobForMatchScore(jobRow);
+    if (!jobRow) return scores;
 
-  let config;
-  try {
-    config = await resolveEngineConfigForJob(jobPlain, {
-      tenantClientId: opts.tenantClientId || null,
-    });
-  } catch (err) {
-    console.warn('[candidateService.scoreCandidatesAgainstJob] resolveEngineConfig failed', err.message || err);
-    return scores;
-  }
+    if (!Array.isArray(jobRow.skills) || !jobRow.skills.length) {
+      try {
+        await jobService.hydrateJobSkills(jobRow);
+      } catch {
+        /* score with whatever skills exist */
+      }
+    }
+    jobPlain = jobService.toPlainJobForMatchScore(jobRow);
 
-  let jobEmb = [];
-  try {
-    jobEmb = await getJobEmbedding(jobPlain);
-  } catch (err) {
-    console.warn('[candidateService.scoreCandidatesAgainstJob] job embedding failed', err.message || err);
+    try {
+      config = await resolveEngineConfigForJob(jobPlain, {
+        tenantClientId: opts.tenantClientId || null,
+      });
+    } catch (err) {
+      console.warn('[candidateService.scoreCandidatesAgainstJob] resolveEngineConfig failed', err.message || err);
+      return scores;
+    }
+
+    try {
+      jobEmb = await getJobEmbedding(jobPlain);
+    } catch (err) {
+      console.warn('[candidateService.scoreCandidatesAgainstJob] job embedding failed', err.message || err);
+      jobEmb = [];
+    }
+
+    cached = { jobPlain, config, jobEmb };
+    _jc.set(jid, cached);
+    // auto-clear after current event-loop tick finishes to prevent stale cross-request leakage
+    setImmediate(() => _jc.delete(jid));
   }
+  const { jobPlain, config, jobEmb } = cached;
 
   const ids = modelRows.map((r) => r.id).filter(Boolean);
   let links = [];
@@ -1023,9 +1300,22 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
 
   const { embedCandidateAndSave } = require('./vectorSearchService');
 
+  const LIST_SCORE_CACHE_TTL = 120; // 2 min — list scores are lightweight; invalidated on profile save
+  const scoreCacheKey = (cid) => `list-score:${jid}:${cid}`;
+
   await runWithConcurrency(modelRows, LIST_SCORE_CONCURRENCY, async (inst) => {
     const cid = String(inst.id);
     let pkg = { matchScore: 0, scoreBreakdown: null, parameterMatches: {} };
+
+    // Try Redis cache first
+    if (isRedisAvailable()) {
+      const cached = await redis.get(scoreCacheKey(cid));
+      if (cached && typeof cached.matchScore === 'number') {
+        scores.set(cid, cached);
+        return;
+      }
+    }
+
     try {
       const full = toPlainCandidateForMatchScore(inst);
       if (!full.embedding?.length) {
@@ -1044,6 +1334,9 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
       console.warn('[candidateService.scoreCandidatesAgainstJob] score failed', cid, err.message || err);
     }
     scores.set(cid, pkg);
+    if (isRedisAvailable() && typeof pkg.matchScore === 'number') {
+      redis.set(scoreCacheKey(cid), pkg, { ttlSeconds: LIST_SCORE_CACHE_TTL }).catch(() => {});
+    }
   });
 
   return scores;
@@ -1154,15 +1447,25 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
   if (!ids.length) return mappedRows;
 
   let heavyRows = [];
-  try {
-    heavyRows = await Candidate.findAll({
-      where: { id: { [Op.in]: ids } },
-      include: includeCandidateTagsForList,
-      attributes: [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES],
-    });
-  } catch (err) {
-    console.warn('[candidateService.attachLastSubmissionEngineMatchScores] reload failed', err.message || err);
-    return mappedRows;
+
+  // Use pre-loaded Sequelize instances when the caller already fetched embedding+skills+tags,
+  // avoiding a costly second Candidate.findAll with a large tags JOIN.
+  if (Array.isArray(opts.preloadedInstances) && opts.preloadedInstances.length) {
+    const idSet = new Set(ids.map(String));
+    heavyRows = opts.preloadedInstances.filter((r) => idSet.has(String(r.id)));
+  }
+
+  if (!heavyRows.length) {
+    try {
+      heavyRows = await Candidate.findAll({
+        where: { id: { [Op.in]: ids } },
+        include: includeCandidateTagsForList,
+        attributes: [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES],
+      });
+    } catch (err) {
+      console.warn('[candidateService.attachLastSubmissionEngineMatchScores] reload failed', err.message || err);
+      return mappedRows;
+    }
   }
 
   const heavyById = new Map(heavyRows.map((r) => [String(r.id), r]));
@@ -1179,7 +1482,11 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
 
   const scoresByCandidate = new Map();
 
-  for (const [jobKey, candIdStrs] of byJob) {
+  // Run all per-job scoring groups in parallel (bounded concurrency) instead of sequentially.
+  // Each group is already internally parallel via LIST_SCORE_CONCURRENCY inside scoreCandidatesAgainstJob.
+  const JOB_GROUP_CONCURRENCY = 5;
+  const jobEntries = Array.from(byJob.entries());
+  await runWithConcurrency(jobEntries, JOB_GROUP_CONCURRENCY, async ([jobKey, candIdStrs]) => {
     if (reuseJobId && String(jobKey) === reuseJobId && reuseScoreMap?.size) {
       for (const cid of candIdStrs) {
         const pkg = reuseScoreMap.get(cid);
@@ -1188,11 +1495,11 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
           scoresByCandidate.set(cid, { matchScore: pkg });
         }
       }
-      continue;
+      return;
     }
 
     const instSubset = candIdStrs.map((cid) => heavyById.get(cid)).filter(Boolean);
-    if (!instSubset.length) continue;
+    if (!instSubset.length) return;
 
     try {
       const sm = await scoreCandidatesAgainstJob(instSubset, jobKey, {
@@ -1208,7 +1515,7 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
         err.message || err,
       );
     }
-  }
+  });
 
   for (const m of mappedRows) {
     const lj = m.lastJobSubmission;
@@ -1317,6 +1624,7 @@ const listPaginated = async ({
     const orderIndex = new Map(ids.map((id, i) => [String(id), i]));
     rows.sort((a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0));
     const mappedRows = rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true }));
+    await enrichMappedRowsWithOrgData(mappedRows);
     await attachLatestJobSubmissions(mappedRows);
     if (includeEngineScores) {
       await attachLastSubmissionEngineMatchScores(mappedRows, { tenantClientId });
@@ -1356,7 +1664,9 @@ const listPaginated = async ({
     };
   }
 
-  const listAttrs = jid ? [...LIST_GRID_ATTRIBUTES, 'embedding', 'skills'] : LIST_GRID_ATTRIBUTES;
+  const listAttrs = (jid || matchLastJobScores)
+    ? [...LIST_GRID_ATTRIBUTES, 'embedding', 'skills']
+    : LIST_GRID_ATTRIBUTES;
 
   const rows = await Candidate.findAll({
     where: { id: ids },
@@ -1373,6 +1683,7 @@ const listPaginated = async ({
   }
 
   const mappedRows = rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true }));
+  await enrichMappedRowsWithOrgData(mappedRows);
 
   await attachLatestJobSubmissions(mappedRows);
   if (includeEngineScores) {
@@ -1382,7 +1693,9 @@ const listPaginated = async ({
       tenantClientId,
     });
   } else if (matchLastJobScores) {
-    await attachLastSubmissionEngineMatchScores(mappedRows, { tenantClientId });
+    // Pass pre-loaded instances (already have embedding + skills + tags from initial query)
+    // so attachLastSubmissionEngineMatchScores can skip its own heavy Candidate.findAll reload.
+    await attachLastSubmissionEngineMatchScores(mappedRows, { tenantClientId, preloadedInstances: rows });
   }
 
   for (const m of mappedRows) {
@@ -1552,6 +1865,11 @@ const create = async (payload) => {
   }
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;
+  // Always derive companyExperiences from workExperience for cross-experience search
+  cleanPayload.companyExperiences = buildCompanyExperiences(
+    cleanPayload.workExperience,
+    cleanPayload.experience,
+  );
   await prepareCityFieldsInPayload(cleanPayload);
   normalizePreferredWorkingHoursInPayload(cleanPayload);
   await applyCandidateCityFromCatalog(cleanPayload);
@@ -1683,6 +2001,15 @@ const update = async (id, payload) => {
 
   normalizePreferredWorkingHoursInPayload(cleanPayload);
 
+  // Re-derive companyExperiences whenever workExperience changes (or always, cheaply)
+  const wxForUpdate = 'workExperience' in cleanPayload
+    ? cleanPayload.workExperience
+    : (candidate.workExperience || candidate.get?.('workExperience'));
+  const exForUpdate = 'experience' in cleanPayload
+    ? cleanPayload.experience
+    : (candidate.experience || candidate.get?.('experience'));
+  cleanPayload.companyExperiences = buildCompanyExperiences(wxForUpdate, exForUpdate);
+
   await prepareCityFieldsInPayload(cleanPayload);
   await applyCandidateCityFromCatalog(cleanPayload);
 
@@ -1767,6 +2094,7 @@ const searchFree = async ({ query, limit = 50 }) => {
 
 module.exports = {
   list,
+  listSlimForVectorSearch,
   getById,
   getByUserId,
   listByUserId,

@@ -32,6 +32,10 @@ const {
   loadTaxonomyIndex,
   resolveJobTaxonomy,
 } = require('./jobTaxonomyResolver');
+const redisService = require('./redisService');
+const { isRedisAvailable } = require('../config/redis');
+
+const JOB_EMB_CACHE_TTL = 86_400; // 24 h — embeddings are stable until the job text changes
 
 // ─── Inline job-query builder (mirrors jobSonarService.buildJobSonarQuery)
 // Kept local to avoid circular imports between matchingScoreService ↔ jobSonarService.
@@ -83,12 +87,45 @@ function _jobHash(jp) {
 async function getJobEmbedding(jobPlain) {
   const id = String(jobPlain.id || '');
   const h  = _jobHash(jobPlain);
+
+  // 0. Use stored DB embedding if available and content hasn't changed
+  if (Array.isArray(jobPlain.embedding) && jobPlain.embedding.length > 0) {
+    _jobEmbCache.set(id, { hash: h, emb: jobPlain.embedding });
+    return jobPlain.embedding;
+  }
+  const { normalizeEmbedding } = require('./vectorSearchService');
+  if (jobPlain.embedding && !Array.isArray(jobPlain.embedding)) {
+    const normalized = normalizeEmbedding(jobPlain.embedding);
+    if (normalized.length > 0) {
+      _jobEmbCache.set(id, { hash: h, emb: normalized });
+      return normalized;
+    }
+  }
+
+  // 1. In-process memory cache (fastest)
   const cached = _jobEmbCache.get(id);
   if (cached && cached.hash === h) return cached.emb;
+
+  // 2. Redis cache (survives server restarts)
+  const rKey = `job:emb:${id}:${h}`;
+  if (id && isRedisAvailable()) {
+    const rCached = await redisService.get(rKey);
+    if (Array.isArray(rCached) && rCached.length) {
+      _jobEmbCache.set(id, { hash: h, emb: rCached });
+      return rCached;
+    }
+  }
+
+  // 3. Compute via OpenAI
   const text = _buildJobText(jobPlain);
   if (!text.trim()) return [];
   const emb = await embedText(text.slice(0, 8000));
-  if (emb && emb.length) _jobEmbCache.set(id, { hash: h, emb });
+  if (emb && emb.length) {
+    _jobEmbCache.set(id, { hash: h, emb });
+    if (id && isRedisAvailable()) {
+      redisService.set(rKey, emb, { ttlSeconds: JOB_EMB_CACHE_TTL }).catch(() => {});
+    }
+  }
   return emb || [];
 }
 

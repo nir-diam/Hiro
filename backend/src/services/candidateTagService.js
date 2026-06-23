@@ -14,6 +14,79 @@ const Candidate = require('../models/Candidate');
 const User = require('../models/User');
 const tagScoringEngine = require('./tagScoringEngine');
 
+const CANDIDATE_TYPE_ALIASES_LOOKUP = {
+  education: 'degree',
+  certificate: 'certification',
+  certificates: 'certification',
+  certification: 'certification',
+  certifications: 'certification',
+  methodology: 'skill',
+  methodologies: 'skill',
+  domain: 'industry',
+  soft: 'soft_skill',
+};
+
+const CANDIDATE_ALLOWED_TAG_TYPES = [
+  'role', 'skill', 'industry', 'tool', 'certification', 'language', 'seniority', 'degree', 'soft_skill',
+];
+
+const normalizeCandidateTagType = (rawType) => {
+  if (rawType == null || rawType === '') return null;
+  const raw = String(rawType).toLowerCase().trim();
+  if (CANDIDATE_TYPE_ALIASES_LOOKUP[raw]) return CANDIDATE_TYPE_ALIASES_LOOKUP[raw];
+  return CANDIDATE_ALLOWED_TAG_TYPES.includes(raw) ? raw : null;
+};
+
+const looksLikeProfessionalCertificate = (payload = {}) => {
+  const text = [
+    payload.name,
+    payload.quote,
+    payload.tag_reason,
+    payload.raw_type_reason,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return /\b(תעוד(ה|ת)|לימודי\s+תעודה|הסמכה\s+מקצועית)\b/u.test(text);
+};
+
+const looksLikeAcademicDegree = (payload = {}) => {
+  const text = [payload.name, payload.quote, payload.tag_reason].filter(Boolean).join(' ');
+  return /\b(תואר\s+(ראשון|שני|שלישי)|B\.?\s?A\.?|M\.?\s?A\.?|PhD|MBA)\b/ui.test(text);
+};
+
+/** Resolve catalog type from LLM tag payload (fixes degree/context vs certification mismatches). */
+const resolveIncomingTagType = (payload = {}, fallbackType = 'role') => {
+  const normalized = normalizeCandidateTagType(payload.raw_type ?? payload.type ?? fallbackType);
+  if (normalized === 'certification') return 'certification';
+  if (
+    looksLikeProfessionalCertificate(payload) &&
+    !looksLikeAcademicDegree(payload) &&
+    (normalized === 'degree' || normalized === 'role' || !normalized)
+  ) {
+    return 'certification';
+  }
+  return normalized || 'skill';
+};
+
+const TAG_TYPE_MERGE_PRIORITY = {
+  certification: 3,
+  degree: 2,
+  role: 1,
+  skill: 1,
+};
+
+const pickPreferredResolvedTag = (current, incoming) => {
+  const currentType = resolveIncomingTagType(current.payload, current.payload?.raw_type || 'role');
+  const incomingType = resolveIncomingTagType(incoming.payload, incoming.payload?.raw_type || 'role');
+  const currentPri = TAG_TYPE_MERGE_PRIORITY[currentType] || 0;
+  const incomingPri = TAG_TYPE_MERGE_PRIORITY[incomingType] || 0;
+  if (incomingPri > currentPri) return incoming;
+  if (currentPri > incomingPri) return current;
+  if (incomingType === 'certification') return incoming;
+  if (currentType === 'certification') return current;
+  return incoming;
+};
+
 if (!SystemTag.associations?.tag) {
   SystemTag.belongsTo(Tag, { foreignKey: 'tag_id', as: 'tag' });
 }
@@ -338,10 +411,76 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     defaults.tag_reason ||
     '';
 
+  // Compute the normalized incoming type once so we can potentially fix an existing tag.
+  const normalizedIncoming =
+    normalizeCandidateTagType(defaults.type) ||
+    resolveIncomingTagType(
+      {
+        raw_type: defaults.type,
+        name: defaults.displayNameHe || tagKey,
+        quote: defaults.contextSample,
+      },
+      'skill',
+    );
+
+  /**
+   * Self-heal catalog type when we have better evidence from the CV parser.
+   * - Always upgrade generic 'role' → specific type.
+   * - For pending tags, sync to the latest resolved type (e.g. degree → certification).
+   */
+  const maybeUpgradeType = async (catalogTag) => {
+    if (!normalizedIncoming || normalizedIncoming === 'role') return catalogTag;
+
+    const current = String(catalogTag.type || '').toLowerCase();
+    const status = String(catalogTag.status || '').toLowerCase();
+
+    if (status === 'pending' && current === 'certification' && normalizedIncoming === 'degree') {
+      return catalogTag;
+    }
+
+    const shouldUpdate =
+      current === 'role' ||
+      (status === 'pending' && current !== normalizedIncoming);
+
+    if (shouldUpdate && current !== normalizedIncoming) {
+      try {
+        await catalogTag.update({ type: normalizedIncoming });
+        catalogTag.type = normalizedIncoming;
+        console.info('[ensureTagRecord] upgraded catalog tag type', {
+          tagId: catalogTag.id,
+          from: current,
+          to: normalizedIncoming,
+          tagKey,
+        });
+      } catch (err) {
+        console.warn('[ensureTagRecord] type upgrade failed', err?.message || err);
+      }
+    }
+    return catalogTag;
+  };
+
   for (const target of searchTargets) {
     const found = await findTagByNameOrAlias(target);
     if (found) {
+      // Blacklisted tags are stored as 'deprecated' — skip silently.
+      if (String(found.status).toLowerCase() === 'deprecated') return null;
       const catalogTag = await preferActiveCatalogTag(found, searchTargets);
+      // If the best catalog match is also deprecated, skip it.
+      if (String(catalogTag.status).toLowerCase() === 'deprecated') return null;
+      if (
+        normalizedIncoming &&
+        String(catalogTag.type || '').toLowerCase() !== normalizedIncoming
+      ) {
+        console.warn('[ensureTagRecord] catalog reuse type mismatch', {
+          tagId: catalogTag.id,
+          catalogType: catalogTag.type,
+          incomingType: normalizedIncoming,
+          tagKey,
+          displayNameHe: defaults.displayNameHe,
+          matchedTarget: target,
+        });
+      }
+      await maybeUpgradeType(catalogTag);
       if (String(catalogTag.status).toLowerCase() === 'pending') {
         try {
           const tagCorrectionAgentService = require('./tagCorrectionAgentService');
@@ -361,6 +500,8 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
     if (!trimmed) continue;
     const active = await findTagByNameOrAlias(trimmed, { status: 'active' });
     if (active) {
+      if (String(active.status).toLowerCase() === 'deprecated') return null;
+      await maybeUpgradeType(active);
       return { tag: active, created: false };
     }
   }
@@ -368,21 +509,13 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
   //const fuzzy = await findFuzzyTag(defaults.displayNameHe || defaults.displayNameEn || tagKey);
   //if (fuzzy) return { tag: fuzzy, created: false };
 
-  let typeValue = typeof defaults.type === 'string' ? defaults.type.toLowerCase().trim() : 'role';
-  // LLM often sends "education"; catalog enum uses "degree".
-  if (typeValue === 'education') typeValue = 'degree';
-  const allowedTypes = [
-    'role',
-    'skill',
-    'industry',
-    'tool',
-    'certification',
-    'language',
-    'seniority',
-    'degree',
-    'soft_skill',
-  ];
-  const tagType = allowedTypes.includes(typeValue) ? typeValue : 'role';
+  let typeValue = typeof defaults.type === 'string' ? defaults.type.toLowerCase().trim() : 'skill';
+  typeValue = CANDIDATE_TYPE_ALIASES_LOOKUP[typeValue] ?? typeValue;
+  const tagType = normalizedIncoming || (CANDIDATE_ALLOWED_TAG_TYPES.includes(typeValue) ? typeValue : 'skill');
+
+  // Final safety check: if a deprecated tag exists for this tagKey, don't recreate it.
+  const deprecatedCheck = await Tag.findOne({ where: { tagKey, status: 'deprecated' } });
+  if (deprecatedCheck) return null;
 
   const tag = await Tag.create({
     tagKey,
@@ -411,9 +544,16 @@ const JOB_TAG_TYPE_MAP = {
   industry: 'industry',
   tool: 'tool',
   certification: 'certification',
+  certifications: 'certification',
+  certificate: 'certification',
+  certificates: 'certification',
   language: 'language',
   seniority: 'seniority',
   degree: 'degree',
+  education: 'degree',
+  methodology: 'skill',
+  methodologies: 'skill',
+  domain: 'industry',
   soft: 'soft_skill',
   soft_skill: 'soft_skill',
 };
@@ -706,31 +846,33 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
   // Resolve each payload to a tag (find existing or create pending). Deduplicate by tag.id.
   const resolved = await Promise.all(
     payloads.map(async (payload) => {
+      const resolvedType = resolveIncomingTagType(payload);
       const { tag, created } = await ensureTagRecord(payload.tagKey, {
         displayNameHe: payload.name,
-        type: payload.raw_type || 'role',
+        type: resolvedType,
         contextSample: payload.quote || payload.context || payload.tag_reason || '',
         clientId,
       });
-      return tag ? { tag, created, payload } : null;
+      return tag ? { tag, created, payload, resolvedType } : null;
     }),
   );
   const byTagId = new Map();
   resolved.filter(Boolean).forEach((r) => {
     if (!byTagId.has(r.tag.id)) byTagId.set(r.tag.id, r);
+    else byTagId.set(r.tag.id, pickPreferredResolvedTag(byTagId.get(r.tag.id), r));
   });
   const uniqueResolved = Array.from(byTagId.values());
 
   // Insert every tag: is_active mirrors catalog status (see systemTagIsActiveForCatalogTag).
   await Promise.all(
-    uniqueResolved.map(async ({ tag, created, payload }) => {
+    uniqueResolved.map(async ({ tag, created, payload, resolvedType }) => {
       const score = tagScoringEngine.scoreTag(payload);
       const isActive = systemTagIsActiveForCatalogTag(tag, { created });
       await SystemTag.create({
         type: SYSTEM_TAG_TYPE_CANDIDATE,
         entity_id: candidateId,
         tag_id: tag.id,
-        raw_type: payload.raw_type,
+        raw_type: resolvedType || payload.raw_type,
         context: payload.context,
         raw_type_reason: payload.raw_type_reason,
         tag_reason: payload.tag_reason,
@@ -952,6 +1094,7 @@ module.exports = {
   listJobTagsByJobIds,
   hydrateJobSkills,
   hydrateJobsSkills,
+  assignJobSkills,
   createCandidateTag: async (payload) => {
     if (!payload?.tagKey) throw new Error('tagKey required');
     const entityId = payload.entity_id || payload.candidate_id || payload.candidateId;
@@ -1067,5 +1210,7 @@ module.exports = {
   listJobIdsByTag,
   isCatalogTagStatusActive,
   syncSystemTagsActiveForCatalogTag,
+  resolveIncomingTagType,
+  normalizeCandidateTagType,
 };
 

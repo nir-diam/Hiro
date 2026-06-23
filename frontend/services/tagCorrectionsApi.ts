@@ -36,6 +36,9 @@ export type TagAiDecisionDto = {
     status: 'pending' | 'approved' | 'overridden';
     actionDate: string;
     reviewStatus: string;
+    reviewerAction?: string | null;
+    hesitationLevel?: number | null;
+    dilemmaReasoning?: string | null;
 };
 
 export async function fetchTagCorrectionAgentEnabled(): Promise<boolean> {
@@ -75,6 +78,8 @@ export async function fetchTagAiDecisions(params: {
     decision?: string;
     date?: string;
     sortOrder?: 'asc' | 'desc';
+    reviewStatus?: string;
+    reviewerAction?: string;
     autoBackfill?: boolean;
     backfillLimit?: number;
 }): Promise<{
@@ -89,7 +94,8 @@ export async function fetchTagAiDecisions(params: {
     if (params.limit) q.set('limit', String(params.limit));
     if (params.decision && params.decision !== 'all') q.set('decision', params.decision);
     if (params.date) q.set('date', params.date);
-    q.set('reviewStatus', 'pending_review');
+    q.set('reviewStatus', params.reviewStatus || 'all');
+    if (params.reviewerAction) q.set('reviewerAction', params.reviewerAction);
     if (params.autoBackfill) {
         q.set('autoBackfill', '1');
         if (params.backfillLimit) q.set('backfillLimit', String(params.backfillLimit));
@@ -117,8 +123,9 @@ export async function fetchTagAiDecisions(params: {
 
 export async function resolveTagAiDecisions(payload: {
     decisionIds: string[];
-    action: 'merge' | 'create' | 'delete';
+    action: 'merge' | 'create' | 'delete' | 'blacklist' | 'manual' | 'undo_manual' | 'undo_blacklist';
     targetTagId?: string;
+    aliasPriority?: number;
 }): Promise<{ success: boolean; resolvedIds: string[] }> {
     const res = await fetch(`${apiBase()}/api/tags/ai-decisions/resolve`, {
         method: 'POST',

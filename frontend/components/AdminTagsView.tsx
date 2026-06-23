@@ -284,6 +284,16 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
                     ...tag,
                     synonyms: normalizeIncomingSynonyms(tag.synonyms),
                 });
+                const priorityMap: Record<string, number> = {};
+                (tag.synonyms || []).forEach((syn: any) => {
+                    if (syn && syn.source === 'merge') {
+                        const phrase = syn.phrase || syn.name || syn.value;
+                        if (phrase && syn.priority != null) {
+                            priorityMap[phrase] = syn.priority;
+                        }
+                    }
+                });
+                setAliasPriorityMap(priorityMap);
             } else {
                 // Reset for new
                 setFormData({
@@ -303,6 +313,7 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
                     usageCount: 0,
                     lastUsedAt: new Date().toISOString(),
                 });
+                setAliasPriorityMap({});
             }
             setActiveTab('general');
             setEditingSynId(null);
@@ -1063,6 +1074,10 @@ const AdminTagsView: React.FC = () => {
     const [jobUsageCounts, setJobUsageCounts] = useState<Record<string, number>>({});
     const [viewMode, setViewMode] = useState<'table' | 'grid'>('table');
     const [filterVertical, setFilterVertical] = useState(true);
+    const [showCollisionsOnly, setShowCollisionsOnly] = useState(false);
+    const [collisionTagsList, setCollisionTagsList] = useState<Tag[]>([]);
+    const [collisionSharedPhrases, setCollisionSharedPhrases] = useState<Record<string, string[]>>({});
+    const [collisionsLoading, setCollisionsLoading] = useState(false);
     const navigate = useNavigate();
     const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
     const [pageSize, setPageSize] = useState(100);
@@ -1434,6 +1449,64 @@ const AdminTagsView: React.FC = () => {
         loadTypeOptions();
     }, [loadTypeOptions]);
 
+    const computeCollisions = useCallback((allTags: Tag[]): { collisionTags: Tag[]; sharedPhrases: Record<string, string[]> } => {
+        const phraseToTagIds = new Map<string, string[]>();
+        for (const tag of allTags) {
+            const phrases = new Set<string>();
+            (tag.aliases || []).forEach(a => { if (a?.trim()) phrases.add(a.trim().toLowerCase()); });
+            (tag.synonyms || []).forEach(s => { if (s?.phrase?.trim()) phrases.add(s.phrase.trim().toLowerCase()); });
+            for (const phrase of phrases) {
+                const existing = phraseToTagIds.get(phrase) || [];
+                existing.push(tag.id);
+                phraseToTagIds.set(phrase, existing);
+            }
+        }
+        const sharedPhraseMap = new Map<string, string[]>();
+        phraseToTagIds.forEach((tagIds, phrase) => {
+            if (tagIds.length >= 2) sharedPhraseMap.set(phrase, tagIds);
+        });
+        const collisionIdSet = new Set<string>();
+        sharedPhraseMap.forEach(tagIds => tagIds.forEach(id => collisionIdSet.add(id)));
+        const collisionTags = allTags.filter(t => collisionIdSet.has(t.id));
+        const sharedPhrases: Record<string, string[]> = {};
+        collisionTags.forEach(tag => {
+            const phrases: string[] = [];
+            sharedPhraseMap.forEach((tagIds, phrase) => {
+                if (tagIds.includes(tag.id)) phrases.push(phrase);
+            });
+            sharedPhrases[tag.id] = phrases;
+        });
+        return { collisionTags, sharedPhrases };
+    }, []);
+
+    const handleToggleCollisions = useCallback(async () => {
+        if (showCollisionsOnly) {
+            setShowCollisionsOnly(false);
+            setCollisionTagsList([]);
+            setCollisionSharedPhrases({});
+            return;
+        }
+        setCollisionsLoading(true);
+        try {
+            const params = new URLSearchParams();
+            params.set('page', '1');
+            params.set('limit', '9999');
+            const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, { cache: 'reload' });
+            if (!res.ok) throw new Error('Failed to load tags');
+            const payload = await res.json();
+            const allTags: Tag[] = Array.isArray(payload.data) ? payload.data : Array.isArray(payload) ? payload : [];
+            const { collisionTags, sharedPhrases } = computeCollisions(allTags);
+            setCollisionTagsList(collisionTags);
+            setCollisionSharedPhrases(sharedPhrases);
+            setShowCollisionsOnly(true);
+            setPage(1);
+        } catch (err: any) {
+            alert(err?.message || 'Failed to load collisions');
+        } finally {
+            setCollisionsLoading(false);
+        }
+    }, [showCollisionsOnly, apiBase, computeCollisions]);
+
     useEffect(() => {
         const handler = () => loadTags();
         window.addEventListener('hiro-tags-created', handler);
@@ -1478,13 +1551,40 @@ const AdminTagsView: React.FC = () => {
         setPage(1);
     }, [debouncedSearchTerm, selectedTypes, selectedCategories, selectedStatuses, synonymFilter, sourceFilter, createdFrom, createdTo, updatedFrom, updatedTo, sortConfig.key, sortConfig.direction, pageSize]);
 
-    const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+    // When collision mode is active, apply free-text + synonym search client-side
+    const filteredCollisionTagsList = useMemo(() => {
+        if (!showCollisionsOnly) return collisionTagsList;
+        let result = collisionTagsList;
+        const q = debouncedSearchTerm.trim().toLowerCase();
+        if (q) {
+            result = result.filter(tag =>
+                (tag.displayNameHe || '').toLowerCase().includes(q) ||
+                (tag.displayNameEn || '').toLowerCase().includes(q) ||
+                (tag.tagKey || '').toLowerCase().includes(q) ||
+                (tag.category || '').toLowerCase().includes(q) ||
+                (tag.synonyms || []).some(s => (s.phrase || '').toLowerCase().includes(q)) ||
+                (tag.aliases || []).some(a => (a || '').toLowerCase().includes(q))
+            );
+        }
+        const syn = synonymFilter.trim().toLowerCase();
+        if (syn) {
+            result = result.filter(tag =>
+                (tag.synonyms || []).some(s => (s.phrase || '').toLowerCase().includes(syn)) ||
+                (tag.aliases || []).some(a => (a || '').toLowerCase().includes(syn))
+            );
+        }
+        return result;
+    }, [showCollisionsOnly, collisionTagsList, debouncedSearchTerm, synonymFilter]);
+
+    const effectiveTotal = showCollisionsOnly ? filteredCollisionTagsList.length : totalRecords;
+    const totalPages = Math.max(1, Math.ceil(effectiveTotal / pageSize));
     useEffect(() => {
         setPage((prev) => Math.min(prev, totalPages));
     }, [totalPages]);
 
-    const startIndex = totalRecords ? (page - 1) * pageSize : 0;
-    const endIndex = Math.min(startIndex + pageSize, totalRecords);
+    const startIndex = effectiveTotal ? (page - 1) * pageSize : 0;
+    const endIndex = Math.min(startIndex + pageSize, effectiveTotal);
+    const displayedTags = showCollisionsOnly ? filteredCollisionTagsList.slice(startIndex, endIndex) : tags;
     const handlePageSizeChange = (value: number) => {
         setPageSize(value);
         setPage(1);
@@ -2068,6 +2168,23 @@ const AdminTagsView: React.FC = () => {
                             <ListBulletIcon className="w-4 h-4" />
                             {filterVertical ? 'סינון אנכי' : 'סינון אופקי'}
                         </button>
+                        <button
+                            type="button"
+                            onClick={handleToggleCollisions}
+                            disabled={collisionsLoading}
+                            title="הצג רק תגיות שיש להן כינוי/מילה נרדפת משותפת עם תגית אחרת"
+                            className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold transition disabled:opacity-50 ${showCollisionsOnly ? 'border-orange-400 bg-orange-50 text-orange-700' : 'border-border-default bg-transparent text-text-muted hover:border-orange-300 hover:text-orange-600'}`}
+                        >
+                            {collisionsLoading ? (
+                                <svg className="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"/></svg>
+                            ) : (
+                                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+                            )}
+                            הצג כפילויות
+                            {showCollisionsOnly && collisionTagsList.length > 0 && (
+                                <span className="bg-orange-500 text-white rounded-full text-[10px] font-bold px-1.5 py-0.5 leading-none">{collisionTagsList.length}</span>
+                            )}
+                        </button>
                      <button 
                         onClick={handleOpenChat}
                             className="bg-white border border-border-default text-primary-700 font-bold py-2 px-4 rounded-xl hover:bg-primary-50 transition shadow-sm flex items-center gap-2"
@@ -2258,8 +2375,8 @@ const AdminTagsView: React.FC = () => {
             <div className="bg-bg-card border border-border-default rounded-2xl shadow-sm overflow-hidden flex-1 flex flex-col">
                 <div className="px-3 py-3 border-b border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        {totalRecords
-                            ? `מראה ${totalRecords ? startIndex + 1 : 0}–${totalRecords ? endIndex : 0} מתוך ${totalRecords} תגיות`
+                        {effectiveTotal
+                            ? `מראה ${effectiveTotal ? startIndex + 1 : 0}–${effectiveTotal ? endIndex : 0} מתוך ${effectiveTotal} תגיות${showCollisionsOnly ? ' (פילויות)' : ''}`
                             : 'לא נמצאו תגיות להצגה'}
                     </div>
                     <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -2306,7 +2423,7 @@ const AdminTagsView: React.FC = () => {
                                     <input 
                                         type="checkbox" 
                                         onChange={handleSelectAll} 
-                                        checked={tags.length > 0 && selectedTagIds.size === tags.length}
+                                        checked={displayedTags.length > 0 && selectedTagIds.size === displayedTags.length}
                                         className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
                                     />
                                 </th>
@@ -2331,8 +2448,8 @@ const AdminTagsView: React.FC = () => {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
-                            {tags.map(tag => (
-                                <tr key={tag.id} className={`hover:bg-bg-hover transition-colors group cursor-pointer ${selectedTagIds.has(tag.id) ? 'bg-primary-50/50' : ''}`} onClick={() => handleEdit(tag)}>
+                            {displayedTags.map(tag => (
+                                <tr key={tag.id} className={`hover:bg-bg-hover transition-colors group cursor-pointer ${selectedTagIds.has(tag.id) ? 'bg-primary-50/50' : ''} ${showCollisionsOnly ? 'border-r-4 border-r-orange-400' : ''}`} onClick={() => handleEdit(tag)}>
                                     <td className="p-4 text-center" onClick={e => e.stopPropagation()}>
                                         <input 
                                             type="checkbox" 
@@ -2351,6 +2468,13 @@ const AdminTagsView: React.FC = () => {
                                             <button onClick={(e) => {e.stopPropagation(); handleEdit(tag);}} className="p-1.5 hover:bg-primary-50 text-primary-600 rounded-lg"><PencilIcon className="w-4 h-4"/></button>
                                             <button onClick={(e) => {e.stopPropagation(); handleDelete(tag);}} className="p-1.5 hover:bg-red-50 text-red-500 rounded-lg"><TrashIcon className="w-4 h-4"/></button>
                                         </div>
+                                        {showCollisionsOnly && collisionSharedPhrases[tag.id]?.length > 0 && (
+                                            <div className="mt-1 flex flex-wrap gap-1 justify-center">
+                                                {collisionSharedPhrases[tag.id].map(phrase => (
+                                                    <span key={phrase} className="text-[10px] bg-orange-100 text-orange-700 rounded px-1.5 py-0.5 font-mono border border-orange-200" title={`כינוי משותף: "${phrase}"`}>{phrase}</span>
+                                                ))}
+                                            </div>
+                                        )}
                                     </td>
                                 </tr>
                             ))}
@@ -2359,8 +2483,8 @@ const AdminTagsView: React.FC = () => {
                 </div>
                 <div className="px-3 py-3 border-t border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        {totalRecords
-                            ? `מראה ${totalRecords ? startIndex + 1 : 0}–${totalRecords ? endIndex : 0} מתוך ${totalRecords} תגיות`
+                        {effectiveTotal
+                            ? `מראה ${effectiveTotal ? startIndex + 1 : 0}–${effectiveTotal ? endIndex : 0} מתוך ${effectiveTotal} תגיות${showCollisionsOnly ? ' (פילויות)' : ''}`
                             : 'לא נמצאו תגיות להצגה'}
                     </div>
                     <div className="flex flex-wrap items-center gap-2 text-[11px]">

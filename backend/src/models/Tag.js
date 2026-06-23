@@ -24,7 +24,7 @@ const Tag = sequelize.define(
         'degree',
         'soft_skill'
       ),
-      defaultValue: 'role',
+      defaultValue: 'skill',
     },
     category: DataTypes.STRING,
    
@@ -79,4 +79,10 @@ const Tag = sequelize.define(
 );
 
 module.exports = Tag;
+
+// Deferred association to avoid circular require issues.
+setImmediate(() => {
+  const SystemTag = require('./SystemTag');
+  Tag.hasMany(SystemTag, { foreignKey: 'tag_id', as: 'systemTagEntries' });
+});
 

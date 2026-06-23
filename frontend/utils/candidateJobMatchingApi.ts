@@ -3,6 +3,27 @@
  * All calls go through the backend — no AI keys exposed to the client.
  */
 
+// Module-level cache so fetchClientOptions / fetchCityOptions hit the network only once per session.
+let _jobsListCache: { client?: string; city?: string; status?: string }[] | null = null;
+let _jobsListPending: Promise<{ client?: string; city?: string; status?: string }[]> | null = null;
+
+async function getJobsList(): Promise<{ client?: string; city?: string; status?: string }[]> {
+  if (_jobsListCache) return _jobsListCache;
+  if (_jobsListPending) return _jobsListPending;
+  const base = apiBase();
+  _jobsListPending = fetch(`${base}/api/jobs?limit=2000`, { headers: authHeaders() })
+    .then(async (res) => {
+      if (!res.ok) return [];
+      const data = await res.json();
+      const list = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
+      _jobsListCache = list;
+      _jobsListPending = null;
+      return list;
+    })
+    .catch(() => { _jobsListPending = null; return []; });
+  return _jobsListPending;
+}
+
 export interface JobMatchResult {
   id: string;
   title: string;
@@ -131,12 +152,8 @@ export async function fetchDeepInsight(candidateId: string, jobId: string): Prom
 
 /** Fetch distinct client names from all open/frozen jobs (reuse job list endpoint). */
 export async function fetchClientOptions(): Promise<string[]> {
-  const base = apiBase();
   try {
-    const res = await fetch(`${base}/api/jobs?limit=2000`, { headers: authHeaders() });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const jobs: { client?: string }[] = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
+    const jobs = await getJobsList();
     const seen = new Set<string>();
     return jobs
       .map((j) => (j.client || '').trim())
@@ -148,12 +165,8 @@ export async function fetchClientOptions(): Promise<string[]> {
 
 /** Fetch distinct cities from all open/frozen jobs. */
 export async function fetchCityOptions(): Promise<string[]> {
-  const base = apiBase();
   try {
-    const res = await fetch(`${base}/api/jobs?limit=2000`, { headers: authHeaders() });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const jobs: { city?: string; status?: string }[] = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
+    const jobs = await getJobsList();
     const seen = new Set<string>();
     return jobs
       .filter((j) => j.status === 'פתוחה' || j.status === 'מוקפאת')

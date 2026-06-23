@@ -1105,7 +1105,7 @@ Return ONLY a valid JSON object (no markdown, no explanations) matching this sch
     "name": string,
     "evidence": string,
     "quote": string|null,
-    "raw_type": "role" | "skill" | "tool" | "degree" | "methodology" | "seniority" | "industry" | "soft_skill",
+    "raw_type": "role" | "skill" | "tool" | "degree" | "certification" | "language" | "methodology" | "seniority" | "industry" | "soft_skill",
     "context": "Core" | "Tool" | "Degree" | "Profile",
     "raw_type_reason": string|null,
     "tag_reason": string|null,
@@ -1291,7 +1291,7 @@ const buildResumeResponseSchema = () => ({
           quote:            { type: 'string', nullable: true, description: 'EXACT verbatim substring of the CV text justifying this tag. ≤ 240 chars. Same as `evidence`. null only if no verbatim phrase exists.' },
           raw_type: {
             type: 'string',
-            enum: ['role', 'skill', 'tool', 'degree', 'methodology', 'seniority', 'industry', 'soft_skill'],
+            enum: ['role', 'skill', 'tool', 'degree', 'certification', 'language', 'methodology', 'seniority', 'industry', 'soft_skill'],
           },
           context: {
             type: 'string',
@@ -3048,14 +3048,7 @@ const generateInternalOpinion = async (req, res) => {
       return res.status(500).json({ message: 'Gemini API key not configured' });
     }
 
-    let promptRow;
-    try {
-      promptRow = await promptService.getById('internal_opinion');
-    } catch {
-      promptRow = null;
-    }
-    const template = promptRow?.template || `אתה מומחה גיוס בכיר. כתוב חוות דעת פנימית מקצועית בעברית על מועמד בהתאם למשרה.
-החזר HTML עם <p>, <h3>, <ul>, <li>, <strong>. נתוני המועמד: {{candidate_summary}}. נתוני המשרה: {{job_context}}.`;
+    const promptRow = await promptService.ensureById('internal_opinion');
 
     const candidateSummary = [
       `שם: ${candidate.fullName || 'לא צוין'}`,
@@ -3074,9 +3067,35 @@ const generateInternalOpinion = async (req, res) => {
         ].join('\n')
       : 'לא סופקה משרה ספציפית. כתוב חוות דעת כללית על המועמד.';
 
-    const systemPrompt = template
+    // Screening answers (array of { question, answer })
+    const screeningAnswersText = Array.isArray(body.screeningAnswers) && body.screeningAnswers.length
+      ? body.screeningAnswers
+          .filter((qa) => qa.answer && String(qa.answer).trim())
+          .map((qa, i) => `${i + 1}. ${qa.question}: ${qa.answer}`)
+          .join('\n') || 'אין תשובות לשאלון'
+      : 'אין תשובות לשאלון';
+
+    // Strip HTML tags from the existing draft so the LLM gets clean text
+    const rawDraft = String(body.currentDraft || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    const currentDraftText = rawDraft || '';
+
+    const template = promptRow.template;
+
+
+
+    let systemPrompt = template
       .replace(/\{\{candidate_summary\}\}/g, candidateSummary)
-      .replace(/\{\{job_context\}\}/g, jobContext);
+      .replace(/\{\{job_context\}\}/g, jobContext)
+      .replace(/\{\{screening_answers\}\}/g, screeningAnswersText)
+      .replace(/\{\{current_draft\}\}/g, currentDraftText || 'אין');
+
+    // If the template predates the new variables, append them so they're always available.
+    if (!template.includes('{{screening_answers}}') && screeningAnswersText !== 'אין תשובות לשאלון') {
+      systemPrompt += `\n\nתשובות המועמד לשאלון הסינון:\n${screeningAnswersText}`;
+    }
+    if (!template.includes('{{current_draft}}') && currentDraftText) {
+      systemPrompt += `\n\nטיוטה קיימת שכתב/ה הרכז/ת (שכתב והרחב לחוות דעת מקצועית אחת):\n${currentDraftText}`;
+    }
 
     const text = await sendChat({
       apiKey,

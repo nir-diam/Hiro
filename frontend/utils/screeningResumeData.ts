@@ -46,10 +46,23 @@ export function buildResumeDataFromCandidate(
           if (typeof exp === 'string') return exp;
           const role = String(exp?.role || exp?.title || '').trim();
           const company = String(exp?.company || exp?.organization || '').trim();
-          const years = String(exp?.years || exp?.period || exp?.date || '').trim();
+          // Prefer ISO startDate/endDate over free-text years
+          let dateStr = String(exp?.years || exp?.period || exp?.date || '').trim();
+          if (!dateStr && (exp?.startDate || exp?.endDate)) {
+            const start = String(exp?.startDate || '').replace(/-\d{2}$/, '').trim();
+            const end = String(exp?.endDate || '').replace(/-\d{2}$/, '').trim();
+            if (start && end) dateStr = `${start} – ${end}`;
+            else dateStr = start || end;
+          }
+          const description = String(exp?.description || exp?.summary || '').trim();
           const line1 = [role, company].filter(Boolean).join(', ');
-          const line2 = years ? `<br/>${years}` : '';
-          return `<b>${line1 || 'ניסיון תעסוקתי'}</b>${line2}`;
+          const line2 = dateStr
+            ? `<br/><span style="color:#6b7280;font-size:0.85em;">${dateStr}</span>`
+            : '';
+          const line3 = description
+            ? `<br/><span style="display:block;margin-top:4px;white-space:pre-line;">${description}</span>`
+            : '';
+          return `<b>${line1 || 'ניסיון תעסוקתי'}</b>${line2}${line3}`;
         })
       : [''];
 
@@ -57,9 +70,18 @@ export function buildResumeDataFromCandidate(
     Array.isArray(candidate.education) && candidate.education.length > 0
       ? candidate.education.map((edu: any) => {
           if (typeof edu === 'string') return edu;
-          const deg = String(edu?.degree || edu?.title || '').trim();
-          const inst = String(edu?.institution || edu?.school || '').trim();
-          const years = String(edu?.years || edu?.period || '').trim();
+          // Primary: pre-formatted value string (schema: { value: string })
+          const val = String(edu?.value || '').trim();
+          if (val) return `<b>${val}</b>`;
+          // Fallback: composed fields
+          const deg = String(edu?.degree || edu?.title || edu?.fieldOfStudy || '').trim();
+          const inst = String(
+            edu?.institution || edu?.school || edu?.university || '',
+          ).trim();
+          let years = String(edu?.years || edu?.period || '').trim();
+          if (!years && (edu?.startYear || edu?.endYear)) {
+            years = [edu?.startYear, edu?.endYear].filter(Boolean).join(' - ');
+          }
           const line1 = [deg, inst].filter(Boolean).join(', ');
           const line2 = years ? `<br/>${years}` : '';
           return `<b>${line1 || 'השכלה'}</b>${line2}`;

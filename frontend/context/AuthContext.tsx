@@ -1,5 +1,26 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { permissionForPath } from '../access/pathAccess';
+
+/** Parse the `exp` claim from a JWT without a library. Returns ms timestamp or null. */
+function getTokenExpiryMs(token: string): number | null {
+    try {
+        const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+        return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+    } catch {
+        return null;
+    }
+}
+
+function redirectToLogin() {
+    try {
+        localStorage.removeItem('token');
+        localStorage.removeItem('herouser');
+        localStorage.removeItem('user');
+        sessionStorage.clear();
+    } catch { /* ignore */ }
+    const isPortal = window.location.hash.startsWith('#/candidate-portal');
+    window.location.replace(isPortal ? '/#/candidate-portal/login' : '/#/login');
+}
 
 export type AuthUser = {
     id?: string;
@@ -69,8 +90,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
             });
             if (!res.ok) {
                 if (res.status === 401) {
-                    clearAuthLocalStorage();
-                    setUser(null);
+                    redirectToLogin();
+                    return;
                 }
                 setReady(true);
                 return;
@@ -94,7 +115,71 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         void refreshUser();
     }, [refreshUser]);
 
-    /** Client usage `autoDisconnect`: log out and wipe auth from localStorage after 60 minutes idle. */
+    // Keep a stable ref so effects can call refreshUser without adding it as a dependency.
+    const refreshUserRef = useRef(refreshUser);
+    useEffect(() => { refreshUserRef.current = refreshUser; }, [refreshUser]);
+
+    /**
+     * Re-validate the session whenever the tab becomes visible after being hidden
+     * for more than 2 minutes. This catches the case where the token expired while
+     * the user was away, without forcing a redirect prematurely.
+     */
+    useEffect(() => {
+        let hiddenAt: number | null = null;
+        const AWAY_THRESHOLD_MS = 2 * 60 * 1000;
+
+        const onVisibility = () => {
+            if (document.visibilityState === 'hidden') {
+                hiddenAt = Date.now();
+            } else if (document.visibilityState === 'visible' && hiddenAt !== null) {
+                const awayMs = Date.now() - hiddenAt;
+                hiddenAt = null;
+                if (awayMs >= AWAY_THRESHOLD_MS) {
+                    void refreshUserRef.current();
+                }
+            }
+        };
+
+        document.addEventListener('visibilitychange', onVisibility);
+        return () => document.removeEventListener('visibilitychange', onVisibility);
+    }, []);
+
+    /** Schedule a redirect when the JWT itself expires (regardless of idle). */
+    const tokenExpiryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    useEffect(() => {
+        if (tokenExpiryTimerRef.current) clearTimeout(tokenExpiryTimerRef.current);
+
+        const token = localStorage.getItem('token');
+        if (!token || !user) return;
+
+        const expiryMs = getTokenExpiryMs(token);
+        if (!expiryMs) return;
+
+        const msUntilExpiry = expiryMs - Date.now();
+        if (msUntilExpiry <= 0) {
+            // Let the server confirm before redirecting (guards against clock skew).
+            void refreshUserRef.current();
+            return;
+        }
+
+        // When the timer fires, verify with the server before redirecting.
+        tokenExpiryTimerRef.current = setTimeout(() => void refreshUserRef.current(), msUntilExpiry);
+
+        // Also re-validate when the tab becomes visible after an apparent expiry.
+        const onVisible = () => {
+            if (document.visibilityState === 'visible' && Date.now() >= expiryMs) {
+                void refreshUserRef.current();
+            }
+        };
+        document.addEventListener('visibilitychange', onVisible);
+
+        return () => {
+            if (tokenExpiryTimerRef.current) clearTimeout(tokenExpiryTimerRef.current);
+            document.removeEventListener('visibilitychange', onVisible);
+        };
+    }, [user?.id]);
+
+    /** Client usage `autoDisconnect`: log out after 60 minutes of idle. */
     useEffect(() => {
         if (typeof window === 'undefined') return;
         if (!user?.autoDisconnect) return;
@@ -102,51 +187,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
         let timeoutId: ReturnType<typeof setTimeout>;
 
-        const redirectAfterLogout = () => {
-            const path = window.location.pathname.startsWith('/candidate-portal')
-                ? '/candidate-portal/login'
-                : '/login';
-            window.location.assign(path);
-        };
-
-        const clearSession = () => {
-            try {
-                localStorage.clear();
-            } catch {
-                clearAuthLocalStorage();
-            }
-            setUser(null);
-            redirectAfterLogout();
-        };
-
         const schedule = () => {
             window.clearTimeout(timeoutId);
-            timeoutId = window.setTimeout(clearSession, AUTO_DISCONNECT_IDLE_MS);
+            timeoutId = window.setTimeout(() => redirectToLogin(), AUTO_DISCONNECT_IDLE_MS);
         };
 
         schedule();
 
         const onActivity = () => schedule();
-        const events: (keyof WindowEventMap)[] = [
-            'mousedown',
-            'keydown',
-            'touchstart',
-            'scroll',
-            'click',
-            'wheel',
-        ];
+        const events: (keyof WindowEventMap)[] = ['mousedown', 'keydown', 'touchstart', 'scroll', 'click', 'wheel'];
         const opts: AddEventListenerOptions = { capture: true, passive: true };
         events.forEach((ev) => window.addEventListener(ev, onActivity, opts));
-
-        const onVisible = () => {
-            if (document.visibilityState === 'visible') schedule();
-        };
-        document.addEventListener('visibilitychange', onVisible);
 
         return () => {
             window.clearTimeout(timeoutId);
             events.forEach((ev) => window.removeEventListener(ev, onActivity, opts));
-            document.removeEventListener('visibilitychange', onVisible);
         };
     }, [user?.autoDisconnect, user?.id]);
 

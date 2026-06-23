@@ -3,6 +3,7 @@ import { XMarkIcon, MagnifyingGlassIcon, EnvelopeIcon } from './Icons';
 import type { BulkJobPickerOption } from './BulkAddToFilterModal';
 import { useLanguage } from '../context/LanguageContext';
 import { jobIsOpenForStaffPick } from '../utils/jobPickerOpen';
+import { getJobHealthData, daysOpenFromDate } from '../utils/jobHealth';
 
 export type BulkReferSuccessSummary = {
     /** Total email dispatches returned by the API (sum of count per candidate). */
@@ -58,7 +59,7 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
     onClose,
     candidateBackendIds,
     selectedCount,
-    jobs: jobsFromApi = [],
+    jobs: jobsFromProp = [],
     onSuccess,
 }) => {
     const { t } = useLanguage();
@@ -67,6 +68,10 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
     const [searchTerm, setSearchTerm] = useState('');
     const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
     const [notes, setNotes] = useState('');
+
+    const [fetchedJobs, setFetchedJobs] = useState<BulkJobPickerOption[]>([]);
+    const [jobsLoading, setJobsLoading] = useState(false);
+    const [jobsError, setJobsError] = useState<string | null>(null);
 
     const [contacts, setContacts] = useState<ReferralContactRow[]>([]);
     const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
@@ -77,6 +82,58 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
     const [submitting, setSubmitting] = useState(false);
     const [submitProgress, setSubmitProgress] = useState<{ current: number; total: number } | null>(null);
     const [submitError, setSubmitError] = useState<string | null>(null);
+
+    // Fetch jobs from backend when modal opens
+    useEffect(() => {
+        if (!isOpen || !apiBase) return;
+        let cancelled = false;
+        setJobsLoading(true);
+        setJobsError(null);
+        void (async () => {
+            try {
+                const token = getStaffToken();
+                const init: RequestInit = token
+                    ? staffFetchInit(token, { method: 'GET' })
+                    : { method: 'GET', cache: 'no-store' };
+                const res = await fetch(`${apiBase}/api/jobs/for-picker`, init);
+                if (!res.ok) throw new Error('שגיאה בטעינת המשרות');
+                const data = await res.json();
+                const list: any[] = Array.isArray(data)
+                    ? data
+                    : Array.isArray(data?.rows)
+                      ? data.rows
+                      : Array.isArray(data?.data)
+                        ? data.data
+                        : [];
+                if (cancelled) return;
+                setFetchedJobs(
+                    list.map((j) => ({
+                        id: String(j.id),
+                        title: String(j.title || j.name || 'ללא שם'),
+                        subtitle: j.client ? String(j.client) : undefined,
+                        status: j.status != null ? String(j.status) : undefined,
+                        city: j.city ? String(j.city) : undefined,
+                        activeProcess: typeof j.activeProcess === 'number' ? j.activeProcess : 0,
+                        associatedCandidates: typeof j.associatedCandidates === 'number' ? j.associatedCandidates : 0,
+                        waitingForScreening: typeof j.waitingForScreening === 'number' ? j.waitingForScreening : 0,
+                        openDate: j.openDate ? String(j.openDate) : undefined,
+                        healthProfile: j.healthProfile ? String(j.healthProfile) : undefined,
+                    })),
+                );
+            } catch (e) {
+                if (!cancelled) setJobsError((e as Error).message || 'שגיאה בטעינת המשרות');
+            } finally {
+                if (!cancelled) setJobsLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [isOpen, apiBase]);
+
+    // Merge prop jobs (fast initial data) with freshly fetched jobs (prefer fetched when available)
+    const jobsFromApi = useMemo(
+        () => (fetchedJobs.length > 0 ? fetchedJobs : jobsFromProp),
+        [fetchedJobs, jobsFromProp],
+    );
 
     const openJobsForReferral = useMemo(
         () => jobsFromApi.filter((j) => jobIsOpenForStaffPick(j.status)),
@@ -107,6 +164,8 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
         setSearchTerm('');
         setSelectedJobId(null);
         setNotes('');
+        setFetchedJobs([]);
+        setJobsError(null);
         setContacts([]);
         setSelectedContactIds(new Set());
         setJobClientLabel('');
@@ -343,7 +402,16 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
                         </div>
 
                         <div className="flex-1 space-y-3 pb-4">
-                            {jobsFromApi.length === 0 ? (
+                            {jobsLoading ? (
+                                <div className="p-8 text-center text-text-muted text-sm bg-bg-subtle/50 rounded-2xl border border-dashed border-border-default">
+                                    <svg className="w-5 h-5 animate-spin mx-auto mb-2 text-primary-400" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
+                                    טוען משרות...
+                                </div>
+                            ) : jobsError ? (
+                                <div className="p-8 text-center text-red-500 text-sm bg-red-50 rounded-2xl border border-dashed border-red-200">
+                                    {jobsError}
+                                </div>
+                            ) : jobsFromApi.length === 0 ? (
                                 <div className="p-8 text-center text-text-muted text-sm bg-bg-subtle/50 rounded-2xl border border-dashed border-border-default">
                                     {t('bulk_refer.no_jobs')}
                                 </div>
@@ -358,6 +426,9 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
                             ) : (
                                 filteredJobs.map((job) => {
                                     const isSelected = selectedJobId === job.id;
+                                    const health = getJobHealthData(job);
+                                    const days = daysOpenFromDate(job.openDate);
+                                    const locationParts = [job.subtitle, job.city].filter(Boolean);
                                     return (
                                         <div
                                             key={job.id}
@@ -369,39 +440,48 @@ const BulkReferModal: React.FC<BulkReferModalProps> = ({
                                             }`}
                                         >
                                             <div className="pt-1">
-                                                <div
-                                                    className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${
-                                                        isSelected
-                                                            ? 'border-primary-600 bg-primary-600'
-                                                            : 'border-border-strong bg-white'
-                                                    }`}
-                                                >
+                                                <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'border-primary-600 bg-primary-600' : 'border-border-strong bg-white'}`}>
                                                     {isSelected && (
-                                                        <svg
-                                                            className="w-3 h-3 text-white"
-                                                            fill="none"
-                                                            viewBox="0 0 24 24"
-                                                            stroke="currentColor"
-                                                            strokeWidth={3}
-                                                        >
-                                                            <path
-                                                                strokeLinecap="round"
-                                                                strokeLinejoin="round"
-                                                                d="M5 13l4 4L19 7"
-                                                            />
+                                                        <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                                                            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
                                                         </svg>
                                                     )}
                                                 </div>
                                             </div>
                                             <div className="flex-1 min-w-0">
-                                                <h4
-                                                    className={`font-bold text-sm truncate ${isSelected ? 'text-primary-900' : 'text-text-default'}`}
-                                                >
-                                                    {job.title}
-                                                </h4>
-                                                {job.subtitle ? (
-                                                    <p className="text-xs text-text-subtle mt-1">{job.subtitle}</p>
-                                                ) : null}
+                                                <div className="flex justify-between items-start mb-1">
+                                                    <h4 className={`font-bold text-sm truncate pr-1 ${isSelected ? 'text-primary-900' : 'text-text-default'}`}>
+                                                        {job.title}
+                                                    </h4>
+                                                    <div className="scale-75 origin-top-left -mt-1 -ml-2 shrink-0">
+                                                        <div className="group/health relative inline-flex items-center justify-center cursor-help w-8 h-8">
+                                                            <div className="absolute inset-0 flex items-center justify-center">
+                                                                <div className={`w-3 h-3 rounded-full ${health.color} ${health.pulse ? 'animate-pulse ring-2 ring-offset-1 ring-red-200' : ''} shadow-sm`} />
+                                                            </div>
+                                                            <div className="absolute bottom-full mb-2 right-0 w-max max-w-[200px] bg-gray-800 text-white text-xs rounded-lg py-2 px-3 shadow-xl z-50 text-center opacity-0 group-hover/health:opacity-100 transition-opacity duration-200 pointer-events-none">
+                                                                {health.message}
+                                                                <div className="absolute top-full right-3 border-4 border-transparent border-t-gray-800" />
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                {locationParts.length > 0 && (
+                                                    <p className="text-xs text-text-subtle mb-2">{locationParts.join(' • ')}</p>
+                                                )}
+                                                <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium">
+                                                    <span className="px-2 py-1 rounded-md flex items-center gap-1.5 bg-bg-subtle">
+                                                        <span className="w-2 h-2 rounded-full bg-blue-400" />
+                                                        <span>{job.associatedCandidates ?? 0} מועמדים</span>
+                                                    </span>
+                                                    <span className="px-2 py-1 rounded-md flex items-center gap-1.5 bg-bg-subtle">
+                                                        <span className="w-2 h-2 rounded-full bg-emerald-400" />
+                                                        <span>{job.activeProcess ?? 0} בתהליך</span>
+                                                    </span>
+                                                    <span className="px-2 py-1 rounded-md flex items-center gap-1.5 bg-bg-subtle">
+                                                        <span className="w-2 h-2 rounded-full bg-amber-400" />
+                                                        <span>פתוחה {days} ימים</span>
+                                                    </span>
+                                                </div>
                                             </div>
                                         </div>
                                     );
