@@ -49,6 +49,7 @@ import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
 import { ComplexQueryBuilder } from './ComplexQueryComponents';
 import { complexRulesHaveValue, serializeComplexRulesForApi, type ComplexFilterRule } from '../utils/complexQuery';
 import { fetchCandidatesListResponse } from '../utils/candidatesListApi';
+import { fetchSavedSearchBlacklist, type EnrichedBlacklistEntry } from '../services/savedSearchesApi';
 
 const MATCH_POPUP_WIDTH = 288;
 
@@ -470,6 +471,144 @@ const DoubleRangeSlider: React.FC<{
                     <span className="text-[11px] font-medium text-text-subtle">{unknownLabel}</span>
                 </label>
             )}
+        </div>
+    );
+};
+
+
+type SavedSearchStatsChipsProps = {
+    searchId: string | number;
+    resultCount: number;
+    blacklistCount: number;
+    onRestore: (email: string | null, phone: string | null) => Promise<void>;
+    onOpenCandidate?: (candidateId: string) => void;
+};
+
+const SavedSearchStatsChips: React.FC<SavedSearchStatsChipsProps> = ({
+    searchId,
+    resultCount,
+    blacklistCount,
+    onRestore,
+    onOpenCandidate,
+}) => {
+    const [open, setOpen] = useState(false);
+    const [loading, setLoading] = useState(false);
+    const [entries, setEntries] = useState<EnrichedBlacklistEntry[]>([]);
+    const [restoringKey, setRestoringKey] = useState<string | null>(null);
+    const panelRef = useRef<HTMLDivElement>(null);
+
+    const entryKey = (e: EnrichedBlacklistEntry) =>
+        `${e.candidateEmail || ''}|${e.candidatePhone || ''}`;
+
+    useEffect(() => {
+        if (!open) return;
+        setLoading(true);
+        fetchSavedSearchBlacklist(searchId)
+            .then((data) => setEntries(data.blacklist))
+            .catch(() => setEntries([]))
+            .finally(() => setLoading(false));
+    }, [open, searchId, blacklistCount]);
+
+    useEffect(() => {
+        if (!open) return;
+        const onClick = (e: MouseEvent) => {
+            if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onClick);
+        return () => document.removeEventListener('mousedown', onClick);
+    }, [open]);
+
+    return (
+        <div className="flex items-center gap-1.5">
+            <span className="text-[11px] text-text-muted whitespace-nowrap px-2 py-0.5 rounded-full bg-white border border-border-default">
+                {resultCount} מועמדים
+            </span>
+            <div className="relative" ref={panelRef}>
+                <button
+                    type="button"
+                    onClick={() => blacklistCount > 0 && setOpen((v) => !v)}
+                    className={`text-[11px] whitespace-nowrap px-2 py-0.5 rounded-full border transition-colors ${
+                        blacklistCount > 0
+                            ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100 cursor-pointer'
+                            : 'bg-white border-border-default text-text-muted cursor-default'
+                    }`}
+                    disabled={blacklistCount === 0}
+                >
+                    {blacklistCount} ברשימה שחורה
+                </button>
+                {open && blacklistCount > 0 && (
+                    <div className="absolute top-full end-0 mt-1 z-30 w-72 max-h-64 overflow-y-auto bg-bg-card border border-border-default rounded-xl shadow-xl p-3 text-start">
+                        <p className="text-xs font-bold text-text-default mb-2">מועמדים שהוסרו מהחיפוש</p>
+                        {loading ? (
+                            <p className="text-xs text-text-muted">טוען…</p>
+                        ) : entries.length === 0 ? (
+                            <p className="text-xs text-text-muted">אין מועמדים ברשימה</p>
+                        ) : (
+                            <ul className="space-y-2">
+                                {entries.map((entry) => {
+                                    const key = entryKey(entry);
+                                    return (
+                                        <li key={key} className="flex items-start justify-between gap-2 text-xs border-b border-border-subtle pb-2 last:border-0 last:pb-0">
+                                            {entry.candidateId && onOpenCandidate ? (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => onOpenCandidate(entry.candidateId!)}
+                                                    className="min-w-0 text-start hover:bg-bg-hover rounded-lg px-1 py-0.5 -mx-1 transition-colors group"
+                                                    title="פתח פרופיל מועמד"
+                                                >
+                                                    <p className="font-medium text-text-default truncate group-hover:text-primary-700">
+                                                        {entry.candidateName || entry.candidateEmail || entry.candidatePhone || 'מועמד'}
+                                                    </p>
+                                                    {entry.candidateEmail && (
+                                                        <p className="text-text-muted truncate" dir="ltr">{entry.candidateEmail}</p>
+                                                    )}
+                                                    {entry.candidatePhone && (
+                                                        <p className="text-text-muted truncate" dir="ltr">{entry.candidatePhone}</p>
+                                                    )}
+                                                </button>
+                                            ) : (
+                                                <div className="min-w-0">
+                                                    <p className="font-medium text-text-default truncate">
+                                                        {entry.candidateName || entry.candidateEmail || entry.candidatePhone || 'מועמד'}
+                                                    </p>
+                                                    {entry.candidateEmail && (
+                                                        <p className="text-text-muted truncate" dir="ltr">{entry.candidateEmail}</p>
+                                                    )}
+                                                    {entry.candidatePhone && (
+                                                        <p className="text-text-muted truncate" dir="ltr">{entry.candidatePhone}</p>
+                                                    )}
+                                                </div>
+                                            )}
+                                            <button
+                                                type="button"
+                                                disabled={restoringKey === key}
+                                                onClick={async () => {
+                                                    setRestoringKey(key);
+                                                    try {
+                                                        await onRestore(entry.candidateEmail ?? null, entry.candidatePhone ?? null);
+                                                        setEntries((prev) => {
+                                                            const next = prev.filter((e) => entryKey(e) !== key);
+                                                            if (next.length === 0) setOpen(false);
+                                                            return next;
+                                                        });
+                                                    } finally {
+                                                        setRestoringKey(null);
+                                                    }
+                                                }}
+                                                className="shrink-0 text-[10px] font-semibold text-primary-600 hover:text-primary-800 whitespace-nowrap disabled:opacity-50"
+                                            >
+                                                החזר לתוצאות
+                                            </button>
+                                        </li>
+                                    );
+                                })}
+                            </ul>
+                        )}
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
@@ -1371,7 +1510,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const navigate = useNavigate();
     const location = useLocation();
     const [searchParamsFromUrl, setUrlSearchParams] = useSearchParams();
-    const { savedSearches, addSearch, updateSearch } = useSavedSearches();
+    const { savedSearches, addSearch, updateSearch, blacklistFromSearch, removeFromSearchBlacklist } = useSavedSearches();
     const { t } = useLanguage();
     const { user } = useAuth();
 
@@ -1496,6 +1635,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [isPublicSearch, setIsPublicSearch] = useState(false);
     const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
     const [loadedSearch, setLoadedSearch] = useState<SavedSearch | null>(null);
+
+    // Keep loadedSearch in sync with the context (e.g. after blacklist/update mutations).
+    // The main load effect guards on id-change, so this won't re-trigger hydration.
+    useEffect(() => {
+        if (!loadedSearch) return;
+        const updated = savedSearches.find(s => String(s.id) === String(loadedSearch.id));
+        if (updated && updated !== loadedSearch) setLoadedSearch(updated);
+    }, [savedSearches]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const [appliedAdvancedFilters, setAppliedAdvancedFilters] = useState<AppliedAdvancedSearchPayload | null>(
         () => listViewSnapshot?.appliedAdvancedFilters ?? null,
@@ -1748,17 +1895,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         address: c.address || '',
         phone: c.phone || '',
         industry:
-            (c.industry && String(c.industry).trim()) ||
-            (() => {
-                const inds = c.industryAnalysis?.industries;
-                if (!Array.isArray(inds) || !inds.length) return '';
-                const sorted = [...inds].sort(
-                    (a: { percentage?: number }, b: { percentage?: number }) =>
-                        (Number(b?.percentage) || 0) - (Number(a?.percentage) || 0),
-                );
-                return String(sorted[0]?.label || '').trim();
-            })() ||
-            '',
+            (c.industry && String(c.industry).trim()) || '',
         field: c.field || '',
         sector: c.sector || '',
         companySize: c.companySize || '',
@@ -1814,6 +1951,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: AppliedAdvancedSearchPayload | null;
             dataIncomplete?: boolean;
             jobId?: string;
+            savedSearchId?: string | number | null;
         }) => {
             if (!apiBase) return;
             setIsRemoteLoading(true);
@@ -1828,6 +1966,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         dataIncomplete: opts.dataIncomplete,
                         jobId: opts.jobId,
                         matchLastJobScores: true,
+                        savedSearchId: opts.savedSearchId ?? null,
                     },
                     candidatesListFetchInit(),
                 );
@@ -1868,6 +2007,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     // cascade and cause every useEffect that depends on fetchCandidates to re-fire.
     const companyFiltersRef = useRef(companyFilters);
     companyFiltersRef.current = companyFilters; // always in sync, no extra renders
+
+    // Ref keeps the active saved-search id readable inside fetch callbacks.
+    const loadedSearchRef = useRef(loadedSearch);
+    loadedSearchRef.current = loadedSearch;
 
     const hasActiveCompanyFilters = !!(
         companyFilters.industries?.length ||
@@ -1925,6 +2068,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     }, [
         page,
@@ -1942,6 +2086,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         if (!hasInitiallyLoaded || suspendListPolling) return;
         if (prevCompanyFiltersRef.current === companyFilters) return;
         prevCompanyFiltersRef.current = companyFilters;
+        // Skip — this change was caused by loading a saved search, not by user interaction.
+        if (loadedSearchRef.current) return;
         // Suppress the page useEffect from also firing a fetch when setPage(1) is called below
         suppressNextListFetchEffectRef.current = true;
         setPage(1);
@@ -1952,6 +2098,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     }, [companyFilters, hasInitiallyLoaded, suspendListPolling, pageSize, debouncedSearchTerm, resolveAdvancedPayloadForFetch, fetchCandidatesList, showIncompleteOnly, selectedJobId]);
 
@@ -2111,14 +2258,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         selectedJobId,
     ]);
 
-    // Poll backend for updates every 10s on current page
+    // Poll backend for updates every 60s on current page.
+    // Disabled when viewing a saved search — the results are already filtered and stable.
     useEffect(() => {
         if (!apiBase || !hasInitiallyLoaded || suspendListPolling) return;
+        if (loadedSearchRef.current) return; // no background polling inside a saved search
         let cancelled = false;
         let inFlight = false;
 
         const poll = async () => {
             if (cancelled || inFlight || document.hidden) return;
+            if (loadedSearchRef.current) return; // guard against race if search loaded mid-interval
             inFlight = true;
             try {
                 const res = await fetchCandidatesListResponse(
@@ -2131,6 +2281,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         dataIncomplete: showIncompleteOnly,
                         jobId: selectedJobId.trim(),
                         matchLastJobScores: true,
+                        savedSearchId: loadedSearchRef.current?.id ?? null,
                     },
                     candidatesListFetchInit(),
                 );
@@ -2211,6 +2362,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     /** Complex-query textarea: wait 1s after typing, then search with `adv` (no per-keystroke GET). */
     useEffect(() => {
         if (!apiBase || suspendListPolling) return;
+        if (loadedSearchRef.current) return; // saved-search mode: suppress auto re-fetch from debounce
         if (skipComplexFetchOnceRef.current) {
             skipComplexFetchOnceRef.current = false;
             return;
@@ -2227,6 +2379,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: resolveAdvancedPayloadForFetch(debouncedComplexRules),
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     }, [
         apiBase,
@@ -2254,6 +2407,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     }, [
         selectedJobId,
@@ -2808,21 +2962,75 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
      useEffect(() => {
         const savedSearchId = searchParamsFromUrl.get('savedSearchId');
         if (savedSearchId) {
-            const searchToLoad = savedSearches.find(s => s.id === Number(savedSearchId));
+            const searchToLoad = savedSearches.find(s => String(s.id) === String(savedSearchId));
             if (searchToLoad) {
                 if (loadedSearch?.id !== searchToLoad.id) {
-                    setSearchParams(mergeListSearchParams(searchToLoad.searchParams));
-                    setAdditionalFilters(searchToLoad.additionalFilters);
-                    setLanguageFilters(searchToLoad.languageFilters);
-                    
-                    if (searchToLoad.searchParams.complexRules) {
-                        setComplexRules(searchToLoad.searchParams.complexRules);
+                    const fs = searchToLoad.filterState;
+
+                    // Resolve the new filter values as local variables so we can
+                    // pass them directly to fetchCandidatesList — state setters are
+                    // async, so we cannot rely on React state being up-to-date yet.
+                    let newSearchParams: ListSearchParamsState;
+                    let newLangFilters: { language: string; level: string }[];
+                    let newComplexRules: ComplexFilterRule[];
+                    let newSearchTerm: string;
+                    let newCompanyFilters: { sizes: string[]; sectors: string[]; industries: string[]; fields: string[]; roles: string[] };
+
+                    if (fs && Object.keys(fs).length > 0) {
+                        newSearchParams  = fs.searchParams ? mergeListSearchParams(fs.searchParams) : mergeListSearchParams({});
+                        newComplexRules  = Array.isArray(fs.complexRules)   ? fs.complexRules   : [];
+                        newLangFilters   = Array.isArray(fs.languageFilters) ? fs.languageFilters : [];
+                        newSearchTerm    = typeof fs.searchTerm === 'string' ? fs.searchTerm     : '';
+                        newCompanyFilters = fs.companyFilters ?? { sizes: [], sectors: [], industries: [], fields: [], roles: [] };
+
+                        setSearchParams(newSearchParams);
+                        setComplexRules(newComplexRules);
+                        setAdditionalFilters(Array.isArray(fs.additionalFilters) ? fs.additionalFilters : []);
+                        setLanguageFilters(newLangFilters);
+                        setCompanyFilters(newCompanyFilters);
+                        setSearchTerm(newSearchTerm);
+                        if (typeof fs.smartSearchQuery === 'string') setSmartSearchQuery(fs.smartSearchQuery);
                     } else {
-                        setComplexRules([]);
+                        // Fallback for searches saved before filterState was introduced.
+                        newSearchParams   = mergeListSearchParams(searchToLoad.searchParams);
+                        newLangFilters    = searchToLoad.languageFilters ?? [];
+                        newComplexRules   = searchToLoad.searchParams?.complexRules ?? [];
+                        newSearchTerm     = '';
+                        newCompanyFilters = { sizes: [], sectors: [], industries: [], fields: [], roles: [] };
+
+                        setSearchParams(newSearchParams);
+                        setAdditionalFilters(searchToLoad.additionalFilters);
+                        setLanguageFilters(newLangFilters);
+                        setComplexRules(newComplexRules);
                     }
 
                     setIsAdvancedSearchOpen(true);
                     setLoadedSearch(searchToLoad);
+
+                    // Sync the ref immediately so the fetch below sends the right savedSearchId.
+                    loadedSearchRef.current = searchToLoad;
+
+                    // Suppress the page/filter effects from firing a duplicate fetch.
+                    suppressNextListFetchEffectRef.current = true;
+                    setPage(1);
+
+                    // Build the fetch payload directly from the just-resolved values
+                    // (React state is still showing the previous search at this point).
+                    const advPayload = buildAdvancedPayloadFromPanel(newSearchParams, newLangFilters, newComplexRules);
+                    const hasCF = newCompanyFilters.sizes.length || newCompanyFilters.sectors.length ||
+                                  newCompanyFilters.industries.length || newCompanyFilters.fields.length ||
+                                  newCompanyFilters.roles.length;
+                    if (hasCF) advPayload.companyFilters = newCompanyFilters;
+
+                    void fetchCandidatesList({
+                        page: 1,
+                        limit: pageSize,
+                        search: newSearchTerm,
+                        advanced: advPayload,
+                        dataIncomplete: showIncompleteOnly,
+                        jobId: selectedJobId.trim(),
+                        savedSearchId: searchToLoad.id,
+                    });
                 }
             } else {
                 setLoadedSearch(null);
@@ -2830,7 +3038,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         } else {
              setLoadedSearch(null);
         }
-    }, [searchParamsFromUrl, savedSearches, loadedSearch?.id]);
+    }, [searchParamsFromUrl, savedSearches, loadedSearch?.id, fetchCandidatesList, pageSize, showIncompleteOnly, selectedJobId]);
 
     useEffect(() => {
         const tagParam = searchParamsFromUrl.get('tag');
@@ -2913,6 +3121,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setIsPublicSearch(false);
         setIsSaveModalOpen(true);
     };
+
+    const handleOpenUpdateModal = () => {
+        setModalMode('update');
+        setSearchNameToSave(loadedSearch?.name ?? '');
+        setIsPublicSearch(loadedSearch?.isPublic ?? false);
+        setIsSaveModalOpen(true);
+    };
     
     const handleJobComparisonSearch = async () => {
         const job = jobs.find(j => j.id === selectedJobId);
@@ -2962,6 +3177,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             return;
         }
         const finalSearchParams = { ...searchParams, complexRules };
+        const filterState = {
+            searchParams,
+            complexRules,
+            additionalFilters,
+            languageFilters,
+            companyFilters,
+            searchTerm,
+            smartSearchQuery,
+        };
 
         if (modalMode === 'update' && loadedSearch) {
             updateSearch(
@@ -2970,11 +3194,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 isPublicSearch,
                 finalSearchParams,
                 additionalFilters,
-                languageFilters
+                languageFilters,
+                filterState,
             );
             setFeedbackMessage('החיתוך עודכן בהצלחה!');
         } else {
-            addSearch(searchNameToSave, isPublicSearch, finalSearchParams, additionalFilters, languageFilters);
+            addSearch(searchNameToSave, isPublicSearch, finalSearchParams, additionalFilters, languageFilters, filterState);
             setFeedbackMessage('החיתוך נשמר בהצלחה!');
         }
         setSearchNameToSave('');
@@ -3032,6 +3257,24 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         const base = candidates;
         let filtered = base;
 
+        // Optimistic client-side blacklist filter — server also enforces this by email/phone.
+        if (loadedSearch?.blacklist?.length) {
+            const blacklistedEmails = new Set(
+                loadedSearch.blacklist.map(b => String(b.candidateEmail || '').trim().toLowerCase()).filter(Boolean)
+            );
+            const blacklistedPhones = new Set(
+                loadedSearch.blacklist.map(b => String(b.candidatePhone || '').trim()).filter(Boolean)
+            );
+            filtered = filtered.filter(c => {
+                const email = String(c.email || '').trim().toLowerCase();
+                const phone = String(c.phone || '').trim();
+                return !(
+                    (email && blacklistedEmails.has(email)) ||
+                    (phone && blacklistedPhones.has(phone))
+                );
+            });
+        }
+
         if (showNeedsAttention) {
             filtered = filtered.filter(candidate => getMissingFields(candidate).length > 0);
         }
@@ -3056,7 +3299,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
 
         return sortableItems;
-    }, [candidates, sortConfig, showNeedsAttention, showFavoritesOnly, favorites]);
+    }, [candidates, sortConfig, showNeedsAttention, showFavoritesOnly, favorites, loadedSearch]);
 
     // Server already returns paginated candidates for the selected page.
     const paginatedCandidates = useMemo(() => {
@@ -3154,6 +3397,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: snapshot,
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     };
 
@@ -3182,8 +3426,84 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: null,
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     }, [pageSize, debouncedSearchTerm, fetchCandidatesList, setUrlSearchParams, showIncompleteOnly, selectedJobId]);
+
+    const handleExitSavedSearch = () => {
+        // Remove savedSearchId from URL
+        setUrlSearchParams((params) => {
+            const next = new URLSearchParams(params);
+            next.delete('savedSearchId');
+            return next;
+        }, { replace: true });
+
+        // Clear all filters
+        setSearchTerm('');
+        setDebouncedSearchTerm('');
+        setComplexRules([]);
+        setDebouncedComplexRules([]);
+        debouncedComplexRulesRef.current = [];
+        setAdditionalFilters([]);
+        setLanguageFilters([]);
+        setCompanyFilters({ sizes: [], sectors: [], industries: [], fields: [], roles: [] });
+        setSearchParams(mergeListSearchParams({}));
+        setAppliedAdvancedFilters(null);
+        setLoadedSearch(null);
+        loadedSearchRef.current = null;
+        setPage(1);
+        setSuspendListPolling(false);
+        setSemanticBaselineCandidates(null);
+        setSmartSearchQuery('');
+        try { sessionStorage.removeItem(VIEW_STATE_KEY); } catch { /* ignore */ }
+
+        setHasInitiallyLoaded(false);
+        suppressNextListFetchEffectRef.current = true;
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: '',
+            advanced: null,
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
+            savedSearchId: null,
+        });
+    };
+
+    const handleRestoreFromBlacklist = useCallback(async (
+        candidateEmail: string | null,
+        candidatePhone: string | null,
+    ) => {
+        const search = loadedSearchRef.current;
+        if (!search) return;
+
+        await removeFromSearchBlacklist(search.id, candidateEmail, candidatePhone);
+
+        suppressNextListFetchEffectRef.current = true;
+        void fetchCandidatesList({
+            page: 1,
+            limit: pageSize,
+            search: debouncedSearchTerm,
+            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRulesRef.current),
+            dataIncomplete: showIncompleteOnly,
+            jobId: selectedJobId.trim(),
+            savedSearchId: search.id,
+        });
+        setPage(1);
+    }, [
+        removeFromSearchBlacklist,
+        fetchCandidatesList,
+        pageSize,
+        debouncedSearchTerm,
+        resolveAdvancedPayloadForFetch,
+        showIncompleteOnly,
+        selectedJobId,
+    ]);
+
+    const handleOpenBlacklistedCandidate = useCallback((candidateId: string) => {
+        const search = location.search || '';
+        navigate(`/candidates/${candidateId}${search}`);
+    }, [navigate, location.search]);
 
     const handleClearSearch = () => {
         // Clear free search
@@ -3217,6 +3537,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             advanced: null,
             dataIncomplete: showIncompleteOnly,
             jobId: selectedJobId.trim(),
+            savedSearchId: loadedSearchRef.current?.id ?? null,
         });
     };
 
@@ -3843,8 +4164,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             </button>
                             <button onClick={handleOpenSaveModal} className="flex items-center gap-1 text-xs font-semibold text-primary-600 hover:text-primary-800 bg-primary-50 px-3 py-1.5 rounded-lg hover:bg-primary-100 transition">
                                 <BookmarkIcon className="w-3.5 h-3.5"/>
-                                <span>{t('candidates.save_search')}</span>
+                                <span>שמור חיפוש חדש</span>
                             </button>
+                            {loadedSearch && (
+                                <button onClick={handleOpenUpdateModal} className="flex items-center gap-1 text-xs font-semibold text-amber-600 hover:text-amber-800 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition">
+                                    <BookmarkIcon className="w-3.5 h-3.5"/>
+                                    <span>עדכן חיפוש קיים</span>
+                                </button>
+                            )}
                         </div>
                         <button onClick={handleShowResults} className="bg-primary-600 text-white font-bold py-2 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20 text-sm">
                             {t('candidates.show_results')}
@@ -3870,9 +4197,29 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 onPageChange={goToPage}
                                 onPageSizeChange={handlePageSizeSelect}
                                 prefix={
-                                    <button onClick={toggleSelectionMode} className={`p-1.5 rounded-lg border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
-                                        <CheckCircleIcon className="w-4 h-4" />
-                                    </button>
+                                    <>
+                                        <button onClick={toggleSelectionMode} className={`p-1.5 rounded-lg border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
+                                            <CheckCircleIcon className="w-4 h-4" />
+                                        </button>
+                                        {loadedSearch && (
+                                            <>
+                                                <span className="flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full bg-primary-50 border border-primary-200 text-primary-700 text-xs font-medium whitespace-nowrap max-w-[200px]" title={loadedSearch.name}>
+                                                    <BookmarkIcon className="w-3 h-3 shrink-0" />
+                                                    <span className="truncate">{loadedSearch.name}</span>
+                                                    <button onClick={handleExitSavedSearch} title="נקה חיפוש שמור" className="shrink-0 ml-0.5 rounded-full hover:bg-primary-200 text-primary-500 hover:text-primary-800 transition-colors p-0.5">
+                                                        <XMarkIcon className="w-3 h-3" />
+                                                    </button>
+                                                </span>
+                                                <SavedSearchStatsChips
+                                                    searchId={loadedSearch.id}
+                                                    resultCount={totalCandidates}
+                                                    blacklistCount={loadedSearch.blacklist?.length ?? 0}
+                                                    onRestore={handleRestoreFromBlacklist}
+                                                    onOpenCandidate={handleOpenBlacklistedCandidate}
+                                                />
+                                            </>
+                                        )}
+                                    </>
                                 }
                             />
                         </div>
@@ -3952,7 +4299,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     {columns.map(col => (
                                         <td key={col.id} className="p-4 text-text-muted">{renderCell(candidate, col.id)}</td>
                                     ))}
-                                    <td className="px-2 py-4 sticky end-0 bg-bg-card group-hover:bg-bg-hover group-[:has(:checked)]:bg-primary-50 transition-colors w-16"></td>
+                                    <td className="px-2 py-4 sticky end-0 bg-bg-card group-hover:bg-bg-hover group-[:has(:checked)]:bg-primary-50 transition-colors w-16 relative">
+                                        {loadedSearch && (
+                                            <button
+                                                onClick={e => {
+                                                    e.stopPropagation();
+                                                    blacklistFromSearch(
+                                                        loadedSearch.id,
+                                                        String(candidate.email || '').trim() || null,
+                                                        String(candidate.phone || '').trim() || null,
+                                                    );
+                                                }}
+                                                title="הסר מחיפוש זה"
+                                                className="opacity-0 group-hover:opacity-100 transition-opacity text-[10px] font-semibold text-rose-600 hover:text-white bg-rose-50 hover:bg-rose-500 px-2 flex items-center h-7 rounded border border-rose-200 hover:border-rose-600 shadow-sm whitespace-nowrap absolute top-1/2 end-4 -translate-y-1/2 z-10"
+                                            >
+                                                <XMarkIcon className="w-3.5 h-3.5 inline-block ml-0.5 shrink-0" />
+                                                הסר מרשימה זו
+                                            </button>
+                                        )}
+                                    </td>
                                 </tr>
                             ))}
                             </tbody>
@@ -3967,9 +4332,29 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 onPageChange={goToPage}
                                 onPageSizeChange={handlePageSizeSelect}
                                 prefix={
-                                    <button onClick={toggleSelectionMode} className={`p-1.5 rounded-lg border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
-                                        <CheckCircleIcon className="w-4 h-4" />
-                                    </button>
+                                    <>
+                                        <button onClick={toggleSelectionMode} className={`p-1.5 rounded-lg border-2 transition-all flex-shrink-0 ${selectionMode ? 'bg-primary-100 text-primary-700 border-primary-300' : 'bg-bg-card text-text-default border-border-default hover:border-primary-300'}`} title={t('candidates.multi_select_tooltip')}>
+                                            <CheckCircleIcon className="w-4 h-4" />
+                                        </button>
+                                        {loadedSearch && (
+                                            <>
+                                                <span className="flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-full bg-primary-50 border border-primary-200 text-primary-700 text-xs font-medium whitespace-nowrap max-w-[200px]" title={loadedSearch.name}>
+                                                    <BookmarkIcon className="w-3 h-3 shrink-0" />
+                                                    <span className="truncate">{loadedSearch.name}</span>
+                                                    <button onClick={handleExitSavedSearch} title="נקה חיפוש שמור" className="shrink-0 ml-0.5 rounded-full hover:bg-primary-200 text-primary-500 hover:text-primary-800 transition-colors p-0.5">
+                                                        <XMarkIcon className="w-3 h-3" />
+                                                    </button>
+                                                </span>
+                                                <SavedSearchStatsChips
+                                                    searchId={loadedSearch.id}
+                                                    resultCount={totalCandidates}
+                                                    blacklistCount={loadedSearch.blacklist?.length ?? 0}
+                                                    onRestore={handleRestoreFromBlacklist}
+                                                    onOpenCandidate={handleOpenBlacklistedCandidate}
+                                                />
+                                            </>
+                                        )}
+                                    </>
                                 }
                             />
                         </div>

@@ -4,7 +4,30 @@ import {
   createSavedSearch,
   updateSavedSearch,
   deleteSavedSearch,
+  blacklistCandidateFromSearch,
+  removeCandidateFromSearchBlacklist,
 } from '../services/savedSearchesApi';
+
+export interface FilterState {
+  searchParams?: Record<string, any>;
+  complexRules?: any[];
+  additionalFilters?: any[];
+  languageFilters?: any[];
+  companyFilters?: {
+    sizes: string[];
+    sectors: string[];
+    industries: string[];
+    fields: string[];
+    roles: string[];
+  };
+  searchTerm?: string;
+  smartSearchQuery?: string;
+}
+
+export interface BlacklistEntry {
+  candidateEmail?: string | null;
+  candidatePhone?: string | null;
+}
 
 export interface SavedSearch {
   id: number | string;
@@ -16,13 +39,17 @@ export interface SavedSearch {
   isAlert?: boolean;
   frequency?: 'daily' | 'weekly';
   notificationMethods?: ('email' | 'system')[];
+  filterState?: FilterState;
+  blacklist?: BlacklistEntry[];
 }
 
 interface SavedSearchesContextType {
   savedSearches: SavedSearch[];
-  addSearch: (name: string, isPublic: boolean, searchParams: any, additionalFilters: any[], languageFilters: any[], alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] }) => Promise<void>;
+  addSearch: (name: string, isPublic: boolean, searchParams: any, additionalFilters: any[], languageFilters: any[], filterState?: FilterState, alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] }) => Promise<void>;
   deleteSearch: (id: number | string) => Promise<void>;
-  updateSearch: (id: number | string, name: string, isPublic: boolean, searchParams: any, additionalFilters: any[], languageFilters: any[], alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] }) => Promise<void>;
+  updateSearch: (id: number | string, name: string, isPublic: boolean, searchParams: any, additionalFilters: any[], languageFilters: any[], filterState?: FilterState, alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] }) => Promise<void>;
+  blacklistFromSearch: (searchId: number | string, candidateEmail: string | null, candidatePhone: string | null) => Promise<void>;
+  removeFromSearchBlacklist: (searchId: number | string, candidateEmail: string | null, candidatePhone: string | null) => Promise<void>;
 }
 
 const SavedSearchesContext = createContext<SavedSearchesContextType | undefined>(undefined);
@@ -92,10 +119,12 @@ export const SavedSearchesProvider: React.FC<{ children: React.ReactNode }> = ({
     searchParams: any,
     additionalFilters: any[],
     languageFilters: any[],
+    filterState?: FilterState,
     alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] },
   ) => {
     const payload = {
       name, isPublic, searchParams, additionalFilters, languageFilters,
+      ...(filterState ? { filterState } : {}),
       ...(alertConfig || {}),
     };
 
@@ -123,10 +152,12 @@ export const SavedSearchesProvider: React.FC<{ children: React.ReactNode }> = ({
     searchParams: any,
     additionalFilters: any[],
     languageFilters: any[],
+    filterState?: FilterState,
     alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] },
   ) => {
     const payload = {
       name, isPublic, searchParams, additionalFilters, languageFilters,
+      ...(filterState ? { filterState } : {}),
       ...(alertConfig || {}),
     };
 
@@ -138,12 +169,59 @@ export const SavedSearchesProvider: React.FC<{ children: React.ReactNode }> = ({
     } catch { /* keep optimistic update */ }
   }, []);
 
+  const blacklistFromSearch = useCallback(async (
+    searchId: number | string,
+    candidateEmail: string | null,
+    candidatePhone: string | null,
+  ) => {
+    const entry: BlacklistEntry = { candidateEmail, candidatePhone };
+    // Optimistic update — immediately hide the candidate in the UI.
+    setSavedSearches(prev => prev.map(s =>
+      s.id === searchId
+        ? { ...s, blacklist: [...(s.blacklist ?? []), entry] }
+        : s,
+    ));
+    try {
+      const { blacklist } = await blacklistCandidateFromSearch(searchId, candidateEmail, candidatePhone);
+      setSavedSearches(prev => prev.map(s => s.id === searchId ? { ...s, blacklist } : s));
+    } catch { /* keep optimistic update */ }
+  }, []);
+
+  const removeFromSearchBlacklist = useCallback(async (
+    searchId: number | string,
+    candidateEmail: string | null,
+    candidatePhone: string | null,
+  ) => {
+    const emailKey = candidateEmail ? String(candidateEmail).trim().toLowerCase() : '';
+    const phoneKey = candidatePhone ? String(candidatePhone).trim() : '';
+
+    setSavedSearches(prev => prev.map(s => {
+      if (s.id !== searchId) return s;
+      const blacklist = (s.blacklist ?? []).filter((b) => {
+        const bEmail = b.candidateEmail ? String(b.candidateEmail).trim().toLowerCase() : '';
+        const bPhone = b.candidatePhone ? String(b.candidatePhone).trim() : '';
+        if (emailKey && phoneKey) return !(bEmail === emailKey && bPhone === phoneKey);
+        if (emailKey) return bEmail !== emailKey;
+        if (phoneKey) return bPhone !== phoneKey;
+        return true;
+      });
+      return { ...s, blacklist };
+    }));
+
+    try {
+      const { blacklist } = await removeCandidateFromSearchBlacklist(searchId, candidateEmail, candidatePhone);
+      setSavedSearches(prev => prev.map(s => s.id === searchId ? { ...s, blacklist } : s));
+    } catch { /* keep optimistic update */ }
+  }, []);
+
   const value = useMemo(() => ({
     savedSearches,
     addSearch,
     deleteSearch,
     updateSearch,
-  }), [savedSearches, addSearch, deleteSearch, updateSearch]);
+    blacklistFromSearch,
+    removeFromSearchBlacklist,
+  }), [savedSearches, addSearch, deleteSearch, updateSearch, blacklistFromSearch, removeFromSearchBlacklist]);
 
   return (
     <SavedSearchesContext.Provider value={value}>

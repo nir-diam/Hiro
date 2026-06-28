@@ -10,6 +10,10 @@ const { scheduleOrganizationEmbedding } = require('./organizationEmbeddingServic
 const { scheduleOrganizationEnrichment } = require('./organizationEnrichmentService');
 const { embedTextCached } = require('./embeddingService');
 const promptService = require('./promptService');
+const {
+  GENERIC_BUCKET_SUFFIXES,
+  normalizeGenericBucketLabel,
+} = require('../constants/genericOrganizationBuckets');
 
 // ─── Embedding helpers ────────────────────────────────────────────────────────
 
@@ -64,7 +68,57 @@ const diceCoefficient = (a = '', b = '') => {
 
 const API_ATTRIBUTES = { exclude: ['embedding'] };
 
-const list = async ({ includeMerged = false, page = 1, limit = 50, search = '' } = {}) => {
+/** ILIKE on name fields + any entry in aliases[] */
+const organizationSearchWhere = (search) => {
+  const trimmed = String(search || '').trim();
+  if (!trimmed) return {};
+
+  const sequelize = Organization.sequelize;
+  const orConditions = [
+    { name: { [Op.iLike]: `%${trimmed}%` } },
+    { nameEn: { [Op.iLike]: `%${trimmed}%` } },
+    { legalName: { [Op.iLike]: `%${trimmed}%` } },
+  ];
+
+  if (sequelize) {
+    const escapedLike = sequelize.escape(`%${trimmed}%`);
+    orConditions.push(
+      sequelize.literal(
+        `EXISTS (SELECT 1 FROM unnest(COALESCE("aliases", ARRAY[]::text[])) alias WHERE alias ILIKE ${escapedLike})`,
+      ),
+    );
+  }
+
+  return { [Op.or]: orConditions };
+};
+
+const parseInclusiveDateFrom = (value) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return new Date(`${trimmed}T00:00:00.000Z`);
+  }
+  return new Date(trimmed);
+};
+
+const parseInclusiveDateTo = (value) => {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return new Date(`${trimmed}T23:59:59.999Z`);
+  }
+  return new Date(trimmed);
+};
+
+const list = async ({
+  includeMerged = false,
+  page = 1,
+  limit = 50,
+  search = '',
+  activityDate,
+  activityFrom,
+  activityTo,
+} = {}) => {
   const activityWhere = includeMerged ? {} : {
     [Op.or]: [
       { activityStatus: { [Op.ne]: 'merged' } },
@@ -72,17 +126,27 @@ const list = async ({ includeMerged = false, page = 1, limit = 50, search = '' }
     ],
   };
 
-  const searchWhere = search
-    ? {
-        [Op.or]: [
-          { name: { [Op.iLike]: `%${search}%` } },
-          { nameEn: { [Op.iLike]: `%${search}%` } },
-          { legalName: { [Op.iLike]: `%${search}%` } },
-        ],
-      }
-    : {};
+  const searchWhere = organizationSearchWhere(search);
 
   const where = { [Op.and]: [activityWhere, searchWhere] };
+
+  if (activityDate || activityFrom || activityTo) {
+    const rangeStart = parseInclusiveDateFrom(activityFrom || activityDate);
+    const rangeEnd = parseInclusiveDateTo(activityTo || activityDate);
+    const createdRange = {};
+    const updatedRange = {};
+    if (rangeStart) {
+      createdRange[Op.gte] = rangeStart;
+      updatedRange[Op.gte] = rangeStart;
+    }
+    if (rangeEnd) {
+      createdRange[Op.lte] = rangeEnd;
+      updatedRange[Op.lte] = rangeEnd;
+    }
+    where[Op.and].push({
+      [Op.or]: [{ createdAt: createdRange }, { updatedAt: updatedRange }],
+    });
+  }
   const offset = (page - 1) * limit;
 
   const { count, rows: orgs } = await Organization.findAndCountAll({
@@ -153,8 +217,15 @@ const findByAnyName = async ({ name, nameEn, legalName }) => {
 const ensureIndustryPicklistEntries = async (mainField, subField) => {
   if (!mainField) return null;
   const mainCategory = await picklistService.ensureMainFieldCategory(mainField);
-  if (mainCategory && subField) {
-    await picklistService.ensureCategoryValueByLabel(mainCategory.id, subField);
+  const subFields = Array.isArray(subField)
+    ? subField.map((s) => String(s || '').trim()).filter(Boolean)
+    : subField
+      ? [String(subField).trim()].filter(Boolean)
+      : [];
+  if (mainCategory) {
+    for (const sf of subFields) {
+      await picklistService.ensureCategoryValueByLabel(mainCategory.id, sf);
+    }
   }
   return mainCategory;
 };
@@ -178,6 +249,17 @@ const sanitizePayload = (payload) => {
     const bucket = normalizeEmployeeCount(out.employeeCount);
     out.employeeCount = bucket || null;
   }
+  for (const key of ['mainField2', 'subField', 'businessModel', 'productType']) {
+    if (!(key in out)) continue;
+    const val = out[key];
+    if (Array.isArray(val)) {
+      out[key] = val.map((x) => String(x || '').trim()).filter(Boolean);
+    } else if (val != null && String(val).trim() !== '') {
+      out[key] = [String(val).trim()];
+    } else {
+      out[key] = [];
+    }
+  }
   delete out.embedding;
   return out;
 };
@@ -197,6 +279,9 @@ const create = async (payload) => {
     throw err;
   }
   await ensureIndustryPicklistEntries(clean.mainField, clean.subField);
+  for (const mf of clean.mainField2 || []) {
+    await ensureIndustryPicklistEntries(mf, []);
+  }
   const org = await Organization.create(clean);
   scheduleOrganizationEmbedding(org);
   return org;
@@ -206,6 +291,10 @@ const update = async (id, payload) => {
   const org = await getById(id);
   const clean = sanitizePayload(payload);
   await ensureIndustryPicklistEntries(clean.mainField || org.mainField, clean.subField || org.subField);
+  const extraMains = clean.mainField2 ?? org.mainField2 ?? [];
+  for (const mf of extraMains) {
+    await ensureIndustryPicklistEntries(mf, []);
+  }
   await org.update(clean);
   scheduleOrganizationEmbedding(org);
   return org;
@@ -262,22 +351,37 @@ const findTmpByName = async (name) => {
 
 /**
  * Find similar organizations using embedding cosine similarity (top N).
+ * scope: 'regular' = exclude generic buckets; 'generic' = only generic buckets.
  * Falls back to text fuzzy-match when no embeddings are available.
  * Returns [{id, name, similarity}] where similarity is 0-100.
  */
-const findSimilarOrganizations = async (name, topN = 10) => {
+const buildScopeNameFilter = (scope) => {
+  const suffixConditions = GENERIC_BUCKET_SUFFIXES.map((suffix) => ({
+    name: { [Op.iLike]: `%${suffix}%` },
+  }));
+  if (scope === 'generic') return { [Op.or]: suffixConditions };
+  if (scope === 'regular') return { [Op.not]: { [Op.or]: suffixConditions } };
+  return {};
+};
+
+const findSimilarOrganizations = async (name, topN = 10, { scope = 'regular' } = {}) => {
   const trimmed = String(name || '').trim();
   if (!trimmed) return [];
+  const scopeFilter = buildScopeNameFilter(scope);
 
   // ── 1. Try embedding-based similarity ──────────────────────────────────────
   try {
     const queryEmbedding = await embedTextCached(trimmed);
 
     if (Array.isArray(queryEmbedding) && queryEmbedding.length) {
-      // Load all orgs that have a stored embedding (slim query, no heavy joins)
       const rows = await Organization.findAll({
         attributes: ['id', 'name', 'nameEn', 'embedding'],
-        where: { embedding: { [Op.ne]: null } },
+        where: {
+          [Op.and]: [
+            { embedding: { [Op.ne]: null } },
+            scopeFilter,
+          ],
+        },
         raw: true,
       });
 
@@ -298,40 +402,135 @@ const findSimilarOrganizations = async (name, topN = 10) => {
         .slice(0, topN);
 
       if (scored.length) return scored;
-      // If no orgs have embeddings yet, fall through to text search
     }
   } catch (err) {
     console.warn('[orgService] embedding similarity failed, falling back to text search:', err?.message);
   }
 
-  // ── 2. Text fuzzy-match fallback (with real bigram similarity) ───────────────
+  // ── 2. Text fuzzy-match fallback ─────────────────────────────────────────────
   try {
-    // Search by first 20 chars to cast a wide net, then score all candidates
     const searchPrefix = trimmed.substring(0, 20);
     const rows = await Organization.findAll({
       attributes: ['id', 'name', 'nameEn'],
       where: {
-        [Op.or]: [
-          { name: { [Op.iLike]: `%${searchPrefix}%` } },
-          { nameEn: { [Op.iLike]: `%${searchPrefix}%` } },
+        [Op.and]: [
+          scopeFilter,
+          {
+            [Op.or]: [
+              { name: { [Op.iLike]: `%${searchPrefix}%` } },
+              { nameEn: { [Op.iLike]: `%${searchPrefix}%` } },
+            ],
+          },
         ],
       },
-      limit: topN * 3, // fetch more so we can re-rank
+      limit: topN * 3,
       raw: true,
     });
     return rows
       .map((r) => {
         const displayName = r.name || r.nameEn || '';
-        const simName   = diceCoefficient(trimmed, r.name   || '');
+        const simName = diceCoefficient(trimmed, r.name || '');
         const simNameEn = diceCoefficient(trimmed, r.nameEn || '');
         return { id: r.id, name: displayName, similarity: Math.max(simName, simNameEn) };
       })
-      .filter((r) => r.similarity >= 20)   // skip very weak matches
+      .filter((r) => r.similarity >= 20)
       .sort((a, b) => b.similarity - a.similarity)
       .slice(0, topN);
   } catch {
     return [];
   }
+};
+
+/** Load generic-bucket Organization rows (כללי / legacy גנרי). */
+const findGenericBucketOrganizations = async () => {
+  const suffixConditions = GENERIC_BUCKET_SUFFIXES.map((suffix) => ({
+    name: { [Op.iLike]: `%${suffix}%` },
+  }));
+  const rows = await Organization.findAll({
+    attributes: ['id', 'name'],
+    where: { [Op.or]: suffixConditions },
+    order: [['name', 'ASC']],
+    raw: true,
+  });
+  return rows.map((r) => ({ id: r.id, name: r.name }));
+};
+
+const addTermAsAlias = async (targetOrg, term) => {
+  if (!targetOrg || !term) return false;
+  const trimmed = String(term).trim();
+  if (!trimmed) return false;
+  const currentAliases = Array.isArray(targetOrg.aliases) ? targetOrg.aliases : [];
+  const alreadyAlias =
+    currentAliases.some((a) => String(a).toLowerCase() === trimmed.toLowerCase()) ||
+    String(targetOrg.name || '').toLowerCase() === trimmed.toLowerCase();
+  if (alreadyAlias) return false;
+  await targetOrg.update({ aliases: [...currentAliases, trimmed] });
+  return true;
+};
+
+/** Similar-entity list for UI + AI decision log — embedding-ranked, single scope. */
+const buildSimilarEntities = (similarCompanies = [], kind = 'company') => {
+  const merged = [];
+  const seen = new Set();
+
+  for (const c of similarCompanies) {
+    const name = String(c.name || '').trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+    merged.push({
+      name,
+      similarity: typeof c.similarity === 'number' ? c.similarity : 0,
+      kind: kind === 'generic' ? 'generic' : 'company',
+    });
+  }
+
+  return merged.sort((a, b) => b.similarity - a.similarity);
+};
+
+const similarEntitiesForDecision = (decision, { regularSimilar, genericSimilar, parsedSimilar, genericBuckets }) => {
+  const isGenericDecision = decision === 'map_generic';
+  const semanticPool = isGenericDecision ? genericSimilar : regularSimilar;
+  const kind = isGenericDecision ? 'generic' : 'company';
+  const allowedNames = isGenericDecision
+    ? [...semanticPool.map((c) => c.name), ...genericBuckets.map((b) => b.name)]
+    : regularSimilar.map((c) => c.name);
+
+  const aiSimilar = sanitizeAiSimilarEntities(parsedSimilar, allowedNames).map((e) => ({
+    ...e,
+    kind,
+  }));
+  return aiSimilar.length ? aiSimilar : buildSimilarEntities(semanticPool, kind);
+};
+
+const resolveGenericBucketTarget = (target, genericBuckets = []) => {
+  const raw = String(target || '').trim();
+  if (!raw || !genericBuckets.length) return null;
+
+  const candidates = [raw, normalizeGenericBucketLabel(raw)];
+  for (const c of candidates) {
+    const exact = genericBuckets.find((b) => b.name === c);
+    if (exact) return exact;
+    const ci = genericBuckets.find((b) => String(b.name).toLowerCase() === c.toLowerCase());
+    if (ci) return ci;
+  }
+
+  const normalizedTarget = normalizeGenericBucketLabel(raw).toLowerCase();
+  return (
+    genericBuckets.find(
+      (b) => normalizeGenericBucketLabel(b.name).toLowerCase() === normalizedTarget,
+    ) || null
+  );
+};
+
+const sanitizeAiSimilarEntities = (entities, allowedNames) => {
+  const allowed = new Set([...allowedNames].map((n) => String(n).toLowerCase()));
+  if (!Array.isArray(entities)) return [];
+  return entities
+    .map((e) => ({
+      name: String(e?.name || '').trim(),
+      similarity: typeof e?.similarity === 'number' ? e.similarity : 0,
+    }))
+    .filter((e) => e.name && allowed.has(e.name.toLowerCase()));
 };
 
 /**
@@ -340,8 +539,9 @@ const findSimilarOrganizations = async (name, topN = 10) => {
  * similarCompanies should be [{id, name, similarity}] from embedding search.
  * Returns null on any error so the caller can fall back to safe defaults.
  */
-const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies = [] }) => {
+const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies = [], genericSimilar = [] }) => {
   try {
+    const genericBuckets = await findGenericBucketOrganizations();
     const promptRow = await promptService.ensureById('organization_ai_enriched');
     if (!promptRow) {
       console.warn('[orgService] organization_ai_enriched prompt not found');
@@ -351,8 +551,13 @@ const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies 
     const inputJson = JSON.stringify({
       original_term: term,
       context,
-      // Pass similarity scores so the AI can use them in its reasoning
       existing_companies: similarCompanies.map((c) => ({
+        id: c.id,
+        name: c.name,
+        similarity: c.similarity ?? 0,
+      })),
+      generic_buckets: genericBuckets.map((b) => ({ id: b.id, name: b.name })),
+      generic_similar: genericSimilar.map((c) => ({
         id: c.id,
         name: c.name,
         similarity: c.similarity ?? 0,
@@ -378,27 +583,52 @@ const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies 
       return null;
     }
     const parsed = JSON.parse(jsonMatch[0]);
+
+    let decision = parsed.decision || 'create_company';
+    let target = parsed.target || null;
+    let targetId = parsed.targetId || null;
+
+    if (decision === 'map_generic') {
+      const resolved = resolveGenericBucketTarget(target, genericBuckets);
+      if (resolved) {
+        target = resolved.name;
+        targetId = resolved.id;
+      } else {
+        console.warn(`[orgService] map_generic invented/unknown target "${target}" — forcing manual review`);
+        decision = 'manual_review';
+        target = null;
+        targetId = null;
+        parsed.hesitationLevel = Math.max(typeof parsed.hesitationLevel === 'number' ? parsed.hesitationLevel : 0, 70);
+      }
+    } else if (decision === 'merge_company' && targetId) {
+      const mergeMatch = similarCompanies.find((c) => String(c.id) === String(targetId));
+      if (mergeMatch) target = mergeMatch.name;
+    }
+
+    const similarEntities = similarEntitiesForDecision(decision, {
+      regularSimilar: similarCompanies,
+      genericSimilar,
+      parsedSimilar: parsed.similarEntities,
+      genericBuckets,
+    });
+
     console.log(`[orgService] AI decision for "${term}":`, {
-      decision: parsed.decision,
-      target: parsed.target,
-      targetId: parsed.targetId,
+      decision,
+      target,
+      targetId,
       hesitationLevel: parsed.hesitationLevel,
     });
     const hesitationLevel = typeof parsed.hesitationLevel === 'number' ? parsed.hesitationLevel : null;
 
     return {
-      decision: parsed.decision || 'create_company',
-      target: parsed.target || null,
-      targetId: parsed.targetId || null,
+      decision,
+      target,
+      targetId,
       explanation: parsed.explanation || '',
       hesitationLevel,
       dilemmaReasoning: parsed.dilemmaReasoning || '',
-      // Merge AI-reported similar entities with our embedding scores for a richer display
-      similarEntities: Array.isArray(parsed.similarEntities) && parsed.similarEntities.length
-        ? parsed.similarEntities
-        : similarCompanies.slice(0, 5).map((c) => ({ name: c.name, similarity: c.similarity ?? 0 })),
-      // Derived: anything >= 60 goes to manual queue
-      needsManualReview: hesitationLevel !== null && hesitationLevel >= 60,
+      similarEntities,
+      needsManualReview: hesitationLevel !== null && hesitationLevel >= 40,
     };
   } catch (err) {
     console.error('[orgService] askAiForOrgDecision error:', err.message);
@@ -462,17 +692,18 @@ const findOrCreateByName = async (name, defaults = {}) => {
   console.log(`[orgService] "${trimmed}" → new term, starting AI classification...`);
   const { candidateId, context: ctxOverride, ...restDefaults } = defaults;
   const context = ctxOverride || 'resume';
-  const similarCompanies = await findSimilarOrganizations(trimmed);
+  const similarCompanies = await findSimilarOrganizations(trimmed, 10, { scope: 'regular' });
+  const genericSimilar = await findSimilarOrganizations(trimmed, 10, { scope: 'generic' });
 
   // 4. Ask the AI to classify this company name
-  const aiResult = await askAiForOrgDecision({ term: trimmed, context, similarCompanies });
+  const aiResult = await askAiForOrgDecision({ term: trimmed, context, similarCompanies, genericSimilar });
 
   const band = hesitationBand(aiResult?.hesitationLevel ?? null);
   // LLM-declared manual_review always forces 'manual' regardless of hesitation band
   const reviewStatus = aiResult?.decision === 'manual_review' ? 'manual' : reviewStatusFromBand(band);
   const similarEntities = aiResult
     ? aiResult.similarEntities
-    : similarCompanies.slice(0, 5).map((c) => ({ name: c.name, similarity: c.similarity ?? 0 }));
+    : buildSimilarEntities(similarCompanies, 'company');
 
   const saveDecision = (extra = {}) =>
     OrganizationAiDecision.create({
@@ -494,13 +725,8 @@ const findOrCreateByName = async (name, defaults = {}) => {
   if (aiResult?.decision === 'merge_company' && band === 'vodai' && aiResult.targetId) {
     const targetOrg = await Organization.findByPk(aiResult.targetId);
     if (targetOrg) {
-      // Add the incoming name as an alias on the target org (if not already there)
-      const currentAliases = Array.isArray(targetOrg.aliases) ? targetOrg.aliases : [];
-      const alreadyAlias =
-        currentAliases.some((a) => a.toLowerCase() === trimmed.toLowerCase()) ||
-        (targetOrg.name || '').toLowerCase() === trimmed.toLowerCase();
-      if (!alreadyAlias) {
-        await targetOrg.update({ aliases: [...currentAliases, trimmed] });
+      const added = await addTermAsAlias(targetOrg, trimmed);
+      if (added) {
         console.log(`[orgService] merge_company: added alias "${trimmed}" → "${targetOrg.name}"`);
       }
       saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_merge' });
@@ -508,7 +734,19 @@ const findOrCreateByName = async (name, defaults = {}) => {
     }
   }
 
-  // ── 6. map_generic + ודאי → skip, log only ───────────────────────────────
+  // ── 6. map_generic + ודאי → alias on generic bucket org ───────────────────
+  if (aiResult?.decision === 'map_generic' && band === 'vodai' && aiResult.targetId) {
+    const targetOrg = await Organization.findByPk(aiResult.targetId);
+    if (targetOrg) {
+      const added = await addTermAsAlias(targetOrg, trimmed);
+      if (added) {
+        console.log(`[orgService] map_generic: added alias "${trimmed}" → "${targetOrg.name}"`);
+      }
+      saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_map_generic' });
+      return targetOrg;
+    }
+  }
+
   if (aiResult?.decision === 'map_generic' && band === 'vodai') {
     saveDecision({ reviewStatus: 'pending_review' });
     return null;
@@ -566,5 +804,6 @@ module.exports = {
   getByIds,
   findByName,
   findOrCreateByName,
+  findGenericBucketOrganizations,
 };
 

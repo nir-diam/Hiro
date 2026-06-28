@@ -9,6 +9,7 @@ export type CandidatesListRequest = {
     dataIncomplete?: boolean;
     jobId?: string;
     matchLastJobScores?: boolean | '0' | '1';
+    savedSearchId?: string | number | null;
 };
 
 export function shouldPostCandidatesList(req: CandidatesListRequest): boolean {
@@ -40,6 +41,7 @@ export async function fetchCandidatesListResponse(
         if (req.matchLastJobScores != null) {
             body.matchLastJobScores = req.matchLastJobScores === false ? '0' : '1';
         }
+        if (req.savedSearchId != null) body.savedSearchId = String(req.savedSearchId);
         return fetch(`${base}/api/candidates/search/list`, {
             ...init,
             method: 'POST',
@@ -66,5 +68,6 @@ export async function fetchCandidatesListResponse(
     if (req.matchLastJobScores != null) {
         params.set('matchLastJobScores', req.matchLastJobScores === false ? '0' : '1');
     }
+    if (req.savedSearchId != null) params.set('savedSearchId', String(req.savedSearchId));
     return fetch(`${base}/api/candidates?${params.toString()}`, init);
 }

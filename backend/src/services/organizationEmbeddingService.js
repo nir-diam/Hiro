@@ -19,6 +19,11 @@ const sanitizeEmbedding = (emb) => {
   return undefined;
 };
 
+const pushSegment = (segments, val) => {
+  if (Array.isArray(val)) segments.push(...val.map((x) => String(x || '').trim()).filter(Boolean));
+  else if (val) segments.push(String(val).trim());
+};
+
 const buildEmbeddingText = (org) => {
   const plain = org?.toJSON ? org.toJSON() : org || {};
   const segments = [
@@ -27,11 +32,8 @@ const buildEmbeddingText = (org) => {
     plain.legalName,
     plain.description,
     plain.mainField,
-    plain.subField,
     plain.secondaryField,
     plain.type,
-    plain.businessModel,
-    plain.productType,
     plain.classification,
     plain.location,
     plain.hqCountry,
@@ -39,6 +41,9 @@ const buildEmbeddingText = (org) => {
     plain.structure,
     plain.parentCompany,
   ];
+  pushSegment(segments, plain.subField);
+  pushSegment(segments, plain.businessModel);
+  pushSegment(segments, plain.productType);
   if (Array.isArray(plain.aliases)) segments.push(...plain.aliases.filter(Boolean));
   if (Array.isArray(plain.tags)) segments.push(...plain.tags.filter(Boolean));
   if (Array.isArray(plain.techTags)) segments.push(...plain.techTags.filter(Boolean));

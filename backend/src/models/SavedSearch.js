@@ -57,6 +57,11 @@ const SavedSearch = sequelize.define(
       defaultValue: [],
       field: 'notification_methods',
     },
+    filterState: {
+      type: DataTypes.JSONB,
+      defaultValue: {},
+      field: 'filter_state',
+    },
   },
   {
     tableName: 'saved_searches',

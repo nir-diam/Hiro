@@ -803,6 +803,20 @@ const buildPersistFieldsFromAiParse = (ai, fallback = {}) => {
   return out;
 };
 
+const MILITARY_EXPERIENCE_RE =
+  /צה["']?ל|צבא|שירות\s+צבאי|שירות\s+בצבא|\bidf\b|חיל\s+ה|חייל|מג"ב|גולני|נח"ל|עוצב|שב"?ס|מודיעין|שריון|חיל\s+האוויר|חיל\s+הים|חיל\s+התותחנים|חיל\s+החימוש|חיל\s+הלוגיסטיקה|חיל\s+הקשר|חיל\s+המשלוחים|חיל\s+הרפואה|חיל\s+החינוך|חיל\s+המשטרה|משטרה\s+צבאית/i;
+
+const isMilitaryWorkEntry = (entry) => {
+  if (!entry || typeof entry !== 'object') return false;
+  if (entry.isMilitary === true || entry.type === 'military' || entry.category === 'military') {
+    return true;
+  }
+  const blob = [entry.title, entry.company, entry.companyField, entry.description]
+    .filter((v) => v != null && String(v).trim())
+    .join(' ');
+  return MILITARY_EXPERIENCE_RE.test(blob);
+};
+
 const normalizeWorkExperience = (arr) => {
   if (!Array.isArray(arr)) return [];
   return arr
@@ -814,7 +828,7 @@ const normalizeWorkExperience = (arr) => {
       if (!title && !company && !description) return null;
       const startDate = String(x.startDate || '').trim() || '2000-01';
       const endDate = String(x.endDate || '').trim() || (startDate || '2000-12');
-      return {
+      const base = {
         id: x.id || idx + 1,
         title: title || 'ניסיון תעסוקתי',
         company,
@@ -823,6 +837,9 @@ const normalizeWorkExperience = (arr) => {
         endDate,
         description: description || [title, company].filter(Boolean).join(' - '),
       };
+      return isMilitaryWorkEntry({ title, company, companyField: base.companyField, description, ...x })
+        ? { ...base, isMilitary: true }
+        : base;
     })
     .filter(Boolean);
 };
@@ -972,6 +989,9 @@ const ensureOrganizationsFromExperience = async (experience, candidateId = null)
         return org;
       }),
     );
+    if (candidateId) {
+      await candidateService.refreshCompanyExperiencesForCandidate(candidateId);
+    }
   } catch (err) {
     console.error('Failed to sync organizations for work experience', err);
   }
@@ -1175,6 +1195,15 @@ const CV_PARSING_TAG_COUNT_APPENDIX = `
 - There is NO maximum tag count. Extract every relevant professional tag supported by evidence in the CV.
 - Include roles, skills, tools, seniority, industry, methodologies, degrees, and soft skills whenever they appear.
 - Still aim for at least 1-2 Role tags, one Seniority tag, and one Industry tag when the CV supports them.
+`;
+
+/** Military service → workExperience (shown separately as ניסיון צבאי in formatted CV). */
+const CV_PARSING_MILITARY_APPENDIX = `
+--- Military service (שירות צבאי) ---
+- If the CV mentions IDF / צה"ל / שירות צבאי / army service, add one or more entries to workExperience.
+- Use company "צה"ל" (or the specific unit/branch name when stated) and title = role/rank/position when stated.
+- Include startDate/endDate when the CV states service years or dates.
+- Do NOT omit military service — it belongs in workExperience like civilian jobs (the UI splits it automatically).
 `;
 
 /** Sequelize attribute type → short label for LLM context */
@@ -1392,7 +1421,7 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{JSON\}/g, schemaJson).replace(/\$JSON/g, schemaJson);
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
-    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}`;
+    template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}\n${CV_PARSING_MILITARY_APPENDIX}`;
     resumePromptCache = { ...record, template };
   } catch (err) {
     console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);
@@ -1586,6 +1615,12 @@ const parseCandidateListParams = (req) => {
         String(matchLastJobScoresRaw || '').toLowerCase() === 'true')
     : true;
 
+  const savedSearchIdRaw = src.savedSearchId ?? src.saved_search_id;
+  const savedSearchId =
+    savedSearchIdRaw != null && String(savedSearchIdRaw).trim() !== ''
+      ? String(savedSearchIdRaw).trim()
+      : null;
+
   return {
     page,
     limit: clampedLimit,
@@ -1595,6 +1630,7 @@ const parseCandidateListParams = (req) => {
     filterTagId,
     includeEngineScores,
     matchLastJobScores,
+    savedSearchId,
   };
 };
 
@@ -1608,7 +1644,21 @@ const runCandidateList = async (req, res) => {
     filterTagId,
     includeEngineScores,
     matchLastJobScores,
+    savedSearchId,
   } = parseCandidateListParams(req);
+
+  // Load blacklist for this saved search so we can exclude by email/phone server-side.
+  let blacklistedEmails = [];
+  let blacklistedPhones = [];
+  if (savedSearchId) {
+    const SavedSearchBlacklist = require('../models/SavedSearchBlacklist');
+    const entries = await SavedSearchBlacklist.findAll({
+      where: { savedSearchId },
+      attributes: ['candidateEmail', 'candidatePhone'],
+    });
+    blacklistedEmails = entries.map((e) => e.candidateEmail).filter(Boolean);
+    blacklistedPhones = entries.map((e) => e.candidatePhone).filter(Boolean);
+  }
 
   const tenantClientId = await getStaffClientIdFromRequest(req);
   const payload = await candidateService.listPaginated({
@@ -1621,6 +1671,8 @@ const runCandidateList = async (req, res) => {
     tenantClientId,
     includeEngineScores,
     matchLastJobScores,
+    blacklistedEmails,
+    blacklistedPhones,
   });
   const safeRows = (Array.isArray(payload.rows) ? payload.rows : []).map((row) => {
     if (!row || typeof row !== 'object') return row;

@@ -5,15 +5,16 @@ import {
     MagnifyingGlassIcon, PlusIcon, PencilIcon, TrashIcon, CheckIcon, XMarkIcon, 
     SparklesIcon, TagIcon, BuildingOffice2Icon, CheckCircleIcon, NoSymbolIcon,
     ChevronDownIcon, ArrowLeftIcon, ArrowUpTrayIcon, DocumentArrowDownIcon, ChatBubbleBottomCenterTextIcon,
-    Bars3Icon, Squares2X2Icon, TableCellsIcon, ListBulletIcon, CalendarDaysIcon
+    Bars3Icon, Squares2X2Icon, TableCellsIcon, ListBulletIcon, CalendarDaysIcon, ArrowDownTrayIcon
 } from './Icons';
 import HiroAIChat from './HiroAIChat';
+import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 
 // --- NEW DATA MODEL ---
 type TagStatus = 'active' | 'draft' | 'deprecated' | 'archived' | 'pending';
 type TagType = 'role' | 'skill' | 'industry' | 'tool' | 'certification' | 'language' | 'seniority' | 'domain';
 type QualityState = 'verified' | 'needs_review' | 'experimental' | 'initial_detection';
-type TagSource = 'system' | 'admin' | 'user' | 'ai' | 'manual';
+type TagSource = 'system' | 'admin' | 'user' | 'ai' | 'manual' | 'job';
 
 interface TagSynonym {
     id: string;
@@ -43,7 +44,9 @@ interface Tag {
     usageCount: number;
     lastUsedAt?: string;
     createdAt?: string;
+    created_at?: string;
     updatedAt?: string;
+    updated_at?: string;
     createdBy?: string;
     updatedBy?: string;
     internalNote?: string;
@@ -115,9 +118,17 @@ const normalizeIncomingSynonyms = (synonyms?: any[]): TagSynonym[] => {
     return normalized as TagSynonym[];
 };
 
-type SourceFilterValue = '' | 'ai' | 'manual' | 'candidate' | 'curator';
+type SourceFilterValue = 'ai' | 'manual' | 'candidate' | 'curator' | 'job';
 
-type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'status' | 'createdAt' | 'source' | 'usageCount' | 'jobUsageCount';
+const SOURCE_FILTER_OPTIONS: { value: SourceFilterValue; label: string }[] = [
+    { value: 'ai', label: 'AI' },
+    { value: 'manual', label: 'ידני' },
+    { value: 'candidate', label: 'מועמד' },
+    { value: 'curator', label: 'רכז' },
+    { value: 'job', label: 'job' },
+];
+
+type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'status' | 'updatedAt' | 'source' | 'usageCount' | 'jobUsageCount';
 type SortConfig = { key: SortKey | null; direction: 'asc' | 'desc' };
 
 const getRelativeTimeLabel = (date?: Date | string) => {
@@ -167,6 +178,7 @@ const formatDateOnly = (value?: string | Date) => {
 const mapSourceToFilterValue = (value?: TagSource): SourceFilterValue => {
     if (value === 'ai') return 'ai';
     if (value === 'manual') return 'manual';
+    if (value === 'job') return 'job';
     if (value === 'user') return 'candidate';
     if (value === 'admin' || value === 'system') return 'curator';
     return 'manual';
@@ -176,6 +188,7 @@ const getSourceDisplayName = (value?: TagSource) => {
     if (!value) return 'ידני';
     if (value === 'ai') return 'AI';
     if (value === 'manual') return 'ידני';
+    if (value === 'job') return 'job';
     if (value === 'user') return 'מועמד';
     if (value === 'admin' || value === 'system') return 'רכז';
     return value;
@@ -1058,13 +1071,13 @@ const AdminTagsView: React.FC = () => {
     const typeDropdownRef = useRef<HTMLDivElement>(null);
     const categoryDropdownRef = useRef<HTMLDivElement>(null);
     const statusDropdownRef = useRef<HTMLDivElement>(null);
-    const [sourceFilter, setSourceFilter] = useState<SourceFilterValue>('');
-    const [createdFrom, setCreatedFrom] = useState('');
-    const [createdTo, setCreatedTo] = useState('');
-    const [updatedFrom, setUpdatedFrom] = useState('');
-    const [updatedTo, setUpdatedTo] = useState('');
+    const sourceDropdownRef = useRef<HTMLDivElement>(null);
+    const [sourceDropdownOpen, setSourceDropdownOpen] = useState(false);
+    const [selectedSources, setSelectedSources] = useState<SourceFilterValue[]>([]);
+    const [activityFrom, setActivityFrom] = useState('');
+    const [activityTo, setActivityTo] = useState('');
     const [sortConfig, setSortConfig] = useState<SortConfig>({ key: 'tagKey', direction: 'asc' });
-    const [columnOrder, setColumnOrder] = useState<SortKey[]>(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'createdAt', 'source', 'usageCount', 'jobUsageCount']);
+    const [columnOrder, setColumnOrder] = useState<SortKey[]>(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'updatedAt', 'source', 'usageCount', 'jobUsageCount']);
     const [inlineLoading, setInlineLoading] = useState<Record<string, boolean>>({});
     const [bulkActionType, setBulkActionType] = useState<'delete' | 'reassign'>('delete');
     const [bulkTargetTagId, setBulkTargetTagId] = useState<string>('');
@@ -1155,6 +1168,10 @@ const AdminTagsView: React.FC = () => {
         setSelectedStatuses(prev => prev.includes(value) ? prev.filter(item => item !== value) : [...prev, value]);
     };
 
+    const toggleSourceSelection = (value: SourceFilterValue) => {
+        setSelectedSources(prev => prev.includes(value) ? prev.filter(item => item !== value) : [...prev, value]);
+    };
+
     const toggleSort = (key: SortKey) => {
         setSortConfig(prev => {
             if (prev.key === key) {
@@ -1171,7 +1188,7 @@ const AdminTagsView: React.FC = () => {
         type: { label: 'סוג' },
         category: { label: 'קטגוריה' },
         status: { label: 'סטטוס' },
-        createdAt: { label: 'תאריך יצירה' },
+        updatedAt: { label: 'תאריך' },
         source: { label: 'מקור' },
         usageCount: { label: 'שימוש במועמדים' },
         jobUsageCount: { label: 'שימוש במשרות' },
@@ -1263,9 +1280,16 @@ const AdminTagsView: React.FC = () => {
                         )}
                     </td>
                 );
-            case 'createdAt':
+            case 'updatedAt':
                 return (
-                    <td className="p-4 text-xs text-text-muted">{formatDateTime(tag.createdAt || tag.lastUsedAt)}</td>
+                    <td className="p-4 text-xs text-text-muted">
+                        <div>{formatDateTime(tag.updatedAt || tag.updated_at)}</div>
+                        {(tag.createdAt || tag.created_at) && (
+                            <div className="text-[10px] text-text-muted/70">
+                                נוצר: {formatDateTime(tag.createdAt || tag.created_at)}
+                            </div>
+                        )}
+                    </td>
                 );
             case 'source':
                 return (
@@ -1361,30 +1385,58 @@ const AdminTagsView: React.FC = () => {
         }
     }, [apiBase]);
 
-    const loadTags = useCallback(async () => {
+    const listQueryKey = useMemo(
+        () => JSON.stringify({
+            debouncedSearchTerm,
+            synonymFilter,
+            selectedTypes: [...selectedTypes].sort(),
+            selectedCategories: [...selectedCategories].sort(),
+            selectedStatuses: [...selectedStatuses].sort(),
+            selectedSources: [...selectedSources].sort(),
+            activityFrom,
+            activityTo,
+            sortKey: sortConfig.key,
+            sortDir: sortConfig.direction,
+            pageSize,
+        }),
+        [
+            debouncedSearchTerm,
+            synonymFilter,
+            selectedTypes,
+            selectedCategories,
+            selectedStatuses,
+            selectedSources,
+            activityFrom,
+            activityTo,
+            sortConfig.key,
+            sortConfig.direction,
+            pageSize,
+        ],
+    );
+    const prevListQueryKeyRef = useRef(listQueryKey);
+
+    const fetchTags = useCallback(async (targetPage: number) => {
         if (!apiBase) return;
         setLoading(true);
         setError(null);
         try {
             const params = new URLSearchParams();
-            params.set('page', String(page));
+            params.set('page', String(targetPage));
             params.set('limit', String(pageSize));
             if (debouncedSearchTerm) params.set('search', debouncedSearchTerm);
             if (synonymFilter.trim()) params.set('synonym', synonymFilter.trim());
             if (selectedTypes.length) params.set('types', selectedTypes.join(','));
             if (selectedCategories.length) params.set('categories', selectedCategories.join(','));
             if (selectedStatuses.length) params.set('statuses', selectedStatuses.join(','));
-            if (sourceFilter) params.set('source', sourceFilter);
-            if (createdFrom) params.set('createdFrom', createdFrom);
-            if (createdTo) params.set('createdTo', createdTo);
-            if (updatedFrom) params.set('updatedFrom', updatedFrom);
-            if (updatedTo) params.set('updatedTo', updatedTo);
+            if (selectedSources.length) params.set('sources', selectedSources.join(','));
+            if (activityFrom) params.set('activityFrom', activityFrom);
+            if (activityTo) params.set('activityTo', activityTo);
             const currentSortKey = sortConfig.key || 'tagKey';
             const serverSortKey = currentSortKey === 'jobUsageCount' ? 'tagKey' : currentSortKey;
             params.set('sort', serverSortKey);
             params.set('direction', sortConfig.direction);
             const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
-                cache: 'reload',
+                cache: 'no-store',
             });
             if (!res.ok) throw new Error('Failed to load tags');
             const payload = await res.json();
@@ -1405,26 +1457,36 @@ const AdminTagsView: React.FC = () => {
         }
     }, [
         apiBase,
-        page,
         pageSize,
         debouncedSearchTerm,
         synonymFilter,
         selectedTypes,
         selectedCategories,
         selectedStatuses,
-        sourceFilter,
-        createdFrom,
-        createdTo,
-        updatedFrom,
-        updatedTo,
+        selectedSources,
+        activityFrom,
+        activityTo,
         sortConfig.key,
         sortConfig.direction,
         refreshUsageCounts,
     ]);
 
     useEffect(() => {
-        loadTags();
-    }, [loadTags]);
+        const filtersChanged = prevListQueryKeyRef.current !== listQueryKey;
+        prevListQueryKeyRef.current = listQueryKey;
+        const pageToFetch = filtersChanged ? 1 : page;
+        if (filtersChanged && page !== 1) {
+            setPage(1);
+        }
+        if (filtersChanged) {
+            setShowCollisionsOnly(false);
+            setCollisionTagsList([]);
+            setCollisionSharedPhrases({});
+        }
+        fetchTags(pageToFetch);
+    }, [listQueryKey, page, fetchTags]);
+
+    const loadTags = useCallback(() => fetchTags(page), [fetchTags, page]);
 
     const loadTypeOptions = useCallback(async () => {
         const baseUrl = apiBase || '';
@@ -1524,6 +1586,9 @@ const AdminTagsView: React.FC = () => {
             if (statusDropdownRef.current && !statusDropdownRef.current.contains(event.target as Node)) {
                 setStatusDropdownOpen(false);
             }
+            if (sourceDropdownRef.current && !sourceDropdownRef.current.contains(event.target as Node)) {
+                setSourceDropdownOpen(false);
+            }
             if (bulkDropdownRef.current && !bulkDropdownRef.current.contains(event.target as Node)) {
                 setBulkDropdownOpen(false);
             }
@@ -1546,10 +1611,6 @@ const AdminTagsView: React.FC = () => {
             setCategoryDropdownOpen(true);
         }
     }, [aiSuggestions]);
-
-    useEffect(() => {
-        setPage(1);
-    }, [debouncedSearchTerm, selectedTypes, selectedCategories, selectedStatuses, synonymFilter, sourceFilter, createdFrom, createdTo, updatedFrom, updatedTo, sortConfig.key, sortConfig.direction, pageSize]);
 
     // When collision mode is active, apply free-text + synonym search client-side
     const filteredCollisionTagsList = useMemo(() => {
@@ -2005,6 +2066,45 @@ const AdminTagsView: React.FC = () => {
         document.body.removeChild(link);
     };
 
+    const handleDownloadSelectedXlsx = () => {
+        const selected = tags.filter((t) => selectedTagIds.has(t.id));
+        if (!selected.length) return;
+
+        const columns = columnOrder.map((key) => ({
+            key,
+            label: columnMeta[key].label,
+            getValue: (tag: Tag) => {
+                switch (key) {
+                    case 'tagKey':
+                        return tag.tagKey;
+                    case 'displayNameHe':
+                        return tag.displayNameHe;
+                    case 'displayNameEn':
+                        return tag.displayNameEn;
+                    case 'type':
+                        return tag.type;
+                    case 'category':
+                        return tag.category;
+                    case 'status':
+                        return `${tag.status} / ${tag.qualityState}`;
+                    case 'updatedAt':
+                        return formatDateTime(tag.updatedAt || tag.updated_at);
+                    case 'source':
+                        return getSourceDisplayName(tag.source);
+                    case 'usageCount':
+                        return String(getCandidateUsageCount(tag));
+                    case 'jobUsageCount':
+                        return String(getJobUsageCount(tag));
+                    default:
+                        return '';
+                }
+            },
+        }));
+
+        const stamp = new Date().toISOString().slice(0, 10);
+        downloadRowsAsXlsx(selected, columns, `tags_${stamp}.xlsx`);
+    };
+
     const handleImportClick = () => fileInputRef.current?.click();
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2311,30 +2411,53 @@ const AdminTagsView: React.FC = () => {
                     )}
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
-                    <div className="flex gap-2">
-                        <div className="flex flex-col gap-1 w-full">
-                            <label className="text-[10px] text-text-muted uppercase tracking-wider">נוצר מה-</label>
-                            <input type="date" value={createdFrom} onChange={e => setCreatedFrom(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition" />
-                        </div>
-                        
+                    <div className="flex flex-col gap-1 w-full">
+                        <label className="text-[10px] text-text-muted uppercase tracking-wider">מתאריך</label>
+                        <input
+                            type="date"
+                            value={activityFrom}
+                            onChange={e => setActivityFrom(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition"
+                        />
                     </div>
-                    <div className="flex gap-2">
-                        <div className="flex flex-col gap-1 w-full">
-                            <label className="text-[10px] text-text-muted uppercase tracking-wider">עודכן מ-</label>
-                            <input type="date" value={updatedFrom} onChange={e => setUpdatedFrom(e.target.value)} className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition" />
-                        </div>
-                        
+                    <div className="flex flex-col gap-1 w-full">
+                        <label className="text-[10px] text-text-muted uppercase tracking-wider">עד תאריך</label>
+                        <input
+                            type="date"
+                            value={activityTo}
+                            min={activityFrom || undefined}
+                            onChange={e => setActivityTo(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition"
+                        />
                     </div>
                 </div>
                 <div className="flex flex-col gap-1">
                     <label className="text-[10px] text-text-muted uppercase tracking-wider">מקור</label>
-                    <select value={sourceFilter} onChange={e => setSourceFilter(e.target.value as SourceFilterValue)} className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition">
-                        <option value="">מקור (הכל)</option>
-                        <option value="ai">AI</option>
-                        <option value="manual">ידני</option>
-                        <option value="candidate">מועמד</option>
-                        <option value="curator">רכז</option>
-                </select>
+                    <div className="relative" ref={sourceDropdownRef}>
+                        <button
+                            type="button"
+                            onClick={() => setSourceDropdownOpen(prev => !prev)}
+                            className="w-full text-xs text-left bg-bg-input border border-border-default rounded-xl py-2 px-3 flex items-center justify-between"
+                        >
+                            <span>{selectedSources.length ? selectedSources.length + ' מקורות' : 'מקור (הכל)'}</span>
+                            <ChevronDownIcon className={'w-4 h-4 transition ' + (sourceDropdownOpen ? 'rotate-180' : '')} />
+                        </button>
+                        {sourceDropdownOpen && (
+                            <div className="absolute z-20 mt-1 w-full bg-white border border-border-default rounded-xl shadow-lg">
+                                {SOURCE_FILTER_OPTIONS.map(option => (
+                                    <label key={option.value} className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-bg-subtle cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedSources.includes(option.value)}
+                                            onChange={() => toggleSourceSelection(option.value)}
+                                            className="w-3 h-3"
+                                        />
+                                        <span>{option.label}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        )}
+                    </div>
                 </div>
                 <input type="text" value={synonymFilter} onChange={e => setSynonymFilter(e.target.value)} placeholder="מילה נרדפת" className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition" />
             </div>
@@ -2365,6 +2488,13 @@ const AdminTagsView: React.FC = () => {
                             className="flex items-center gap-2 bg-red-600 text-white font-bold py-1.5 px-4 rounded-lg shadow-sm border border-red-500 hover:bg-red-700 transition disabled:opacity-50"
                         >
                             {isBulkDeleting ? 'מוחק...' : 'מחק נבחרים'}
+                        </button>
+                        <button
+                            onClick={handleDownloadSelectedXlsx}
+                            className="flex items-center gap-2 bg-white text-text-default font-bold py-1.5 px-4 rounded-lg shadow-sm border border-border-default hover:bg-bg-hover transition"
+                        >
+                            <ArrowDownTrayIcon className="w-4 h-4" />
+                            <span>הורד XLSX</span>
                         </button>
                     </div>
                     <button onClick={() => setSelectedTagIds(new Set<string>())} className="text-text-muted hover:text-primary-600 text-sm font-medium">ביטול בחירה</button>

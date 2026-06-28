@@ -1,5 +1,6 @@
 const Prompt = require('../models/Prompt');
 const promptHistoryService = require('./promptHistoryService');
+const { COMPANY_ENRICHMENT_PROMPT_TEMPLATE } = require('../prompts/companyEnrichmentPrompt');
 
 const DEFAULT_PROMPTS = [
   {
@@ -122,42 +123,36 @@ Output JSON.`,
     id: 'company_enrichment',
     name: 'העשרת נתוני חברה (Intelligence)',
     description: 'משמש להשלמת פרטי חברות, תעשייה, מתחרים ולוגו.',
-    template: `You are a Corporate Intelligence Extraction Agent for an Israeli database.
-I have a list of Israeli companies: {{company_names_json}}.
-
-**MANDATORY INSTRUCTIONS:**
-1. **LANGUAGE RULES:** 
-    - 'description', 'location', 'mainField', 'subField' MUST be in **HEBREW**.
-    - 'techTags' MUST be in **ENGLISH**.
-2. **LOCATION ACCURACY:**
-    - Provide the specific City name in Hebrew.
-3. **DATA ENRICHMENT:**
-    - Use the **Google Search tool** to find real data.
-    - Infer 'Business Model', 'Growth Indicator'.
-
-Return a valid JSON array.`,
+    template: COMPANY_ENRICHMENT_PROMPT_TEMPLATE,
     model: 'gemini-3-pro-preview',
     temperature: 0.1,
-    variables: ['company_names_json'],
+    variables: ['company_names_json', 'companyNamesJson', 'mainFieldJson', 'website', 'snippet'],
     category: 'companies',
   },
   {
     id: 'organization_ai_enriched',
     name: 'סיווג ישות חברה (AI Agent)',
     description:
-      'מחליט האם מונח חברה שנמצא בקו"ח הוא חברה חדשה, מיזוג לחברה קיימת, או שיוך לסל גנרי.',
+      'מחליט האם מונח חברה שנמצא בקו"ח הוא חברה חדשה, מיזוג לחברה קיימת, או שיוך לסל כללי.',
     template: `You are a corporate-intelligence AI agent embedded in an Israeli recruitment system.
 Your task: classify an unrecognized company term extracted from a candidate CV.
 
 You will receive a JSON object with:
 1. "original_term": the raw company string from the CV.
 2. "context": where it appeared (e.g. "resume", "email").
-3. "existing_companies": top candidate matches already in the database, each with a semantic "similarity" score (0-100) computed from embedding cosine similarity. A score ≥ 85 is a very strong match.
+3. "existing_companies": top regular (non-generic) company matches from embedding semantic search, each with "similarity" (0-100). A score ≥ 85 is a very strong match.
+4. "generic_buckets": all predefined generic-bucket organizations (סל כללי). Each has "id" and "name". Names end with "(כללי)" or legacy "(גנרי)".
+5. "generic_similar": top generic-bucket matches from embedding semantic search (same similarity scale as existing_companies).
 
 **Decision rules (pick exactly one):**
 - "create_company": the term is clearly a real, distinct company not yet in the database. Use when no existing_company has similarity ≥ 60 AND the term looks like a proper company name.
-- "merge_company": the term is a subsidiary, alias, division, or transliteration of a company in "existing_companies". Prefer this when similarity ≥ 75. Set "targetId" to the id of the best match.
-- "map_generic": the term is NOT a company — it is a military unit, role, skill, department, or noise (e.g. "Software Development", "פיתוח תוכנה", "חיל האוויר", "בנק").
+- "merge_company": the term is a subsidiary, alias, division, or transliteration of a company in "existing_companies". Prefer this when similarity ≥ 75. Set "targetId" to the id of the best match. Set "target" to that company's exact name.
+- "map_generic": the term is NOT a company — it is a military unit, role, skill, department, or noise (e.g. "Software Development", "פיתוח תוכנה", "חיל האוויר", "בנק"). You MUST pick exactly ONE bucket from "generic_buckets". Copy the bucket "name" verbatim and set "targetId" to its "id". NEVER invent a bucket name.
+
+**CRITICAL — no invented targets:**
+- For "merge_company": "target" and "targetId" MUST come from one row in "existing_companies" only.
+- For "map_generic": "target" and "targetId" MUST come from one row in "generic_buckets" only.
+- For "similarEntities": scope by decision — for "create_company" or "merge_company" list ONLY names from "existing_companies" (regular companies). For "map_generic" list ONLY names from "generic_buckets" or "generic_similar". Do NOT mix regular and generic in one list. Do NOT invent names.
 
 **Hesitation guidelines:**
 - hesitationLevel = 0-30: you are very confident.
@@ -167,12 +162,12 @@ You will receive a JSON object with:
 **Output strictly valid JSON (no markdown) with this exact schema:**
 {
   "decision": "create_company" | "merge_company" | "map_generic",
-  "target": "<name of existing company to merge into, or generic bucket label, or null for create_company>",
-  "targetId": "<id of existing company if merge_company, else null>",
+  "target": "<exact name from existing_companies or generic_buckets, or null for create_company>",
+  "targetId": "<uuid from existing_companies or generic_buckets when merging/mapping, else null>",
   "explanation": "<1-2 sentences in Hebrew explaining the decision>",
   "hesitationLevel": <integer 0-100, where 0 = completely certain, 100 = maximum uncertainty>,
   "dilemmaReasoning": "<brief Hebrew note about what made this hard, or empty string if hesitation < 30>",
-  "similarEntities": [{"name": "<company name>", "similarity": <0-100>}]
+  "similarEntities": [{"name": "<exact name — regular only for create/merge, generic only for map_generic>", "similarity": <0-100>}]
 }
 
 Input:

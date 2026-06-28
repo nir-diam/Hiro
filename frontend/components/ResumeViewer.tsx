@@ -9,12 +9,21 @@ import { useLanguage } from '../context/LanguageContext';
 import { PrintableResume } from './CandidatePublicProfileView';
 import {
     educationEntryToDisplayLine,
+    normalizeDrivingLicensesForPrint,
     normalizeLanguagesForPrintRows,
+    splitWorkExperienceForPrint,
     stripResumeHtml,
 } from '../utils/printableResumeFormatting';
 import { downloadElementAsMultiPagePdf, sanitizePdfFilename } from '../utils/resumeViewerPdfExport';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
 import { normalizeOriginalTextHistory } from '../utils/parsedTextHistory';
+import {
+    DRIVING_LICENSE_FALLBACK,
+    DRIVING_LICENSE_PICKLIST_KEY,
+    fetchPicklistValuesByKey,
+    sortDrivingLicensePicklistRows,
+    type PicklistValueRow,
+} from '../services/picklistValuesApi';
 
 const TopTab: React.FC<{ title: string; isActive: boolean; onClick: () => void }> = ({ title, isActive, onClick }) => (
     <button 
@@ -198,7 +207,11 @@ function mergeTagsForPrint(fd: any, rd: ResumeData): any[] {
     return [];
 }
 
-function buildPrintableResumePayload(fullData: any, rd: ResumeData): any {
+function buildPrintableResumePayload(
+    fullData: any,
+    rd: ResumeData,
+    opts?: { drivingLicenseRows?: PicklistValueRow[] },
+): any {
     const summaryPlain = stripResumeHtml(rd.summary || '');
     const eduList = (rd.education || []).map((e, i) => ({
         id: i,
@@ -212,6 +225,13 @@ function buildPrintableResumePayload(fullData: any, rd: ResumeData): any {
                 ? fd.workExperience
                 : mapExperienceStrings(rd.experience || []);
         workExp = normalizePrintExperienceList(workExp);
+        const explicitMilitary = Array.isArray(fd.militaryExperience) ? fd.militaryExperience : [];
+        const { civilianWorkExperience, militaryExperience } = splitWorkExperienceForPrint(
+            workExp,
+            explicitMilitary,
+        );
+        workExp = normalizePrintExperienceList(civilianWorkExperience);
+        const militaryForPrint = normalizePrintExperienceList(militaryExperience);
 
         const education =
             Array.isArray(fd.education) && fd.education.length
@@ -240,6 +260,8 @@ function buildPrintableResumePayload(fullData: any, rd: ResumeData): any {
             title: fd.title ?? rd.title ?? '',
             professionalSummary: prof,
             workExperience: workExp,
+            militaryExperience: militaryForPrint,
+            drivingLicenses: normalizeDrivingLicensesForPrint(fd, opts?.drivingLicenseRows),
             education,
             tags: normalizeTagsForPrint(tagsSrc),
             languages: normalizeLanguagesForPrintRows(langSrc),
@@ -313,6 +335,9 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   const parsedResumeCaptureRef = useRef<HTMLDivElement>(null);
   const filesPdfExporterRef = useRef<CvFilesPdfExporter | null>(null);
   const [latestEmail, setLatestEmail] = useState<EmailUploadRecord | null>(null);
+  const [drivingLicensePicklist, setDrivingLicensePicklist] = useState<PicklistValueRow[]>(
+      DRIVING_LICENSE_FALLBACK,
+  );
   const uploadingLabel = t('resume.uploading') || 'טוען קובץ...';
 
   // Update copyButtonText when language changes
@@ -336,6 +361,19 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
   );
 
   const apiBase = import.meta.env.VITE_API_BASE || '';
+
+  useEffect(() => {
+      if (!apiBase) return;
+      let cancelled = false;
+      void fetchPicklistValuesByKey(apiBase, DRIVING_LICENSE_PICKLIST_KEY).then((rows) => {
+          if (cancelled || !rows.length) return;
+          setDrivingLicensePicklist(sortDrivingLicensePicklistRows(rows));
+      });
+      return () => {
+          cancelled = true;
+      };
+  }, [apiBase]);
+
   const effectiveResumeUrl = resumeFileUrl || resumeData?.resumeUrl || '';
   const finalResumeData = resumeData
       ? { ...resumeData, resumeUrl: effectiveResumeUrl }
@@ -345,8 +383,8 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
       const rd = resumeData
           ? { ...resumeData, resumeUrl: effectiveResumeUrl }
           : { name: '', contact: '', summary: '', experience: [], education: [], resumeUrl: effectiveResumeUrl };
-      return buildPrintableResumePayload(fullData, rd);
-  }, [fullData, resumeData, effectiveResumeUrl]);
+      return buildPrintableResumePayload(fullData, rd, { drivingLicenseRows: drivingLicensePicklist });
+  }, [fullData, resumeData, effectiveResumeUrl, drivingLicensePicklist]);
 
   const candidateSearchText = useMemo(() => {
       const fd = fullData && typeof fullData === 'object' ? fullData : {};

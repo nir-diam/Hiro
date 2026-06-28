@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, UserIcon,
     ArrowTopRightOnSquareIcon, CheckCircleIcon, ExclamationTriangleIcon,
@@ -58,7 +59,8 @@ interface AiDecision {
     hesitationPct: number;
     hesitationLabel: string;
     hesitationQuote: string;
-    similarEntities: { name: string; similarity: number }[];
+    similarEntities: { name: string; similarity: number; kind?: string }[];
+    reviewStatus: 'pending_review' | 'approved' | 'changed' | 'manual';
     needsManual: boolean;
     isAutoHandled: boolean;
     source: string;
@@ -75,19 +77,60 @@ interface BlacklistEntry {
 // ─── Generic bucket options ───────────────────────────────────────────────────
 
 const GENERIC_BUCKETS = [
-    'הייטק ומחשוב (גנרי)',
-    'שירותי תוכנה (גנרי)',
-    'פיננסים וביטוח (גנרי)',
-    'תעשייה ויצור (גנרי)',
-    'בריאות ורפואה (גנרי)',
-    'חינוך והוראה (גנרי)',
-    'ביטחון וצבא (גנרי)',
-    'שירותים ומסחר קמעונאי (גנרי)',
-    'נדל"ן ובנייה (גנרי)',
-    'תחבורה ולוגיסטיקה (גנרי)',
-    'מנהל ואדמיניסטרציה (גנרי)',
-    'משפטים ורגולציה (גנרי)',
+    'הייטק ומחשוב (כללי)',
+    'שירותי תוכנה (כללי)',
+    'פיננסים וביטוח (כללי)',
+    'תעשייה ויצור (כללי)',
+    'בריאות ורפואה (כללי)',
+    'חינוך והוראה (כללי)',
+    'ביטחון וצבא (כללי)',
+    'שירותים ומסחר קמעונאי (כללי)',
+    'נדל"ן ובנייה (כללי)',
+    'תחבורה ולוגיסטיקה (כללי)',
+    'מנהל ואדמיניסטרציה (כללי)',
+    'משפטים ורגולציה (כללי)',
 ];
+
+const isGenericBucketOrgName = (name?: string) => {
+    const n = String(name || '');
+    return n.includes('(כללי)') || n.includes('(גנרי)');
+};
+
+type OrgPick = { id: string; name: string };
+
+const orgApiHeaders = (): HeadersInit => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
+const mapOrgPickList = (raw: unknown): OrgPick[] => {
+    const list = Array.isArray(raw)
+        ? raw
+        : raw && typeof raw === 'object' && Array.isArray((raw as { data?: unknown }).data)
+          ? (raw as { data: unknown[] }).data
+          : [];
+    return list
+        .filter((o): o is Record<string, unknown> => !!o && typeof o === 'object')
+        .map((o) => ({ id: String(o.id ?? ''), name: String(o.name ?? '').trim() }))
+        .filter((o) => o.id && o.name);
+};
+
+const fetchOrganizationsPage = async (
+    apiBase: string,
+    opts?: { search?: string; limit?: number },
+): Promise<OrgPick[]> => {
+    const params = new URLSearchParams();
+    params.set('page', '1');
+    params.set('limit', String(opts?.limit ?? 200));
+    if (opts?.search?.trim()) params.set('search', opts.search.trim());
+    const res = await fetch(`${apiBase}/api/organizations?${params}`, {
+        credentials: 'include',
+        headers: orgApiHeaders(),
+    });
+    if (!res.ok) return [];
+    const raw = await res.json();
+    return mapOrgPickList(raw);
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -123,6 +166,7 @@ const mapApiEntry = (entry: OrgAiDecisionDto): AiDecision => {
         hesitationLabel,
         hesitationQuote: entry.dilemmaReasoning || entry.aiReasoning || '',
         similarEntities: entry.similarEntities || [],
+        reviewStatus: entry.reviewStatus,
         needsManual: entry.reviewStatus === 'manual' || pct >= 60,
         isAutoHandled: entry.reviewStatus === 'approved' || pct < 30,
         source: 'קורות חיים',
@@ -145,7 +189,7 @@ const DECISION_META: Record<DecisionType, {
     },
     map_generic: {
         color: 'text-orange-600', bg: 'bg-orange-50', border: 'border-orange-100',
-        labelFn: (t) => `שיוך לגנרי: "${t ?? ''}"`,
+        labelFn: (t) => `שיוך לכללי: "${t ?? ''}"`,
         icon: (
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 18v2.25A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z" />
@@ -331,7 +375,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [manualSearchTerm, setManualSearchTerm] = useState('');
     const [linkSearchTerm, setLinkSearchTerm] = useState('');
     const [selectedExistingCompany, setSelectedExistingCompany] = useState<{ id: string; name: string } | null>(null);
-    const [organizations, setOrganizations] = useState<{ id: string; name: string }[]>([]);
+    const [organizations, setOrganizations] = useState<OrgPick[]>([]);
+    const [mergeOrgsLoading, setMergeOrgsLoading] = useState(false);
     const [sortBy, setSortBy] = useState<'confidence' | 'occurrences' | 'name'>('confidence');
     const [minConfidence] = useState(0);
 
@@ -363,14 +408,35 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         }
     }, [apiBase]);
 
-    const loadOrganizationsData = useCallback(async () => {
+    const loadOrganizationsData = useCallback(async (opts?: { search?: string }) => {
         try {
-            const res = await fetch(`${apiBase}/api/organizations`);
-            if (!res.ok) return;
-            const data = await res.json();
-            if (Array.isArray(data))
-                setOrganizations(data.filter((o: any) => o.name).map((o: any) => ({ id: o.id, name: o.name })));
+            const list = await fetchOrganizationsPage(apiBase, { search: opts?.search, limit: 200 });
+            setOrganizations(list);
         } catch { /* swallow */ }
+    }, [apiBase]);
+
+    const loadGenericBucketOrgs = useCallback(async () => {
+        setMergeOrgsLoading(true);
+        try {
+            const [klali, genri] = await Promise.all([
+                fetchOrganizationsPage(apiBase, { search: 'כללי', limit: 200 }),
+                fetchOrganizationsPage(apiBase, { search: 'גנרי', limit: 200 }),
+            ]);
+            const byId = new Map<string, OrgPick>();
+            for (const o of [...klali, ...genri]) {
+                if (isGenericBucketOrgName(o.name)) byId.set(o.id, o);
+            }
+            const sorted = [...byId.values()].sort((a, b) => {
+                const ia = GENERIC_BUCKETS.indexOf(a.name);
+                const ib = GENERIC_BUCKETS.indexOf(b.name);
+                if (ia >= 0 && ib >= 0) return ia - ib;
+                if (ia >= 0) return -1;
+                if (ib >= 0) return 1;
+                return a.name.localeCompare(b.name, 'he');
+            });
+            setOrganizations(sorted);
+        } catch { /* swallow */ }
+        finally { setMergeOrgsLoading(false); }
     }, [apiBase]);
 
     const loadHistory = useCallback(async () => {
@@ -582,6 +648,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [isMerging, setIsMerging] = useState(false);
     const [aiCheckedIds, setAiCheckedIds] = useState<Set<string>>(new Set());
     const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
+    const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
     const [aiCreateModalName, setAiCreateModalName] = useState('');
 
     const loadDecisions = useCallback(async () => {
@@ -670,7 +737,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                 }).catch(() => notify(`העשרה נכשלה עבור "${term}"`, 'error'));
             }
             await resolveOrgAiDecision(id, { reviewerAction: 'approved', reviewStatus: 'approved' });
-            updateDecision(id, { isAutoHandled: true, needsManual: false });
+            updateDecision(id, { isAutoHandled: true, needsManual: false, reviewStatus: 'approved' });
             notify(dec?.decisionType === 'create_company' ? `ההחלטה אושרה והחברה נוצרה` : 'ההחלטה אושרה');
         } catch (err: any) { notify(err.message || 'שגיאה בעדכון ההחלטה', 'error'); }
     };
@@ -679,7 +746,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         setOpenDropdownId(null);
         try {
             await resolveOrgAiDecision(id, { reviewerAction: 'manual', reviewStatus: 'manual' });
-            updateDecision(id, { needsManual: true, isAutoHandled: false });
+            updateDecision(id, { needsManual: true, isAutoHandled: false, reviewStatus: 'manual' });
             notify('הועבר לטיפול ידני');
         } catch { notify('שגיאה בעדכון ההחלטה', 'error'); }
     };
@@ -787,6 +854,45 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         // dashboard tab manages its own data via AdminCompanyAgentDashboard
     }, [activeTab, loadDecisions, loadUnmatched, loadHistory, loadOrganizationsData]);
 
+    // Load org list when merge / generic modal opens (and server-search while typing for merge)
+    useEffect(() => {
+        if (!mergeModal) return;
+
+        if (mergeModal.mode === 'map_generic') {
+            void loadGenericBucketOrgs();
+            return;
+        }
+
+        const q = mergeOrgSearch.trim();
+        const timer = setTimeout(() => {
+            void (async () => {
+                setMergeOrgsLoading(true);
+                try {
+                    const list = await fetchOrganizationsPage(apiBase, {
+                        search: q || undefined,
+                        limit: 200,
+                    });
+                    setOrganizations(list.filter((o) => !isGenericBucketOrgName(o.name)));
+                } catch { /* swallow */ }
+                finally { setMergeOrgsLoading(false); }
+            })();
+        }, q ? 300 : 0);
+
+        return () => clearTimeout(timer);
+    }, [mergeModal, mergeOrgSearch, apiBase, loadGenericBucketOrgs]);
+
+    const mergeModalOrgs = useMemo(() => {
+        if (!mergeModal) return [];
+        if (mergeModal.mode === 'map_generic') {
+            return organizations.filter((o) => isGenericBucketOrgName(o.name));
+        }
+        const q = mergeOrgSearch.trim().toLowerCase();
+        return organizations
+            .filter((o) => !isGenericBucketOrgName(o.name))
+            .filter((o) => !q || o.name.toLowerCase().includes(q))
+            .sort((a, b) => a.name.localeCompare(b.name, 'he'));
+    }, [mergeModal, mergeOrgSearch, organizations]);
+
     // ─── Render helpers (AI tab) ───────────────────────────────────────────────
 
     const renderHesitationBox = (d: AiDecision) => {
@@ -829,12 +935,19 @@ const AdminCompanyCorrectionsView: React.FC = () => {
 
         return (
             <div className="flex flex-wrap justify-center gap-1.5 max-w-[260px] mx-auto text-[10px] font-bold">
-                {visible.map((e, i) => (
-                    <div key={i} className="flex items-center gap-1.5 bg-purple-50 text-purple-700 border border-purple-100 px-2 py-1 rounded-md">
+                {visible.map((e, i) => {
+                    const isGeneric = e.kind === 'generic' || isGenericBucketOrgName(e.name);
+                    return (
+                    <div key={i} className={`flex items-center gap-1.5 px-2 py-1 rounded-md border ${isGeneric ? 'bg-orange-50 text-orange-700 border-orange-100' : 'bg-purple-50 text-purple-700 border-purple-100'}`}>
                         <span>{e.name}</span>
-                        <span className="text-purple-400 bg-white px-1 rounded-sm">{e.similarity}%</span>
+                        {isGeneric ? (
+                            <span className="text-orange-500 bg-white px-1 rounded-sm text-[9px]">כללי</span>
+                        ) : (
+                            <span className="text-purple-400 bg-white px-1 rounded-sm">{e.similarity}%</span>
+                        )}
                     </div>
-                ))}
+                    );
+                })}
                 {!isExpanded && remaining > 0 && (
                     <button
                         onClick={toggleExpand}
@@ -872,47 +985,68 @@ const AdminCompanyCorrectionsView: React.FC = () => {
 
     const renderActionDropdown = (d: AiDecision) => {
         const isOpen = openDropdownId === d.id;
+        const menu = isOpen && dropdownRect ? createPortal(
+            <div
+                style={{
+                    position: 'fixed',
+                    top: dropdownRect.bottom + 4,
+                    left: dropdownRect.left,
+                    width: 208,
+                    zIndex: 9999,
+                }}
+                className="bg-white border border-border-default rounded-xl shadow-lg overflow-hidden"
+            >
+                <button onClick={() => handleAiApprove(d.id)}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-emerald-50 text-emerald-700 flex items-center gap-2 border-b border-border-default/40">
+                    <IconCheck className="w-3.5 h-3.5" /> אשר החלטה
+                </button>
+                <button onClick={() => handleAiMarkManual(d.id)}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-amber-50 text-amber-700 flex items-center gap-2 border-b border-border-default/40">
+                    <IconWarning className="w-3.5 h-3.5" /> העבר לטיפול ידני
+                </button>
+                <button onClick={() => handleAiChangeDecision(d.id, 'merge_company')}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-indigo-50 text-indigo-700 flex items-center gap-2 border-b border-border-default/40">
+                    <IconLink /> מיזוג לחברה קיימת
+                </button>
+                <button onClick={() => handleAiChangeDecision(d.id, 'create_company')}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-emerald-50 text-emerald-700 flex items-center gap-2 border-b border-border-default/40">
+                    <IconPlus /> יצירת חברה חדשה
+                </button>
+                <button onClick={() => handleAiChangeDecision(d.id, 'create_company_enrich')}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-teal-50 text-teal-700 flex items-center gap-2 border-b border-border-default/40">
+                    <SparklesIcon className="w-3.5 h-3.5" /> יצירת חברה + העשרה
+                </button>
+                <button onClick={() => handleAiChangeDecision(d.id, 'map_generic')}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-orange-50 text-orange-700 flex items-center gap-2 border-b border-border-default/40">
+                    <IconGrid className="w-3.5 h-3.5" /> שיוך לסל כללי
+                </button>
+                <button onClick={() => handleAddToBlacklist(d)}
+                    className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-gray-50 text-gray-700 flex items-center gap-2">
+                    <IconXCircle className="w-3.5 h-3.5 rounded-full border border-current p-0.5" /> הוסף לרשימה שחורה
+                </button>
+            </div>,
+            document.body
+        ) : null;
+
         return (
             <div className="relative text-left">
                 <button
-                    onClick={(e) => { e.stopPropagation(); setOpenDropdownId(isOpen ? null : d.id); }}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (isOpen) {
+                            setOpenDropdownId(null);
+                            setDropdownRect(null);
+                        } else {
+                            setDropdownRect(e.currentTarget.getBoundingClientRect());
+                            setOpenDropdownId(d.id);
+                        }
+                    }}
                     className="bg-white border border-border-default rounded-lg px-3 py-1.5 text-xs font-semibold text-text-default shadow-sm hover:border-text-subtle flex items-center gap-2 justify-between w-32 focus:ring-2 focus:ring-orange-500 mr-auto transition-colors"
                 >
                     <span>שנה החלטה</span>
                     <IconChevronDown />
                 </button>
-                {isOpen && (
-                    <div className="absolute left-0 top-full mt-1 w-52 bg-white border border-border-default rounded-xl shadow-lg z-20 overflow-hidden">
-                        <button onClick={() => handleAiApprove(d.id)}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-emerald-50 text-emerald-700 flex items-center gap-2 border-b border-border-default/40">
-                            <IconCheck className="w-3.5 h-3.5" /> אשר החלטה
-                        </button>
-                        <button onClick={() => handleAiMarkManual(d.id)}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-amber-50 text-amber-700 flex items-center gap-2 border-b border-border-default/40">
-                            <IconWarning className="w-3.5 h-3.5" /> העבר לטיפול ידני
-                        </button>
-                        <button onClick={() => handleAiChangeDecision(d.id, 'merge_company')}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-indigo-50 text-indigo-700 flex items-center gap-2 border-b border-border-default/40">
-                            <IconLink /> מיזוג לחברה קיימת
-                        </button>
-                        <button onClick={() => handleAiChangeDecision(d.id, 'create_company')}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-emerald-50 text-emerald-700 flex items-center gap-2 border-b border-border-default/40">
-                            <IconPlus /> יצירת חברה חדשה
-                        </button>
-                        <button onClick={() => handleAiChangeDecision(d.id, 'create_company_enrich')}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-teal-50 text-teal-700 flex items-center gap-2 border-b border-border-default/40">
-                            <SparklesIcon className="w-3.5 h-3.5" /> יצירת חברה + העשרה
-                        </button>
-                        <button onClick={() => handleAiChangeDecision(d.id, 'map_generic')}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-orange-50 text-orange-700 flex items-center gap-2 border-b border-border-default/40">
-                            <IconGrid className="w-3.5 h-3.5" /> שיוך לסל גנרי
-                        </button>
-                        <button onClick={() => handleAddToBlacklist(d)}
-                            className="w-full text-right px-3 py-2.5 text-xs font-semibold hover:bg-gray-50 text-gray-700 flex items-center gap-2">
-                            <IconXCircle className="w-3.5 h-3.5 rounded-full border border-current p-0.5" /> הוסף לרשימה שחורה
-                        </button>
-                    </div>
-                )}
+                {menu}
             </div>
         );
     };
@@ -928,7 +1062,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             )}
 
             {/* Dropdown backdrop */}
-            {openDropdownId && <div className="fixed inset-0 z-10" onClick={() => setOpenDropdownId(null)} />}
+            {openDropdownId && <div className="fixed inset-0 z-[9998]" onClick={() => { setOpenDropdownId(null); setDropdownRect(null); }} />}
 
             {/* ── Header ── */}
             <div className="flex justify-between items-center bg-white border border-border-default rounded-xl p-4 shadow-sm flex-shrink-0">
@@ -1431,7 +1565,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 <option value="all">כל ההחלטות</option>
                                 <option value="create_company">יצירת חברה חדשה</option>
                                 <option value="merge_company">מיזוג לחברה קיימת</option>
-                                <option value="map_generic">שיוך לסל גנרי</option>
+                                <option value="map_generic">שיוך לסל כללי</option>
                             </select>
                         </div>
                     </div>
@@ -1462,8 +1596,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 <tbody className="divide-y divide-border-default">
                                     {filteredDecisions.map(d => (
                                         <tr key={d.id} className={`transition-colors ${
-                                            d.needsManual
-                                                ? 'bg-slate-50/70 opacity-55 hover:opacity-75 pointer-events-none'
+                                            d.reviewStatus === 'manual'
+                                                ? 'bg-slate-50/70 opacity-55 hover:opacity-75'
                                                 : 'hover:bg-[#f8fafc]'
                                         }`}>
                                             <td className="p-4 align-top text-center w-12 border-l border-border-default/20 pt-6">
@@ -1616,10 +1750,10 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setMergeModal(null)}>
                     <div className="bg-white rounded-2xl p-6 shadow-xl w-full max-w-md text-right" onClick={e => e.stopPropagation()}>
                         <h2 className="text-lg font-black text-slate-800 mb-1">
-                            {mergeModal.mode === 'merge_company' ? 'מיזוג לחברה קיימת' : 'שיוך לסל גנרי'}
+                            {mergeModal.mode === 'merge_company' ? 'מיזוג לחברה קיימת' : 'שיוך לסל כללי'}
                         </h2>
                         <p className="text-sm text-text-muted mb-5">
-                            הביטוי <span className="font-bold text-text-default">"{mergeModal.term}"</span> {mergeModal.mode === 'merge_company' ? 'ישויך כ-Alias לחברה שנבחר' : 'ימופה לסל הגנרי שנבחר'}
+                            הביטוי <span className="font-bold text-text-default">"{mergeModal.term}"</span> {mergeModal.mode === 'merge_company' ? 'ישויך כ-Alias לחברה שנבחר' : 'ימופה לסל הכללי שנבחר'}
                         </p>
 
                         {mergeModal.mode === 'merge_company' ? (
@@ -1634,10 +1768,12 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                     autoFocus
                                 />
                                 <div className="w-full border border-slate-300 rounded-xl bg-slate-50 mb-5 max-h-48 overflow-y-auto">
-                                    {[...organizations]
-                                        .filter(o => !mergeOrgSearch.trim() || o.name.toLowerCase().includes(mergeOrgSearch.trim().toLowerCase()))
-                                        .sort((a, b) => a.name.localeCompare(b.name, 'he'))
-                                        .map(org => (
+                                    {mergeOrgsLoading ? (
+                                        <p className="text-center text-xs text-text-muted py-4">טוען חברות...</p>
+                                    ) : mergeModalOrgs.length === 0 ? (
+                                        <p className="text-center text-xs text-text-muted py-4">לא נמצאו תוצאות</p>
+                                    ) : (
+                                        mergeModalOrgs.map(org => (
                                             <button
                                                 key={org.id}
                                                 type="button"
@@ -1647,9 +1783,6 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                                 {org.name}
                                             </button>
                                         ))
-                                    }
-                                    {organizations.filter(o => !mergeOrgSearch.trim() || o.name.toLowerCase().includes(mergeOrgSearch.trim().toLowerCase())).length === 0 && (
-                                        <p className="text-center text-xs text-text-muted py-4">לא נמצאו תוצאות</p>
                                     )}
                                 </div>
                                 {mergeTargetId && (
@@ -1660,24 +1793,30 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             </>
                         ) : (
                             <>
-                                <label className="block text-xs font-bold text-text-muted mb-1.5">סל גנרי</label>
+                                <label className="block text-xs font-bold text-text-muted mb-1.5">סל כללי</label>
+                                {mergeOrgsLoading ? (
+                                    <p className="text-sm text-text-muted mb-5">טוען סלי כללי...</p>
+                                ) : (
                                 <select
                                     value={mergeTargetId}
                                     onChange={e => {
                                         setMergeTargetId(e.target.value);
-                                        const org = organizations.find(o => o.id === e.target.value);
+                                        const org = mergeModalOrgs.find(o => o.id === e.target.value);
                                         setMergeTarget(org?.name ?? '');
                                     }}
                                     className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm font-medium text-slate-700 focus:ring-2 focus:ring-orange-500 focus:border-orange-500 mb-5 bg-slate-50"
                                 >
-                                    <option value="">-- בחר סל גנרי --</option>
-                                    {organizations
-                                        .filter(o => o.name?.includes('(גנרי)'))
-                                        .map(o => (
-                                            <option key={o.id} value={o.id}>{o.name}</option>
-                                        ))
-                                    }
+                                    <option value="">-- בחר סל כללי --</option>
+                                    {mergeModalOrgs.map(o => (
+                                        <option key={o.id} value={o.id}>{o.name}</option>
+                                    ))}
                                 </select>
+                                )}
+                                {!mergeOrgsLoading && mergeModalOrgs.length === 0 && (
+                                    <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-4">
+                                        לא נמצאו סלי כללי במאגר. צור ארגונים עם שם שמסתיים ב-(כללי) או (גנרי).
+                                    </p>
+                                )}
                                 {mergeTarget && (
                                     <div className="mb-4 text-xs text-orange-700 bg-orange-50 border border-orange-100 rounded-lg px-3 py-2">
                                         ✓ "{mergeModal.term}" ימופה לסל "{mergeTarget}"
@@ -1696,7 +1835,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                         : 'bg-orange-600 hover:bg-orange-700'
                                 }`}
                             >
-                                {isMerging ? 'מבצע...' : mergeModal.mode === 'merge_company' ? 'אשר ובצע מיזוג' : 'אשר שיוך גנרי'}
+                                {isMerging ? 'מבצע...' : mergeModal.mode === 'merge_company' ? 'אשר ובצע מיזוג' : 'אשר שיוך כללי'}
                             </button>
                             <button
                                 onClick={() => setMergeModal(null)}

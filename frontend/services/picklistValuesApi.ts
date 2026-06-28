@@ -126,8 +126,16 @@ export const MOBILITY_PICKLIST_KEY = 'mobility';
 /** When picklist `driving_license` is empty — aligns with DB seed + screening (`licenseType` empty for neutral). */
 export const DRIVING_LICENSE_FALLBACK: PicklistValueRow[] = [
     { id: '_fb_dl_none', label: 'ללא', value: '-', displayName: null },
-    { id: '_fb_dl_b', label: 'B', value: 'B', displayName: null },
-    { id: '_fb_dl_c', label: 'C', value: 'C', displayName: null },
+    { id: '_fb_dl_a', label: 'A (אופנוע)', value: 'A', displayName: null },
+    { id: '_fb_dl_a1', label: 'A1', value: 'A1', displayName: null },
+    { id: '_fb_dl_a2', label: 'A2', value: 'A2', displayName: null },
+    { id: '_fb_dl_b', label: 'B (רכב פרטי)', value: 'B', displayName: null },
+    { id: '_fb_dl_c', label: 'C (משאית)', value: 'C', displayName: null },
+    { id: '_fb_dl_c1', label: 'C1', value: 'C1', displayName: null },
+    { id: '_fb_dl_d', label: 'D (אוטובוס)', value: 'D', displayName: null },
+    { id: '_fb_dl_d1', label: 'D1', value: 'D1', displayName: null },
+    { id: '_fb_dl_e', label: 'E (גורר)', value: 'E', displayName: null },
+    { id: '_fb_dl_1', label: '1 (טרקטור)', value: '1', displayName: null },
 ];
 
 /** Driving-license dropdown: ללא / `-` always first, then other neutrals, then rest by Hebrew label. */
@@ -203,6 +211,131 @@ export const WORK_MODEL_PREFERRED_FALLBACK: PicklistValueRow[] = JOB_SCOPE_PREFE
 
 export function picklistRowLabel(v: PicklistValueRow): string {
     return ((v.displayName || v.label || v.value) as string).trim() || v.value;
+}
+
+const DRIVING_LICENSE_NEUTRAL_RAW = new Set([
+    '',
+    '-',
+    'ללא',
+    'לא חשוב',
+    'לא ידוע',
+    'none',
+    'no',
+    'not required',
+    'n/a',
+    'na',
+]);
+
+/** AI / legacy stored tokens → canonical picklist `value`. */
+const DRIVING_LICENSE_SYNONYMS: Record<string, string> = {
+    אופנוע: 'A',
+    motorcycle: 'A',
+    moto: 'A',
+    טרקטור: '1',
+    tractor: '1',
+    'רכב פרטי': 'B',
+    'private car': 'B',
+    car: 'B',
+    משאית: 'C',
+    truck: 'C',
+    lorry: 'C',
+    אוטובוס: 'D',
+    bus: 'D',
+    גורר: 'E',
+    trailer: 'E',
+};
+
+function drivingLicenseRowsOrFallback(rows?: PicklistValueRow[]): PicklistValueRow[] {
+    return rows?.length ? rows : DRIVING_LICENSE_FALLBACK;
+}
+
+/** Whether a stored token means “no license” / not relevant for CV display. */
+export function isNeutralDrivingLicenseStored(
+    stored: string,
+    rows: PicklistValueRow[] = DRIVING_LICENSE_FALLBACK,
+): boolean {
+    const key = String(stored ?? '').trim();
+    if (!key) return true;
+    if (DRIVING_LICENSE_NEUTRAL_RAW.has(key.toLowerCase())) return true;
+
+    const list = drivingLicenseRowsOrFallback(rows);
+    const row =
+        list.find((r) => String(r.value ?? '').trim() === key) ||
+        list.find((r) => String(r.id ?? '').trim() === key) ||
+        list.find((r) => picklistRowLabel(r) === key || String(r.label ?? '').trim() === key);
+    if (!row) return false;
+
+    const v = String(row.value ?? '').trim();
+    const lbl = picklistRowLabel(row);
+    return v === '-' || lbl === 'ללא' || v === 'לא חשוב' || lbl === 'לא חשוב';
+}
+
+/** Resolve messy stored value → canonical picklist `value`, or null. */
+export function resolveDrivingLicensePicklistValue(
+    stored: string,
+    rows: PicklistValueRow[] = DRIVING_LICENSE_FALLBACK,
+): string | null {
+    const key = String(stored ?? '').trim();
+    if (!key || isNeutralDrivingLicenseStored(key, rows)) return null;
+
+    const list = drivingLicenseRowsOrFallback(rows);
+
+    const byValue = list.find(
+        (r) => String(r.value ?? '').trim() === key || String(r.id ?? '').trim() === key,
+    );
+    if (byValue) return String(byValue.value).trim();
+
+    const byLabel = list.find(
+        (r) => picklistRowLabel(r) === key || String(r.label ?? '').trim() === key,
+    );
+    if (byLabel) return String(byLabel.value).trim();
+
+    const syn = DRIVING_LICENSE_SYNONYMS[key.toLowerCase()];
+    if (syn && list.some((r) => String(r.value).trim() === syn)) return syn;
+
+    const lower = key.toLowerCase();
+    const byPartial = list.find((r) => {
+        const lbl = picklistRowLabel(r).toLowerCase();
+        if (!lbl || lbl === 'ללא') return false;
+        return lbl.includes(lower) || lower.includes(lbl);
+    });
+    if (byPartial) return String(byPartial.value).trim();
+
+    if (/^[a-e]\d?$/i.test(key)) {
+        const letter = list.find((r) => String(r.value).trim().toUpperCase() === key.toUpperCase());
+        if (letter) return String(letter.value).trim();
+    }
+    if (key === '1') {
+        const one = list.find((r) => String(r.value).trim() === '1');
+        if (one) return '1';
+    }
+
+    return null;
+}
+
+/** Map stored picklist value/key → Hebrew display label for CV print & UI. */
+export function drivingLicenseDisplayLabel(
+    stored: string,
+    rows: PicklistValueRow[] = DRIVING_LICENSE_FALLBACK,
+): string {
+    const key = String(stored || '').trim();
+    if (!key || isNeutralDrivingLicenseStored(key, rows)) return '';
+
+    const list = drivingLicenseRowsOrFallback(rows);
+    const pickValue = resolveDrivingLicensePicklistValue(key, list);
+    if (pickValue) {
+        const row = list.find((r) => String(r.value).trim() === pickValue);
+        if (row && !isNeutralDrivingLicenseStored(pickValue, list)) {
+            return picklistRowLabel(row);
+        }
+    }
+
+    const asLabel = list.find((r) => picklistRowLabel(r) === key);
+    if (asLabel && !isNeutralDrivingLicenseStored(asLabel.value, list)) {
+        return picklistRowLabel(asLabel);
+    }
+
+    return '';
 }
 
 export async function fetchPicklistValuesByKey(

@@ -3,6 +3,7 @@ const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const organizationService = require('../services/organizationService');
 const organizationEmbeddingService = require('../services/organizationEmbeddingService');
+const { resolveSubFieldFromPicklist } = require('../services/organizationEnrichmentService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
@@ -14,6 +15,7 @@ const Organization = require('../models/Organization');
 const { sendSingleTurnChat, sendChat, resolveGeminiApiKey } = require('../services/geminiService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
+const { buildCompanyEnrichmentPrompt } = require('../prompts/companyEnrichmentPrompt');
 
 // Module-level helpers so they are available before the enrich try-block
 const serperRaw = async (q, num = 5) => {
@@ -43,112 +45,13 @@ const searchSnippet = async (companyName) => {
   }
 };
 
-const fallbackCompanyPrompt = (companyNames, mainFieldOptions = []) => {
- 
-  const mainFieldJson = JSON.stringify(mainFieldOptions);
-  const companyNamesJson = JSON.stringify(companyNames);
-  return `
-You are a Data Architect specialized in the Israeli Labor Market and Corporate Intelligence.
-
-TASK: Enrich ONLY the specific company names provided in this list: ${companyNamesJson}.
-Use Google Search and your internal knowledge to provide real, accurate data for each entity.
-
-*MANDATORY INSTRUCTIONS:*
-
-1. STRICT RULES:
-   - NO HALLUCINATION: If a company is not found, return "Unknown" or null for its specific fields, but always return the JSON object for that name.
-   - LANGUAGE RULES:
-   - Hebrew: description, location, mainField, subField, secondaryField, tags, legalName.
-   - English: nameEn, techTags, hqCountry.
-   - LOCATION ACCURACY: Provide the specific City name in Hebrew (e.g., 'פתח תקווה', 'הרצליה', 'איירפורט סיטי'). Do NOT use general districts.
-   -  DATA ENRICHMENT: Every object MUST include exhaustive 'tags' (Hebrew) and 'techTags' (English) based on the company's activity and job requirements.
-
-2. *INDUSTRY HIERARCHY (CRITICAL):*
-
-   - 'mainField' (תעשיית אם): MUST be exactly one of these parent picklist values (copy verbatim): ${mainFieldJson}.
-   - 'subField' (תעשייה ראשית / תת-תחום): Hebrew label for the company's primary sub-domain under that mainField. If unknown, use null.
-   - 'secondaryField' (תחום עיסוק משני): OPTIONAL free Hebrew text describing ADDITIONAL business areas beyond the primary subField. MUST NOT repeat or duplicate the subField value. If the company operates only in the primary subField area, set this to null.
-   - Do NOT invent or paraphrase mainField values outside the list above.
-
-DATA SPECIFICATIONS:
-- description: 2-3 sentences in Hebrew about the company's core business.
-- employeeCount: Must be one of ['1-10', '11-50', '51-200', '201-1000', '1000+', '10000+'].
-- type: Must be one of ['הייטק', 'תעשייה', 'מסחר וקמעונאות', 'שירותים', 'פיננסים', 'נדל"ן', 'אחר'].
-- classification: Must be one of ['פרטית', 'ציבורית', 'ממשלתית', 'מלכ"ר'].
-- dataConfidence: Set based on the quality of search results ('High', 'Medium', 'Low').
-
-OUTPUT FORMAT: Return ONLY a valid JSON array. No conversational text, no headers, no markdown outside the JSON block.
-
-JSON STRUCTURE:
-[
-
-  {
-
-    "name": "Common Name",
-
-    "nameEn": "English Name",
-
-    "legalName": "Full Legal Name",
-
-    "aliases": ["Alias 1", "Alias 2"],
-
-    "description": "Hebrew description (2 sentences)",
-
-    "mainField": "MUST be exactly one of: ${mainFieldJson}",
-
-    "subField": "Primary sub-industry in Hebrew (under mainField) or null",
-
-    "secondaryField": "Additional business areas in Hebrew or null",
-
-    "employeeCount": "estimate range",
-
-    "website": "url",
-
-    "linkedinUrl": "url", 
-
-    "foundedYear": "YYYY",
-
-    "location": "City Name (Hebrew)",
-
-    "address": "Full street address in Hebrew (e.g. רחוב הברזל 3, תל אביב) or null",
-
-    "hqCountry": "Country (English)",
-
-    "type": "one of ['הייטק', 'תעשייה', 'מסחר וקמעונאות', 'שירותים', 'פיננסים', 'נדל\"ן', 'אחר']",
-
-    "classification": "one of ['פרטית', 'ציבורית', 'ממשלתית', 'מלכ\"ר']",
-
-    "businessModel": "one of ['B2B', 'B2C', 'B2G', 'Mixed', 'Unknown']",
-
-    "productType": "one of ['Product', 'Service', 'Platform', 'Project', 'Unknown']",
-
-    "growthIndicator": "one of ['Growing', 'Stable', 'Shrinking', 'Unknown']",
-
-    "structure": "one of ['Independent', 'Parent', 'Subsidiary']",
-
-    "parentCompany": "Name of parent if Subsidiary",
-
-    "subsidiaries": ["Name1", "Name2"],
-
-    "tags": ["Tag1 (Hebrew)", "Tag2 (Hebrew)"],
-
-    "techTags": ["Tech1 (English)", "Tech2 (English)"],
-
-    "dataConfidence": "one of ['High', 'Medium', 'Low']",
-
-    "activityStatus": "one of ['פעילה', 'לא פעילה', 'בפירוק', 'לא ידוע']"
-
-  }
-
-]
-
-check that all fields exist and good for the table schema`;
-};
+const fallbackCompanyPrompt = (companyNames, mainFieldOptions = [], website = '', snippet = '') =>
+  buildCompanyEnrichmentPrompt({ companyNames, mainFieldOptions, website, snippet });
 
 let companyPromptTemplate = null;
 const loadCompanyPromptTemplate = async () => {
   try {
-    const record = await promptService.getById('company_enrichment');
+    const record = await promptService.ensureById('company_enrichment');
     companyPromptTemplate = record.template;
   } catch (err) {
     console.warn('[organization-enrich] missing company_enrichment prompt', err.message || err);
@@ -168,6 +71,9 @@ const buildCompanyPrompt = async (companyData) => {
   const firstWebsite = companyData.length > 0
     ? (typeof companyData[0] === 'string' ? '' : companyData[0].website || '')
     : '';
+  const firstSnippet = companyData.length > 0
+    ? (typeof companyData[0] === 'string' ? '' : companyData[0].snippet || '')
+    : '';
 
   const template = await loadCompanyPromptTemplate();
   if (template) {
@@ -184,15 +90,12 @@ const buildCompanyPrompt = async (companyData) => {
     if (out.includes('${website}')) {
       out = out.replace('${website}', firstWebsite);
     }
-    const firstSnippet = companyData.length > 0
-      ? (typeof companyData[0] === 'string' ? '' : companyData[0].snippet || '')
-      : '';
     if (out.includes('${snippet}')) {
       out = out.replace('${snippet}', firstSnippet);
     }
     return out;
   }
-  return fallbackCompanyPrompt(companyNames, mainFieldOptions);
+  return fallbackCompanyPrompt(companyNames, mainFieldOptions, firstWebsite, firstSnippet);
 };
 
 const LOGO_ALLOWED_EXT = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);
@@ -233,7 +136,18 @@ const list = async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
-  const result = await organizationService.list({ includeMerged, page, limit, search });
+  const activityFrom = typeof req.query.activityFrom === 'string' ? req.query.activityFrom.trim() : '';
+  const activityTo = typeof req.query.activityTo === 'string' ? req.query.activityTo.trim() : '';
+  const activityDate = typeof req.query.activityDate === 'string' ? req.query.activityDate.trim() : '';
+  const result = await organizationService.list({
+    includeMerged,
+    page,
+    limit,
+    search,
+    activityFrom,
+    activityTo,
+    activityDate,
+  });
   res.json(result);
 };
 
@@ -693,70 +607,7 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
           const companyName = rawName.trim();
           if (!companyName) return null;
 
-   
-
-          //HERE!!! — mainField from item; subField = LLM picks one from PicklistCategoryValues of this mainField
-          let mainField = item.mainField || '';
-          const mainField2 = item.mainField2 || [];
-          let subField = item.subField || '';
-          try {
-            if (mainField2.length) {
-              const subcats = await picklistService.listSubcategories(picklistService.BUSINESS_FIELD_CATEGORY_ID);
-              // For each mainField2 value, collect its subfield options and remember which value owns each option
-              const allSubFieldOptions = [];
-              const subFieldToMainField = {};
-              for (const mf of mainField2) {
-                const cat = (subcats || []).find((c) => (c.name || '').trim() === mf.trim());
-                if (!cat) continue;
-                const vals = await picklistService.listCategoryValues(cat.id);
-                for (const v of (vals || [])) {
-                  const label = (v.label || v.value || '').trim();
-                  if (label) {
-                    allSubFieldOptions.push(label);
-                    subFieldToMainField[label] = mf;
-                  }
-                }
-              }
-              if (allSubFieldOptions.length) {
-                const subJson = JSON.stringify(allSubFieldOptions);
-                const prompt = `Company: ${companyName}. Description: ${(item.description || '').slice(0, 300)}.
-Return ONLY a JSON object with one key: "subField".
-subField MUST be exactly one of (copy verbatim): ${subJson}.
-Example: {"subField":"..."}`;
-                const llmRes = await sendSingleTurnChat({
-                  apiKey: process.env.GEMINI_API_KEY || process.env.API_KEY,
-                  systemPrompt: prompt,
-                  message: prompt,
-                });
-                const objMatch = llmRes.match(/\{\s*[\s\S]*\s*\}/);
-                if (objMatch) {
-                  const obj = JSON.parse(objMatch[0]);
-                  if (obj.subField && allSubFieldOptions.includes(obj.subField)) {
-                    subField = obj.subField;
-                    mainField = subFieldToMainField[subField] || mainField;
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            console.warn('[organization-enrich] subField LLM failed', e?.message || e);
-          }
-          item.mainField = mainField;
-          item.subField = subField;
-
-          // Derive secondaryField from the extra mainField2 categories (those beyond the primary mainField)
-          // if the LLM didn't provide a distinct secondaryField value
-          if (!item.secondaryField || item.secondaryField === subField) {
-            const extraMainFields = Array.isArray(item.mainField2)
-              ? item.mainField2.filter((f) => f && f.trim() !== (mainField || '').trim())
-              : [];
-            if (extraMainFields.length > 0) {
-              item.secondaryField = extraMainFields.join(', ');
-            } else {
-              item.secondaryField = null;
-            }
-          }
-
+          await resolveSubFieldFromPicklist(item, companyName);
 
           const domainForPdl = item.website ? getDomain(item.website) : null;
           if (false &&domainForPdl && process.env.PDL_API_KEY) {
@@ -850,14 +701,13 @@ Example: {"subField":"..."}`;
 
 
             let logo = typeof item.logo === 'string' ? item.logo.trim() : '';
-            if (!logo && item.website) {
               try {
                 const hostname = new URL(item.website).hostname;
                 logo = `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
               } catch {
                 logo = '';
               }
-            }
+            
           
 
           const enriched = { ...item , logo : logo || item.logo };

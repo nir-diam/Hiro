@@ -28,7 +28,7 @@ import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { SmartTagType, SmartTagData } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
 import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
-import { educationEntryToDisplayLine, normalizeLanguagesForPrintRows } from '../utils/printableResumeFormatting';
+import { educationEntryToDisplayLine, normalizeDrivingLicensesForPrint, normalizeLanguagesForPrintRows, splitWorkExperienceForPrint } from '../utils/printableResumeFormatting';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
 import CityEditableField from './CityEditableField';
 import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
@@ -781,6 +781,12 @@ export const PrintableResume: React.FC<{
 }> = ({ data, className = '', hideCompanyLogo = false, density = 'default' }) => {
     const displayName = buildCandidateFullName(data.firstName, data.lastName) || data.fullName || '';
     const printLanguages = normalizeLanguagesForPrintRows(data.languages);
+    const printDrivingLicenses = normalizeDrivingLicensesForPrint(data);
+    const explicitMilitary = Array.isArray(data.militaryExperience) ? data.militaryExperience : [];
+    const { civilianWorkExperience, militaryExperience } = splitWorkExperienceForPrint(
+        Array.isArray(data.workExperience) ? data.workExperience : [],
+        explicitMilitary,
+    );
     const compact = density === 'compact';
 
     const rootPad = compact ? 'p-3' : 'p-10';
@@ -815,6 +821,39 @@ export const PrintableResume: React.FC<{
         ? 'bg-gray-100 text-gray-800 text-[9px] font-medium px-1 py-0.5 rounded border border-gray-200 leading-tight'
         : 'bg-gray-100 text-gray-800 text-xs font-medium px-2.5 py-1 rounded border border-gray-200';
     const langUl = compact ? 'space-y-0.5 text-[11px] leading-tight' : 'space-y-2 text-sm';
+
+    const renderExperienceSection = (
+        items: any[],
+        heading: string,
+        headingMb: string,
+    ) => (
+        <section className={expSectionMb}>
+            <h3 className={`${secTitle} ${headingMb}`}>{heading}</h3>
+            <div className={expStack}>
+                {items.map((exp: any, index: number) => {
+                    const start = formatCvPrintDate(exp.startDate);
+                    const end = formatCvPrintDate(exp.endDate);
+                    const dateLabel =
+                        (typeof exp.dateRangeLabel === 'string' && exp.dateRangeLabel.trim()) ||
+                        [start, end].filter(Boolean).join(' — ');
+                    return (
+                        <div key={`${heading}-${index}`} className="break-inside-avoid">
+                            <div className="flex justify-between items-baseline mb-0.5">
+                                <h4 className={expH4}>{exp.title}</h4>
+                                {dateLabel ? (
+                                    <span dir="ltr" className={expDate}>
+                                        {dateLabel}
+                                    </span>
+                                ) : null}
+                            </div>
+                            {exp.company ? <div className={expCompany}>{exp.company}</div> : null}
+                            {exp.description ? <p className={expDesc}>{exp.description}</p> : null}
+                        </div>
+                    );
+                })}
+            </div>
+        </section>
+    );
 
     return (
         <div
@@ -881,34 +920,20 @@ export const PrintableResume: React.FC<{
             )}
 
             {/* Experience */}
-            {data.workExperience && data.workExperience.length > 0 && (
-                <section className={expSectionMb}>
-                    <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-4'}`}>ניסיון תעסוקתי</h3>
-                    <div className={expStack}>
-                        {data.workExperience.map((exp: any, index: number) => {
-                            const start = formatCvPrintDate(exp.startDate);
-                            const end = formatCvPrintDate(exp.endDate);
-                            const dateLabel =
-                                (typeof exp.dateRangeLabel === 'string' && exp.dateRangeLabel.trim()) ||
-                                [start, end].filter(Boolean).join(' — ');
-                            return (
-                                <div key={index} className="break-inside-avoid">
-                                    <div className="flex justify-between items-baseline mb-0.5">
-                                        <h4 className={expH4}>{exp.title}</h4>
-                                        {dateLabel ? (
-                                            <span dir="ltr" className={expDate}>
-                                                {dateLabel}
-                                            </span>
-                                        ) : null}
-                                    </div>
-                                    {exp.company ? <div className={expCompany}>{exp.company}</div> : null}
-                                    {exp.description ? <p className={expDesc}>{exp.description}</p> : null}
-                                </div>
-                            );
-                        })}
-                    </div>
-                </section>
-            )}
+            {civilianWorkExperience.length > 0 &&
+                renderExperienceSection(
+                    civilianWorkExperience,
+                    'ניסיון תעסוקתי',
+                    compact ? 'mb-2' : 'mb-4',
+                )}
+
+            {/* Military service */}
+            {militaryExperience.length > 0 &&
+                renderExperienceSection(
+                    militaryExperience,
+                    'ניסיון צבאי',
+                    compact ? 'mb-2' : 'mb-4',
+                )}
 
             {/* Education */}
             {data.education && data.education.length > 0 && (
@@ -925,6 +950,20 @@ export const PrintableResume: React.FC<{
                             );
                         })}
                     </ul>
+                </section>
+            )}
+
+            {/* Driving licenses */}
+            {printDrivingLicenses.length > 0 && (
+                <section className={compact ? 'mb-4 break-inside-avoid' : 'mb-8 break-inside-avoid'}>
+                    <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>רישיונות נהיגה</h3>
+                    <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
+                        {printDrivingLicenses.map((license) => (
+                            <span key={license} className={skillTag}>
+                                {license}
+                            </span>
+                        ))}
+                    </div>
                 </section>
             )}
 

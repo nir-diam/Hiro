@@ -7,7 +7,7 @@ import {
     TrashIcon, XMarkIcon, LinkedInIcon, BriefcaseIcon,
     ChartBarIcon, BoltIcon, ShieldCheckIcon, Cog6ToothIcon, ChatBubbleBottomCenterTextIcon,
     BuildingOffice2Icon, ExclamationTriangleIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, FunnelIcon,
-    AvatarIcon, ArrowTopRightOnSquareIcon, UserGroupIcon, ArrowUpTrayIcon
+    AvatarIcon, ArrowTopRightOnSquareIcon, UserGroupIcon, ArrowUpTrayIcon, ArrowDownTrayIcon
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
@@ -19,13 +19,22 @@ import {
     SECTOR_PICKLIST_KEY,
     type PicklistValueRow,
 } from '../services/picklistValuesApi';
-import BusinessFieldHierarchyFields from './BusinessFieldHierarchyFields';
+import BusinessFieldHierarchyFields, { mainFieldsFromApi, mainFieldsToApi } from './BusinessFieldHierarchyFields';
+import { FormMultiSelect } from './FormMultiSelect';
+import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 
 // --- Types ---
 type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'משולב' | 'לא ידוע';
 type ProductType = 'מוצר (Product)' | 'שירותים (Services)' | 'פלטפורמה' | 'פרויקטים' | 'לא ידוע';
 type GrowthIndicator = 'Growing' | 'Stable' | 'Shrinking' | 'Unknown';
 type DataConfidence = 'High' | 'Medium' | 'Low' | 'Pending Review';
+type CompanyQualityMode = 'needs_review' | 'verified';
+
+const qualityModeFromConfidence = (dc: DataConfidence): CompanyQualityMode =>
+    dc === 'High' ? 'verified' : 'needs_review';
+
+const confidenceFromQualityMode = (mode: CompanyQualityMode): DataConfidence =>
+    mode === 'verified' ? 'High' : 'Pending Review';
 type CorporateStructure = 'חברה עצמאית (ללא שיוך)' | 'חברת אם (Parent/Holding)' | 'חברת בת (Subsidiary)';
 
 type CompanyId = string | number;
@@ -56,10 +65,10 @@ interface Company {
     // Business Logic
     mainField: string; // תעשיית אם (parent picklist)
     mainField2: string[]; // שני תחומים ראשיים נוספים
-    subField: string;  // תעשייה ראשית / תת-תחום (child picklist)
+    subField: string[];  // תעשייה ראשית / תת-תחום (child picklist)
     secondaryField: string; // תחום עיסוק משני (free text)
-    businessModel: BusinessModel;
-    productType: ProductType;
+    businessModel: BusinessModel[];
+    productType: ProductType[];
     type: string;      // Organization Type (High-tech, Industry...)
     classification: string; // Public/Private
     
@@ -138,6 +147,36 @@ function normalizeProductType(s: string): ProductType {
 }
 function asProductType(v: unknown): ProductType {
     return normalizeProductType(String(v || ''));
+}
+function parseStringArray(v: unknown): string[] {
+    if (Array.isArray(v)) return v.map((x) => String(x ?? '').trim()).filter(Boolean);
+    const s = String(v ?? '').trim();
+    return s ? [s] : [];
+}
+function asBusinessModelArray(v: unknown): BusinessModel[] {
+    const items = parseStringArray(v).map((x) => normalizeBusinessModel(x));
+    return items.filter((x, i, arr) => arr.indexOf(x) === i);
+}
+function asProductTypeArray(v: unknown): ProductType[] {
+    const items = parseStringArray(v).map((x) => normalizeProductType(x));
+    return items.filter((x, i, arr) => arr.indexOf(x) === i);
+}
+function mergeStringArrayFromRaw(raw: unknown, existing: string[]): string[] {
+    const fromRaw = parseStringArray(raw);
+    return fromRaw.length ? fromRaw : existing;
+}
+function mergeEnumArrayFromRaw<T extends string>(
+    raw: unknown,
+    existing: T[],
+    normalize: (v: unknown) => T,
+): T[] {
+    if (Array.isArray(raw) && raw.length) {
+        return raw.map((x) => normalize(x)).filter((x, i, arr) => arr.indexOf(x) === i);
+    }
+    if (raw != null && String(raw).trim() !== '') {
+        return [normalize(raw)];
+    }
+    return existing;
 }
 function asGrowthIndicator(v: unknown): GrowthIndicator {
     const s = String(v || '');
@@ -258,15 +297,14 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         employeeCount: coerceEmployeeCountBucket(o.employeeCount),
         mainField: String(o.mainField ?? ''),
         mainField2: Array.isArray(o.mainField2) ? (o.mainField2 as unknown[]).map(String) : [],
-        subField: String(o.subField ?? ''),
+        subField: parseStringArray(o.subField),
         secondaryField: (() => {
             const sf = String(o.secondaryField ?? '');
-            const sub = String(o.subField ?? '');
-            // Discard secondaryField if it duplicates subField (stale bad data)
-            return sf && sf !== sub ? sf : '';
+            const subs = parseStringArray(o.subField);
+            return sf && !subs.includes(sf) ? sf : '';
         })(),
-        businessModel: asBusinessModel(o.businessModel),
-        productType: asProductType(o.productType),
+        businessModel: asBusinessModelArray(o.businessModel),
+        productType: asProductTypeArray(o.productType),
         type: String(o.type ?? ''),
         classification: normalizeClassification(String(o.classification ?? '')),
         structure: asCorporateStructure(o.structure),
@@ -295,7 +333,8 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         aliases: c.aliases?.length ? c.aliases : [],
         description: c.description || null,
         mainField: c.mainField || null,
-        subField: c.subField || null,
+        mainField2: c.mainField2?.length ? c.mainField2 : [],
+        subField: c.subField?.length ? c.subField : [],
         secondaryField: c.secondaryField || null,
         employeeCount: c.employeeCount || null,
         type: c.type || null,
@@ -306,8 +345,8 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         location: c.location || null,
         hqCountry: c.hqCountry || null,
         classification: c.classification || null,
-        businessModel: c.businessModel || null,
-        productType: c.productType || null,
+        businessModel: c.businessModel?.length ? c.businessModel : [],
+        productType: c.productType?.length ? c.productType : [],
         structure: c.structure || null,
         parentCompany: c.parentCompany || null,
         subsidiaries: c.subsidiaries?.length ? c.subsidiaries : [],
@@ -400,24 +439,21 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         mainField2: Array.isArray(raw.mainField2) && raw.mainField2.length
             ? (raw.mainField2 as unknown[]).map(String)
             : c.mainField2,
-        subField: (typeof raw.subField === 'string' && raw.subField) || c.subField,
+        subField: mergeStringArrayFromRaw(raw.subField, c.subField),
         secondaryField: (() => {
             const rawSf = typeof raw.secondaryField === 'string' ? raw.secondaryField : '';
             const resolvedMain = (typeof raw.mainField === 'string' && raw.mainField) || c.mainField;
             const resolvedMf2: string[] = Array.isArray(raw.mainField2) && raw.mainField2.length
                 ? (raw.mainField2 as unknown[]).map(String)
                 : c.mainField2 ?? [];
-            const resolvedSub = (typeof raw.subField === 'string' && raw.subField) || c.subField;
+            const resolvedSubs = mergeStringArrayFromRaw(raw.subField, c.subField);
 
-            // 1. Use LLM secondaryField if it's distinct from subField
-            if (rawSf && rawSf !== resolvedSub) return rawSf;
+            if (rawSf && !resolvedSubs.includes(rawSf)) return rawSf;
 
-            // 2. Derive from mainField2 entries that are not the primary mainField
             const extras = resolvedMf2.filter((f) => f.trim() !== (resolvedMain || '').trim());
             if (extras.length > 0) return extras.join(', ');
 
-            // 3. Keep existing DB value if still distinct from subField
-            return c.secondaryField && c.secondaryField !== resolvedSub ? c.secondaryField : '';
+            return c.secondaryField && !resolvedSubs.includes(c.secondaryField) ? c.secondaryField : '';
         })(),
         employeeCount: coerceEmployeeCountBucket(raw.employeeCount) || c.employeeCount,
         website: (typeof raw.website === 'string' && raw.website) || c.website,
@@ -428,10 +464,8 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         hqCountry: (typeof raw.hqCountry === 'string' && raw.hqCountry) || c.hqCountry,
         type: (typeof raw.type === 'string' && raw.type) || c.type,
         classification: (typeof raw.classification === 'string' && raw.classification) ? normalizeClassification(raw.classification) : c.classification,
-        businessModel:
-            raw.businessModel != null && String(raw.businessModel) !== '' ? asBusinessModel(raw.businessModel) : c.businessModel,
-        productType:
-            raw.productType != null && String(raw.productType) !== '' ? asProductType(raw.productType) : c.productType,
+        businessModel: mergeEnumArrayFromRaw(raw.businessModel, c.businessModel, asBusinessModel),
+        productType: mergeEnumArrayFromRaw(raw.productType, c.productType, asProductType),
         growthIndicator:
             raw.growthIndicator != null && String(raw.growthIndicator) !== ''
                 ? asGrowthIndicator(raw.growthIndicator)
@@ -801,18 +835,18 @@ const CompanyModal: React.FC<{
         id: 0,
         name: '', nameEn: '', legalName: '', aliases: [],
         description: '',
-        mainField: '', subField: '', secondaryField: '',
+        mainField: '', subField: [], secondaryField: '',
         mainField2: [],
         employeeCount: '',
         website: '', linkedinUrl: '', logo: '',
         foundedYear: '', location: '', hqCountry: 'Israel',
         address: '', activityStatus: 'לא ידוע',
         type: 'הייטק', classification: 'פרטית',
-        businessModel: 'B2B', productType: 'שירותים (Services)',
+        businessModel: [], productType: [],
         growthIndicator: 'Unknown',
         structure: 'חברה עצמאית (ללא שיוך)', parentCompany: '', subsidiaries: [],
         tags: [], techTags: [],
-        dataConfidence: 'Medium', lastVerified: new Date().toISOString().split('T')[0]
+        dataConfidence: 'Pending Review', lastVerified: new Date().toISOString().split('T')[0]
     });
     
     const [tagsInput, setTagsInput] = useState('');
@@ -824,7 +858,10 @@ const CompanyModal: React.FC<{
         if (isOpen) {
             setActiveTab('details');
             if (company) {
-                setFormData(company);
+                setFormData({
+                    ...company,
+                    dataConfidence: confidenceFromQualityMode(qualityModeFromConfidence(company.dataConfidence)),
+                });
                 setTagsInput(company.tags.join(', '));
                 setTechTagsInput(company.techTags.join(', '));
                 setSubsidiariesInput(company.subsidiaries ? company.subsidiaries.join(', ') : '');
@@ -834,18 +871,18 @@ const CompanyModal: React.FC<{
                     id: '',
                     name: '', nameEn: '', legalName: '', aliases: [],
                     description: '',
-                    mainField: '', subField: '', secondaryField: '',
+                    mainField: '', subField: [], secondaryField: '',
         mainField2: [],
                     employeeCount: '',
                     website: '', linkedinUrl: '', logo: '',
                     foundedYear: '', location: '', hqCountry: 'Israel',
                     address: '', activityStatus: 'לא ידוע',
                     type: 'הייטק', classification: 'פרטית',
-                    businessModel: 'B2B', productType: 'שירותים (Services)',
+                    businessModel: [], productType: [],
                     growthIndicator: 'Unknown',
                     structure: 'חברה עצמאית (ללא שיוך)', parentCompany: '', subsidiaries: [],
                     tags: [], techTags: [],
-                    dataConfidence: 'Low', lastVerified: new Date().toISOString().split('T')[0]
+                    dataConfidence: 'Pending Review', lastVerified: new Date().toISOString().split('T')[0]
                 });
                 setTagsInput('');
                 setTechTagsInput('');
@@ -919,7 +956,12 @@ const CompanyModal: React.FC<{
         const subsidiaries = subsidiariesInput.split(',').map(t => t.trim()).filter(Boolean);
         const aliases = aliasesInput.split(',').map(t => t.trim()).filter(Boolean);
 
-        const verifiedConfidence: DataConfidence = 'High';
+        const qualityMode = qualityModeFromConfidence(formData.dataConfidence);
+        const savedConfidence = confidenceFromQualityMode(qualityMode);
+        const savedLastVerified =
+            qualityMode === 'verified'
+                ? new Date().toISOString().split('T')[0]
+                : formData.lastVerified;
 
         await Promise.resolve(
             onSave({
@@ -928,8 +970,8 @@ const CompanyModal: React.FC<{
                 techTags,
                 subsidiaries,
                 aliases,
-                dataConfidence: verifiedConfidence,
-                lastVerified: new Date().toISOString().split('T')[0],
+                dataConfidence: savedConfidence,
+                lastVerified: savedLastVerified,
             })
         );
         if (closeAfterSave) onClose();
@@ -1016,14 +1058,26 @@ const CompanyModal: React.FC<{
                             <div className="md:col-span-2">
                                 <label className="block text-xs font-semibold text-text-muted mb-1">אתר אינטרנט</label>
                                 <div className="relative">
-                                    <GlobeAmericasIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
+                                    {formData.website ? (
+                                        <a href={formData.website.startsWith('http') ? formData.website : `https://${formData.website}`} target="_blank" rel="noopener noreferrer" className="absolute left-3 top-1/2 -translate-y-1/2 text-primary-500 hover:text-primary-700 transition-colors" title="פתח קישור">
+                                            <GlobeAmericasIcon className="w-4 h-4" />
+                                        </a>
+                                    ) : (
+                                        <GlobeAmericasIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
+                                    )}
                                     <input type="url" name="website" value={formData.website} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="https://..." dir="ltr" />
                                 </div>
                             </div>
                              <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">עמוד לינקדאין</label>
                                 <div className="relative">
-                                    <LinkedInIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
+                                    {formData.linkedinUrl ? (
+                                        <a href={formData.linkedinUrl.startsWith('http') ? formData.linkedinUrl : `https://${formData.linkedinUrl}`} target="_blank" rel="noopener noreferrer" className="absolute left-3 top-1/2 -translate-y-1/2 text-primary-500 hover:text-primary-700 transition-colors" title="פתח קישור">
+                                            <LinkedInIcon className="w-4 h-4" />
+                                        </a>
+                                    ) : (
+                                        <LinkedInIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
+                                    )}
                                     <input type="url" name="linkedinUrl" value={formData.linkedinUrl} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="linkedin.com/company/..." dir="ltr" />
                                 </div>
                             </div>
@@ -1095,59 +1149,39 @@ const CompanyModal: React.FC<{
                                 <BusinessFieldHierarchyFields
                                     apiBase={apiBase}
                                     values={{
-                                        mainField: formData.mainField,
+                                        mainField: mainFieldsFromApi(formData.mainField, formData.mainField2),
                                         subField: formData.subField,
                                         secondaryField: formData.secondaryField,
                                     }}
-                                    onChange={(next) =>
+                                    onChange={(next) => {
+                                        const { mainField, mainField2 } = mainFieldsToApi(next.mainField);
                                         setFormData((prev) => ({
                                             ...prev,
-                                            mainField: next.mainField,
+                                            mainField,
+                                            mainField2,
                                             subField: next.subField,
                                             secondaryField: next.secondaryField ?? '',
-                                        }))
-                                    }
+                                        }));
+                                    }}
                                 />
                             </div>
-                            <div className="md:col-span-4">
-                                
-                                {(formData.mainField2 || []).length > 0 && (
-                                    <div className="flex flex-wrap gap-1 mt-1">
-                                        {(formData.mainField2 || []).map((v, i) => (
-                                            <span key={i} className="inline-flex items-center gap-1 text-[11px] bg-primary-50 text-primary-700 border border-primary-100 rounded px-2 py-0.5">
-                                                {v}
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setFormData((prev) => ({
-                                                        ...prev,
-                                                        mainField2: (prev.mainField2 || []).filter((_, j) => j !== i),
-                                                    }))}
-                                                    className="hover:text-red-500 leading-none"
-                                                >×</button>
-                                            </span>
-                                        ))}
-                                    </div>
-                                )}
-                            </div>
                             <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">מודל עסקי</label>
-                                <select name="businessModel" value={formData.businessModel} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="B2B">B2B</option>
-                                    <option value="B2C">B2C</option>
-                                    <option value="B2G">B2G</option>
-                                    <option value="משולב">משולב</option>
-                                    <option value="לא ידוע">לא ידוע</option>
-                                </select>
+                                <FormMultiSelect
+                                    label="מודל עסקי"
+                                    options={BM.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
+                                    value={formData.businessModel}
+                                    onChange={(businessModel) => setFormData((prev) => ({ ...prev, businessModel: businessModel as BusinessModel[] }))}
+                                    placeholder="בחר מודל עסקי…"
+                                />
                             </div>
                              <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">סוג מוצר</label>
-                                <select name="productType" value={formData.productType} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500">
-                                    <option value="מוצר (Product)">מוצר (Product)</option>
-                                    <option value="שירותים (Services)">שירותים (Services)</option>
-                                    <option value="פלטפורמה">פלטפורמה</option>
-                                    <option value="פרויקטים">פרויקטים</option>
-                                    <option value="לא ידוע">לא ידוע</option>
-                                </select>
+                                <FormMultiSelect
+                                    label="סוג מוצר"
+                                    options={PT.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
+                                    value={formData.productType}
+                                    onChange={(productType) => setFormData((prev) => ({ ...prev, productType: productType as ProductType[] }))}
+                                    placeholder="בחר סוג מוצר…"
+                                />
                             </div>
                             
                             <div>
@@ -1289,9 +1323,51 @@ const CompanyModal: React.FC<{
                 )}
 
                 <footer className="p-4 border-t border-border-default bg-bg-subtle flex justify-between items-center">
-                    <div className="flex items-center gap-2 text-xs font-medium text-text-muted">
-                        <ShieldCheckIcon className={`w-4 h-4 ${formData.dataConfidence === 'High' ? 'text-green-500' : formData.dataConfidence === 'Medium' ? 'text-yellow-500' : formData.dataConfidence === 'Pending Review' ? 'text-amber-500' : 'text-red-500'}`} />
-                        <span>רמת אמינות מידע: {formData.dataConfidence === 'Pending Review' ? 'ממתין לסקירה' : formData.dataConfidence}</span>
+                    <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2 text-xs font-bold text-text-muted">
+                            <ShieldCheckIcon
+                                className={`w-4 h-4 ${
+                                    qualityModeFromConfidence(formData.dataConfidence) === 'verified'
+                                        ? 'text-green-500'
+                                        : 'text-amber-500'
+                                }`}
+                            />
+                            <span>מצב איכות:</span>
+                        </div>
+                        <div className="flex bg-bg-subtle p-0.5 rounded-lg border border-border-default">
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    setFormData((prev) => ({
+                                        ...prev,
+                                        dataConfidence: confidenceFromQualityMode('needs_review'),
+                                    }))
+                                }
+                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                    qualityModeFromConfidence(formData.dataConfidence) === 'needs_review'
+                                        ? 'bg-amber-100 text-amber-800 border border-amber-200 shadow-sm'
+                                        : 'text-text-muted hover:text-text-default'
+                                }`}
+                            >
+                                לביקורת
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    setFormData((prev) => ({
+                                        ...prev,
+                                        dataConfidence: confidenceFromQualityMode('verified'),
+                                    }))
+                                }
+                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                    qualityModeFromConfidence(formData.dataConfidence) === 'verified'
+                                        ? 'bg-green-100 text-green-800 border border-green-200 shadow-sm'
+                                        : 'text-text-muted hover:text-text-default'
+                                }`}
+                            >
+                                מאומת
+                            </button>
+                        </div>
                     </div>
                     <div className="flex gap-3">
                          <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-text-muted hover:bg-bg-hover transition-colors">ביטול</button>
@@ -1300,7 +1376,7 @@ const CompanyModal: React.FC<{
                             onClick={() => void saveCompanyForm().catch(() => {})}
                             className="px-6 py-2.5 rounded-xl text-sm font-bold text-white bg-primary-600 hover:bg-primary-700 transition-all shadow-md"
                         >
-                            {company ? 'שמור ועדכן אמינות' : 'צור חברה'}
+                            {company ? 'שמור פרטים' : 'צור חברה'}
                         </button>
                     </div>
                 </footer>
@@ -1360,6 +1436,9 @@ const AdminCompaniesView: React.FC = () => {
     
     // Filters State - Expanded for Advanced Search
     const [searchTerm, setSearchTerm] = useState('');
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const [activityFrom, setActivityFrom] = useState('');
+    const [activityTo, setActivityTo] = useState('');
     const [currentPage, setCurrentPage] = useState(1);
     const PAGE_SIZE = 50;
     const [totalCount, setTotalCount] = useState(0);
@@ -1369,7 +1448,7 @@ const AdminCompaniesView: React.FC = () => {
         type: '',
         size: '',
         field: '',
-        mainField: '',
+        mainField: [] as string[],
         showPendingOnly: false,
         showMerged: false,
         // Advanced Fields
@@ -1378,10 +1457,10 @@ const AdminCompaniesView: React.FC = () => {
         legalName: '',
         website: '',
         linkedin: '',
-        subField: '',
+        subField: [] as string[],
         secondaryField: '',
-        businessModel: '',
-        productType: '',
+        businessModel: [] as BusinessModel[],
+        productType: [] as ProductType[],
         classification: '',
         structure: '',
         parent: '',
@@ -1427,7 +1506,13 @@ const AdminCompaniesView: React.FC = () => {
     // Selection State
     const [selectedIds, setSelectedIds] = useState<Set<CompanyId>>(new Set());
 
-    const loadOrganizations = useCallback(async (opts?: { includeMerged?: boolean; search?: string; page?: number }) => {
+    const loadOrganizations = useCallback(async (opts?: {
+        includeMerged?: boolean;
+        search?: string;
+        page?: number;
+        activityFrom?: string;
+        activityTo?: string;
+    }) => {
         if (!apiBase) {
             setCompanies([]);
             return;
@@ -1435,10 +1520,16 @@ const AdminCompaniesView: React.FC = () => {
         setCompaniesLoading(true);
         try {
             const params = new URLSearchParams();
-            if (opts?.includeMerged) params.set('includeMerged', 'true');
+            const includeMerged = opts?.includeMerged ?? filters.showMerged;
+            if (includeMerged) params.set('includeMerged', 'true');
             params.set('page', String(opts?.page ?? 1));
             params.set('limit', String(PAGE_SIZE));
-            if (opts?.search) params.set('search', opts.search);
+            const search = opts?.search ?? debouncedSearchTerm;
+            if (search) params.set('search', search);
+            const from = opts?.activityFrom ?? activityFrom;
+            const to = opts?.activityTo ?? activityTo;
+            if (from) params.set('activityFrom', from);
+            if (to) params.set('activityTo', to);
             const res = await fetch(`${apiBase}/api/organizations?${params.toString()}`, {
                 cache: 'no-store',
                 credentials: 'include',
@@ -1465,21 +1556,34 @@ const AdminCompaniesView: React.FC = () => {
         } finally {
             setCompaniesLoading(false);
         }
-    }, [apiBase]);
+    }, [apiBase, debouncedSearchTerm, activityFrom, activityTo, filters.showMerged]);
+
+    const listQueryKey = useMemo(
+        () => JSON.stringify({
+            debouncedSearchTerm,
+            activityFrom,
+            activityTo,
+            includeMerged: filters.showMerged,
+            pageSize: PAGE_SIZE,
+        }),
+        [debouncedSearchTerm, activityFrom, activityTo, filters.showMerged],
+    );
+    const prevListQueryKeyRef = useRef(listQueryKey);
 
     useEffect(() => {
-        void loadOrganizations({ page: currentPage, search: searchTerm });
-    }, [loadOrganizations]);
-
-    // Debounced search → reset to page 1 and reload
-    useEffect(() => {
-        const t = setTimeout(() => {
-            setCurrentPage(1);
-            void loadOrganizations({ page: 1, search: searchTerm });
-        }, 350);
+        const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
         return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [searchTerm]);
+
+    useEffect(() => {
+        const filtersChanged = prevListQueryKeyRef.current !== listQueryKey;
+        prevListQueryKeyRef.current = listQueryKey;
+        const pageToFetch = filtersChanged ? 1 : currentPage;
+        if (filtersChanged && currentPage !== 1) {
+            setCurrentPage(1);
+        }
+        void loadOrganizations({ page: pageToFetch });
+    }, [listQueryKey, currentPage, loadOrganizations]);
 
     const [sectorPicklistRows, setSectorPicklistRows] = useState<PicklistValueRow[]>([]);
     useEffect(() => {
@@ -1510,8 +1614,19 @@ const AdminCompaniesView: React.FC = () => {
             const matchesLocation = !filters.location || c.location.includes(filters.location);
             const matchesType = !filters.type || c.type === filters.type;
             const matchesSize = !filters.size || c.employeeCount === filters.size;
-            const industryFilter = (filters.mainField || filters.field || '').trim();
-            const matchesField = !industryFilter || c.mainField.includes(industryFilter);
+            const mainFieldFilters = Array.isArray(filters.mainField)
+                ? filters.mainField
+                : filters.mainField
+                  ? [String(filters.mainField)]
+                  : filters.field
+                    ? [String(filters.field)]
+                    : [];
+            const matchesField =
+                !mainFieldFilters.length ||
+                mainFieldFilters.some((f) => {
+                    const companyMains = [c.mainField, ...(c.mainField2 || [])].filter(Boolean);
+                    return companyMains.includes(f);
+                });
             const matchesPending = !filters.showPendingOnly || c.dataConfidence === 'Pending Review';
             const matchesMerged = filters.showMerged || c.activityStatus !== 'merged';
 
@@ -1522,12 +1637,18 @@ const AdminCompaniesView: React.FC = () => {
             const matchesWeb = !filters.website || c.website.includes(filters.website);
             const matchesLinked = !filters.linkedin || c.linkedinUrl.includes(filters.linkedin);
             
-            const matchesSub = !filters.subField || c.subField.includes(filters.subField);
+            const matchesSub =
+                !filters.subField.length ||
+                filters.subField.some((f) => c.subField.includes(f));
             const matchesSecondary =
                 !filters.secondaryField ||
                 (c.secondaryField && c.secondaryField.includes(filters.secondaryField));
-            const matchesBiz = !filters.businessModel || c.businessModel === filters.businessModel;
-            const matchesProd = !filters.productType || c.productType === filters.productType;
+            const matchesBiz =
+                !filters.businessModel.length ||
+                filters.businessModel.some((f) => c.businessModel.includes(f));
+            const matchesProd =
+                !filters.productType.length ||
+                filters.productType.some((f) => c.productType.includes(f));
             const matchesClass = !filters.classification || c.classification === filters.classification;
             
             const matchesStruct = !filters.structure || c.structure === filters.structure;
@@ -1713,18 +1834,20 @@ const AdminCompaniesView: React.FC = () => {
     
     const handleClearFilters = () => {
         setFilters({
-            location: '', type: '', size: '', field: '', mainField: '', showPendingOnly: false, showMerged: false,
+            location: '', type: '', size: '', field: '', mainField: [] as string[], showPendingOnly: false, showMerged: false,
             name: '', nameEn: '', legalName: '', website: '', linkedin: '',
-            subField: '', secondaryField: '', businessModel: '', productType: '', classification: '',
+            subField: [] as string[], secondaryField: '', businessModel: [] as BusinessModel[], productType: [] as ProductType[], classification: '',
             structure: '', parent: '', founded: '', tags: '', tech: ''
         });
         setSearchTerm('');
+        setDebouncedSearchTerm('');
+        setActivityFrom('');
+        setActivityTo('');
         setCurrentPage(1);
     };
 
     const handlePageChange = (newPage: number) => {
         setCurrentPage(newPage);
-        void loadOrganizations({ page: newPage, search: searchTerm });
     };
     
     // --- Column Management Handlers ---
@@ -1882,7 +2005,9 @@ const AdminCompaniesView: React.FC = () => {
                             aliases: [],
                             description: c.description || 'Added by AI',
                             mainField: c.mainField || 'General',
-                            subField: '',
+                            mainField2: [],
+                            subField: [],
+                            secondaryField: '',
                             employeeCount: 'Unknown',
                             website: '',
                             linkedinUrl: '',
@@ -1891,8 +2016,8 @@ const AdminCompaniesView: React.FC = () => {
                             hqCountry: 'Israel',
                             type: 'Unknown',
                             classification: 'פרטית',
-                            businessModel: 'לא ידוע',
-                            productType: 'לא ידוע',
+                            businessModel: [],
+                            productType: [],
                             growthIndicator: 'Unknown',
                             structure: 'חברה עצמאית (ללא שיוך)',
                             tags: [],
@@ -1964,8 +2089,10 @@ const AdminCompaniesView: React.FC = () => {
              case 'mainField':
                  return (
                      <>
-                        {company.mainField}
-                        {company.subField && <span className="text-text-muted text-xs block">{company.subField}</span>}
+                        {[company.mainField, ...(company.mainField2 || [])].filter(Boolean).join(' · ')}
+                        {company.subField.length > 0 && (
+                            <span className="text-text-muted text-xs block">{company.subField.join(' · ')}</span>
+                        )}
                         {company.secondaryField && (
                             <span className="text-text-subtle text-[10px] block">{company.secondaryField}</span>
                         )}
@@ -1994,10 +2121,19 @@ const AdminCompaniesView: React.FC = () => {
                      </div>
                  );
              case 'businessModel':
-                  return company.businessModel !== 'לא ידוע' ? (
-                        <span className={`px-2 py-0.5 rounded text-xs font-semibold border ${company.businessModel === 'B2B' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-orange-50 text-orange-700 border-orange-100'}`}>
-                            {company.businessModel}
-                        </span>
+                  return company.businessModel.filter((m) => m !== 'לא ידוע').length > 0 ? (
+                        <div className="flex flex-wrap gap-1">
+                            {company.businessModel.filter((m) => m !== 'לא ידוע').map((m) => (
+                                <span
+                                    key={m}
+                                    className={`px-2 py-0.5 rounded text-xs font-semibold border ${
+                                        m === 'B2B' ? 'bg-blue-50 text-blue-700 border-blue-100' : 'bg-orange-50 text-orange-700 border-orange-100'
+                                    }`}
+                                >
+                                    {m}
+                                </span>
+                            ))}
+                        </div>
                     ) : '-';
              case 'linkedinUrl':
                  return company.linkedinUrl ? (
@@ -2067,6 +2203,60 @@ const AdminCompaniesView: React.FC = () => {
          }
     };
 
+    const getCompanyExportValue = (company: Company, columnId: string): string => {
+        switch (columnId) {
+            case 'logo':
+                return '';
+            case 'name':
+                return company.name;
+            case 'mainField':
+                return [
+                    [company.mainField, ...(company.mainField2 || [])].filter(Boolean).join(' · '),
+                    company.subField.length ? company.subField.join(' · ') : '',
+                    company.secondaryField || '',
+                ].filter(Boolean).join(' | ');
+            case 'structure':
+                return company.structure;
+            case 'businessModel':
+                return company.businessModel.filter((m) => m !== 'לא ידוע').join(', ');
+            case 'type':
+                return company.type;
+            case 'linkedinUrl':
+                return company.linkedinUrl || '';
+            case 'foundedYear':
+                return company.foundedYear || '';
+            case 'employeeCount':
+                return company.employeeCount || '';
+            case 'location':
+                return company.location || '';
+            case 'dataConfidence':
+                return company.dataConfidence || '';
+            case 'techTags':
+                return (company.techTags || []).join(', ');
+            case 'candidateCount':
+                return String(company.candidateCount ?? 0);
+            case 'lastVerified':
+                return company.lastVerified || '';
+            default:
+                return String((company as unknown as Record<string, unknown>)[columnId] ?? '');
+        }
+    };
+
+    const handleDownloadSelectedXlsx = () => {
+        const selected = filteredCompanies.filter((c) => selectedIds.has(c.id));
+        if (!selected.length) return;
+
+        const exportColumnIds = visibleColumns.filter((id) => id !== 'logo');
+        const columns = exportColumnIds.map((id) => ({
+            key: id,
+            label: allColumnsDef.find((c) => c.id === id)?.label || id,
+            getValue: (company: Company) => getCompanyExportValue(company, id),
+        }));
+
+        const stamp = new Date().toISOString().slice(0, 10);
+        downloadRowsAsXlsx(selected, columns, `companies_${stamp}.xlsx`);
+    };
+
 
     return (
         <div className="flex flex-col h-full bg-bg-default relative">
@@ -2088,13 +2278,11 @@ const AdminCompaniesView: React.FC = () => {
                             className={`flex items-center gap-2 font-bold py-2.5 px-4 rounded-xl transition shadow-sm border ${filters.showPendingOnly ? 'bg-amber-100 text-amber-800 border-amber-300' : 'bg-white text-amber-600 border-amber-200 hover:bg-amber-50'}`}
                         >
                             <ExclamationTriangleIcon className="w-5 h-5"/>
-                            <span>ממתינים לסקירה</span>
+                            <span>ממתין לביקורת</span>
                         </button>
                         <button
                             onClick={() => {
-                                const next = !filters.showMerged;
-                                setFilters(prev => ({ ...prev, showMerged: next }));
-                                void loadOrganizations({ includeMerged: next });
+                                setFilters(prev => ({ ...prev, showMerged: !prev.showMerged }));
                             }}
                             className={`flex items-center gap-2 font-bold py-2.5 px-4 rounded-xl transition shadow-sm border ${filters.showMerged ? 'bg-slate-200 text-slate-700 border-slate-300' : 'bg-white text-slate-400 border-slate-200 hover:bg-slate-50'}`}
                             title="הצג/הסתר חברות שמוזגו לחברה אחרת"
@@ -2104,7 +2292,7 @@ const AdminCompaniesView: React.FC = () => {
                         </button>
                         <button
                             type="button"
-                            onClick={() => void loadOrganizations()}
+                            onClick={() => void loadOrganizations({ page: currentPage })}
                             disabled={companiesLoading}
                             className="flex items-center gap-2 bg-white border border-border-default text-text-default font-bold py-2.5 px-4 rounded-xl hover:bg-bg-subtle transition shadow-sm disabled:opacity-50"
                             title="רענן מ־GET /api/organizations (organizationController.list)"
@@ -2176,14 +2364,20 @@ const AdminCompaniesView: React.FC = () => {
                                         compact
                                         showSecondary={false}
                                         values={{
-                                            mainField: filters.mainField || filters.field,
+                                            mainField: Array.isArray(filters.mainField)
+                                                ? filters.mainField
+                                                : filters.mainField
+                                                  ? [filters.mainField]
+                                                  : filters.field
+                                                    ? [filters.field]
+                                                    : [],
                                             subField: filters.subField,
                                         }}
                                         onChange={(next) =>
                                             setFilters((prev) => ({
                                                 ...prev,
                                                 mainField: next.mainField,
-                                                field: next.mainField,
+                                                field: next.mainField[0] || '',
                                                 subField: next.subField,
                                             }))
                                         }
@@ -2213,6 +2407,27 @@ const AdminCompaniesView: React.FC = () => {
                                          <option value="10000+">10000+</option>
                                      </select>
                                 </div>
+                                <div className="flex gap-3 min-w-[280px]">
+                                    <div className="flex flex-col gap-1 flex-1">
+                                        <label className="text-[10px] text-text-muted uppercase tracking-wider">מתאריך</label>
+                                        <input
+                                            type="date"
+                                            value={activityFrom}
+                                            onChange={(e) => setActivityFrom(e.target.value)}
+                                            className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition"
+                                        />
+                                    </div>
+                                    <div className="flex flex-col gap-1 flex-1">
+                                        <label className="text-[10px] text-text-muted uppercase tracking-wider">עד תאריך</label>
+                                        <input
+                                            type="date"
+                                            value={activityTo}
+                                            min={activityFrom || undefined}
+                                            onChange={(e) => setActivityTo(e.target.value)}
+                                            className="w-full bg-bg-input border border-border-default rounded-xl p-2 text-xs focus:border-primary-500 transition"
+                                        />
+                                    </div>
+                                </div>
                                  <div className="flex bg-bg-subtle p-1 rounded-xl border border-border-default ml-auto">
                                     <button onClick={() => setViewMode('table')} className={`p-2 rounded-lg transition-all ${viewMode === 'table' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
                                     <button onClick={() => setViewMode('grid')} className={`p-2 rounded-lg transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
@@ -2237,7 +2452,13 @@ const AdminCompaniesView: React.FC = () => {
                                     <BusinessFieldHierarchyFields
                                         apiBase={apiBase}
                                         values={{
-                                            mainField: filters.mainField || filters.field,
+                                            mainField: Array.isArray(filters.mainField)
+                                                ? filters.mainField
+                                                : filters.mainField
+                                                  ? [filters.mainField]
+                                                  : filters.field
+                                                    ? [filters.field]
+                                                    : [],
                                             subField: filters.subField,
                                             secondaryField: filters.secondaryField,
                                         }}
@@ -2245,26 +2466,31 @@ const AdminCompaniesView: React.FC = () => {
                                             setFilters((prev) => ({
                                                 ...prev,
                                                 mainField: next.mainField,
-                                                field: next.mainField,
+                                                field: next.mainField[0] || '',
                                                 subField: next.subField,
                                                 secondaryField: next.secondaryField ?? '',
                                             }))
                                         }
                                     />
                                 </div>
-                                <select name="businessModel" value={filters.businessModel} onChange={handleFilterChange} className="input-field">
-                                    <option value="">מודל עסקי (הכל)</option>
-                                    <option value="B2B">B2B</option>
-                                    <option value="B2C">B2C</option>
-                                    <option value="B2G">B2G</option>
-                                    <option value="משולב">משולב</option>
-                                </select>
-                                <select name="productType" value={filters.productType} onChange={handleFilterChange} className="input-field">
-                                    <option value="">סוג מוצר (הכל)</option>
-                                    <option value="מוצר (Product)">מוצר</option>
-                                    <option value="שירותים (Services)">שירות</option>
-                                    <option value="פלטפורמה">פלטפורמה</option>
-                                </select>
+                                <FormMultiSelect
+                                    compact
+                                    options={BM.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
+                                    value={filters.businessModel}
+                                    onChange={(businessModel) =>
+                                        setFilters((prev) => ({ ...prev, businessModel: businessModel as BusinessModel[] }))
+                                    }
+                                    placeholder="מודל עסקי (הכל)"
+                                />
+                                <FormMultiSelect
+                                    compact
+                                    options={PT.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
+                                    value={filters.productType}
+                                    onChange={(productType) =>
+                                        setFilters((prev) => ({ ...prev, productType: productType as ProductType[] }))
+                                    }
+                                    placeholder="סוג מוצר (הכל)"
+                                />
 
                                 {/* Structure */}
                                 <select name="classification" value={filters.classification} onChange={handleFilterChange} className="input-field">
@@ -2324,6 +2550,13 @@ const AdminCompaniesView: React.FC = () => {
                                 >
                                     <TrashIcon className="w-4 h-4" />
                                     <span>מחק נבחרים</span>
+                                </button>
+                                <button
+                                    onClick={handleDownloadSelectedXlsx}
+                                    className="flex items-center gap-2 bg-white text-text-default font-bold py-1.5 px-4 rounded-lg shadow-sm border border-border-default hover:bg-bg-hover transition"
+                                >
+                                    <ArrowDownTrayIcon className="w-4 h-4" />
+                                    <span>הורד XLSX</span>
                                 </button>
                             </div>
                             <button onClick={() => setSelectedIds(new Set())} className="text-text-muted hover:text-primary-600 text-sm font-medium">ביטול בחירה</button>
@@ -2475,7 +2708,9 @@ const AdminCompaniesView: React.FC = () => {
                                         <CompanyLogoMark company={company} size={48} />
                                         <div className="flex-1 min-w-0">
                                             <h3 className="font-bold text-lg text-text-default leading-tight truncate" title={company.name}>{company.name}</h3>
-                                            <p className="text-xs text-text-muted mt-1 font-medium">{company.mainField}</p>
+                                            <p className="text-xs text-text-muted mt-1 font-medium">
+                                                {[company.mainField, ...(company.mainField2 || [])].filter(Boolean).join(' · ')}
+                                            </p>
                                         </div>
                                     </div>
                                     
@@ -2493,7 +2728,9 @@ const AdminCompaniesView: React.FC = () => {
                                     </div>
                                     
                                     <div className="flex flex-wrap gap-2 mb-4">
-                                        {company.businessModel && company.businessModel !== 'לא ידוע' && <span className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-100 font-bold">{company.businessModel}</span>}
+                                        {company.businessModel.filter((m) => m !== 'לא ידוע').map((m) => (
+                                            <span key={m} className="text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded border border-blue-100 font-bold">{m}</span>
+                                        ))}
                                         {company.foundedYear && <span className="text-[10px] bg-gray-100 text-gray-700 px-2 py-0.5 rounded border border-gray-200">הוקמה ב-{company.foundedYear}</span>}
                                         <span className="text-[10px] bg-gray-100 text-gray-700 px-2 py-0.5 rounded border border-gray-200">{company.employeeCount} עובדים</span>
                                     </div>

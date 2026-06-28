@@ -3,6 +3,7 @@ const OrganizationAiDecision = require('../models/OrganizationAiDecision');
 const Organization = require('../models/Organization');
 const OrganizationTmp = require('../models/OrganizationTmp');
 const Candidate = require('../models/Candidate');
+const organizationService = require('../services/organizationService');
 
 /**
  * GET /api/organizations/ai-decisions
@@ -140,9 +141,21 @@ const resolve = async (req, res) => {
 
     // When confirming a merge/generic: add alias to target org + mark source org as merged
     let aliasResult = null;
-    const targetId = (aiSuggestedTargetId !== undefined ? aiSuggestedTargetId : null)
+    let targetId = (aiSuggestedTargetId !== undefined ? aiSuggestedTargetId : null)
       ?? decision.aiSuggestedTargetId;
     const mergeDecision = aiDecision !== undefined ? aiDecision : decision.aiDecision;
+    const suggestedTargetName = aiSuggestedTarget !== undefined
+      ? aiSuggestedTarget
+      : decision.aiSuggestedTarget;
+
+    // Resolve generic bucket id by exact name when reviewer picked a bucket label only
+    if (mergeDecision === 'map_generic' && !targetId && suggestedTargetName) {
+      const buckets = await organizationService.findGenericBucketOrganizations();
+      const match = buckets.find(
+        (b) => String(b.name).toLowerCase() === String(suggestedTargetName).toLowerCase(),
+      );
+      if (match) targetId = match.id;
+    }
 
     if ((mergeDecision === 'merge_company' || mergeDecision === 'map_generic') && targetId) {
       const targetOrg = await Organization.findByPk(targetId);

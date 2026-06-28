@@ -34,6 +34,12 @@ const enrich = async (req, res) => {
 const sanitizeTagPayload = (tag) => {
   const payload = tag.toJSON ? tag.toJSON() : { ...tag };
   delete payload.embedding;
+  if (!payload.createdAt && payload.created_at) {
+    payload.createdAt = payload.created_at;
+  }
+  if (!payload.updatedAt && payload.updated_at) {
+    payload.updatedAt = payload.updated_at;
+  }
   return payload;
 };
 
@@ -50,6 +56,14 @@ const list = async (req, res) => {
     const page = Number(req.query.page) || undefined;
     const limit = Number(req.query.limit) || undefined;
     const parsedStatuses = parseListParam(req.query.statuses);
+    const onlyCreatedFrom =
+      req.query.createdFrom &&
+      !req.query.createdTo &&
+      !req.query.updatedFrom &&
+      !req.query.updatedTo &&
+      !req.query.activityDate &&
+      !req.query.activityFrom &&
+      !req.query.activityTo;
     const options = {
       page,
       limit,
@@ -58,11 +72,14 @@ const list = async (req, res) => {
       types: parseListParam(req.query.types),
       categories: parseListParam(req.query.categories),
       statuses: parsedStatuses,
-      sourceFilter: req.query.source,
-      createdFrom: req.query.createdFrom,
+      sources: parseListParam(req.query.sources || req.query.source),
+      createdFrom: onlyCreatedFrom ? undefined : req.query.createdFrom,
       createdTo: req.query.createdTo,
       updatedFrom: req.query.updatedFrom,
       updatedTo: req.query.updatedTo,
+      activityDate: req.query.activityDate || (onlyCreatedFrom ? req.query.createdFrom : undefined),
+      activityFrom: req.query.activityFrom,
+      activityTo: req.query.activityTo,
       sort: req.query.sort,
       direction: req.query.direction,
     };

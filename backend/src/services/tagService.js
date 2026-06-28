@@ -216,11 +216,14 @@ const list = async (options = {}) => {
     types = [],
     categories = [],
     statuses = [],
-    sourceFilter,
+    sources = [],
     createdFrom,
     createdTo,
     updatedFrom,
     updatedTo,
+    activityDate,
+    activityFrom,
+    activityTo,
     sort = 'tagKey',
     direction = 'asc',
   } = options;
@@ -285,47 +288,140 @@ const list = async (options = {}) => {
   if (Array.isArray(categories) && categories.length) {
     where.category = { [Op.in]: categories };
   }
+  const hasDateFilter = Boolean(
+    createdFrom || createdTo || updatedFrom || updatedTo || activityDate || activityFrom || activityTo,
+  );
+
   if (Array.isArray(statuses) && statuses.length) {
     where.status = { [Op.in]: statuses };
-  } else if (!normalizedSearch) {
+  } else if (!normalizedSearch && !hasDateFilter) {
     // Only hide pending tags on unfiltered/unscoped browsing.
-    // When a search term is provided, include all statuses so pending
-    // tags (e.g. freshly AI-detected) are discoverable.
+    // When a search term or date filter is provided, include all statuses.
     where.status = { [Op.ne]: 'pending' };
   }
 
-  const normalizedSource = (sourceFilter || '').toLowerCase();
-  if (normalizedSource) {
-    if (normalizedSource === 'curator') {
-      where.source = { [Op.in]: ['admin', 'system'] };
-    } else if (normalizedSource === 'candidate') {
-      where.source = { [Op.in]: ['user', 'candidate'] };
-    } else if (['ai', 'manual', 'admin', 'system', 'user'].includes(normalizedSource)) {
-      where.source = normalizedSource;
+  const mapUiSourcesToDb = (uiSources) => {
+    const dbSources = new Set();
+    for (const raw of uiSources || []) {
+      const filter = String(raw || '').trim().toLowerCase();
+      switch (filter) {
+        case 'curator':
+          dbSources.add('admin');
+          dbSources.add('system');
+          break;
+        case 'candidate':
+          dbSources.add('user');
+          break;
+        case 'ai':
+        case 'manual':
+        case 'job':
+        case 'admin':
+        case 'system':
+        case 'user':
+          dbSources.add(filter);
+          break;
+        default:
+          break;
+      }
+    }
+    return [...dbSources];
+  };
+
+  if (Array.isArray(sources) && sources.length) {
+    const dbSources = mapUiSourcesToDb(sources);
+    if (dbSources.length) {
+      where.source = { [Op.in]: dbSources };
     }
   }
 
-  if (createdFrom || createdTo) {
-    where.createdAt = {};
-    if (createdFrom) {
-      where.createdAt[Op.gte] = new Date(createdFrom);
+  const parseInclusiveDateFrom = (value) => {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return new Date(`${trimmed}T00:00:00.000Z`);
     }
-    if (createdTo) {
-      where.createdAt[Op.lte] = new Date(createdTo);
+    return new Date(trimmed);
+  };
+
+  const parseInclusiveDateTo = (value) => {
+    const trimmed = String(value || '').trim();
+    if (!trimmed) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+      return new Date(`${trimmed}T23:59:59.999Z`);
     }
-  }
-  if (updatedFrom || updatedTo) {
-    where.updatedAt = {};
-    if (updatedFrom) {
-      where.updatedAt[Op.gte] = new Date(updatedFrom);
+    return new Date(trimmed);
+  };
+
+  // Use snake_case columns: legacy "createdAt"/"updatedAt" DB columns are stale.
+  if (activityDate || activityFrom || activityTo) {
+    const rangeStart = parseInclusiveDateFrom(activityFrom || activityDate);
+    const rangeEnd = parseInclusiveDateTo(activityTo || activityDate);
+    const createdRange = {};
+    const updatedRange = {};
+    if (rangeStart) {
+      createdRange[Op.gte] = rangeStart;
+      updatedRange[Op.gte] = rangeStart;
     }
-    if (updatedTo) {
-      where.updatedAt[Op.lte] = new Date(updatedTo);
+    if (rangeEnd) {
+      createdRange[Op.lte] = rangeEnd;
+      updatedRange[Op.lte] = rangeEnd;
+    }
+    const activityClause = {
+      [Op.or]: [{ created_at: createdRange }, { updated_at: updatedRange }],
+    };
+    if (where[Op.or]) {
+      const searchClause = { [Op.or]: where[Op.or] };
+      delete where[Op.or];
+      where[Op.and] = [searchClause, activityClause];
+    } else {
+      where[Op.or] = activityClause[Op.or];
+    }
+  } else {
+    if (createdFrom || createdTo) {
+      where.created_at = {};
+      if (createdFrom) {
+        where.created_at[Op.gte] = parseInclusiveDateFrom(createdFrom);
+      }
+      if (createdTo) {
+        where.created_at[Op.lte] = parseInclusiveDateTo(createdTo);
+      }
+    }
+    if (updatedFrom || updatedTo) {
+      where.updated_at = {};
+      if (updatedFrom) {
+        where.updated_at[Op.gte] = parseInclusiveDateFrom(updatedFrom);
+      }
+      if (updatedTo) {
+        where.updated_at[Op.lte] = parseInclusiveDateTo(updatedTo);
+      }
     }
   }
 
-  const sortableKeys = new Set(['tagKey', 'displayNameHe', 'displayNameEn', 'type', 'category', 'status', 'createdAt', 'source', 'usageCount']);
-  const safeSortKey = sortableKeys.has(sort) ? sort : 'tagKey';
+  const sortableKeys = new Set([
+    'tagKey',
+    'displayNameHe',
+    'displayNameEn',
+    'type',
+    'category',
+    'status',
+    'createdAt',
+    'updatedAt',
+    'source',
+    'usageCount',
+  ]);
+  const sortColumnMap = {
+    tagKey: 'tagKey',
+    displayNameHe: 'displayNameHe',
+    displayNameEn: 'displayNameEn',
+    type: 'type',
+    category: 'category',
+    status: 'status',
+    createdAt: 'created_at',
+    updatedAt: 'updated_at',
+    source: 'source',
+    usageCount: 'usageCount',
+  };
+  const safeSortKey = sortableKeys.has(sort) ? sortColumnMap[sort] || sort : 'tagKey';
   const safeSortDirection = (direction || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
 
   const queryOptions = {

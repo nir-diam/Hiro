@@ -4,11 +4,14 @@ import { ChevronDownIcon, XMarkIcon } from './Icons';
 export type FormMultiSelectOption = { value: string; label: string };
 
 type FormMultiSelectProps = {
-    label: string;
+    label?: string;
     options: FormMultiSelectOption[];
     value: string[];
     onChange: (next: string[]) => void;
     placeholder?: string;
+    compact?: boolean;
+    disabled?: boolean;
+    className?: string;
 };
 
 export const FormMultiSelect: React.FC<FormMultiSelectProps> = ({
@@ -17,6 +20,9 @@ export const FormMultiSelect: React.FC<FormMultiSelectProps> = ({
     value,
     onChange,
     placeholder = 'בחר',
+    compact = false,
+    disabled = false,
+    className = '',
 }) => {
     const [open, setOpen] = useState(false);
     const rootRef = useRef<HTMLDivElement>(null);
@@ -58,11 +64,17 @@ export const FormMultiSelect: React.FC<FormMultiSelectProps> = ({
     };
 
     return (
-        <div className="relative" ref={rootRef}>
-            <span className="block text-sm font-semibold text-text-muted mb-1">{label}</span>
+        <div className={`relative ${className}`} ref={rootRef}>
+            {label ? (
+                <span className={`block font-semibold text-text-muted mb-1 ${compact ? 'text-xs' : 'text-sm'}`}>
+                    {label}
+                </span>
+            ) : null}
             <div
-                className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus-within:ring-primary-500 focus-within:border-primary-500 p-2.5 min-h-[42px] cursor-pointer flex flex-wrap gap-2 items-center transition shadow-sm"
-                onClick={() => setOpen((o) => !o)}
+                className={`w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus-within:ring-primary-500 focus-within:border-primary-500 flex flex-wrap gap-2 items-center transition shadow-sm ${
+                    compact ? 'rounded-xl py-2 px-3 min-h-[38px]' : 'p-2.5 min-h-[42px]'
+                } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                onClick={() => { if (!disabled) setOpen((o) => !o); }}
                 onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();

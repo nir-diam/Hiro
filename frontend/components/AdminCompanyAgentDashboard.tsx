@@ -82,7 +82,7 @@ const getHesitationBand = (level: number | null) => {
 const getDecisionConfig = (d: string) => {
     if (d === 'create_company') return { label: 'יצירה', color: 'text-emerald-700', bg: 'bg-emerald-50 border-emerald-100', icon: <IconBuilding className="w-3 h-3" /> };
     if (d === 'merge_company')  return { label: 'מיזוג',  color: 'text-indigo-700',  bg: 'bg-indigo-50 border-indigo-100',  icon: <IconLink    className="w-3 h-3" /> };
-    return                             { label: 'גנרי',  color: 'text-orange-700',  bg: 'bg-orange-50 border-orange-100',  icon: <IconGrid    className="w-3 h-3" /> };
+    return                             { label: 'כללי',  color: 'text-orange-700',  bg: 'bg-orange-50 border-orange-100',  icon: <IconGrid    className="w-3 h-3" /> };
 };
 
 const getStatusConfig = (s: string) => {
@@ -282,12 +282,12 @@ const AdminCompanyAgentDashboard: React.FC = () => {
                     <div className="space-y-3">
                         <BarSection label="יצירה חדשה" value={stats.byDecision.create_company} total={totalDecisions} color="bg-emerald-400" labelColor="text-emerald-700" />
                         <BarSection label="מיזוג" value={stats.byDecision.merge_company} total={totalDecisions} color="bg-indigo-400" labelColor="text-indigo-700" />
-                        <BarSection label="גנרי" value={stats.byDecision.map_generic} total={totalDecisions} color="bg-orange-400" labelColor="text-orange-700" />
+                        <BarSection label="כללי" value={stats.byDecision.map_generic} total={totalDecisions} color="bg-orange-400" labelColor="text-orange-700" />
                     </div>
                     <div className="mt-4 pt-3 border-t border-border-default text-xs text-text-muted flex gap-4">
                         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> יצירה: {fmt(stats.byDecision.create_company)}</span>
                         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-400 inline-block" /> מיזוג: {fmt(stats.byDecision.merge_company)}</span>
-                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-400 inline-block" /> גנרי: {fmt(stats.byDecision.map_generic)}</span>
+                        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-orange-400 inline-block" /> כללי: {fmt(stats.byDecision.map_generic)}</span>
                     </div>
                 </div>
 

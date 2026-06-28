@@ -307,20 +307,107 @@ const gridStr = (v) => {
   return s;
 };
 
-const topIndustryLabelFromAnalysis = (ia) => {
-  if (!ia || typeof ia !== 'object') return '';
-  const inds = ia.industries;
-  if (!Array.isArray(inds) || !inds.length) return '';
-  const sorted = [...inds].sort(
-    (a, b) => (Number(b?.percentage) || 0) - (Number(a?.percentage) || 0),
-  );
-  return gridStr(sorted[0]?.label);
+/** Strip legal suffixes so "אלביט מערכות בע\"מ" resolves to canonical org "אלביט מערכות". */
+const normalizeCompanyNameForOrgLookup = (name) => {
+  let s = gridStr(name);
+  if (!s) return '';
+  s = s.replace(/\s+בע[״"']מ\.?\s*$/i, '');
+  s = s.replace(/\s+בע\s*מ\.?\s*$/i, '');
+  s = s.replace(/\s+l\.?t\.?d\.?\s*$/i, '');
+  s = s.replace(/\s+inc\.?\s*$/i, '');
+  return s.trim();
 };
+
+const companyLookupKeys = (name) => {
+  const raw = gridStr(name);
+  if (!raw) return [];
+  const norm = normalizeCompanyNameForOrgLookup(raw);
+  const keys = new Set([raw.toLowerCase()]);
+  if (norm) keys.add(norm.toLowerCase());
+  return [...keys];
+};
+
+const resolveOrgFromMap = (companyName, orgMap) => {
+  if (!orgMap || !companyName) return null;
+  for (const key of companyLookupKeys(companyName)) {
+    const hit = orgMap.get(key);
+    if (hit) return hit;
+  }
+  const norm = normalizeCompanyNameForOrgLookup(companyName).toLowerCase();
+  if (!norm) return null;
+  for (const [key, org] of orgMap) {
+    if (key.startsWith(norm) || norm.startsWith(key)) return org;
+  }
+  return null;
+};
+
+const namesLikelySameCompany = (left, right) => {
+  const aKeys = companyLookupKeys(left);
+  const bKeys = companyLookupKeys(right);
+  if (!aKeys.length || !bKeys.length) return false;
+  for (const a of aKeys) {
+    for (const b of bKeys) {
+      if (a === b) return true;
+      if (a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a))) return true;
+    }
+  }
+  return false;
+};
+
+/** Resolve org by canonical name/alias map, then by candidate_organizations links (fuzzy name match). */
+const resolveOrgForExperience = (companyName, orgMap, linkedOrgs = []) => {
+  const fromMap = resolveOrgFromMap(companyName, orgMap);
+  if (fromMap) return fromMap;
+  for (const org of linkedOrgs) {
+    const d = org?.toJSON ? org.toJSON() : org;
+    if (!d) continue;
+    if (namesLikelySameCompany(companyName, d.name)) return d;
+    if (Array.isArray(d.aliases)) {
+      for (const alias of d.aliases) {
+        if (namesLikelySameCompany(companyName, alias)) return d;
+      }
+    }
+  }
+  return null;
+};
+
+const orgHasGridMetadata = (orgData) => {
+  if (!orgData) return false;
+  return Boolean(
+    gridStr(orgData.mainField) ||
+    firstSubFieldLabel(orgData.subField) ||
+    gridStr(orgData.classification) ||
+    gridStr(orgData.employeeCount),
+  );
+};
+
+const industryLabelFromTags = (payload) => {
+  for (const td of payload.tagDetails || []) {
+    if (String(td.rawType || '').toLowerCase() !== 'industry') continue;
+    const label = gridStr(td.displayNameHe || td.displayNameEn);
+    if (label) return label;
+  }
+  return '';
+};
+
+const firstSubFieldLabel = (subField) => {
+  if (Array.isArray(subField)) {
+    for (const item of subField) {
+      const s = gridStr(item);
+      if (s) return s;
+    }
+    return '';
+  }
+  return gridStr(subField);
+};
+
+const isPresentEndDate = (value) =>
+  /present|כיום|הווה|עד\s*היום|current/i.test(String(value || '').trim());
 
 const parseEndYearForSort = (endDate) => {
   if (endDate == null) return 0;
   const s = String(endDate).trim();
-  if (/present|כיום/i.test(s)) return 9999;
+  if (isPresentEndDate(s)) return 9999;
   const m = s.match(/^(\d{4})/);
   return m ? parseInt(m[1], 10) : 0;
 };
@@ -342,10 +429,11 @@ const buildCompanyExperiences = (workExperience, experience) => {
     .map((e) => {
       const endDate = e.endDate != null ? String(e.endDate).trim() : null;
       const startDate = e.startDate != null ? String(e.startDate).trim() : null;
-      const isCurrent = !endDate || /present|כיום/i.test(endDate) || e.isCurrent === true;
+      const isCurrent = !endDate || isPresentEndDate(endDate) || e.isCurrent === true;
       return {
         company:     String(e.company || '').trim(),
-        industry:    String(e.companyIndustry || e.industry || e.companyField || '').trim(),
+        industry:    String(e.companyIndustry || e.industry || '').trim(),
+        field:       String(e.field || e.companyField || '').trim(),
         sector:      String(e.sector || e.companyType || e.orgType || e.type || '').trim(),
         companySize: String(e.companySize || e.size || '').trim(),
         isCurrent,
@@ -367,157 +455,261 @@ const buildCompanyExperiences = (workExperience, experience) => {
     });
 };
 
-/** Prefer workExperience; else legacy experience JSON. Pick current job or latest by end year. */
+/** Prefer workExperience; else legacy experience JSON. Same ranking as buildCompanyExperiences. */
 const pickBestExperienceRow = (payload) => {
+  const built = buildCompanyExperiences(payload.workExperience, payload.experience);
+  if (!built.length) return null;
+  const primary = built[0];
   const wx = payload.workExperience;
   const ex = payload.experience;
   const list =
     Array.isArray(wx) && wx.length ? wx : Array.isArray(ex) && ex.length ? ex : [];
-  if (!list.length) return null;
-  const current = list.find(
-    (e) =>
-      e &&
-      (/present|כיום/i.test(String(e.endDate || e.end || '').trim()) || e.isCurrent === true),
+  const companyKey = gridStr(primary.company).toLowerCase();
+  const match =
+    list.find((e) => e && gridStr(e.company).toLowerCase() === companyKey) || list[0];
+  return match;
+};
+
+/** Derive companyExperiences from workExperience (always rebuild when source rows exist). */
+const ensureCompanyExperiencesOnPayload = (payload) => {
+  const wx = payload.workExperience;
+  const ex = payload.experience;
+  const hasSource =
+    (Array.isArray(wx) && wx.length) || (Array.isArray(ex) && ex.length);
+  if (hasSource) {
+    payload.companyExperiences = buildCompanyExperiences(wx, ex);
+    return payload.companyExperiences;
+  }
+  if (!Array.isArray(payload.companyExperiences)) payload.companyExperiences = [];
+  return payload.companyExperiences;
+};
+
+/** Ranked experiences: current → latest end date → longest tenure (companyExperiences[0] is primary). */
+const pickRankedCompanyExperiences = (payload) => ensureCompanyExperiencesOnPayload(payload);
+
+/** Most recent job: companyExperiences[0] (current → latest end date) or best workExperience row. */
+const pickPrimaryCompanyExperience = (payload) => {
+  const exps = pickRankedCompanyExperiences(payload);
+  if (Array.isArray(exps) && exps.length && gridStr(exps[0]?.company)) {
+    return exps[0];
+  }
+  const best = pickBestExperienceRow(payload);
+  if (!best) return null;
+  return {
+    company: gridStr(best.company),
+    industry: gridStr(best.companyIndustry || best.industry || best.companyField),
+    field: gridStr(best.field || best.companyField),
+    sector: gridStr(best.sector || best.companyType || best.orgType || best.type),
+    companySize: gridStr(best.companySize || best.size),
+  };
+};
+
+const orgFieldsFromData = (orgData) => {
+  if (!orgData) return null;
+  return {
+    industry: gridStr(orgData.mainField),
+    field: firstSubFieldLabel(orgData.subField),
+    sector: gridStr(orgData.classification),
+    companySize: gridStr(orgData.employeeCount),
+  };
+};
+
+const mergeOrgIntoExperience = (exp, orgData) => {
+  if (!exp || !orgData) return exp;
+  const fromOrg = orgFieldsFromData(orgData);
+  if (!fromOrg) return exp;
+  if (fromOrg.industry) exp.industry = fromOrg.industry;
+  if (fromOrg.field) exp.field = fromOrg.field;
+  if (fromOrg.sector) exp.sector = fromOrg.sector;
+  if (fromOrg.companySize) exp.companySize = fromOrg.companySize;
+  return exp;
+};
+
+const enrichCompanyExperiencesArray = async (companyExperiences, linkedOrgs = []) => {
+  if (!Array.isArray(companyExperiences) || !companyExperiences.length) return companyExperiences;
+  const orgMap = await loadOrganizationsForCompanyNames(
+    companyExperiences.map((e) => e?.company).filter(Boolean),
   );
-  if (current) return current;
-  let best = list[0];
-  let bestY = parseEndYearForSort(best?.endDate || best?.end);
-  for (let i = 1; i < list.length; i++) {
-    const e = list[i];
-    const y = parseEndYearForSort(e?.endDate || e?.end);
-    if (y > bestY) {
-      bestY = y;
-      best = e;
-    }
+  for (const exp of companyExperiences) {
+    const orgData = resolveOrgForExperience(exp?.company, orgMap, linkedOrgs);
+    if (orgData) mergeOrgIntoExperience(exp, orgData);
   }
-  return best;
+  return companyExperiences;
 };
 
-const sortTagDetailsByRelevance = (details, rawType) => {
-  const t = String(rawType).toLowerCase();
-  return [...details.filter((d) => String(d.rawType || '').toLowerCase() === t)].sort((a, b) => {
-    if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
-    return (Number(b.finalScore) || 0) - (Number(a.finalScore) || 0);
-  });
+/** Batch-resolve organizations by canonical name or aliases (incl. generic-bucket aliases). */
+const loadOrganizationsForCompanyNames = async (companyNames) => {
+  const keys = new Set();
+  for (const n of companyNames || []) {
+    for (const k of companyLookupKeys(n)) keys.add(k);
+  }
+  const lowerNames = [...keys];
+  if (!lowerNames.length) return new Map();
+
+  const binds = [...lowerNames, ...lowerNames];
+  const ph1 = lowerNames.map((_, i) => `$${i + 1}`).join(', ');
+  const offset = lowerNames.length;
+  const ph2 = lowerNames.map((_, i) => `$${offset + i + 1}`).join(', ');
+
+  const rows = await sequelize.query(
+    `SELECT id, name, aliases, "mainField", "subField", "employeeCount", classification
+     FROM organizations
+     WHERE LOWER(TRIM(name)) IN (${ph1})
+        OR EXISTS (
+          SELECT 1 FROM unnest(COALESCE(aliases, ARRAY[]::text[])) a
+          WHERE LOWER(TRIM(a)) IN (${ph2})
+        )`,
+    { bind: binds, type: QueryTypes.SELECT },
+  );
+
+  const orgMap = new Map();
+  for (const d of rows) {
+    const key = String(d.name || '').trim().toLowerCase();
+    if (key) orgMap.set(key, d);
+    for (const lk of companyLookupKeys(d.name)) orgMap.set(lk, d);
+    if (Array.isArray(d.aliases)) {
+      for (const alias of d.aliases) {
+        for (const lk of companyLookupKeys(alias)) {
+          if (!orgMap.has(lk)) orgMap.set(lk, d);
+        }
+      }
+    }
+  }
+  return orgMap;
 };
 
-/** Fill empty industry / field / sector / companySize for list & detail from tags + analysis + experience. */
-const enrichGridCompanyFields = (payload) => {
-  const details = payload.tagDetails || [];
-  const bestExp = pickBestExperienceRow(payload);
+/** Organizations linked to candidates via candidate_organizations (employer history). */
+const loadLinkedOrganizationsByCandidateIds = async (candidateIds) => {
+  const ids = [...new Set((candidateIds || []).map((id) => String(id).trim()).filter(Boolean))];
+  const byCandidate = new Map();
+  if (!ids.length) return byCandidate;
 
-  if (!gridStr(payload.industry)) {
-    const fromIa = topIndustryLabelFromAnalysis(payload.industryAnalysis);
-    if (fromIa) payload.industry = fromIa;
-  }
-  if (!gridStr(payload.industry)) {
-    const sorted = sortTagDetailsByRelevance(details, 'industry');
-    const tag = sorted[0];
-    if (tag) {
-      payload.industry =
-        gridStr(tag.displayNameHe) || gridStr(tag.displayNameEn) || gridStr(tag.tagKey);
-    }
-  }
-  if (!gridStr(payload.industry) && bestExp) {
-    const v =
-      gridStr(bestExp.companyField) ||
-      gridStr(bestExp.industry) ||
-      gridStr(bestExp.companyIndustry);
-    if (v) payload.industry = v;
-  }
+  const rows = await sequelize.query(
+    `SELECT co."candidateId" AS "candidateId",
+            o.id, o.name, o.aliases, o."mainField", o."subField", o."employeeCount", o.classification
+     FROM candidate_organizations co
+     JOIN organizations o ON o.id = co."organizationId"
+     WHERE co."candidateId" = ANY($1::uuid[])`,
+    { bind: [ids], type: QueryTypes.SELECT },
+  );
 
-  if (!gridStr(payload.field)) {
-    const sorted = sortTagDetailsByRelevance(details, 'role');
-    const tag = sorted[0];
-    if (tag) {
-      payload.field =
-        gridStr(tag.category) ||
-        gridStr(tag.displayNameHe) ||
-        gridStr(tag.displayNameEn) ||
-        gridStr(tag.tagKey);
-    }
+  for (const row of rows) {
+    const cid = String(row.candidateId);
+    if (!byCandidate.has(cid)) byCandidate.set(cid, []);
+    byCandidate.get(cid).push(row);
   }
-  if (!gridStr(payload.field) && bestExp) {
-    const v = gridStr(bestExp.field) || gridStr(bestExp.companyField);
-    if (v) payload.field = v;
-  }
-
-  if (!gridStr(payload.sector)) {
-    const ia = payload.industryAnalysis;
-    const sub = ia?.smartTags?.orgDNA?.subLabel;
-    if (gridStr(sub)) payload.sector = gridStr(sub);
-    else if (Array.isArray(ia?.smartTags?.domains) && ia.smartTags.domains.length) {
-      payload.sector = gridStr(ia.smartTags.domains[0]);
-    }
-  }
-  if (!gridStr(payload.sector) && bestExp) {
-    const v =
-      gridStr(bestExp.type) ||
-      gridStr(bestExp.companyType) ||
-      gridStr(bestExp.sector) ||
-      gridStr(bestExp.orgType);
-    if (v) payload.sector = v;
-  }
-
-  if (!gridStr(payload.companySize) && bestExp) {
-    const v = gridStr(bestExp.size) || gridStr(bestExp.companySize);
-    if (v) payload.companySize = v;
-  }
+  return byCandidate;
 };
 
 /**
- * After mapCandidateWithTags, any row that still lacks `sector` or `companySize`
- * is enriched by looking up companies from companyExperiences in the organizations table.
- * organizations.classification → sector, organizations.employeeCount → companySize.
- * Uses a single batched query to avoid N+1.
+ * Pick the most relevant employer that yields grid metadata.
+ * Walks ranked experiences in order; skips primary when its org is unknown/empty.
+ */
+const pickGridEmployerSource = (ranked, orgMap, linkedOrgs = []) => {
+  for (const exp of ranked) {
+    const orgData = resolveOrgForExperience(exp?.company, orgMap, linkedOrgs);
+    if (orgData) mergeOrgIntoExperience(exp, orgData);
+    const fromOrg = orgFieldsFromData(orgData);
+    if (orgHasGridMetadata(orgData)) {
+      return { exp, orgData, fromOrg };
+    }
+    if (gridStr(exp.industry) || gridStr(exp.sector) || gridStr(exp.companySize)) {
+      return { exp, orgData, fromOrg };
+    }
+  }
+  const primary = ranked[0];
+  if (!primary) return null;
+  const orgData = resolveOrgForExperience(primary.company, orgMap, linkedOrgs);
+  if (orgData) mergeOrgIntoExperience(primary, orgData);
+  return { exp: primary, orgData, fromOrg: orgFieldsFromData(orgData) };
+};
+
+/**
+ * Grid columns תעשייה / תחום / סקטור / מס' עובדים.
+ * - field: always from the most relevant job row (companyExperiences[0] / companyField).
+ * - industry / sector / companySize: from that job's org when resolvable, else next ranked job with org data.
+ */
+const applyGridFieldsFromLastCompany = (payload, orgData = null, orgMap = null, linkedOrgs = []) => {
+  const ranked = pickRankedCompanyExperiences(payload);
+  payload.companyExperiences = ranked;
+  const primary = ranked[0] || null;
+  const primaryField = gridStr(primary?.field);
+
+  if (orgData) {
+    if (primary) mergeOrgIntoExperience(primary, orgData);
+    const fromOrg = orgFieldsFromData(orgData);
+    payload.industry = fromOrg?.industry || gridStr(primary?.industry);
+    payload.field = primaryField || fromOrg?.field || gridStr(primary?.field);
+    payload.sector = fromOrg?.sector || gridStr(primary?.sector);
+    payload.companySize = fromOrg?.companySize || gridStr(primary?.companySize);
+    return;
+  }
+
+  const map = orgMap || new Map();
+  if (primary) {
+    const primaryOrg = resolveOrgForExperience(primary.company, map, linkedOrgs);
+    if (primaryOrg) mergeOrgIntoExperience(primary, primaryOrg);
+    const primaryFromOrg = orgFieldsFromData(primaryOrg);
+    if (orgHasGridMetadata(primaryOrg)) {
+      payload.industry = primaryFromOrg.industry || gridStr(primary.industry);
+      payload.field = primaryField || primaryFromOrg.field || gridStr(primary.field);
+      payload.sector = primaryFromOrg.sector || gridStr(primary.sector);
+      payload.companySize = primaryFromOrg.companySize || gridStr(primary.companySize);
+      return;
+    }
+  }
+
+  const source = pickGridEmployerSource(ranked, map, linkedOrgs);
+  if (!source) {
+    payload.industry = industryLabelFromTags(payload);
+    payload.field = primaryField;
+    payload.sector = '';
+    payload.companySize = '';
+    return;
+  }
+
+  const { exp, fromOrg } = source;
+  payload.industry = fromOrg?.industry || gridStr(exp?.industry) || industryLabelFromTags(payload);
+  payload.field = primaryField || fromOrg?.field || gridStr(exp?.field);
+  payload.sector = fromOrg?.sector || gridStr(exp?.sector);
+  payload.companySize = fromOrg?.companySize || gridStr(exp?.companySize);
+};
+
+/** List/detail grid: derive תעשייה / תחום / סקטור from last employer (org lookup fills in enrichMappedRowsWithOrgData). */
+const enrichGridCompanyFields = (payload) => {
+  applyGridFieldsFromLastCompany(payload);
+};
+
+/**
+ * After mapCandidateWithTags, resolve תעשייה / תחום / סקטור / מס' עובדים from the organizations
+ * table for each candidate's most relevant employer (companyExperiences[0]).
  */
 const enrichMappedRowsWithOrgData = async (mappedRows) => {
   if (!mappedRows || !mappedRows.length) return;
 
   const companyNames = new Set();
   for (const row of mappedRows) {
-    if (gridStr(row.sector) && gridStr(row.companySize)) continue;
-    const exps = row.companyExperiences;
-    if (!Array.isArray(exps)) continue;
-    for (const exp of exps) {
-      const name = String(exp.company || '').trim();
+    for (const exp of pickRankedCompanyExperiences(row)) {
+      const name = gridStr(exp?.company);
       if (name) companyNames.add(name);
     }
   }
   if (!companyNames.size) return;
 
-  const orgs = await Organization.findAll({
-    where: { name: { [Op.in]: [...companyNames] } },
-    attributes: ['name', 'aliases', 'employeeCount', 'classification'],
-  });
-
-  const orgMap = new Map();
-  for (const org of orgs) {
-    const d = org.toJSON ? org.toJSON() : org;
-    const key = String(d.name || '').trim().toLowerCase();
-    if (key) orgMap.set(key, d);
-    if (Array.isArray(d.aliases)) {
-      for (const alias of d.aliases) {
-        const akey = String(alias || '').trim().toLowerCase();
-        if (akey && !orgMap.has(akey)) orgMap.set(akey, d);
-      }
-    }
-  }
-  if (!orgMap.size) return;
+  const orgMap = await loadOrganizationsForCompanyNames([...companyNames]);
+  const linkedOrgsByCandidate = await loadLinkedOrganizationsByCandidateIds(
+    mappedRows.map((row) => row.id).filter(Boolean),
+  );
 
   for (const row of mappedRows) {
-    const needsSector = !gridStr(row.sector);
-    const needsSize = !gridStr(row.companySize);
-    if (!needsSector && !needsSize) continue;
-    const exps = row.companyExperiences;
-    if (!Array.isArray(exps) || !exps.length) continue;
-    for (const exp of exps) {
-      const orgData = orgMap.get(String(exp.company || '').trim().toLowerCase());
-      if (!orgData) continue;
-      if (needsSector && gridStr(orgData.classification)) row.sector = gridStr(orgData.classification);
-      if (needsSize && gridStr(orgData.employeeCount)) row.companySize = gridStr(orgData.employeeCount);
-      break;
+    const linkedOrgs = linkedOrgsByCandidate.get(String(row.id)) || [];
+    const ranked = pickRankedCompanyExperiences(row);
+    for (const exp of ranked) {
+      const orgData = resolveOrgForExperience(exp?.company, orgMap, linkedOrgs);
+      if (orgData) mergeOrgIntoExperience(exp, orgData);
     }
+    row.companyExperiences = ranked;
+    applyGridFieldsFromLastCompany(row, null, orgMap, linkedOrgs);
   }
 };
 
@@ -587,6 +779,7 @@ const mapCandidateWithTags = (candidate, options = {}) => {
 
   enrichCandidateNameForRead(payload);
 
+  ensureCompanyExperiencesOnPayload(payload);
   enrichGridCompanyFields(payload);
 
   if (options.stripListHeavyJson) {
@@ -1587,6 +1780,10 @@ const listPaginated = async ({
   includeEngineScores = false,
   /** Score each row vs its latest `lastJobSubmission.jobId` (opt-in via `matchLastJobScores=1`). */
   matchLastJobScores = false,
+  /** Saved-search blacklist: exclude candidates whose email matches any of these. */
+  blacklistedEmails = [],
+  /** Saved-search blacklist: exclude candidates whose phone matches any of these. */
+  blacklistedPhones = [],
 } = {}) => {
   const safeLimit = Number.isFinite(limit) ? limit : 100;
   const safePage = Number.isFinite(page) && page > 0 ? page : 1;
@@ -1595,7 +1792,24 @@ const listPaginated = async ({
   const jid = jobId != null && String(jobId).trim() !== '' ? String(jobId).trim() : '';
   const tid = tagId != null && String(tagId).trim() !== '' ? String(tagId).trim() : '';
 
-  const { whereSql, binds } = buildCandidateListWhere(trimmedSearch, advanced);
+  let { whereSql, binds } = buildCandidateListWhere(trimmedSearch, advanced);
+
+  // Saved-search blacklist: exclude by stable email/phone identifiers.
+  if (blacklistedEmails.length > 0) {
+    const placeholders = blacklistedEmails.map((e) => {
+      const n = pushBind(binds, e.toLowerCase());
+      return `$${n}`;
+    });
+    whereSql += ` AND (LOWER(email) NOT IN (${placeholders.join(',')}) OR email IS NULL)`;
+  }
+  if (blacklistedPhones.length > 0) {
+    const placeholders = blacklistedPhones.map((p) => {
+      const n = pushBind(binds, p);
+      return `$${n}`;
+    });
+    whereSql += ` AND (phone NOT IN (${placeholders.join(',')}) OR phone IS NULL)`;
+  }
+
   if (tid) {
     const n = pushBind(binds, tid);
     const tagClause = `id IN (
@@ -1789,7 +2003,11 @@ const getById = async (id, opts = {}) => {
   if (!opts.skipCache) {
     try {
       const cached = await redis.get(CANDIDATE_KEY(id));
-      if (cached) return cached;
+      if (cached) {
+        const rows = [cached];
+        await enrichMappedRowsWithOrgData(rows);
+        return rows[0];
+      }
     } catch (e) {
       console.warn('[candidateService] redis get failed (non-fatal):', e.message);
     }
@@ -1803,6 +2021,7 @@ const getById = async (id, opts = {}) => {
   }
   const mapped = mapCandidateWithTags(candidate);
   const rows = [mapped];
+  await enrichMappedRowsWithOrgData(rows);
   await attachLatestJobSubmissions(rows);
   await attachLastSubmissionEngineMatchScores(rows, {
     tenantClientId: opts.tenantClientId || null,
@@ -2008,7 +2227,9 @@ const update = async (id, payload) => {
   const exForUpdate = 'experience' in cleanPayload
     ? cleanPayload.experience
     : (candidate.experience || candidate.get?.('experience'));
-  cleanPayload.companyExperiences = buildCompanyExperiences(wxForUpdate, exForUpdate);
+  cleanPayload.companyExperiences = await enrichCompanyExperiencesArray(
+    buildCompanyExperiences(wxForUpdate, exForUpdate),
+  );
 
   await prepareCityFieldsInPayload(cleanPayload);
   await applyCandidateCityFromCatalog(cleanPayload);
@@ -2026,11 +2247,28 @@ const update = async (id, payload) => {
   const updated = mapCandidateWithTags(
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
+  await enrichMappedRowsWithOrgData([updated]);
   await cacheSet(updated);
   // Profile changed → remove stale scores from every job:*:matches + wipe their opportunities
   invalidateCandidateOpportunities(id).catch(() => {});
   invalidateCandidateInAllJobMatches(id).catch(() => {});
   return updated;
+};
+
+/** Rebuild companyExperiences from work history + organization metadata (after org sync / alias mapping). */
+const refreshCompanyExperiencesForCandidate = async (id) => {
+  const candidate = await Candidate.findByPk(id, {
+    attributes: ['id', 'workExperience', 'experience'],
+  });
+  if (!candidate) return null;
+  const linkedOrgs = (await loadLinkedOrganizationsByCandidateIds([id])).get(String(id)) || [];
+  const companyExperiences = await enrichCompanyExperiencesArray(
+    buildCompanyExperiences(candidate.workExperience, candidate.experience),
+    linkedOrgs,
+  );
+  await Candidate.update({ companyExperiences }, { where: { id } });
+  await cacheDel(id);
+  return companyExperiences;
 };
 
 /** Save edited parsed CV text: archive previous searchText into originalText, set new searchText. */
@@ -2112,6 +2350,7 @@ module.exports = {
   findByPkWithTagsForMatchScore,
   findManyWithTagsForMatchScore,
   toPlainCandidateForMatchScore,
+  refreshCompanyExperiencesForCandidate,
 };
 
 
