@@ -1,9 +1,10 @@
 const path = require('path');
+const { Op } = require('sequelize');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const organizationService = require('../services/organizationService');
 const organizationEmbeddingService = require('../services/organizationEmbeddingService');
-const { resolveSubFieldFromPicklist } = require('../services/organizationEnrichmentService');
+const { resolveSubFieldFromPicklist, searchWebsiteUrl } = require('../services/organizationEnrichmentService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
@@ -11,11 +12,53 @@ const axios = require('axios');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const Candidate = require('../models/Candidate');
 const Organization = require('../models/Organization');
+const OrganizationChangeHistory = require('../models/OrganizationChangeHistory');
+const User = require('../models/User');
 
 const { sendSingleTurnChat, sendChat, resolveGeminiApiKey } = require('../services/geminiService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { filterSerpOrganicResults } = require('../utils/filterSerpOrganicResults');
 const { buildCompanyEnrichmentPrompt } = require('../prompts/companyEnrichmentPrompt');
+
+const UUID_RE = /^[0-9a-f-]{36}$/i;
+
+const resolveOrganizationActor = (req) => {
+  if (req.dbUser) {
+    const plain = req.dbUser.get ? req.dbUser.get({ plain: true }) : req.dbUser;
+    return {
+      actingUser: plain.id,
+      actorName: plain.name || plain.email || null,
+      actorEmail: plain.email || null,
+    };
+  }
+  const userId = req.user?.sub || req.user?.id;
+  if (userId) {
+    return {
+      actingUser: userId,
+      actorName: req.user?.name || req.user?.email || null,
+      actorEmail: req.user?.email || null,
+    };
+  }
+  return { actingUser: 'system', actorName: null, actorEmail: null };
+};
+
+const resolveHistoryActorDisplay = (plain, userMap) => {
+  const actor = plain.actor;
+  const changes = plain.changes || {};
+  const user = userMap.get(String(actor));
+
+  if (user?.name) return user.name;
+  if (user?.email) return user.email;
+  if (changes.actorName) return changes.actorName;
+  if (changes.actorEmail) return changes.actorEmail;
+
+  if (actor && typeof actor === 'string' && !UUID_RE.test(actor) && actor !== 'system') {
+    return actor;
+  }
+
+  if (actor && actor !== 'system') return null;
+  return null;
+};
 
 // Module-level helpers so they are available before the enrich try-block
 const serperRaw = async (q, num = 5) => {
@@ -151,6 +194,21 @@ const list = async (req, res) => {
   res.json(result);
 };
 
+const globalLookup = async (req, res) => {
+  try {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const limit = Math.min(10, Math.max(1, parseInt(req.query.limit, 10) || 6));
+    if (q.length < 2) {
+      return res.json({ data: [] });
+    }
+    const data = await organizationService.globalLookup(q, { limit });
+    res.json({ data });
+  } catch (err) {
+    console.error('[organizationController.globalLookup]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Lookup failed' });
+  }
+};
+
 const get = async (req, res) => {
   try {
     const org = await organizationService.getById(req.params.id);
@@ -162,7 +220,12 @@ const get = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const org = await organizationService.create(req.body);
+    const actor = resolveOrganizationActor(req);
+    const org = await organizationService.create(req.body, {
+      actingUser: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
+    });
     res.status(201).json(org);
   } catch (err) {
     res.status(err.status || 400).json({
@@ -174,7 +237,12 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const org = await organizationService.update(req.params.id, req.body);
+    const actor = resolveOrganizationActor(req);
+    const org = await organizationService.update(req.params.id, req.body, {
+      actingUser: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
+    });
     res.json(org);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Update failed' });
@@ -183,14 +251,74 @@ const update = async (req, res) => {
 
 const remove = async (req, res) => {
   try {
-    await organizationService.remove(req.params.id);
+    const actor = resolveOrganizationActor(req);
+    await organizationService.remove(req.params.id, {
+      actingUser: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
+    });
     res.status(204).end();
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Delete failed' });
   }
 };
 
-// Parse year from experience date string (YYYY-MM, YYYY, or "Present")
+const getHistory = async (req, res) => {
+  const organizationId = req.params.id;
+  if (!organizationId) {
+    return res.status(400).json({ message: 'Missing organization id' });
+  }
+
+  try {
+    const entries = await OrganizationChangeHistory.findAll({
+      where: { organizationId },
+      order: [['created_at', 'DESC']],
+    });
+
+    const actorIds = [
+      ...new Set(
+        entries
+          .map((row) => row.actor)
+          .filter((actor) => actor && actor !== 'system' && UUID_RE.test(String(actor))),
+      ),
+    ];
+
+    const users = actorIds.length
+      ? await User.findAll({
+          where: { id: { [Op.in]: actorIds } },
+          attributes: ['id', 'name', 'email'],
+        })
+      : [];
+    const userMap = new Map(users.map((u) => [String(u.id), u.get({ plain: true })]));
+
+    const payload = entries.map((entry) => {
+      const plain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
+      const actor = plain.actor;
+      const user = userMap.get(String(actor));
+      const actorDisplayName = resolveHistoryActorDisplay(plain, userMap);
+      const createdAt =
+        plain.createdAt ||
+        plain.created_at ||
+        plain.updatedAt ||
+        plain.updated_at ||
+        null;
+      return {
+        ...plain,
+        createdAt,
+        created_at: createdAt,
+        actorDisplayName,
+        userName: user?.name || plain.changes?.actorName || null,
+        userEmail: user?.email || plain.changes?.actorEmail || null,
+      };
+    });
+
+    res.json(payload);
+  } catch (err) {
+    console.error('[organizationController.getHistory]', err);
+    res.status(500).json({ message: 'Failed to load organization history' });
+  }
+};
+
 const parseExperienceYear = (s) => {
   if (!s || typeof s !== 'string') return null;
   const t = s.trim();
@@ -333,6 +461,8 @@ const enrich = async (req, res) => {
       apiKey: process.env.GEMINI_API_KEY || process.env.API_KEY,
       systemPrompt,
       message: messagePayload,
+      promptId: 'company_enrichment',
+      llmInputJson: companyData.length === 1 ? companyData[0] : companyData,
     });
 
     const jsonMatch = response.match(/\[\s*[\s\S]*\s*]/);
@@ -596,6 +726,25 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
       }
     };
 
+    const searchPhone = async (companyName) => {
+      if (!companyName || !process.env.SERPDEV) return null;
+      const q = /[\u0590-\u05FF]/.test(companyName) ? `${companyName} טלפון` : `${companyName} phone`;
+      const results = await serperSearch(q, 5);
+      const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
+      const match = texts.match(/(?:\+972[\s-]?|0)(?:[\s-]?\d){8,10}/);
+      return match ? match[0].replace(/[^\d+]/g, '') : null;
+    };
+
+    const searchEmail = async (companyName) => {
+      if (!companyName || !process.env.SERPDEV) return null;
+      const q = /[\u0590-\u05FF]/.test(companyName) ? `${companyName} אימייל` : `${companyName} email`;
+      const results = await serperSearch(q, 5);
+      const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
+      const emails = texts.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g) || [];
+      const skip = /noreply|no-reply|example\.com/i;
+      return emails.find((e) => !skip.test(e)) || null;
+    };
+
     const suggestions = (
       await Promise.all(
         parsed.map(async (item) => {
@@ -693,6 +842,22 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
           } catch (err) {
             console.warn('[organization-enrich] snippet search failed', err?.message || err);
           }
+
+          if (!String(item.phone || '').trim()) {
+            try {
+              item.phone = await searchPhone(companyName);
+            } catch (err) {
+              console.warn('[organization-enrich] phone search failed', err?.message || err);
+            }
+          }
+
+          if (!String(item.email || '').trim()) {
+            try {
+              item.email = await searchEmail(companyName);
+            } catch (err) {
+              console.warn('[organization-enrich] email search failed', err?.message || err);
+            }
+          }
           
 
             const bucket = normalizeEmployeeCount(item.employeeCount);
@@ -765,10 +930,12 @@ const rebuildEmbedding = async (req, res) => {
 
 module.exports = {
   list,
+  globalLookup,
   get,
   create,
   update,
   remove,
+  getHistory,
   enrich,
   listCandidates,
   createLogoUploadUrl,

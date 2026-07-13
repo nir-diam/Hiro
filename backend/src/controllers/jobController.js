@@ -1,4 +1,6 @@
 const jobService = require('../services/jobService');
+const jobPublicationService = require('../services/jobPublicationService');
+const authService = require('../services/authService');
 const jobCandidateService = require('../services/jobCandidateService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
 const Job = require('../models/Job');
@@ -179,31 +181,40 @@ const list = async (req, res) => {
 };
 
 /**
- * Jobs for messaging UI: when user has a client, only jobs whose Job.client string matches
- * that Client's name/displayName; otherwise all jobs (admin / no-tenant).
+ * Jobs for messaging UI: tenant staff see jobs for their client; platform admins see all.
  */
 const listForCompose = async (req, res) => {
   try {
+    res.set('Cache-Control', 'private, no-store');
     const user = req.dbUser;
-    const allJobs = await jobService.list();
-    if (!user?.clientId || !user.client) {
-      return res.json(allJobs);
+    const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+
+    if (!effectiveClientId || isPlatformAdmin) {
+      return res.json(isPlatformAdmin ? await jobService.list() : []);
     }
-    const c = user.client;
-    const labels = new Set(
-      [c.name, c.displayName]
-        .filter(Boolean)
-        .map((s) => String(s).trim().toLowerCase())
-        .filter(Boolean),
-    );
-    if (!labels.size) {
-      return res.json(allJobs);
-    }
-    const filtered = allJobs.filter((j) => {
-      const jc = String(j.client || '').trim().toLowerCase();
-      return labels.has(jc);
+
+    const client = await Client.findByPk(effectiveClientId, {
+      attributes: ['id', 'name', 'displayName', 'domain', 'metadata'],
     });
-    return res.json(filtered);
+    if (!client) {
+      return res.json([]);
+    }
+
+    const scopedJobs = await jobPublicationService.jobsForClientScope(client);
+    const legacyIds = scopedJobs.map((j) => j.id).filter(Boolean);
+
+    const whereOr = [{ clientId: effectiveClientId }];
+    if (legacyIds.length) {
+      whereOr.push({ id: { [require('sequelize').Op.in]: legacyIds } });
+    }
+
+    const rows = await Job.findAll({
+      where: { [require('sequelize').Op.or]: whereOr },
+      attributes: { exclude: ['events', 'skills'] },
+    });
+    await jobService.hydrateJobsSkills(rows);
+    return res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
   }
@@ -233,10 +244,45 @@ const create = async (req, res) => {
     if (exists) {
       return res.status(500).json({ message: 'Could not generate unique posting code' });
     }
-    const uniqueEmail = `humand+${postingCode}@app.hiro.co.il`;
+
+    let inboxPrefix = 'hiro';
+    const user = req.dbUser;
+    if (user) {
+      const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+      const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+      if (effectiveClientId && !isPlatformAdmin) {
+        const tenantClient = await Client.findByPk(effectiveClientId, {
+          attributes: ['id', 'name', 'displayName', 'domain'],
+        });
+        if (tenantClient) {
+          const domain = String(tenantClient.domain || '').trim().toLowerCase();
+          if (domain) inboxPrefix = domain;
+        }
+      }
+    }
+
+    const uniqueEmail = `${inboxPrefix}+${postingCode}@app.hiro.co.il`;
     const payload = { ...req.body, postingCode, uniqueEmail };
     const aiPasteAnalyzeUsed = Boolean(payload.aiPasteAnalyzeUsed);
     delete payload.aiPasteAnalyzeUsed;
+
+    if (user) {
+      const effectiveClientId = await authService.resolveEffectiveClientIdForUser(user);
+      const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+      if (effectiveClientId && !isPlatformAdmin) {
+        const tenantClient = await Client.findByPk(effectiveClientId, {
+          attributes: ['id', 'name', 'displayName'],
+        });
+        if (tenantClient) {
+          payload.clientId = tenantClient.id;
+          const tenantLabel = String(tenantClient.displayName || tenantClient.name || '').trim();
+          const generic = !payload.client || payload.client === 'לקוח כללי' || payload.client === 'לקוח חדש';
+          if (tenantLabel && generic) {
+            payload.client = tenantLabel;
+          }
+        }
+      }
+    }
 
     // Normalize languages into skills (language-tag skills) before skills normalization
     if (Array.isArray(payload.languages) && payload.languages.length > 0) {

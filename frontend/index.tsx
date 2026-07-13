@@ -1,7 +1,7 @@
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { HashRouter } from 'react-router-dom';
+import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { ThemeProvider } from './context/ThemeContext';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -62,8 +62,8 @@ import { UserPreferencesProvider } from './context/UserPreferencesContext';
           sessionStorage.clear();
         } catch { /* ignore */ }
 
-        const isPortal = window.location.hash.startsWith('#/candidate-portal');
-        window.location.replace(isPortal ? '/#/candidate-portal/login' : '/#/login');
+        const isPortal = window.location.pathname.startsWith('/candidate-portal');
+        window.location.replace(isPortal ? '/candidate-portal/login' : '/login');
       }
     }
 
@@ -71,6 +71,14 @@ import { UserPreferencesProvider } from './context/UserPreferencesContext';
   };
 })();
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Legacy HashRouter links → clean paths (e.g. /#/jobs/... → /jobs/...)
+(function migrateLegacyHashUrls() {
+  const { hash, origin, search } = window.location;
+  if (hash.startsWith('#/')) {
+    window.location.replace(`${origin}${hash.slice(1)}${search}`);
+  }
+})();
 
 const rootElement = document.getElementById('root');
 if (!rootElement) {
@@ -85,13 +93,13 @@ root.render(
         <DevModeProvider>
           <ErrorBoundary>
             <SavedSearchesProvider>
-              <HashRouter>
+              <BrowserRouter>
                 <AuthProvider>
                   <UserPreferencesProvider>
                     <App />
                   </UserPreferencesProvider>
                 </AuthProvider>
-              </HashRouter>
+              </BrowserRouter>
             </SavedSearchesProvider>
           </ErrorBoundary>
         </DevModeProvider>

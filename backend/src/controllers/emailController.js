@@ -28,6 +28,7 @@ const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { sendChat } = require('../services/geminiService');
 const User = require('../models/User');
+const authService = require('../services/authService');
 const NotificationMessage = require('../models/NotificationMessage');
 const RecruitmentStatus = require('../models/RecruitmentStatus');
 const RecruitmentSource = require('../models/RecruitmentSource');
@@ -109,11 +110,11 @@ const resolveRecruitmentSourceFromEmail = async (fromEmail, clientId = null) => 
 const publicStaffAppOrigin = () =>
   String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://hiro.co.il').replace(/\/$/, '');
 
-/** Hash-router URLs e.g. `https://hiro.co.il/#/candidates/{uuid}`. */
+/** Staff app URLs e.g. `https://hiro.co.il/candidates/{uuid}`. */
 const staffSpaUrl = (origin, routePath) => {
   const base = String(origin || '').replace(/\/$/, '');
   const path = String(routePath || '').startsWith('/') ? routePath : `/${routePath}`;
-  return `${base}/#${path}`;
+  return `${base}${path}`;
 };
 
 const escapeHtmlMail = (s) =>
@@ -2424,6 +2425,47 @@ const normalizeQueryStringArray = (val) => {
  * @param {Record<string, unknown>} q
  * @param {boolean} wantsPagination
  */
+/**
+ * All display labels that map a screening row's `clientName` to a tenant Client row.
+ * @param {string} clientId
+ * @returns {Promise<string[]>}
+ */
+async function collectClientScopeLabels(clientId) {
+  const id = String(clientId || '').trim();
+  if (!id) return [];
+  const client = await Client.findByPk(id, {
+    attributes: ['id', 'name', 'displayName', 'domain', 'metadata'],
+  });
+  if (!client) return [];
+  const plain = client.get ? client.get({ plain: true }) : client;
+  const labels = new Set();
+  const add = (v) => {
+    const s = String(v || '').trim();
+    if (s) labels.add(s);
+  };
+  add(plain.name);
+  add(plain.displayName);
+  add(plain.domain);
+  if (plain.metadata && typeof plain.metadata === 'object') {
+    add(plain.metadata.companyName);
+    add(plain.metadata.legalName);
+    add(plain.metadata.nameEn);
+    if (Array.isArray(plain.metadata.aliases)) {
+      for (const alias of plain.metadata.aliases) add(alias);
+    }
+  }
+  return [...labels];
+}
+
+/** @param {string} rowClientName @param {string[]} scopeLabels */
+function screeningClientNameMatchesScope(rowClientName, scopeLabels) {
+  const name = String(rowClientName || '').trim();
+  if (!name || !scopeLabels.length) return false;
+  if (scopeLabels.includes(name)) return true;
+  const lower = name.toLowerCase();
+  return scopeLabels.some((l) => String(l).trim().toLowerCase() === lower);
+}
+
 const parseScreeningCvReferralsQuery = (q, wantsPagination) => {
   const page = Math.max(1, parseInt(String(q.page != null ? q.page : '1'), 10) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(String(q.pageSize != null ? q.pageSize : '25'), 10) || 25));
@@ -2488,7 +2530,7 @@ const screeningReferralRowMatchesFilters = (row, f) => {
   if (f.status && String(row.status || '') !== f.status) return false;
   if (f.clientNames.length) {
     const c = String(row.clientName || '').trim();
-    if (!c || !f.clientNames.includes(c)) return false;
+    if (!c || !f.clientNames.some((label) => screeningClientNameMatchesScope(c, [label]))) return false;
   }
   if (f.jobTitles.length) {
     const j = String(row.jobTitle || '').trim();
@@ -2548,11 +2590,13 @@ const sortScreeningReferralRows = (list, sortKey, sortDir) => {
 };
 
 /**
- * Non-admins see screening CV rows sent by anyone in the same client (team), not only their own `senderUserId`.
+ * Non-admins without tenant client scope see only their own sends.
+ * Tenant staff with a client see rows whose job client matches that client (any sender).
  * @returns {Promise<{ category: string } & Record<string, unknown>>}
  */
-async function buildScreeningCvReferralAccessWhere(req) {
+async function buildScreeningCvReferralAccessWhere(req, { tenantHasClientScope = false } = {}) {
   const where = { category: 'screening_cv' };
+  if (tenantHasClientScope) return where;
   const userId = req.user?.sub || req.user?.id;
   const role = String(req.user?.role || '').toLowerCase();
   const isBroad = role === 'admin' || role === 'super_admin';
@@ -2589,12 +2633,48 @@ function screeningCvNotificationPlainBodyFromPlain(plain) {
 /** CV sends from candidate screening — one row per job send; `toEmail` lists all recipients comma-separated (notification_messages.category = screening_cv). */
 const listScreeningCvReferrals = async (req, res) => {
   try {
-    const where = await buildScreeningCvReferralAccessWhere(req);
-
     const q0 = req.query || {};
+    const role = String(req.user?.role || '').toLowerCase();
+    const isBroad = role === 'admin' || role === 'super_admin';
+    const userId = req.user?.sub || req.user?.id;
+
     const wantsPagination =
       (q0.page != null && String(q0.page) !== '') || (q0.pageSize != null && String(q0.pageSize) !== '');
     const filterParams = parseScreeningCvReferralsQuery(q0, wantsPagination);
+
+    let tenantClientLabels = null;
+    if (!isBroad && userId) {
+      const me = await User.findByPk(userId, { attributes: ['id', 'clientId'] });
+      const effectiveClientId = await authService.resolveEffectiveClientIdForUser(me);
+      if (effectiveClientId) {
+        tenantClientLabels = await collectClientScopeLabels(effectiveClientId);
+      }
+    }
+
+    const adminClientId = String(q0.clientId || '').trim();
+    if (isBroad && adminClientId) {
+      const labels = await collectClientScopeLabels(adminClientId);
+      if (labels.length) filterParams.clientNames = labels;
+    } else if (!isBroad) {
+      if (!tenantClientLabels?.length) {
+        res.set('Cache-Control', 'private, no-store');
+        const emptyStats = {
+          total: 0,
+          accepted: 0,
+          stages: { new: 0, review: 0, interview: 0, offer: 0, hired: 0, rejected: 0 },
+          needsAttention: [],
+        };
+        if (wantsPagination) {
+          return res.json({ items: [], total: 0, page: filterParams.page, pageSize: filterParams.pageSize, totalPages: 1, stats: emptyStats });
+        }
+        return res.json([]);
+      }
+      filterParams.clientNames = tenantClientLabels;
+    }
+
+    const where = await buildScreeningCvReferralAccessWhere(req, {
+      tenantHasClientScope: Boolean(tenantClientLabels?.length),
+    });
 
     const rows = await NotificationMessage.findAll({
       where,
@@ -3267,11 +3347,17 @@ const parseResumeWithAi = async ({ resumeText }) => {
   if (!resumeText || !String(resumeText).trim()) return null;
   const promptRecord = await getResumePromptTemplate();
   const systemPrompt = (promptRecord?.template?.replace('{candidate_tag}', getCandidateTagsSchemaText())) || buildAiResumePrompt(getCandidateTagsSchemaText());
+  const cvText = resumeText.slice(0, 50000);
   const raw = await sendChat({
     apiKey,
     systemPrompt,
-    history: [{ role: 'user', text: resumeText.slice(0, 50000) }],
+    history: [{ role: 'user', text: cvText }],
     message: resumeText,
+    promptId: 'cv_parsing',
+    llmInputJson: {
+      cvTextLength: cvText.length,
+      cvTextPreview: cvText.slice(0, 4000),
+    },
   });
   const parsed = tryParseJson(raw);
   return parsed && typeof parsed === 'object' ? parsed : null;

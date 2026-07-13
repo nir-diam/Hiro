@@ -47,6 +47,7 @@ type BusinessFieldHierarchyFieldsProps = {
     /** Compact layout for filter toolbar */
     compact?: boolean;
     className?: string;
+    disabled?: boolean;
 };
 
 const BusinessFieldHierarchyFields: React.FC<BusinessFieldHierarchyFieldsProps> = ({
@@ -56,6 +57,7 @@ const BusinessFieldHierarchyFields: React.FC<BusinessFieldHierarchyFieldsProps> 
     showSecondary = true,
     compact = false,
     className = '',
+    disabled = false,
 }) => {
     const [industries, setIndustries] = useState<PicklistSubcategoryRow[]>([]);
     const [subFieldOptions, setSubFieldOptions] = useState<PicklistValueRow[]>([]);
@@ -174,6 +176,7 @@ const BusinessFieldHierarchyFields: React.FC<BusinessFieldHierarchyFieldsProps> 
                     <FormMultiSelect
                         label={compact ? undefined : 'תעשייה'}
                         compact={compact}
+                        disabled={disabled}
                         options={mainFieldSelectOptions}
                         value={values.mainField}
                         onChange={handleMainFieldChange}
@@ -185,7 +188,7 @@ const BusinessFieldHierarchyFields: React.FC<BusinessFieldHierarchyFieldsProps> 
                     <FormMultiSelect
                         label={compact ? undefined : 'תחום עיסוק'}
                         compact={compact}
-                        disabled={!values.mainField.length || subFieldOptions.length === 0}
+                        disabled={disabled || !values.mainField.length || subFieldOptions.length === 0}
                         placeholder={
                             !values.mainField.length
                                 ? 'בחר תעשיית אם תחילה'
@@ -211,13 +214,14 @@ const BusinessFieldHierarchyFields: React.FC<BusinessFieldHierarchyFieldsProps> 
                             value={values.secondaryField ?? ''}
                             onChange={(e) => onChange({ ...values, secondaryField: e.target.value })}
                             placeholder={compact ? 'תחום עיסוק משני' : 'טקסט חופשי — תחומים נוספים (אופציונלי)'}
-                            className={inputClass}
+                            readOnly={disabled}
+                            className={`${inputClass} ${disabled ? 'opacity-80 cursor-not-allowed' : ''}`}
                         />
                     </div>
                 )}
             </div>
 
-            {values.mainField.length > 0 && (
+            {values.mainField.length > 0 && !disabled && (
                 <button
                     type="button"
                     onClick={() =>

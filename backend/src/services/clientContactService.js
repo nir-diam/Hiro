@@ -1,8 +1,23 @@
 const ClientContact = require('../models/ClientContact');
 const ClientContactGroup = require('../models/ClientContactGroup');
 const Client = require('../models/Client');
+const { deactivateStaffUserForDeletedContact } = require('./staffUserProvisioningService');
 
 const listByClientId = async (clientId) => ClientContact.findAll({ where: { clientId }, order: [['createdAt', 'ASC']] });
+
+const listByClientIdWithClient = async (clientId) =>
+  ClientContact.findAll({
+    where: { clientId },
+    include: [
+      {
+        model: Client,
+        as: 'client',
+        required: false,
+        attributes: ['id', 'name', 'displayName', 'logoUrl', 'metadata'],
+      },
+    ],
+    order: [['createdAt', 'ASC']],
+  });
 
 const listAllWithClient = async () =>
   ClientContact.findAll({
@@ -39,6 +54,12 @@ const remove = async (id) => {
     err.status = 404;
     throw err;
   }
+  await deactivateStaffUserForDeletedContact({
+    email: row.email,
+    clientId: row.clientId,
+  }).catch((err) => {
+    console.error('[clientContactService.remove] deactivate user failed', err?.message || err);
+  });
   await row.destroy();
 };
 
@@ -62,6 +83,7 @@ const deleteGroup = async (groupId) => {
 
 module.exports = {
   listByClientId,
+  listByClientIdWithClient,
   listAllWithClient,
   createForClient,
   update,

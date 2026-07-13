@@ -218,7 +218,7 @@ const associateCandidateWithJob = async ({
   // Invalidate cached lists so next read reflects new association
   await jcCacheInvalidate(record.jobId, record.candidateId);
 
-  return record;
+  return { record, created };
 };
 
 module.exports = { listForJob, listForCandidate, associateCandidateWithJob };

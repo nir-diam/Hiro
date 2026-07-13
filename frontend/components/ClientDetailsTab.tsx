@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { LinkIcon, PencilIcon } from './Icons';
 import AccordionSection from './AccordionSection'; 
 import { useLanguage } from '../context/LanguageContext';
+import { authHeaders } from '../utils/authHeaders';
 
 // Reusable local components for this view
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; }> = ({ label, name, value, onChange }) => (
@@ -34,6 +35,20 @@ const InfoTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </span>
 );
 
+const getClientBusinessProfile = (client: any) => {
+    const meta = (client?.metadata && typeof client.metadata === 'object') ? client.metadata : {};
+    const mainField = String(client?.industry || meta.mainField || '').trim();
+    const mainField2 = Array.isArray(meta.mainField2)
+        ? meta.mainField2.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+        : [];
+    const subField = Array.isArray(meta.subField)
+        ? meta.subField.map((v: unknown) => String(v || '').trim()).filter(Boolean)
+        : [];
+    const secondaryField = String(meta.secondaryField || '').trim();
+    const industryDisplay = [mainField, ...mainField2].filter(Boolean).join(' · ') || '—';
+    return { mainField, mainField2, subField, secondaryField, industryDisplay };
+};
+
 interface ClientDetailsTabProps {
     client: any;
     onClientUpdated?: (next: any) => void;
@@ -42,6 +57,7 @@ interface ClientDetailsTabProps {
 const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpdated }) => {
     const { t } = useLanguage();
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const businessProfile = getClientBusinessProfile(client);
     const [formData, setFormData] = useState({
         clientName: '',
         clientStatus: 'פעיל',
@@ -94,7 +110,7 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpd
 
             const res = await fetch(`${apiBase}/api/clients/${client.id}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify(payload),
             });
             if (!res.ok) {
@@ -131,7 +147,23 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpd
                         </div>
                     </div>
                     <dl className="space-y-2 pt-2 border-t border-border-default">
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.industry')}</dt><dd className="font-semibold text-right">{client?.industry || client?.field || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.industry')}</dt><dd className="font-semibold text-right">{businessProfile.industryDisplay}</dd></div>
+                        <div className="flex justify-between gap-4">
+                            <dt className="text-text-muted shrink-0">תחום עיסוק:</dt>
+                            <dd className="font-semibold text-right">
+                                {businessProfile.subField.length > 0 ? (
+                                    <span className="inline-flex flex-wrap justify-end gap-1.5">
+                                        {businessProfile.subField.map((item) => (
+                                            <InfoTag key={item}>{item}</InfoTag>
+                                        ))}
+                                    </span>
+                                ) : '—'}
+                            </dd>
+                        </div>
+                        <div className="flex justify-between gap-4">
+                            <dt className="text-text-muted shrink-0">תחום עיסוק משני:</dt>
+                            <dd className="font-semibold text-right">{businessProfile.secondaryField || '—'}</dd>
+                        </div>
                         <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">{client?.metadata?.employeeCount || '—'}</dd></div>
                         <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">{client?.metadata?.ownership || '—'}</dd></div>
                         <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">{client?.city || client?.metadata?.address || '—'}</dd></div>

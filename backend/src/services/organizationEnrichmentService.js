@@ -8,6 +8,7 @@
 
 const axios = require('axios');
 const Organization = require('../models/Organization');
+const { syncOrganizationToLinkedClients } = require('./clientOrganizationSyncService');
 const promptService = require('./promptService');
 const picklistService = require('./picklistService');
 const { sendChat, resolveGeminiApiKey } = require('./geminiService');
@@ -299,6 +300,127 @@ const searchLinkedinUrl = async (companyName) => {
   }
 };
 
+const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+const PHONE_RE = /(?:\+972[\s-]?|0)(?:[\s-]?\d){8,10}/;
+
+const normalizePhone = (raw) => {
+  const digits = String(raw || '').replace(/[^\d+]/g, '');
+  if (!digits) return null;
+  return digits;
+};
+
+const pickBestEmail = (candidates = []) => {
+  const skip = /noreply|no-reply|example\.com|sentry|wixpress|facebook|linkedin/i;
+  return candidates.find((e) => e && !skip.test(String(e))) || null;
+};
+
+const extractContactFromSerper = (data) => {
+  const kg = data?.knowledgeGraph || {};
+  let phone = kg.phone ? normalizePhone(kg.phone) : null;
+  let email = pickBestEmail([kg.email].filter(Boolean));
+
+  const texts = (data?.organic || [])
+    .slice(0, 5)
+    .map((r) => `${r.title || ''} ${r.snippet || ''} ${r.link || ''}`)
+    .join('\n');
+
+  if (!phone) {
+    const match = texts.match(PHONE_RE);
+    if (match) phone = normalizePhone(match[0]);
+  }
+  if (!email) {
+    const emails = texts.match(new RegExp(EMAIL_RE.source, 'g')) || [];
+    email = pickBestEmail(emails);
+  }
+
+  return { phone, email };
+};
+
+const searchPhone = async (companyName) => {
+  if (!companyName || !process.env.SERPDEV) return null;
+  const q = hasHebrew(companyName) ? `${companyName} טלפון` : `${companyName} phone`;
+  const results = await serperSearch(q, 5);
+  const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
+  const match = texts.match(PHONE_RE);
+  return match ? normalizePhone(match[0]) : null;
+};
+
+const searchEmail = async (companyName) => {
+  if (!companyName || !process.env.SERPDEV) return null;
+  const q = hasHebrew(companyName) ? `${companyName} אימייל` : `${companyName} email`;
+  const results = await serperSearch(q, 5);
+  const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
+  const emails = texts.match(new RegExp(EMAIL_RE.source, 'g')) || [];
+  return pickBestEmail(emails);
+};
+
+const searchPhoneAndEmail = async (companyName) => {
+  if (!companyName || !process.env.SERPDEV) return { phone: null, email: null };
+  try {
+    const q = hasHebrew(companyName)
+      ? `${companyName} יצירת קשר טלפון אימייל`
+      : `${companyName} contact phone email`;
+    let result = extractContactFromSerper(await serperRaw(q, 5));
+
+    if (!result.email) {
+      const extra = extractContactFromSerper(
+        await serperRaw(`${companyName} ${hasHebrew(companyName) ? 'דוא"ל' : 'email'}`, 5),
+      );
+      if (extra.email) result = { ...result, email: extra.email };
+      if (!result.phone && extra.phone) result = { ...result, phone: extra.phone };
+    }
+
+    const geminiKey = resolveGeminiApiKey();
+    if (geminiKey && (!result.phone || !result.email)) {
+      try {
+        const data = await serperRaw(q, 5);
+        const organic = data?.organic || [];
+        if (organic.length) {
+          const snippets = organic
+            .slice(0, 5)
+            .map(
+              (r, i) =>
+                `[${i + 1}] Title: ${r.title || ''}\n    Snippet: ${r.snippet || ''}\n    Link: ${r.link || ''}`,
+            )
+            .join('\n\n');
+
+          const llmRes = await sendChat({
+            apiKey: geminiKey,
+            systemPrompt: `You extract a company's public contact phone and email from Google search snippets.
+Return ONLY a valid JSON object with exactly two keys:
+- "phone": Israeli phone number as digits (e.g. 03-1234567 or +972...). null if not found.
+- "email": company contact email. null if not found.
+Do NOT invent values. Skip noreply/no-reply addresses.`,
+            history: [],
+            message: `Company: ${companyName}\n\nSearch results:\n${snippets}\n\nExtract phone and email.`,
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: 'OBJECT',
+              properties: {
+                phone: { type: 'STRING', nullable: true },
+                email: { type: 'STRING', nullable: true },
+              },
+            },
+          });
+
+          const obj = parseJsonResponse(llmRes);
+          if (obj && typeof obj === 'object') {
+            if (!result.phone && obj.phone) result.phone = normalizePhone(obj.phone);
+            if (!result.email && obj.email) result.email = pickBestEmail([String(obj.email).trim()]);
+          }
+        }
+      } catch (llmErr) {
+        console.warn('[orgEnrich] Gemini contact extraction failed:', llmErr?.message || llmErr);
+      }
+    }
+
+    return result;
+  } catch (err) {
+    console.warn('[orgEnrich] contact search failed:', err?.message || err);
+    return { phone: null, email: null };
+  }
+};
+
 const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
 
 const toStrArray = (val) => {
@@ -407,6 +529,19 @@ const resolveSubFieldFromPicklist = async (item, companyName) => {
   return item;
 };
 
+const hasStoredContact = (org, field) => {
+  const plain = org?.get ? org.get({ plain: true }) : org;
+  return !!String(plain?.[field] || '').trim();
+};
+
+/** Never overwrite phone/email on persist when the org already has them. */
+const applyContactPreserveOnUpdates = (updates, existingOrg) => {
+  if (!updates || !existingOrg) return updates;
+  if (hasStoredContact(existingOrg, 'phone')) delete updates.phone;
+  if (hasStoredContact(existingOrg, 'email')) delete updates.email;
+  return updates;
+};
+
 const finalizeEnrichmentItem = async (item, companyName, prefetched = {}) => {
   const out = { ...item };
 
@@ -415,48 +550,67 @@ const finalizeEnrichmentItem = async (item, companyName, prefetched = {}) => {
 
   await resolveSubFieldFromPicklist(out, companyName);
 
-  if (!out.linkedinUrl) {
-    try { out.linkedinUrl = await searchLinkedinUrl(companyName); } catch { /* ignore */ }
+  try {
+    out.linkedinUrl = await searchLinkedinUrl(companyName);
+  } catch (err) {
+    console.warn('[organization-enrich] linkedin search failed', err?.message || err);
   }
 
-  if (!out.foundedYear) {
-    try { out.foundedYear = await searchFoundedYear(companyName); } catch { /* ignore */ }
+  try {
+    out.foundedYear = await searchFoundedYear(companyName);
+  } catch (err) {
+    console.warn('[organization-enrich] founded year search failed', err?.message || err);
   }
 
-  if (!out.address || !out.location) {
+  try {
+    const { address, location } = await searchAddress(companyName);
+    out.address = address;
+    out.location = location;
+  } catch (err) {
+    console.warn('[organization-enrich] address search failed', err?.message || err);
+  }
+
+  try {
+    out.website = await searchWebsiteUrl(companyName);
+  } catch (err) {
+    console.warn('[organization-enrich] website search failed', err?.message || err);
+  }
+
+  try {
+    out.snippet = await searchSnippet(companyName);
+  } catch (err) {
+    console.warn('[organization-enrich] snippet search failed', err?.message || err);
+  }
+
+  if (!String(out.phone || '').trim()) {
     try {
-      const { address, location } = await searchAddress(companyName);
-      if (!out.address && address) out.address = address;
-      if (!out.location && location) out.location = location;
-    } catch { /* ignore */ }
-  }
-
-  if (!out.website) {
-    try { out.website = await searchWebsiteUrl(companyName); } catch { /* ignore */ }
-  }
-
-  if (!out.snippet) {
-    try { out.snippet = await searchSnippet(companyName); } catch { /* ignore */ }
-  }
-
-  if (out.employeeCount != null && out.employeeCount !== '') {
-    const bucket = normalizeEmployeeCount(out.employeeCount);
-    if (bucket) out.employeeCount = bucket;
-    else delete out.employeeCount;
-  }
-
-  if (!out.logo && out.website) {
-    try {
-      const hostname = new URL(out.website).hostname;
-      out.logo = `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
-    } catch {
-      out.logo = '';
+      out.phone = await searchPhone(companyName);
+    } catch (err) {
+      console.warn('[organization-enrich] phone search failed', err?.message || err);
     }
-  } else if (typeof out.logo === 'string') {
-    out.logo = out.logo.trim();
   }
 
-  return out;
+  if (!String(out.email || '').trim()) {
+    try {
+      out.email = await searchEmail(companyName);
+    } catch (err) {
+      console.warn('[organization-enrich] email search failed', err?.message || err);
+    }
+  }
+
+  const bucket = normalizeEmployeeCount(out.employeeCount);
+  if (bucket) out.employeeCount = bucket;
+  else delete out.employeeCount;
+
+  let logo = typeof out.logo === 'string' ? out.logo.trim() : '';
+  try {
+    const hostname = new URL(out.website).hostname;
+    logo = `https://www.google.com/s2/favicons?domain=${hostname}&sz=64`;
+  } catch {
+    logo = '';
+  }
+
+  return { ...out, logo: logo || out.logo };
 };
 
 const buildOrganizationUpdates = (item) => {
@@ -568,6 +722,7 @@ const enrichOrganizationById = async (orgId) => {
 
   const systemPrompt = await buildCompanyPrompt({ name: companyName, website, snippet });
   const messagePayload = JSON.stringify({ name: companyName, website, snippet });
+  const inputPayload = { name: companyName, website, snippet };
 
   const rawResponse = await sendChat({
     apiKey: resolveGeminiApiKey(),
@@ -575,6 +730,8 @@ const enrichOrganizationById = async (orgId) => {
     history: [],
     message: messagePayload,
     responseMimeType: 'application/json',
+    promptId: 'company_enrichment',
+    llmInputJson: inputPayload,
   });
 
   const parsedResponse = parseJsonResponse(rawResponse);
@@ -586,8 +743,15 @@ const enrichOrganizationById = async (orgId) => {
   const rawItem = Array.isArray(parsedResponse) ? parsedResponse[0] : parsedResponse;
   if (!rawItem || typeof rawItem !== 'object') return null;
 
-  const enriched = await finalizeEnrichmentItem(rawItem, companyName, { website, snippet });
-  const updates = buildOrganizationUpdates(enriched);
+  const plain = org.get ? org.get({ plain: true }) : org;
+  const seeded = {
+    ...rawItem,
+    email: plain.email || null,
+    phone: plain.phone || null,
+  };
+
+  const enriched = await finalizeEnrichmentItem(seeded, companyName, { website, snippet });
+  const updates = applyContactPreserveOnUpdates(buildOrganizationUpdates(enriched), org);
 
   if (Object.keys(updates).length === 0) {
     console.log(`[orgEnrich] no enrichable fields returned for "${companyName}"`);
@@ -597,23 +761,96 @@ const enrichOrganizationById = async (orgId) => {
   await Organization.update(updates, { where: { id: orgId } });
   console.log(`[orgEnrich] enriched "${companyName}" (${orgId}) →`, Object.keys(updates).join(', '));
 
+  try {
+    const synced = await syncOrganizationToLinkedClients(orgId);
+    if (synced > 0) {
+      console.log(`[orgEnrich] synced enriched data to ${synced} linked client(s) for org ${orgId}`);
+    }
+  } catch (err) {
+    console.error('[orgEnrich] client sync failed', orgId, err?.message || err);
+  }
+
   scheduleOrganizationEmbedding({ id: orgId });
   return updates;
 };
 
+const persistEnrichmentResults = async (suggestions = []) => {
+  const persistedIds = [];
+  for (const suggestion of suggestions) {
+    const companyId = suggestion?.companyId;
+    const enriched = suggestion?.enriched;
+    if (!companyId || !enriched || typeof enriched !== 'object') continue;
+
+    const updates = applyContactPreserveOnUpdates(buildOrganizationUpdates(enriched), await Organization.findByPk(companyId));
+    if (!Object.keys(updates).length) continue;
+
+    await Organization.update(updates, { where: { id: companyId } });
+    persistedIds.push(companyId);
+    console.log(`[orgEnrich] persisted enrichment for org ${companyId} →`, Object.keys(updates).join(', '));
+
+    try {
+      const synced = await syncOrganizationToLinkedClients(companyId);
+      if (synced > 0) {
+        console.log(`[orgEnrich] synced persisted enrichment to ${synced} linked client(s) for org ${companyId}`);
+      }
+    } catch (err) {
+      console.error('[orgEnrich] client sync failed after persist', companyId, err?.message || err);
+    }
+
+    scheduleOrganizationEmbedding({ id: companyId });
+  }
+  return persistedIds;
+};
+
+const pendingEnrichmentIds = new Set();
+
+const strField = (org, key) => {
+  const plain = org?.get ? org.get({ plain: true }) : org;
+  return String(plain?.[key] || '').trim();
+};
+
+/** True when core discovery fields are still empty and Serper + LLM enrich may help. */
+const organizationNeedsEnrichment = (org) => {
+  if (!org?.id) return false;
+  const hasWebsite = !!strField(org, 'website');
+  const hasLinkedin = !!strField(org, 'linkedinUrl');
+  const hasLocation = !!strField(org, 'location') || !!strField(org, 'address');
+  const hasDescription = !!strField(org, 'description');
+  return !(hasWebsite && hasLinkedin && hasLocation && hasDescription);
+};
+
 const scheduleOrganizationEnrichment = (org) => {
   if (!org?.id) return;
+  const id = String(org.id);
+  if (pendingEnrichmentIds.has(id)) return;
+  pendingEnrichmentIds.add(id);
   setImmediate(() => {
-    enrichOrganizationById(org.id).catch((err) => {
-      console.error('[orgEnrich] background enrichment failed', org.id, err?.message || err);
-    });
+    enrichOrganizationById(org.id)
+      .catch((err) => {
+        console.error('[orgEnrich] background enrichment failed', org.id, err?.message || err);
+      })
+      .finally(() => {
+        pendingEnrichmentIds.delete(id);
+      });
   });
+};
+
+/** Background enrich only when the org record is still missing website/linkedin/location/description. */
+const scheduleOrganizationEnrichmentIfNeeded = (org) => {
+  if (!organizationNeedsEnrichment(org)) return;
+  console.log(`[orgEnrich] scheduling enrichment for thin org ${org.id} "${org.name || ''}"`);
+  scheduleOrganizationEnrichment(org);
 };
 
 module.exports = {
   enrichOrganizationById,
+  organizationNeedsEnrichment,
   scheduleOrganizationEnrichment,
+  scheduleOrganizationEnrichmentIfNeeded,
   buildOrganizationUpdates,
   finalizeEnrichmentItem,
   resolveSubFieldFromPicklist,
+  persistEnrichmentResults,
+  searchWebsiteUrl,
+  hasStoredContact,
 };

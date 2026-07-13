@@ -93,7 +93,7 @@ const roleLabelHe = (role?: string): string => {
 const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const navigate = useNavigate();
     const location = useLocation();
-    const { savedSearches, deleteSearch } = useSavedSearches();
+    const { savedSearches, deleteSearch, loadingSearchId, setLoadingSearchId } = useSavedSearches();
     const { t, dir } = useLanguage();
     const { canPage } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -334,14 +334,24 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                     </button>
                                     
                                     {isSavedSearchesOpen && (
-                                        <div className="bg-bg-subtle/30 py-1 border-y border-border-subtle/50">
+                                        <div className={`bg-bg-subtle/30 py-1 border-y border-border-subtle/50 relative transition-opacity ${loadingSearchId ? 'opacity-50 pointer-events-none' : ''}`}>
+                                            {loadingSearchId && (
+                                                <div className="absolute inset-0 z-10 bg-bg-subtle/40" aria-hidden />
+                                            )}
                                             {savedSearches.length > 0 ? (
                                                 savedSearches.map(search => (
                                                     <div key={search.id} className="relative group/search">
                                                         <Link 
                                                             to={`/candidates?savedSearchId=${search.id}`} 
-                                                            onClick={() => handleNavigation(`/candidates?savedSearchId=${search.id}`)}
-                                                            className="block w-full text-start text-xs py-1.5 px-11 text-text-subtle hover:text-primary-600 truncate"
+                                                            onClick={() => {
+                                                                setLoadingSearchId(search.id);
+                                                                handleNavigation(`/candidates?savedSearchId=${search.id}`);
+                                                            }}
+                                                            className={`block w-full text-start text-xs py-1.5 px-11 truncate ${
+                                                                String(loadingSearchId) === String(search.id)
+                                                                    ? 'text-primary-600 font-semibold'
+                                                                    : 'text-text-subtle hover:text-primary-600'
+                                                            }`}
                                                         >
                                                             {search.name}
                                                         </Link>

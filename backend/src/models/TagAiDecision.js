@@ -67,6 +67,11 @@ const TagAiDecision = sequelize.define(
       allowNull: true,
       field: 'resolved_at',
     },
+    resolvedTargetTagId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'resolved_target_tag_id',
+    },
     hesitationLevel: {
       type: DataTypes.INTEGER,
       allowNull: true,

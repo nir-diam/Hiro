@@ -1,6 +1,7 @@
 const authService = require('../services/authService');
 const User = require('../models/User');
 const Client = require('../models/Client');
+const { sequelize } = require('../config/db');
 const { serializeAuthUser } = require('../services/permissionService');
 const clientUsageSettingService = require('../services/clientUsageSettingService');
 const userPreferencesService = require('../services/userPreferencesService');
@@ -143,6 +144,23 @@ const me = async (req, res) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+/** Sets password, clears activation token, and activates inactive staff accounts. */
+const completeStaffActivation = async (user, password) => {
+  await user.update({
+    password,
+    activationGuid: null,
+    isActive: true,
+  });
+  // Keep legacy duplicate isActive column aligned (users table may have both is_active and "isActive").
+  await sequelize.query(
+    'UPDATE users SET is_active = true, "isActive" = true, "activationGuid" = NULL WHERE id = :id',
+    { replacements: { id: user.id } },
+  ).catch((err) => {
+    console.warn('[auth] activation column sync failed', err?.message || err);
+  });
+  await user.reload();
+};
+
 const getActivationCheck = async (req, res) => {
   try {
     const { guid } = req.params;
@@ -175,11 +193,7 @@ const postActivationComplete = async (req, res) => {
     if (!user) {
       return res.status(404).json({ message: 'This link is invalid or has already been used' });
     }
-    await user.update({
-      password,
-      activationGuid: null,
-      isActive: true,
-    });
+    await completeStaffActivation(user, password);
     return res.json({ ok: true, message: 'Password saved. You can log in.' });
   } catch (err) {
     return res.status(400).json({ message: err.message || 'Activation failed' });

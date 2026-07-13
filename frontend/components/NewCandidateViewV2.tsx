@@ -358,7 +358,7 @@ const NewCandidateViewV2: React.FC = () => {
     const goToChoice = () => {
         resetAiFlow();
         if (typeof window !== 'undefined') {
-            window.location.href = 'https://hiro.co.il/#/candidates';
+            window.location.href = 'https://hiro.co.il/candidates';
             return;
         }
         setCreationMode('choice');

@@ -35,7 +35,18 @@ export async function fetchClientOptions(): Promise<ClientOptionDto[]> {
     }));
 }
 
-export async function fetchStaffUsers(): Promise<StaffUserDto[]> {
+export async function fetchStaffUsers(clientId?: string | null): Promise<StaffUserDto[]> {
+    const id = clientId?.trim();
+    if (id) {
+        const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(id)}/staff-users`, {
+            headers: authHeaders(),
+            cache: 'no-store',
+        });
+        if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || 'Failed to load users');
+        const rows: StaffUserDto[] = await res.json();
+        return rows.map((u) => ({ ...u, clientId: id }));
+    }
+
     const res = await fetch(`${apiBase()}/api/users`, {
         headers: authHeaders(),
         cache: 'no-store',
@@ -72,6 +83,17 @@ export async function createStaffUser(body: {
         body: JSON.stringify(body),
     });
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || 'Failed to create user');
+    return res.json();
+}
+
+export async function resetStaffUserPassword(
+    id: string,
+): Promise<{ ok: boolean; message?: string; email?: string }> {
+    const res = await fetch(`${apiBase()}/api/users/${id}/reset-password`, {
+        method: 'POST',
+        headers: authHeaders(),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).message || 'Failed to reset password');
     return res.json();
 }
 

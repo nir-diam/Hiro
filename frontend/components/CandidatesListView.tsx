@@ -95,6 +95,8 @@ interface AppliedAdvancedSearchPayload {
     /** כלול ציפיות שכר לא ידועות — when true, candidates with no salary fields are also returned. */
     includeUnknownSalary: boolean;
     hasDegree: boolean;
+    /** When hasDegree is true: include practical-engineer (הנדסאי/ת) education tags. Default false. */
+    includePracticalEngineers: boolean;
     languages: { language: string; level: string }[];
     complexRules: Record<string, unknown>[];
     /** Matches `candidates.preferredWorkingHours` (fallback: legacy `availability`). Ignored when גמיש / empty. */
@@ -183,6 +185,9 @@ export interface Candidate {
   /** From complex-query free-text search (API). */
   matchedTerms?: string[];
   matchReasons?: { field: string; term: string; source?: string; snippet?: string }[];
+  /** Full tag metadata from list/detail API (for drawer/profile tag rows). */
+  tagDetails?: unknown[];
+  skills?: { soft?: unknown[]; technical?: unknown[] };
 }
 
 export const candidatesData: Candidate[] = [
@@ -922,6 +927,7 @@ type ListSearchParamsState = {
     internalSalaryMax: number;
     gender: 'any' | 'male' | 'female';
     hasDegree: boolean;
+    includePracticalEngineers: boolean;
     includeUnknownAge: boolean;
     includeUnknownSalary: boolean;
     industryExperience: string;
@@ -948,6 +954,7 @@ function createDefaultListSearchParams(): ListSearchParamsState {
         internalSalaryMax: 30000,
         gender: 'any',
         hasDegree: false,
+        includePracticalEngineers: false,
         includeUnknownAge: true,
         includeUnknownSalary: true,
         industryExperience: '',
@@ -983,6 +990,18 @@ function mergeListSearchParams(saved: Partial<ListSearchParamsState> | null | un
     };
 }
 
+const COMPANY_FILTER_URL_KEYS = ['industries', 'industry', 'fields', 'field', 'roles', 'sizes', 'sectors'] as const;
+
+function stripCompanyFiltersFromUrlParams(params: URLSearchParams): void {
+    for (const key of COMPANY_FILTER_URL_KEYS) params.delete(key);
+}
+
+function isSavedSearchUrlContext(params: URLSearchParams, loadedSearchId?: string | number | null): boolean {
+    if (params.get('savedSearchId')) return true;
+    if (loadedSearchId != null && String(loadedSearchId).trim() !== '') return true;
+    return false;
+}
+
 /** Full `adv` object for GET /api/candidates — always includes age/salary and include-unknown flags. */
 function buildAdvancedPayloadFromPanel(
     searchParams: ListSearchParamsState,
@@ -1010,6 +1029,8 @@ function buildAdvancedPayloadFromPanel(
         includeUnknownAge: searchParams.includeUnknownAge !== false,
         includeUnknownSalary: searchParams.includeUnknownSalary !== false,
         hasDegree: !!searchParams.hasDegree,
+        includePracticalEngineers:
+            !!searchParams.hasDegree && searchParams.includePracticalEngineers === true,
         languages: languageFilters.map((l) => ({ language: l.language, level: l.level })),
         complexRules: serializeComplexRulesForApi(complexRules),
         workingHours: String(searchParams.workingHours || 'גמיש').trim() || 'גמיש',
@@ -1279,18 +1300,7 @@ function filterCandidatesByAdvancedClient(
             }
         }
 
-        if (adv.hasDegree === true) {
-            const tagStr = [...c.tags, ...c.internalTags].join(' ').toLowerCase();
-            const blob = `${tagStr} ${String(c.professionalSummary || '').toLowerCase()}`;
-            const deg =
-                blob.includes('תואר') ||
-                blob.includes('בוגר') ||
-                blob.includes('מוסמך') ||
-                blob.includes('דוקטור') ||
-                blob.includes('mba') ||
-                blob.includes('מ.א.');
-            if (!deg) return false;
-        }
+        if (!candidateMatchesDegreeFilter(c, adv)) return false;
 
         if (Array.isArray(adv.languages) && adv.languages.length) {
             const langs = (c.languages || []).map(languageRowSortText).join(' ').toLowerCase();
@@ -1310,6 +1320,34 @@ function filterCandidatesByAdvancedClient(
 
         return true;
     });
+}
+
+const PRACTICAL_ENGINEER_MARKERS = ['הנדסאי', 'הנדסאית', 'תואר הנדסאי'] as const;
+const ACADEMIC_DEGREE_MARKERS = ['בוגר', 'מוסמך', 'דוקטור', 'mba', 'מ.א.', 'b.sc', 'b.a'] as const;
+
+function blobHasPracticalEngineer(text: string): boolean {
+    const t = text.toLowerCase();
+    return PRACTICAL_ENGINEER_MARKERS.some((m) => t.includes(m));
+}
+
+function blobHasAcademicDegree(text: string): boolean {
+    const t = text.toLowerCase();
+    if (ACADEMIC_DEGREE_MARKERS.some((m) => t.includes(m))) return true;
+    return t.includes('תואר') && !blobHasPracticalEngineer(t);
+}
+
+function candidateMatchesDegreeFilter(
+    candidate: Candidate,
+    adv: Pick<AppliedAdvancedSearchPayload, 'hasDegree' | 'includePracticalEngineers'>,
+): boolean {
+    if (adv.hasDegree !== true) return true;
+    const blob = `${[...candidate.tags, ...candidate.internalTags].join(' ')} ${String(candidate.professionalSummary || '')}`.toLowerCase();
+    const hasPractical = blobHasPracticalEngineer(blob);
+    const hasAcademic = blobHasAcademicDegree(blob);
+    if (adv.includePracticalEngineers === true) {
+        return hasPractical || hasAcademic;
+    }
+    return hasAcademic && !hasPractical;
 }
 
 function candidateSortComparable(
@@ -1510,7 +1548,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const navigate = useNavigate();
     const location = useLocation();
     const [searchParamsFromUrl, setUrlSearchParams] = useSearchParams();
-    const { savedSearches, addSearch, updateSearch, blacklistFromSearch, removeFromSearchBlacklist } = useSavedSearches();
+    const { savedSearches, addSearch, updateSearch, blacklistFromSearch, removeFromSearchBlacklist, setLoadingSearchId } = useSavedSearches();
     const { t } = useLanguage();
     const { user } = useAuth();
 
@@ -1710,6 +1748,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 searchParams.ageMax !== d.ageMax ||
                 searchParams.includeUnknownAge === false,
             hasDegree: searchParams.hasDegree !== d.hasDegree,
+            includePracticalEngineers: searchParams.includePracticalEngineers !== d.includePracticalEngineers,
             salary:
                 searchParams.salaryMin !== d.salaryMin ||
                 searchParams.salaryMax !== d.salaryMax ||
@@ -1745,6 +1784,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         const incomplete = searchParamsFromUrl.get('incomplete');
         if (incomplete !== null) {
             setShowIncompleteOnly(incomplete === '1');
+        }
+        const savedSearchIdFromUrl = searchParamsFromUrl.get('savedSearchId');
+        if (savedSearchIdFromUrl) {
+            return;
         }
         // Use '|' as separator to avoid splitting industry names that contain commas
         // (e.g. "ביטחון, חירום ואכיפת חוק")
@@ -1782,17 +1825,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 else params.delete('fav');
                 if (showIncompleteOnly) params.set('incomplete', '1');
                 else params.delete('incomplete');
-                // Use '|' separator — comma appears inside Hebrew industry names
-                if (companyFilters.industries?.length) params.set('industries', companyFilters.industries.join('|'));
-                else { params.delete('industries'); params.delete('industry'); }
-                if (companyFilters.fields?.length) params.set('fields', companyFilters.fields.join('|'));
-                else { params.delete('fields'); params.delete('field'); }
-                if (companyFilters.roles?.length) params.set('roles', companyFilters.roles.join('|'));
-                else params.delete('roles');
-                if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join('|'));
-                else params.delete('sizes');
-                if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join('|'));
-                else params.delete('sectors');
+                const savedSearchActive = isSavedSearchUrlContext(params, loadedSearchRef.current?.id);
+                if (savedSearchActive) {
+                    stripCompanyFiltersFromUrlParams(params);
+                } else {
+                    // Use '|' separator — comma appears inside Hebrew industry names
+                    if (companyFilters.industries?.length) params.set('industries', companyFilters.industries.join('|'));
+                    else { params.delete('industries'); params.delete('industry'); }
+                    if (companyFilters.fields?.length) params.set('fields', companyFilters.fields.join('|'));
+                    else { params.delete('fields'); params.delete('field'); }
+                    if (companyFilters.roles?.length) params.set('roles', companyFilters.roles.join('|'));
+                    else params.delete('roles');
+                    if (companyFilters.sizes?.length) params.set('sizes', companyFilters.sizes.join('|'));
+                    else params.delete('sizes');
+                    if (companyFilters.sectors?.length) params.set('sectors', companyFilters.sectors.join('|'));
+                    else params.delete('sectors');
+                }
                 return params;
             },
             { replace: true },
@@ -1877,6 +1925,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         lastActivity: c.updatedAt || c.createdAt || '',
         source: c.source || c.sourceDetail || '',
         tags: Array.isArray(c.tags) ? c.tags : [],
+        tagDetails: Array.isArray(c.tagDetails) ? c.tagDetails : [],
+        skills: c.skills && typeof c.skills === 'object' ? c.skills : undefined,
         internalTags: Array.isArray(c.internalTags) ? c.internalTags : [],
         matchScore,
         listMatchScoreFromApi,
@@ -1996,9 +2046,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             } finally {
                 setIsRemoteLoading(false);
                 setHasInitiallyLoaded(true);
+                setLoadingSearchId(null);
             }
         },
-        [apiBase, mapCandidate, applyListMatchPatches],
+        [apiBase, mapCandidate, applyListMatchPatches, setLoadingSearchId],
     );
 
     // Ref keeps companyFilters readable inside callbacks without adding it to dep arrays.
@@ -3006,6 +3057,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
                     setIsAdvancedSearchOpen(true);
                     setLoadedSearch(searchToLoad);
+                    setHasInitiallyLoaded(false);
+                    setLoadingSearchId(searchToLoad.id);
+
+                    setUrlSearchParams((prev) => {
+                        const params = new URLSearchParams(prev);
+                        stripCompanyFiltersFromUrlParams(params);
+                        return params;
+                    }, { replace: true });
 
                     // Sync the ref immediately so the fetch below sends the right savedSearchId.
                     loadedSearchRef.current = searchToLoad;
@@ -3435,6 +3494,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setUrlSearchParams((params) => {
             const next = new URLSearchParams(params);
             next.delete('savedSearchId');
+            stripCompanyFiltersFromUrlParams(next);
             return next;
         }, { replace: true });
 
@@ -3759,7 +3819,20 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     };
 
     return (
-        <div className="space-y-6">
+        <div className="relative">
+            {isRemoteLoading && (
+                <div
+                    className="absolute inset-0 z-40 flex items-start justify-center bg-bg-subtle/55 backdrop-blur-[2px] pointer-events-auto"
+                    aria-busy="true"
+                    aria-live="polite"
+                >
+                    <div className="mt-24 inline-flex items-center gap-2 rounded-xl bg-bg-card/95 px-4 py-2.5 border border-border-default shadow-md text-sm font-medium text-text-muted">
+                        <ArrowPathIcon className="w-5 h-5 text-primary-500 animate-spin" aria-hidden />
+                        <span>{loadedSearchRef.current ? `טוען "${loadedSearchRef.current.name}"...` : 'טוען מועמדים...'}</span>
+                    </div>
+                </div>
+            )}
+        <div className={`space-y-6 transition-opacity duration-200 ${isRemoteLoading ? 'opacity-45 pointer-events-none select-none' : ''}`}>
             {feedbackMessage && (
                 <div className="fixed top-24 right-6 bg-green-500 text-white py-2 px-4 rounded-lg shadow-lg animate-fade-in-out z-50 flex items-center gap-2">
                     <CheckCircleIcon className="w-5 h-5" />
@@ -4097,12 +4170,27 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                          <div className="lg:col-span-1">
                             <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">{t('filter.education')}</label>
                              <button 
-                                onClick={() => setSearchParams(p => ({ ...p, hasDegree: !p.hasDegree }))} 
+                                onClick={() => setSearchParams(p => ({
+                                    ...p,
+                                    hasDegree: !p.hasDegree,
+                                    includePracticalEngineers: !p.hasDegree ? p.includePracticalEngineers : false,
+                                }))} 
                                 className={`w-full flex items-center justify-between px-3 py-2 rounded-xl border-2 transition-all h-[38px] ${searchParams.hasDegree ? 'bg-primary-50 border-primary-500 text-primary-700 shadow-sm' : 'bg-bg-input border-border-default text-text-muted hover:border-primary-300'} ${advFieldModified.hasDegree ? advFieldModifiedClass : ''}`}
                             >
                                 <span className="font-semibold text-xs">{t('filter.has_degree')}</span>
                                 {searchParams.hasDegree ? <CheckCircleIcon className="w-4 h-4" /> : <AcademicCapIcon className="w-4 h-4 opacity-50"/>}
                             </button>
+                            {searchParams.hasDegree && (
+                                <label className={`flex items-center gap-2 mt-2 cursor-pointer select-none ${advFieldModified.includePracticalEngineers ? advFieldModifiedClass + ' rounded-lg px-1 py-0.5' : ''}`}>
+                                    <input
+                                        type="checkbox"
+                                        checked={searchParams.includePracticalEngineers === true}
+                                        onChange={(e) => setSearchParams(p => ({ ...p, includePracticalEngineers: e.target.checked }))}
+                                        className="h-3.5 w-3.5 rounded border-border-default text-primary-600 focus:ring-primary-500"
+                                    />
+                                    <span className="text-xs text-text-muted leading-snug">{t('filter.include_practical_engineers')}</span>
+                                </label>
+                            )}
                         </div>
 
                         <div className="col-span-full md:col-span-2 lg:col-span-2 grid grid-cols-2 gap-4 p-3 bg-bg-subtle/30 rounded-xl border border-border-default/50 relative overflow-hidden">
@@ -4400,14 +4488,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         })}
                     </div>
                 )}
-                {isRemoteLoading && hasInitiallyLoaded && (
-                    <div className="absolute inset-0 z-20 flex items-start justify-center bg-bg-card/45 backdrop-blur-[1px] pointer-events-none">
-                        <div className="mt-4 inline-flex items-center gap-2 rounded-full bg-white/95 px-3 py-1.5 border border-border-default shadow-sm text-xs font-medium text-text-muted">
-                            <ArrowPathIcon className="w-4 h-4 text-primary-500 animate-spin" aria-hidden />
-                            <span>טוען נתונים...</span>
-                        </div>
-                    </div>
-                )}
             </main>
 
             {/* Global Match Score Popup - Rendered outside overflow containers */}
@@ -4654,6 +4734,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 isModalOpen={isJobFieldSelectorOpen}
                 setIsModalOpen={setIsJobFieldSelectorOpen}
             />
+        </div>
         </div>
     );
 }

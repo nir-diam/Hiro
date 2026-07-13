@@ -1107,7 +1107,7 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
     ) {
       const n = pushBind(binds, advanced.jobScopes);
       panelFragments.push(
-        `("jobScope" = ANY($${n}::text[]) OR "jobScopes" && $${n}::text[])`,
+        `("jobScope"::text = ANY($${n}::text[]) OR COALESCE("jobScopes"::text[], ARRAY[]::text[]) && $${n}::text[])`,
       );
     }
 
@@ -1344,17 +1344,29 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       }
     }
 
-    // השכלה: at least one active tag classified as education (link raw_type or catalog type degree/education).
+    // השכלה: active education/degree catalog tags; practical engineers excluded unless requested.
     if (advanced.hasDegree === true) {
+      const includePracticalEngineers = advanced.includePracticalEngineers === true;
+      const engineerExclude = includePracticalEngineers
+        ? ''
+        : `AND NOT (
+            COALESCE(tg.display_name_he, '') ILIKE '%הנדסאי%'
+            OR COALESCE(tg.display_name_he, '') ILIKE '%הנדסאית%'
+            OR COALESCE(tg.display_name_he, '') ILIKE '%תואר הנדסאי%'
+            OR COALESCE(tg.display_name_en, '') ILIKE '%הנדסאי%'
+            OR COALESCE(tg.display_name_en, '') ILIKE '%הנדסאית%'
+            OR COALESCE(tg.tag_key, '') ILIKE '%handasai%'
+          )`;
       panelFragments.push(`EXISTS (
         SELECT 1 FROM system_tags ct
         INNER JOIN tags tg ON tg.id = ct.tag_id
         WHERE ct.entity_id = candidates.id AND ct.is_active = true AND ct.type = 'candidate'
         AND tg.status = 'active'
         AND (
-          LOWER(TRIM(COALESCE(ct.raw_type, ''))) IN ('education')
-          OR LOWER(TRIM(COALESCE(tg.type::text, ''))) IN ('education')
+          LOWER(TRIM(COALESCE(ct.raw_type, ''))) IN ('education', 'degree')
+          OR LOWER(TRIM(COALESCE(tg.type::text, ''))) IN ('education', 'degree')
         )
+        ${engineerExclude}
       )`);
     }
 

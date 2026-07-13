@@ -11,7 +11,16 @@ const candidateTagService = require('../services/candidateTagService');
 const tagEmbeddingService = require('../services/tagEmbeddingService');
 const tagCorrectionAgentService = require('../services/tagCorrectionAgentService');
 const tagAiDecisionResolveService = require('../services/tagAiDecisionResolveService');
+const User = require('../models/User');
 const TagAiDecision = require('../models/TagAiDecision');
+
+const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isValidTagIdParam = (raw) => {
+  const s = String(raw ?? '').trim();
+  if (!s || s === 'null' || s === 'undefined') return false;
+  return TAG_ID_RE.test(s);
+};
 
 const loadAiQueuedPendingTagIds = async () => {
   const rows = await TagAiDecision.findAll({
@@ -108,9 +117,54 @@ const fireAndForget = (promise) => {
   promise.catch((err) => console.error('[tagController] background task failed', err?.message || err));
 };
 
+const UUID_RE = /^[0-9a-f-]{36}$/i;
+
+const resolveTagActor = (req) => {
+  if (req.dbUser) {
+    const plain = req.dbUser.get ? req.dbUser.get({ plain: true }) : req.dbUser;
+    return {
+      actingUser: plain.id,
+      actorName: plain.name || plain.email || null,
+      actorEmail: plain.email || null,
+    };
+  }
+  const userId = req.user?.sub || req.user?.id;
+  if (userId) {
+    return {
+      actingUser: userId,
+      actorName: req.user?.name || req.user?.email || null,
+      actorEmail: req.user?.email || null,
+    };
+  }
+  return { actingUser: 'system', actorName: null, actorEmail: null };
+};
+
+const resolveHistoryActorDisplay = (plain, userMap) => {
+  const actor = plain.actor;
+  const changes = plain.changes || {};
+  const user = userMap.get(String(actor));
+
+  if (user?.name) return user.name;
+  if (user?.email) return user.email;
+  if (changes.actorName) return changes.actorName;
+  if (changes.actorEmail) return changes.actorEmail;
+
+  const updatedBy = changes.after?.updatedBy || changes.before?.updatedBy;
+  if (updatedBy && typeof updatedBy === 'string' && !UUID_RE.test(updatedBy) && updatedBy !== 'system') {
+    return updatedBy;
+  }
+
+  if (actor && typeof actor === 'string' && !UUID_RE.test(actor) && actor !== 'system') {
+    return actor;
+  }
+
+  if (actor && actor !== 'system') return null;
+  return null;
+};
+
 const create = async (req, res) => {
   try {
-    const userId = req.user?.sub || req.user?.id || 'system';
+    const actor = resolveTagActor(req);
     const source =
       typeof req.body?.source === 'string'
         ? req.body.source
@@ -150,10 +204,12 @@ const create = async (req, res) => {
     }
     delete payload.embedding;
     const tag = await tagService.create(payload, {
-      actingUser: userId,
+      actingUser: actor.actingUser,
       source,
-      createdBy: userId,
-      updatedBy: userId,
+      createdBy: actor.actingUser,
+      updatedBy: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
     });
     fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
     const responsePayload = tag.toJSON ? tag.toJSON() : { ...tag };
@@ -166,12 +222,14 @@ const create = async (req, res) => {
 
 const update = async (req, res) => {
   try {
-    const userId = req.user?.sub || req.user?.id || 'system';
+    const actor = resolveTagActor(req);
     const payload = { ...req.body };
     delete payload.embedding;
     const tag = await tagService.update(req.params.id, payload, {
-      actingUser: userId,
-      updatedBy: userId,
+      actingUser: actor.actingUser,
+      updatedBy: actor.actingUser,
+      actorName: actor.actorName,
+      actorEmail: actor.actorEmail,
     });
     fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
     const responsePayload = tag.toJSON ? tag.toJSON() : { ...tag };
@@ -221,16 +279,21 @@ const remove = async (req, res) => {
 
     if (isFkError) {
       let candidates = [];
+      let jobs = [];
       let helperError = null;
       try {
-        candidates = await listTagCandidatesHelper(id);
+        [candidates, jobs] = await Promise.all([
+          listTagCandidatesHelper(id),
+          listTagJobsHelper(id),
+        ]);
       } catch (fetchErr) {
         helperError = fetchErr?.message || 'failed to load';
-        console.error('[tagController.remove] failed to load blocking candidates', fetchErr);
+        console.error('[tagController.remove] failed to load blocking tag usage', fetchErr);
       }
       return res.status(409).json({
-        message: 'Tag is still used by candidates',
+        message: 'Tag is still in use',
         candidates,
+        jobs,
         helperError,
       });
     }
@@ -251,14 +314,33 @@ const listTagCandidatesHelper = async (tagId) => {
 };
 
 const listTagJobsHelper = async (tagId) => {
-  const [rows] = await sequelize.query(
-    `SELECT DISTINCT j.id, j.title, j.status, j.client, j."postingCode"
-     FROM jobs j
-     INNER JOIN system_tags st ON st.entity_id = j.id AND st.type = 'job'
-     WHERE st.tag_id = :tagId`,
-    { replacements: { tagId } },
-  );
-  return rows;
+  const entries = await SystemTag.findAll({
+    where: { tag_id: tagId, type: SYSTEM_TAG_TYPE_JOB },
+    attributes: ['id', 'entity_id'],
+  });
+  if (!entries.length) return [];
+
+  const jobIds = [...new Set(entries.map((entry) => entry.entity_id).filter(Boolean))];
+  const jobs = jobIds.length
+    ? await Job.findAll({
+        where: { id: { [Op.in]: jobIds } },
+        attributes: ['id', 'title', 'status', 'client', 'postingCode'],
+      })
+    : [];
+  const jobMap = new Map(jobs.map((job) => [String(job.id), job.get({ plain: true })]));
+
+  return entries.map((entry) => {
+    const plain = entry.get({ plain: true });
+    const job = jobMap.get(String(plain.entity_id)) || {};
+    return {
+      job_tag_id: plain.id,
+      job_id: plain.entity_id,
+      title: job.title || '',
+      status: job.status || '',
+      client: job.client || '',
+      postingCode: job.postingCode || '',
+    };
+  });
 };
 
 const cleanupPendingTagCorrections = async (terms = []) => {
@@ -284,8 +366,8 @@ const cleanupPendingTagCorrections = async (terms = []) => {
 
 const listTagCandidates = async (req, res) => {
   const tagId = req.params.id;
-  if (!tagId) {
-    return res.status(400).json({ message: 'Missing tag id' });
+  if (!isValidTagIdParam(tagId)) {
+    return res.status(400).json({ message: 'Invalid tag id' });
   }
 
   try {
@@ -302,8 +384,8 @@ const listTagCandidates = async (req, res) => {
 
 const listTagJobs = async (req, res) => {
   const tagId = req.params.id;
-  if (!tagId) {
-    return res.status(400).json({ message: 'Missing tag id' });
+  if (!isValidTagIdParam(tagId)) {
+    return res.status(400).json({ message: 'Invalid tag id' });
   }
   try {
     const jobs = await listTagJobsHelper(tagId);
@@ -325,7 +407,45 @@ const getHistory = async (req, res) => {
       where: { tag_id: tagId },
       order: [['created_at', 'DESC']],
     });
-    res.json(entries);
+
+    const actorIds = [
+      ...new Set(
+        entries
+          .map((row) => row.actor)
+          .filter((actor) => actor && actor !== 'system' && /^[0-9a-f-]{36}$/i.test(String(actor))),
+      ),
+    ];
+
+    const users = actorIds.length
+      ? await User.findAll({
+          where: { id: { [Op.in]: actorIds } },
+          attributes: ['id', 'name', 'email'],
+        })
+      : [];
+    const userMap = new Map(users.map((u) => [String(u.id), u.get({ plain: true })]));
+
+    const payload = entries.map((entry) => {
+      const plain = entry.toJSON ? entry.toJSON() : entry.get({ plain: true });
+      const actor = plain.actor;
+      const user = userMap.get(String(actor));
+      const actorDisplayName = resolveHistoryActorDisplay(plain, userMap);
+      const createdAt =
+        plain.createdAt ||
+        plain.created_at ||
+        plain.updatedAt ||
+        plain.updated_at ||
+        null;
+      return {
+        ...plain,
+        createdAt,
+        created_at: createdAt,
+        actorDisplayName,
+        userName: user?.name || plain.changes?.actorName || null,
+        userEmail: user?.email || plain.changes?.actorEmail || null,
+      };
+    });
+
+    res.json(payload);
   } catch (err) {
     console.error('[tagController.getHistory]', err);
     res.status(500).json({ message: 'Failed to load tag history' });
@@ -693,6 +813,37 @@ const resolveAiDecisions = async (req, res) => {
   }
 };
 
+const getAiDecisionOccurrences = async (req, res) => {
+  const decisionId = String(req.params.decisionId || '').trim();
+  if (!isValidTagIdParam(decisionId)) {
+    return res.status(400).json({ message: 'Invalid decision id' });
+  }
+
+  try {
+    const decision = await TagAiDecision.findByPk(decisionId, {
+      include: [{ model: Tag, as: 'pendingTag', required: false }],
+    });
+    if (!decision) {
+      return res.status(404).json({ message: 'Decision not found' });
+    }
+
+    const plain = decision.get ? decision.get({ plain: true }) : decision;
+    const { tagId, source } = await tagCorrectionAgentService.resolveOccurrencesTagId(plain);
+    if (!tagId) {
+      return res.json({ tagId: null, source: 'none', candidates: [], jobs: [] });
+    }
+
+    const [candidates, jobs] = await Promise.all([
+      listTagCandidatesHelper(tagId),
+      listTagJobsHelper(tagId),
+    ]);
+    return res.json({ tagId, source, candidates, jobs });
+  } catch (err) {
+    console.error('[tagController.getAiDecisionOccurrences]', err);
+    return res.status(500).json({ message: 'Failed to load occurrences for AI decision' });
+  }
+};
+
 const backfillAiDecisions = async (req, res) => {
   try {
     const limit = Number(req.body?.limit) || Number(req.query?.limit) || 40;
@@ -759,6 +910,7 @@ module.exports = {
   putCorrectionAgentSettings,
   listAiDecisions,
   resolveAiDecisions,
+  getAiDecisionOccurrences,
   backfillAiDecisions,
   backfillAutoMerge,
 };

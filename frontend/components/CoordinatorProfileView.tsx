@@ -6,9 +6,61 @@ import {
     LockClosedIcon, ShieldCheckIcon, PencilIcon, CheckCircleIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
-import { fetchStaffUser, updateStaffUser, type StaffUserDto } from '../services/usersApi';
+import { fetchStaffUser, resetStaffUserPassword, updateStaffUser, type StaffUserDto } from '../services/usersApi';
 
 // --- SHARED FORM COMPONENTS ---
+
+const ResetPasswordBlock: React.FC<{ userId: string; userEmail: string }> = ({ userId, userEmail }) => {
+    const { t } = useLanguage();
+    const [resettingPassword, setResettingPassword] = useState(false);
+    const [resetPasswordMsg, setResetPasswordMsg] = useState<string | null>(null);
+    const [resetPasswordOk, setResetPasswordOk] = useState<boolean | null>(null);
+
+    const handleResetPassword = async () => {
+        const confirmed = window.confirm(
+            t('coordinator_profile.reset_password_confirm').replace('{email}', userEmail),
+        );
+        if (!confirmed) return;
+
+        setResetPasswordMsg(null);
+        setResetPasswordOk(null);
+        setResettingPassword(true);
+        try {
+            await resetStaffUserPassword(userId);
+            setResetPasswordOk(true);
+            setResetPasswordMsg(t('coordinator_profile.reset_password_success').replace('{email}', userEmail));
+        } catch (e: unknown) {
+            setResetPasswordOk(false);
+            const message = e instanceof Error ? e.message : t('coordinator_profile.reset_password_failed');
+            setResetPasswordMsg(message);
+        } finally {
+            setResettingPassword(false);
+        }
+    };
+
+    return (
+        <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
+            <div className="flex items-center gap-2 mb-4">
+                <LockClosedIcon className="w-5 h-5 text-primary-500" />
+                <h3 className="text-lg font-bold text-text-default">{t('coordinator_profile.account_actions')}</h3>
+            </div>
+            <p className="text-sm text-text-muted mb-4">{t('coordinator_profile.reset_password_desc')}</p>
+            <button
+                type="button"
+                disabled={resettingPassword}
+                onClick={() => void handleResetPassword()}
+                className="px-4 py-2 border border-border-default rounded-lg text-sm font-bold text-text-default hover:bg-bg-subtle transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+            >
+                {resettingPassword ? t('coordinator_profile.reset_password_sending') : t('coordinator_profile.reset_password')}
+            </button>
+            {resetPasswordMsg && (
+                <p className={`mt-4 text-sm ${resetPasswordOk ? 'text-green-600' : 'text-red-600'}`}>
+                    {resetPasswordMsg}
+                </p>
+            )}
+        </div>
+    );
+};
 
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; type?: string; disabled?: boolean }> = ({ label, name, value, onChange, type = "text", disabled = false }) => (
     <div>
@@ -40,12 +92,14 @@ const ToggleSwitch: React.FC<{ label: string; checked: boolean; onChange: (check
 // --- TABS COMPONENTS ---
 
 const DetailsTab: React.FC<{
+    userId: string;
+    userEmail: string;
     formData: Record<string, unknown>;
     setFormData: React.Dispatch<React.SetStateAction<Record<string, unknown>>>;
     onSave: () => Promise<void>;
     saving: boolean;
     saveMessage: string | null;
-}> = ({ formData, setFormData, onSave, saving, saveMessage }) => {
+}> = ({ userId, userEmail, formData, setFormData, onSave, saving, saveMessage }) => {
     const { t } = useLanguage();
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
@@ -96,6 +150,7 @@ const DetailsTab: React.FC<{
                     </div>
                 </div>
             </div>
+            <ResetPasswordBlock userId={userId} userEmail={userEmail} />
             {saveMessage && (
                 <p className={`text-sm ${saveMessage.includes('נכשל') ? 'text-red-600' : 'text-green-600'}`}>{saveMessage}</p>
             )}
@@ -142,18 +197,6 @@ const UsageTab: React.FC = () => {
                      <ToggleSwitch label={t('coordinator_profile.blocked_sources')} checked={settings.blockedSources} onChange={() => toggle('blockedSources')} description="מנע מהמשתמש לראות מקורות גיוס ספציפיים." />
                      <ToggleSwitch label={t('coordinator_profile.export_approval')} checked={settings.exportData} onChange={() => toggle('exportData')} description="אפשר למשתמש לייצא נתונים לקבצי Excel/CSV." />
                  </div>
-            </div>
-
-            <div className="bg-bg-card p-6 rounded-xl border border-border-default shadow-sm">
-                <h3 className="text-lg font-bold text-text-default mb-4">פעולות חשבון</h3>
-                <div className="flex flex-col sm:flex-row gap-4">
-                    <button className="px-4 py-2 border border-border-default rounded-lg text-sm font-bold text-text-default hover:bg-bg-subtle transition-colors">
-                        {t('coordinator_profile.reset_password')}
-                    </button>
-                    <button className="px-4 py-2 border border-border-default rounded-lg text-sm font-bold text-text-default hover:bg-bg-subtle transition-colors">
-                        {t('coordinator_profile.new_email')}
-                    </button>
-                </div>
             </div>
             
              <div className="flex justify-end">
@@ -549,6 +592,8 @@ const CoordinatorProfileView: React.FC = () => {
             <main className="flex-1 overflow-y-auto">
                 {activeTab === 'details' && (
                     <DetailsTab
+                        userId={staffUser.id}
+                        userEmail={staffUser.email}
                         formData={formData}
                         setFormData={setFormData}
                         onSave={saveDetails}

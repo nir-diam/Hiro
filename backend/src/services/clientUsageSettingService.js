@@ -399,6 +399,7 @@ module.exports = {
   resolveClientIdForWelcomeEmail,
   getReturnMonthsForClientLabel,
   getClientIdForJobClientLabel,
+  resolveClientIdFromJobInbox,
   resolveScreeningDefaultsForJob,
   resolveReturnMonthsForJobRequest,
   upsert,

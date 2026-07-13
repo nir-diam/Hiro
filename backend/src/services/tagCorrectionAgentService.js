@@ -16,6 +16,57 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const PROMPT_ID = 'tag_correction_agent';
 
+const TAG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const isValidTagUuid = (id) => {
+  if (id == null) return false;
+  const s = String(id).trim();
+  return s.length > 0 && s !== 'null' && s !== 'undefined' && TAG_UUID_RE.test(s);
+};
+
+const isMergeDecision = (plain) =>
+  plain.reviewerAction === 'merge'
+  || plain.reviewerAction === 'auto_merge'
+  || plain.aiDecision === 'merge';
+
+const resolveOccurrencesTagId = async (plain) => {
+  if (isValidTagUuid(plain.pendingTagId)) return { tagId: plain.pendingTagId, source: 'pending' };
+
+  if (isValidTagUuid(plain.resolvedTargetTagId)) {
+    return { tagId: plain.resolvedTargetTagId, source: 'merged' };
+  }
+
+  if (isMergeDecision(plain) && plain.aiSuggestedTarget) {
+    const tagType = plain.pendingTag?.type || plain.detectedType;
+    const byName = await tagHybridSearchService.resolveTargetTagIdByName(
+      plain.aiSuggestedTarget,
+      { tagType },
+    );
+    if (byName) return { tagId: byName, source: 'merged' };
+
+    const snap = Array.isArray(plain.candidateTagsSnapshot) ? plain.candidateTagsSnapshot : [];
+    const targetName = String(plain.aiSuggestedTarget).trim().toLowerCase();
+    const snapHit = snap.find(
+      (row) => isValidTagUuid(row?.tagId)
+        && String(row.name || '').trim().toLowerCase() === targetName,
+    );
+    if (snapHit?.tagId) return { tagId: snapHit.tagId, source: 'merged' };
+  }
+
+  if (
+    (plain.reviewerAction === 'create' || plain.aiDecision === 'create')
+    && plain.originalTerm
+  ) {
+    const createdId = await tagHybridSearchService.resolveTargetTagIdByName(
+      plain.originalTerm,
+      { tagType: plain.detectedType },
+    );
+    if (createdId) return { tagId: createdId, source: 'created' };
+  }
+
+  return { tagId: null, source: 'none' };
+};
+
 const parseAgentJson = (text) => {
   const trimmed = String(text || '').trim();
   const match = trimmed.match(/\{[\s\S]*\}/);
@@ -202,6 +253,8 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
         temperature: promptRow.temperature ?? 0.1,
         maxOutputTokens: 1024,
       },
+      promptId: PROMPT_ID,
+      llmInputJson: userPayload,
     });
     decision = normalizeAgentDecision(parseAgentJson(reply), candidateNames);
   } catch (geminiErr) {
@@ -259,6 +312,7 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
           reviewStatus: 'approved',
           reviewerAction: 'auto_merge',
           resolvedAt: new Date(),
+          resolvedTargetTagId: targetTagId,
         });
         console.log(
           `[tagCorrectionAgent] auto-merged "${originalTerm}" → "${decision.aiSuggestedTarget}" ` +
@@ -337,6 +391,7 @@ const schedulePendingIfNeeded = (pendingTagId, contextSample = '', options = {})
                 reviewStatus: 'approved',
                 reviewerAction: 'auto_merge',
                 resolvedAt: new Date(),
+                resolvedTargetTagId: targetTagId,
               });
               console.log(
                 `[tagCorrectionAgent] schedulePendingIfNeeded: auto-merged "${plain.originalTerm}" ` +
@@ -448,6 +503,7 @@ const listDecisions = async ({
       return {
         id: plain.id,
         pendingTagId: plain.pendingTagId,
+        resolvedTargetTagId: plain.resolvedTargetTagId ?? null,
         originalTerm: plain.originalTerm,
         detectedType,
         contextSample: plain.contextSample,
@@ -570,6 +626,7 @@ const backfillAutoMergeDecisions = async (threshold = 30, limit = 200) => {
         reviewStatus: 'approved',
         reviewerAction: 'auto_merge',
         resolvedAt: new Date(),
+        resolvedTargetTagId: targetTagId,
       });
       console.log(
         `[tagCorrectionAgent] backfillAutoMerge: merged "${plain.originalTerm}" → "${plain.aiSuggestedTarget}" ` +
@@ -598,4 +655,5 @@ module.exports = {
   listDecisions,
   backfillPendingWithoutDecisions,
   backfillAutoMergeDecisions,
+  resolveOccurrencesTagId,
 };

@@ -14,9 +14,12 @@ import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
+import SearchableSelect from './SearchableSelect';
 import JobsAIAnalysisModal from './JobsAIAnalysisModal'; // New Import
 import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import { authHeaders } from '../utils/authHeaders';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 // --- TYPES ---
@@ -480,6 +483,9 @@ const JobCard: React.FC<{
 // --- MAIN JOBS VIEW ---
 const JobsView: React.FC = () => {
     const { t } = useLanguage();
+    const { user, ready: authReady } = useAuth();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const isTenantUser = Boolean(user?.clientId) && !isPlatformAdmin;
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [jobs, setJobs] = useState<Job[]>([]);
     const [loadingJobs, setLoadingJobs] = useState(false);
@@ -491,7 +497,13 @@ const JobsView: React.FC = () => {
     const loadJobs = useCallback(async () => {
         setLoadingJobs(true);
         try {
-            const res = await fetch(`${apiBase}/api/jobs`);
+            const url = isTenantUser
+                ? `${apiBase}/api/jobs/for-compose`
+                : `${apiBase}/api/jobs`;
+            const res = await fetch(url, {
+                headers: isTenantUser ? authHeaders(true) : undefined,
+                cache: 'no-store',
+            });
             if (!res.ok) throw new Error('Failed to load jobs');
             const payload = await res.json();
             setJobs(Array.isArray(payload) ? payload : []);
@@ -500,11 +512,12 @@ const JobsView: React.FC = () => {
         } finally {
             setLoadingJobs(false);
         }
-    }, [apiBase]);
+    }, [apiBase, isTenantUser]);
 
     useEffect(() => {
+        if (!authReady) return;
         loadJobs();
-    }, [loadJobs]);
+    }, [loadJobs, authReady]);
 
     const persistJobUpdate = useCallback(async (id: number, updates: Partial<Job>) => {
         const res = await fetch(`${apiBase}/api/jobs/${id}`, {
@@ -979,7 +992,7 @@ const JobsView: React.FC = () => {
         recruiters: [...new Set(jobs.map(j => j.recruiter))],
         statuses: [...new Set(jobs.map(j => j.status as string))] as JobStatus[],
         fields: [...new Set(jobs.map(j => j.field))],
-        clients: [...new Set(jobs.map(j => j.client))],
+        clients: [...new Set(jobs.map(j => j.client))].sort((a, b) => String(a).localeCompare(String(b), 'he')),
         roles: [...new Set(jobs.map(j => j.role))],
         priorities: ['רגילה', 'דחופה', 'קריטית'],
         clientTypes: [...new Set(jobs.map(j => j.clientType))],
@@ -988,6 +1001,15 @@ const JobsView: React.FC = () => {
         recruitingCoordinators: [...new Set(jobs.map(j => j.recruitingCoordinator))],
         accountManagers: [...new Set(jobs.map(j => j.accountManager))]
     }), [jobs]);
+
+    const clientFilterOptions = useMemo(
+        () => filterOptions.clients.map(client => ({ id: client, label: client })),
+        [filterOptions.clients]
+    );
+
+    const handleClientFilterChange = (value: string | number | null) => {
+        setFilters(prev => ({ ...prev, client: value ? String(value) : '' }));
+    };
 
     const handleColumnToggle = (columnId: string) => {
         if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
@@ -1101,9 +1123,18 @@ const JobsView: React.FC = () => {
                             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                             <input type="text" placeholder={t('jobs.search_placeholder')} name="searchTerm" value={filters.searchTerm} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" />
                         </div>
-                        <FilterSelect placeholder={t('jobs.filter_client')} name="client" value={filters.client} onChange={handleFilterChange} options={filterOptions.clients} className="flex-grow min-w-[8rem] flex-shrink-0" />
+                        {isPlatformAdmin ? (
+                            <SearchableSelect
+                                options={clientFilterOptions}
+                                value={filters.client || null}
+                                onChange={handleClientFilterChange}
+                                placeholder={t('jobs.filter_client')}
+                                className="flex-grow min-w-[8rem] flex-shrink-0"
+                                icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
+                            />
+                        ) : null}
                         <FilterSelect placeholder={t('jobs.filter_status')} name="status" value={filters.status} onChange={handleFilterChange} options={filterOptions.statuses.map(s => t(`status.${s}`))} className="flex-grow min-w-[8rem] flex-shrink-0" />
-                        
+
                         {/* Date Range Selector */}
                         <div className="min-w-[140px]">
                             <DateRangeSelector 

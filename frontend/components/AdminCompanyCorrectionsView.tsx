@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { createPortal } from 'react-dom';
 import {
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, UserIcon,
@@ -294,16 +295,28 @@ const Toast: React.FC<{ message: string; type: 'success' | 'error' | 'info'; onC
 // ─── Quick Create Modal ───────────────────────────────────────────────────────
 
 const QuickCreateCompanyModal: React.FC<{
-    isOpen: boolean; onClose: () => void; initialName: string; onSave: (data: any) => void;
+    isOpen: boolean; onClose: () => void; initialName: string; onSave: (data: any) => void | Promise<void>;
 }> = ({ isOpen, onClose, initialName, onSave }) => {
     const [name, setName] = useState(initialName);
     const [industry, setIndustry] = useState('');
     const [website, setWebsite] = useState('');
     const [alias, setAlias] = useState('');
+    const [saving, setSaving] = useState(false);
 
     useEffect(() => {
-        if (isOpen) { setName(initialName); setIndustry(''); setWebsite(''); setAlias(''); }
+        if (isOpen) { setName(initialName); setIndustry(''); setWebsite(''); setAlias(''); setSaving(false); }
     }, [isOpen, initialName]);
+
+    const handleSave = async () => {
+        const trimmed = name.trim();
+        if (!trimmed || saving) return;
+        setSaving(true);
+        try {
+            await onSave({ name: trimmed, industry: industry.trim(), website: website.trim(), alias: alias.trim() });
+        } finally {
+            setSaving(false);
+        }
+    };
 
     if (!isOpen) return null;
 
@@ -334,11 +347,13 @@ const QuickCreateCompanyModal: React.FC<{
                 <div className="p-5 border-t border-border-default flex justify-end gap-3">
                     <button onClick={onClose} className="px-4 py-2 text-sm font-bold text-text-muted hover:bg-bg-hover rounded-lg">ביטול</button>
                     <button
-                        onClick={() => onSave({ name, industry, website, alias })}
-                        className="px-6 py-2 text-sm font-bold text-white bg-orange-500 rounded-lg hover:bg-orange-600 flex items-center gap-2"
+                        type="button"
+                        onClick={handleSave}
+                        disabled={!name.trim() || saving}
+                        className="px-6 py-2 text-sm font-bold text-white bg-orange-500 rounded-lg hover:bg-orange-600 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                         <PlusIcon />
-                        צור חברה
+                        {saving ? 'יוצר...' : 'צור חברה'}
                     </button>
                 </div>
             </div>
@@ -350,6 +365,13 @@ const QuickCreateCompanyModal: React.FC<{
 
 const AdminCompanyCorrectionsView: React.FC = () => {
     const apiBase = (import.meta as { env?: { VITE_API_BASE?: string } }).env?.VITE_API_BASE || '';
+    const navigate = useNavigate();
+
+    const openCompanyDbSearch = useCallback((term: string) => {
+        const q = term.trim();
+        if (!q) return;
+        navigate(`/admin/companies?tab=db&search=${encodeURIComponent(q)}`);
+    }, [navigate]);
 
     // ── Shared state ──
     const [activeTab, setActiveTab] = useState<TabType>('dashboard');
@@ -650,6 +672,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
     const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
     const [aiCreateModalName, setAiCreateModalName] = useState('');
+    const [aiCreateDecisionId, setAiCreateDecisionId] = useState<string | null>(null);
 
     const loadDecisions = useCallback(async () => {
         setLoadingDecisions(true);
@@ -692,6 +715,108 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const updateDecision = (id: string, patch: Partial<AiDecision>) =>
         setDecisions(prev => prev.map(d => d.id === id ? { ...d, ...patch } : d));
 
+    const createOrganizationPlain = async (data: {
+        name: string;
+        industry?: string;
+        website?: string;
+        alias?: string;
+        extraAliases?: string[];
+    }) => {
+        const name = String(data.name || '').trim();
+        if (!name) throw new Error('שם החברה נדרש');
+
+        const aliases = new Set<string>();
+        const alias = String(data.alias || '').trim();
+        if (alias) aliases.add(alias);
+        for (const a of data.extraAliases || []) {
+            const t = String(a || '').trim();
+            if (t && t.toLowerCase() !== name.toLowerCase()) aliases.add(t);
+        }
+
+        const createRes = await fetch(`${apiBase}/api/organizations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name,
+                mainField: data.industry?.trim() || undefined,
+                website: data.website?.trim() || undefined,
+                aliases: aliases.size ? [...aliases] : undefined,
+            }),
+        });
+        if (!createRes.ok) throw new Error(await createRes.text().catch(() => '') || 'יצירת החברה נכשלה');
+        const created = await createRes.json();
+        const orgId = typeof created?.id === 'string' ? created.id : undefined;
+        if (!orgId) throw new Error('לא התקבל מזהה חברה מהשרת');
+        return { orgId, name };
+    };
+
+    const handleAiCreateCompany = async (data: {
+        name: string;
+        industry?: string;
+        website?: string;
+        alias?: string;
+    }) => {
+        const decisionId = aiCreateDecisionId;
+        const dec = decisionId ? decisions.find((d) => d.id === decisionId) : null;
+        setIsCreateModalOpen(false);
+        setAiCreateDecisionId(null);
+
+        try {
+            const { name } = await createOrganizationPlain({
+                ...data,
+                extraAliases: dec?.originalTerm ? [dec.originalTerm] : [],
+            });
+
+            if (decisionId) {
+                await resolveOrgAiDecision(decisionId, {
+                    aiDecision: 'create_company',
+                    reviewerAction: 'changed',
+                    reviewStatus: 'changed',
+                });
+                updateDecision(decisionId, {
+                    decisionType: 'create_company',
+                    decisionTarget: undefined,
+                    reviewStatus: 'changed',
+                });
+            }
+
+            await loadOrganizationsData();
+            notify(`החברה "${name}" נוצרה בהצלחה`);
+        } catch (err: any) {
+            notify(err?.message || 'יצירת החברה נכשלה', 'error');
+        }
+    };
+
+    const createOrganizationWithEnrichment = async (term: string) => {
+        const createRes = await fetch(`${apiBase}/api/organizations`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: term }),
+        });
+        if (!createRes.ok) throw new Error(await createRes.text().catch(() => '') || 'יצירת החברה נכשלה');
+        const created = await createRes.json();
+        const orgId: string = created?.id;
+        if (!orgId) throw new Error('לא התקבל מזהה חברה מהשרת');
+
+        notify(`החברה "${term}" נוצרה — מעשיר ושומר נתונים...`, 'info');
+        const enrichRes = await fetch(`${apiBase}/api/organizations/enrich`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ companyIds: [orgId], persist: true }),
+        });
+        if (!enrichRes.ok) {
+            throw new Error(await enrichRes.text().catch(() => '') || 'העשרה נכשלה');
+        }
+        const enrichData = await enrichRes.json() as { persistedIds?: string[] };
+        const persisted = Array.isArray(enrichData?.persistedIds) && enrichData.persistedIds.includes(orgId);
+        notify(
+            persisted
+                ? `העשרת "${term}" נשמרה בפרופיל החברה`
+                : `העשרת "${term}" הושלמה (לא נמצאו שדות לשמירה)`,
+        );
+        return orgId;
+    };
+
     const handleAddToBlacklist = async (decision: AiDecision) => {
         setOpenDropdownId(null);
         try {
@@ -717,24 +842,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             // For create_company decisions: create the org record + trigger enrichment in background
             if (dec?.decisionType === 'create_company') {
                 const term = dec.originalTerm;
-                const createRes = await fetch(`${apiBase}/api/organizations`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: term }),
-                });
-                if (!createRes.ok) throw new Error(await createRes.text().catch(() => '') || 'יצירת החברה נכשלה');
-                const created = await createRes.json();
-                const orgId: string = created?.id;
-                notify(`החברה "${term}" נוצרה — מתחיל העשרה ברקע...`, 'info');
-                // Fire enrichment in background (do not block approval)
-                fetch(`${apiBase}/api/organizations/enrich`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ companyIds: [orgId] }),
-                }).then(async (r) => {
-                    if (r.ok) notify(`העשרת "${term}" הושלמה בהצלחה`);
-                    else notify(`העשרה נכשלה עבור "${term}"`, 'error');
-                }).catch(() => notify(`העשרה נכשלה עבור "${term}"`, 'error'));
+                await createOrganizationWithEnrichment(term);
             }
             await resolveOrgAiDecision(id, { reviewerAction: 'approved', reviewStatus: 'approved' });
             updateDecision(id, { isAutoHandled: true, needsManual: false, reviewStatus: 'approved' });
@@ -756,6 +864,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         if (newType === 'create_company') {
             const dec = decisions.find(d => d.id === decisionId);
             setAiCreateModalName(dec?.originalTerm ?? '');
+            setAiCreateDecisionId(decisionId);
             setIsCreateModalOpen(true);
             return;
         }
@@ -764,26 +873,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             const term = dec?.originalTerm ?? '';
             if (!term) { notify('לא נמצא שם חברה', 'error'); return; }
             try {
-                // 1. Create canonical org
-                const createRes = await fetch(`${apiBase}/api/organizations`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: term }),
-                });
-                if (!createRes.ok) throw new Error(await createRes.text().catch(() => '') || 'יצירת החברה נכשלה');
-                const created = await createRes.json();
-                const orgId: string = created?.id;
-                notify(`החברה "${term}" נוצרה — מתחיל העשרה ברקע...`, 'info');
-                // 2. Trigger enrichment in background (fire-and-forget — don't await)
-                fetch(`${apiBase}/api/organizations/enrich`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ companyIds: [orgId] }),
-                }).then(async (r) => {
-                    if (r.ok) notify(`העשרת "${term}" הושלמה בהצלחה`);
-                    else notify(`העשרה נכשלה עבור "${term}"`, 'error');
-                }).catch(() => notify(`העשרה נכשלה עבור "${term}"`, 'error'));
-                // 3. Mark AI decision as resolved
+                await createOrganizationWithEnrichment(term);
                 await resolveOrgAiDecision(decisionId, {
                     aiDecision: 'create_company',
                     reviewerAction: 'changed',
@@ -1607,7 +1697,14 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                                 )}
                                             </td>
                                             <td className="p-4 align-top">
-                                                <div className="font-extrabold text-text-default text-base mb-2">{d.originalTerm}</div>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openCompanyDbSearch(d.originalTerm)}
+                                                    className="font-extrabold text-text-default text-base mb-2 text-right hover:text-primary-600 hover:underline transition-colors"
+                                                    title="חפש במסד נתוני חברות"
+                                                >
+                                                    {d.originalTerm}
+                                                </button>
                                                 <button
                                                     onClick={() => {
                                                         if (!d.candidateId) return;
@@ -1737,12 +1834,12 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             {/* Quick create modal */}
             <QuickCreateCompanyModal
                 isOpen={isCreateModalOpen}
-                onClose={() => setIsCreateModalOpen(false)}
-                initialName={activeTab === 'manual' ? (selected?.name || '') : aiCreateModalName}
-                onSave={activeTab === 'manual' ? handleCreateNewCompany : (data) => {
+                onClose={() => {
                     setIsCreateModalOpen(false);
-                    notify(`החברה "${data.name}" נוצרה בהצלחה`);
+                    setAiCreateDecisionId(null);
                 }}
+                initialName={activeTab === 'manual' ? (selected?.name || '') : aiCreateModalName}
+                onSave={activeTab === 'manual' ? handleCreateNewCompany : handleAiCreateCompany}
             />
 
             {/* ── Merge / Generic modal ────────────────────────────────── */}

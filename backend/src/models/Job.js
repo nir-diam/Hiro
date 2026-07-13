@@ -12,6 +12,14 @@ const Job = sequelize.define(
     title: { type: DataTypes.STRING, allowNull: false },
     publicJobTitle: DataTypes.STRING,
     client: { type: DataTypes.STRING, allowNull: false },
+    clientId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'client_id',
+      references: { model: 'clients', key: 'id' },
+      onDelete: 'SET NULL',
+      onUpdate: 'CASCADE',
+    },
     field: DataTypes.STRING,
     role: DataTypes.STRING,
     priority: {

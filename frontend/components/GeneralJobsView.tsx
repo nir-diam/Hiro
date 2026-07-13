@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { MagnifyingGlassIcon, MapPinIcon, BriefcaseIcon, TagIcon, FunnelIcon, BookmarkIcon, BellIcon, XMarkIcon, ClockIcon, CheckCircleIcon, SparklesIcon, ArrowLeftIcon, UserCircleIcon, BuildingOffice2Icon, CalendarDaysIcon, WalletIcon, PaperAirplaneIcon, ChevronDownIcon } from './Icons';
 import JobDetailsDrawer from './JobDetailsDrawer';
@@ -10,10 +10,13 @@ import ApplyModal from './ApplyModal';
 import CVUploadModal from './CVUploadModal';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import { fetchPublicJobBoard, buildPublicJobHashPath, parsePublicRouteClientFromLandingUrl, type PublicBoardJob } from '../services/publishingApi';
 
 
 // --- MOCK DATA --- (Enriched for new filters)
 interface EnrichedJob extends Job {
+    jobId: string;
+    landingUrl?: string;
     tags: string[];
     postedDate: string;
     logo: string;
@@ -22,11 +25,28 @@ interface EnrichedJob extends Job {
     isPromoted?: boolean;
 }
 
-const mockJobsData: EnrichedJob[] = [
-    
-       
-        
-];
+function toEnrichedJob(row: PublicBoardJob): EnrichedJob {
+    return {
+        id: row.jobId as unknown as number,
+        jobId: row.jobId,
+        landingUrl: row.landingUrl,
+        postingCode: row.postingCode || '',
+        title: row.title,
+        client: row.client,
+        location: row.location,
+        jobType: row.jobType,
+        description: row.description,
+        requirements: row.requirements,
+        tags: row.tags?.length ? row.tags : row.requirements.slice(0, 3),
+        postedDate: row.postedDate,
+        logo: row.logo || 'https://via.placeholder.com/80?text=Co',
+        salaryMin: row.salaryMin,
+        salaryMax: row.salaryMax,
+        isPromoted: row.isPromoted,
+        experienceRequired: '',
+        status: 'פתוחה',
+    } as EnrichedJob;
+}
 
 
 const JobListItem: React.FC<{ job: EnrichedJob; onClick: () => void; isActive: boolean; isSaved: boolean; onSave: (e: React.MouseEvent) => void }> = ({ job, onClick, isActive, isSaved, onSave }) => {
@@ -261,8 +281,11 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
     const [selectedRole, setSelectedRole] = useState('');
     const [isJobFieldOpen, setIsJobFieldOpen] = useState(false);
 
-    const [savedJobs, setSavedJobs] = useState<Set<number>>(new Set());
+    const [savedJobs, setSavedJobs] = useState<Set<string>>(new Set());
     const [selectedJob, setSelectedJob] = useState<EnrichedJob | null>(null);
+    const [boardJobs, setBoardJobs] = useState<EnrichedJob[]>([]);
+    const [boardLoading, setBoardLoading] = useState(true);
+    const [boardError, setBoardError] = useState<string | null>(null);
     
     const [isApplyModalOpen, setIsApplyModalOpen] = useState(false);
     const [applyingForJob, setApplyingForJob] = useState<EnrichedJob | null>(null);
@@ -282,7 +305,7 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
         setIsJobFieldOpen(false);
     };
 
-    const handleSaveJob = (e: React.MouseEvent, jobId: number) => {
+    const handleSaveJob = (e: React.MouseEvent, jobId: string) => {
         e.stopPropagation();
         setSavedJobs(prev => {
             const newSet = new Set(prev);
@@ -295,6 +318,39 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
         });
     };
 
+    useEffect(() => {
+        let active = true;
+        setBoardLoading(true);
+        setBoardError(null);
+        const locationStr = locations.map((l) => l.value).join(' ');
+        fetchPublicJobBoard({
+            search: searchTerm,
+            location: locationStr,
+            jobType,
+        })
+            .then(({ jobs: rows }) => {
+                if (!active) return;
+                setBoardJobs(rows.map(toEnrichedJob));
+            })
+            .catch((err) => {
+                if (!active) return;
+                setBoardError(err.message || 'שגיאה בטעינת המשרות');
+                setBoardJobs([]);
+            })
+            .finally(() => {
+                if (active) setBoardLoading(false);
+            });
+        return () => { active = false; };
+    }, [searchTerm, locations, jobType]);
+
+    const filteredJobs = useMemo(() => {
+        return boardJobs.filter(job => {
+            const matchesWorkModel = workModel === 'all' || job.workModel === workModel;
+            const matchesRole = !selectedRole || job.title.toLowerCase().includes(selectedRole.toLowerCase());
+            return matchesWorkModel && matchesRole;
+        });
+    }, [boardJobs, workModel, selectedRole]);
+
     const handleCreateAlert = () => {
         const currentFilters = { 
             searchTerm, 
@@ -306,9 +362,9 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
     };
 
     const handleOpenApplyModal = () => {
-        if (selectedJob) {
-            setApplyingForJob(selectedJob);
-            setIsApplyModalOpen(true);
+        if (selectedJob?.jobId) {
+            const routeClient = parsePublicRouteClientFromLandingUrl(selectedJob.landingUrl);
+            navigate(`${buildPublicJobHashPath(selectedJob.jobId, selectedJob.postingCode, routeClient ?? undefined)}?src=job_board`);
         }
     };
     
@@ -330,30 +386,6 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
         navigate('/candidate-portal/profile', { state: { candidateData: data } });
     };
 
-    const filteredJobs = useMemo(() => {
-        return mockJobsData.filter(job => {
-            const matchesSearch = searchTerm.trim() === '' || 
-                job.title.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                job.client.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                job.tags.some(tag => tag.toLowerCase().includes(searchTerm.toLowerCase()));
-            
-            const matchesLocation = locations.length === 0 || 
-                locations.some(loc => {
-                    if (loc.type === 'city') return job.location.includes(loc.value);
-                    if (loc.type === 'radius') return true; 
-                    return true; 
-                });
-
-            const jobTypesArray = Array.isArray(job.jobType) ? job.jobType : [job.jobType];
-            const matchesJobType = jobType.trim() === '' || 
-                jobTypesArray.some(t => t.toLowerCase().includes(jobType.toLowerCase()));
-            const matchesWorkModel = workModel === 'all' || job.workModel === workModel;
-            const matchesRole = !selectedRole || job.title.toLowerCase().includes(selectedRole.toLowerCase());
-
-            return matchesSearch && matchesLocation && matchesJobType && matchesWorkModel && matchesRole;
-        });
-    }, [searchTerm, locations, jobType, workModel, selectedRole]);
-    
     return (
         <div className="flex flex-col h-full bg-bg-default sm:bg-transparent">
              <style>{`
@@ -484,7 +516,9 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
                         </div>
 
                         <div className="flex justify-between items-center px-1">
-                            <p className="text-sm font-semibold text-text-muted">מציג {filteredJobs.length} משרות</p>
+                            <p className="text-sm font-semibold text-text-muted">
+                                {boardLoading ? 'טוען משרות...' : `מציג ${filteredJobs.length} משרות`}
+                            </p>
                             <button onClick={handleCreateAlert} className="flex items-center gap-2 text-sm font-semibold text-primary-600 hover:underline">
                                 <BellIcon className="w-4 h-4"/>
                                 <span className="hidden sm:inline">צור התראת משרות</span>
@@ -492,15 +526,20 @@ const GeneralJobsView: React.FC<GeneralJobsViewProps> = ({ openJobAlertModal }) 
                             </button>
                         </div>
                         
+                        {boardError && <p className="text-sm text-red-600 px-1">{boardError}</p>}
+
                         <div className="space-y-4 pb-20 sm:pb-6">
+                            {!boardLoading && filteredJobs.length === 0 && (
+                                <p className="text-center text-text-muted py-8">אין משרות מפורסמות בלוח כרגע. ודאו שסימנתם &quot;פרסם בלוח המשרות הכללי&quot; בעמוד הפרסום.</p>
+                            )}
                             {filteredJobs.map(job => (
                             <JobListItem
-                                key={job.id}
+                                key={job.jobId}
                                 job={job}
                                 onClick={() => setSelectedJob(job)}
-                                isActive={selectedJob?.id === job.id}
-                                isSaved={savedJobs.has(job.id)}
-                                onSave={(e) => handleSaveJob(e, job.id)}
+                                isActive={selectedJob?.jobId === job.jobId}
+                                isSaved={savedJobs.has(job.jobId)}
+                                onSave={(e) => handleSaveJob(e, job.jobId)}
                             />
                             ))}
                         </div>

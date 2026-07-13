@@ -12,6 +12,7 @@ const { connectRedis } = require('./config/redis');
 const authRoutes = require('./routes/authRoutes');
 const clientRoutes = require('./routes/clientRoutes');
 const organizationRoutes = require('./routes/organizationRoutes');
+const companiesRoutes = require('./routes/companiesRoutes');
 const jobRoutes = require('./routes/jobRoutes');
 const tagRoutes = require('./routes/tagRoutes');
 const chatRoutes = require('./routes/chatRoutes');
@@ -29,12 +30,14 @@ const userRoutes = require('./routes/userRoutes');
 const eventTypeRoutes = require('./routes/eventTypeRoutes');
 const systemEventRoutes = require('./routes/systemEventRoutes');
 const auditLogRoutes = require('./routes/auditLogRoutes');
+const appLogRoutes = require('./routes/appLogRoutes');
 const messagingRoutes = require('./routes/messagingRoutes');
 const referenceInfoRoutes = require('./routes/referenceInfoRoutes');
 const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateAdminRoutes } = require('./routes/messageTemplateRoutes');
 const matchingEngineRoutes = require('./routes/matchingEngineRoutes');
 const recruitmentSourceRoutes = require('./routes/recruitmentSourceRoutes');
 const savedSearchRoutes = require('./routes/savedSearchRoutes');
+const { publicRouter, publishingRouter, jobPublicationRouter } = require('./routes/jobPublicationRoutes');
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -50,11 +53,20 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok', service: 'hiro-backend' });
 });
 
+const jobPublicationController = require('./controllers/jobPublicationController');
+// Optional clean share URLs when proxied to the API (same handlers as /api/public/jobs/share/...).
+app.get('/jobs/:clientHint/public/board', jobPublicationController.getBoardSharePreview);
+app.get('/jobs/:clientHint/public/:slug', jobPublicationController.getSharePreview);
+
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/clients', clientRoutes);
 app.use('/api/organizations', organizationRoutes);
+app.use('/api/companies', companiesRoutes);
 app.use('/api/jobs', jobRoutes);
+app.use('/api/jobs', jobPublicationRouter);
+app.use('/api/public/jobs', publicRouter);
+app.use('/api/publishing', publishingRouter);
 app.use('/api/tags', tagRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/job-fields', jobFieldRoutes);
@@ -70,6 +82,7 @@ app.use('/api/cities', cityRoutes);
 app.use('/api/event-types', eventTypeRoutes);
 app.use('/api/system-events', systemEventRoutes);
 app.use('/api/audit-logs', auditLogRoutes);
+app.use('/api/admin/logs', appLogRoutes);
 app.use('/api/messaging', messagingRoutes);
 app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/recruitment-sources', recruitmentSourceRoutes);
@@ -87,6 +100,7 @@ const start = async () => {
     try {
       const promptService = require('./services/promptService');
       await promptService.ensureById('tag_correction_agent');
+      await promptService.ensureById('job_taxonomy_mapping');
     } catch (promptErr) {
       console.warn('[server] tag_correction_agent prompt seed failed', promptErr?.message || promptErr);
     }

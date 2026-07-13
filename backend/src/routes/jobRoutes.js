@@ -1,7 +1,7 @@
 const express = require('express');
 const jobController = require('../controllers/jobController');
 const jobEventController = require('../controllers/jobEventController');
-const { authMiddleware, attachDbUser } = require('../middleware/permissionMiddleware');
+const { authMiddleware, attachDbUser, optionalAttachDbUser } = require('../middleware/permissionMiddleware');
 const { optionalAuth } = require('../middleware/authMiddleware');
 
 const router = express.Router();
@@ -19,7 +19,7 @@ router.post('/:id/events', authMiddleware, attachDbUser, jobEventController.crea
 router.put('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventController.update);
 router.delete('/:id/events/:eventId', authMiddleware, attachDbUser, jobEventController.remove);
 router.get('/:id', jobController.get);
-router.post('/', jobController.create);
+router.post('/', optionalAuth, optionalAttachDbUser, jobController.create);
 router.post('/ai/analyze', jobController.analyzeDescription);
 router.put('/:id', jobController.update);
 router.delete('/:id', jobController.remove);

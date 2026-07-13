@@ -7,8 +7,7 @@ const FallbackUI: React.FC = () => {
         // Navigate to the dashboard.
         // Since this component is outside the router context,
         // a hard navigation is the simplest and most reliable way.
-        window.location.hash = '/dashboard';
-        window.location.reload();
+        window.location.replace('/dashboard');
     };
 
     return (

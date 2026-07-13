@@ -1,7 +1,7 @@
 
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { HashRouter } from 'react-router-dom';
+import { BrowserRouter } from 'react-router-dom';
 import App from './App';
 import { ThemeProvider } from './context/ThemeContext';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -22,9 +22,9 @@ root.render(
         <DevModeProvider>
           <ErrorBoundary>
             <SavedSearchesProvider>
-              <HashRouter>
+              <BrowserRouter>
                 <App />
-              </HashRouter>
+              </BrowserRouter>
             </SavedSearchesProvider>
           </ErrorBoundary>
         </DevModeProvider>

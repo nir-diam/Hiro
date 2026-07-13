@@ -8,10 +8,7 @@ import {
     PaperAirplaneIcon, ChevronLeftIcon, ChevronRightIcon
 } from './Icons';
 import type { Candidate } from './CandidatesListView';
-interface CandidateWithExtras extends Candidate {
-  email?: string;
-  salaryMin?: number;
-  salaryMax?: number;
+interface CandidateWithExtras extends Omit<Candidate, 'age' | 'skills' | 'tagDetails'> {
   age?: string | number;
   fullName?: string;
   professionalSummary?: string;
@@ -22,11 +19,17 @@ interface CandidateWithExtras extends Candidate {
   searchText?: string;
   cvText?: string;
   resumeUrl?: string;
+  tagDetails?: unknown[];
+  skills?: { soft?: unknown[]; technical?: unknown[] };
 }
 import ResumeViewer from './ResumeViewer';
 import { MessageModalConfig } from '../hooks/useUIState';
-import { TagInput } from './TagInput';
+import TagRowGroup from './TagRowGroup';
+import { buildCandidateGroupedSmartTags } from '../utils/candidateGroupedSmartTags';
 import { useNavigate } from 'react-router-dom';
+import EventsView from './EventsView';
+import DocumentsView from './DocumentsView';
+import InterestedInJobs from './InterestedInJobs';
 
 type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
 interface MockEvent {
@@ -80,6 +83,36 @@ const crc32base64 = async (file: File) => {
 };
 
 const safeArray = (x: any) => Array.isArray(x) ? x : [];
+
+const normalizeFetchedCandidate = (data: any) => {
+  if (!data || typeof data !== 'object') return null;
+  return {
+    ...data,
+    tags: safeArray(data.tags),
+    tagDetails: safeArray(data.tagDetails),
+    languages: safeArray(data.languages),
+    skills:
+      data.skills && typeof data.skills === 'object'
+        ? {
+            soft: safeArray(data.skills.soft),
+            technical: safeArray(data.skills.technical),
+          }
+        : { soft: [], technical: [] },
+    workExperience: safeArray(data.workExperience ?? data.experience),
+    education: safeArray(data.education),
+  };
+};
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const resolveCandidateApiId = (candidate: Candidate | null): string | null => {
+  if (!candidate) return null;
+  const backendId = String(candidate.backendId || '').trim();
+  if (backendId) return backendId;
+  const id = String(candidate.id ?? '').trim();
+  if (UUID_RE.test(id)) return id;
+  return null;
+};
 
 const formatDateRange = (start?: string, end?: string) => {
   const s = String(start || '').trim();
@@ -144,12 +177,6 @@ const getFileIcon = (fileName: string) => {
 
 // --- TAB CONTENT COMPONENTS ---
 const DetailsContent: React.FC<{ candidate: Candidate }> = ({ candidate }) => {
-    const [tags, setTags] = useState<string[]>(candidate.tags);
-
-    useEffect(() => {
-        setTags(candidate.tags);
-    }, [candidate]);
-
     return (
         <div className="space-y-8">
             {/* Part 1: Summary & Personal Details */}
@@ -210,9 +237,8 @@ const DetailsContent: React.FC<{ candidate: Candidate }> = ({ candidate }) => {
                     </div>
                 </div>
                 <div className="mt-6 pt-6 border-t border-border-default space-y-4">
-                    <div>
-                        <p className="font-semibold text-text-muted text-sm mb-2">תגיות מועמד</p>
-                        <TagInput tags={tags} setTags={setTags} placeholder="הוסף תגית..." />
+                    <div className="w-full relative z-[1000]">
+                        <TagRowGroup groupedSmartTags={buildCandidateGroupedSmartTags(candidate)} />
                     </div>
                 </div>
             </div>
@@ -289,12 +315,23 @@ interface CandidateSummaryDrawerProps {
   onClose: () => void;
   onViewFullProfile?: (candidateId: number) => void;
   onOpenMessageModal?: (config: MessageModalConfig) => void;
+  onOpenNewTask?: () => void;
   viewMode?: 'recruiter' | 'manager';
   isFavorite: boolean;
   onToggleFavorite: (id: number) => void;
 }
 
-const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candidate, isOpen, onClose, onViewFullProfile, onOpenMessageModal, viewMode = 'recruiter', isFavorite, onToggleFavorite }) => {
+const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
+  candidate,
+  isOpen,
+  onClose,
+  onViewFullProfile,
+  onOpenMessageModal,
+  onOpenNewTask = () => {},
+  viewMode = 'recruiter',
+  isFavorite,
+  onToggleFavorite,
+}) => {
   const [activeTab, setActiveTab] = useState<'details' | 'events' | 'jobs' | 'documents'>('details');
   const titleId = useId();
   const [fullCandidate, setFullCandidate] = useState<any | null>(null);
@@ -313,7 +350,8 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
   useEffect(() => {
     let isMounted = true;
     const load = async () => {
-      if (!isOpen || !candidate?.backendId) {
+      const apiId = resolveCandidateApiId(candidate);
+      if (!isOpen || !apiId) {
         if (isMounted) {
           setFullCandidate(null);
           setLoadingCandidate(false);
@@ -323,15 +361,16 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
       }
       setLoadingCandidate(true);
       setCandidateError(null);
+      setFullCandidate(null);
       try {
         const token = localStorage.getItem('token');
-        const res = await fetch(`${apiBase}/api/candidates/${candidate.backendId}`, {
+        const res = await fetch(`${apiBase}/api/candidates/${apiId}`, {
           headers: token ? { Authorization: `Bearer ${token}` } : undefined,
           cache: 'no-store',
         });
         if (!res.ok) throw new Error(`Failed to load candidate (${res.status})`);
         const data = await res.json();
-        if (isMounted) setFullCandidate(data);
+        if (isMounted) setFullCandidate(normalizeFetchedCandidate(data));
       } catch (e: any) {
         if (isMounted) setCandidateError(e?.message || 'Failed to load candidate');
       } finally {
@@ -340,11 +379,29 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
     };
     load();
     return () => { isMounted = false; };
-  }, [isOpen, candidate?.backendId]);
+  }, [isOpen, candidate?.backendId, candidate?.id]);
 
   if (!isOpen || !candidate) return null;
 
-  const mergedCandidate = { ...candidate, ...fullCandidate } as CandidateWithExtras;
+  const candidateApiId = resolveCandidateApiId(candidate) || '';
+
+  const mergedCandidate = {
+    ...candidate,
+    ...fullCandidate,
+    tags: safeArray(fullCandidate?.tags ?? candidate.tags),
+    tagDetails: safeArray(fullCandidate?.tagDetails ?? (candidate as CandidateWithExtras).tagDetails),
+    skills: fullCandidate?.skills ?? (candidate as CandidateWithExtras).skills,
+    languages: safeArray(fullCandidate?.languages ?? candidate.languages),
+    workExperience:
+      safeArray(
+        fullCandidate?.workExperience ??
+          (candidate as CandidateWithExtras).workExperience ??
+          (candidate as CandidateWithExtras).experience,
+      ),
+  } as CandidateWithExtras;
+
+  const groupedSmartTags = buildCandidateGroupedSmartTags(mergedCandidate);
+
   const contactItems = [
     mergedCandidate.phone || '',
     mergedCandidate.email || '',
@@ -362,16 +419,13 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
     resumeUrl,
     candidateId: mergedCandidate.backendId || mergedCandidate.id,
   };
-  const displayTags = safeArray(mergedCandidate.tags);
   const displayCandidate: CandidateWithExtras = {
-    ...candidate,
-    ...fullCandidate,
+    ...mergedCandidate,
     name: resumeData.name || candidate.name,
     title: mergedCandidate.title || candidate.title || '',
     phone: mergedCandidate.phone || candidate.phone || '',
     address: mergedCandidate.address || candidate.address || '',
     professionalSummary: resumeData.summary || candidate.professionalSummary || '',
-    tags: displayTags,
   };
   const displayPhone = displayCandidate.phone || '';
   const displayEmail = displayCandidate.email || '';
@@ -386,7 +440,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
   };
 
   const handleUploadResume = async (file: File) => {
-    const id = candidate?.backendId || candidate?.id;
+    const id = resolveCandidateApiId(candidate);
     if (!id) {
       alert('לא ניתן להעלות קובץ ללא מזהה מועמד.');
       return;
@@ -426,7 +480,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
       });
       if (!attachRes.ok) throw new Error('Failed to attach media');
       const updated = await attachRes.json();
-      setFullCandidate(updated);
+      setFullCandidate(normalizeFetchedCandidate(updated));
     } catch (err: any) {
       console.error('Resume upload failed', err);
       alert(err?.message || 'העלאת קובץ נכשלה.');
@@ -503,7 +557,6 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
                       className="font-bold text-primary-600 hover:underline"
                     >
                       {displayAddress || 'לא צוין'}
-                      {displayAddress || 'לא צוין'}
                     </a>
                   </div>
                   <div>
@@ -535,10 +588,9 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
                   </div>
                 </div>
 
-                <div className="mt-6 pt-6 border-t border-border-default space-y-4">
-                  <div>
-                    <p className="font-semibold text-text-muted text-sm mb-2">תגיות מועמד</p>
-                    <TagInput tags={displayTags} setTags={() => { /* TODO: persist via backend */ }} placeholder="הוסף תגית..." />
+                <div className="mt-6 pt-6 border-t border-border-default">
+                  <div className="w-full relative z-[1000]">
+                    <TagRowGroup groupedSmartTags={groupedSmartTags} />
                   </div>
                 </div>
               </div>
@@ -549,7 +601,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
                   resumeData={candidateResumeData}
                   fullData={mergedCandidate}
                   resumeFileUrl={resumeUrl}
-                  className="h-[600px]"
+                  className="min-h-[720px] h-[min(85vh,900px)]"
                   onDownloadResume={handleDownloadResume}
                   onUploadResume={handleUploadResume}
                   candidateId={mergedCandidate.id || mergedCandidate.backendId}
@@ -560,9 +612,41 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({ candida
           </div>
         );
       }
-      case 'events': return <EventsContent />;
-      case 'jobs': return <JobsContent />;
-      case 'documents': return <DocumentsContent />;
+      case 'events':
+        return candidateApiId ? (
+          <EventsView
+            candidateId={candidateApiId}
+            candidateName={displayCandidate.name}
+          />
+        ) : (
+          <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
+            לא ניתן לטעון אירועים — חסר מזהה מועמד.
+          </div>
+        );
+      case 'jobs':
+        return candidateApiId ? (
+          <InterestedInJobs
+            onOpenNewTask={onOpenNewTask}
+            candidateId={candidateApiId}
+            candidatePhone={displayPhone || null}
+            candidateEmail={displayEmail || null}
+          />
+        ) : (
+          <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
+            לא ניתן לטעון תהליכים — חסר מזהה מועמד.
+          </div>
+        );
+      case 'documents':
+        return candidateApiId ? (
+          <DocumentsView
+            candidateId={candidateApiId}
+            candidateName={displayCandidate.name}
+          />
+        ) : (
+          <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
+            לא ניתן לטעון מסמכים — חסר מזהה מועמד.
+          </div>
+        );
       default: return null;
     }
   };

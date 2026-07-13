@@ -9,6 +9,7 @@ import {
     rowsToLocationGroups,
     type CitySearchRow,
 } from '../utils/citySearchApi';
+import { brandAccentStyle, brandOrPrimary } from '../utils/brandAccent';
 
 const API_BASE = (import.meta.env.VITE_API_BASE as string) || '';
 
@@ -44,6 +45,7 @@ type AreaCityGroupsPanelProps = {
     loading?: boolean;
     className?: string;
     showRegionSelect?: boolean;
+    accentColor?: string;
 };
 
 const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
@@ -61,6 +63,7 @@ const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
     loading = false,
     className = '',
     showRegionSelect = true,
+    accentColor,
 }) => {
     if (loading) {
         return <div className="p-4 text-center text-text-muted text-sm">טוען...</div>;
@@ -100,16 +103,18 @@ const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
                                 <div
                                     className={`w-5 h-5 rounded border flex items-center justify-center cursor-pointer transition-colors flex-shrink-0 ${
                                         fullySelected
-                                            ? 'bg-primary-600 border-primary-600'
+                                            ? brandOrPrimary(accentColor, 'bg-[var(--brand-accent)] border-[var(--brand-accent)]', 'bg-primary-600 border-primary-600')
                                             : partiallySelected
-                                              ? 'bg-primary-100 border-primary-600'
-                                              : 'border-border-default bg-white hover:border-primary-400'
+                                              ? brandOrPrimary(accentColor, 'bg-[var(--brand-accent-soft)] border-[var(--brand-accent)]', 'bg-primary-100 border-primary-600')
+                                              : brandOrPrimary(accentColor, 'border-border-default bg-white hover:border-[var(--brand-accent-border)]', 'border-border-default bg-white hover:border-primary-400')
                                     }`}
                                     onClick={() => toggleRegion(group.region, group.cities)}
                                     title="בחר/בטל את כל האזור"
                                 >
                                     {fullySelected && <CheckIcon className="w-3.5 h-3.5 text-white" />}
-                                    {partiallySelected && <MinusIcon className="w-3.5 h-3.5 text-primary-600" />}
+                                    {partiallySelected && (
+                                        <MinusIcon className={`w-3.5 h-3.5 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)]', 'text-primary-600')}`} />
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -125,8 +130,8 @@ const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
                                                 onClick={() => toggleCity(name)}
                                                 className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] shadow-sm border transition-colors ${
                                                     selected
-                                                        ? 'bg-primary-600 border-primary-600 text-white'
-                                                        : 'bg-white border-border-default text-text-default hover:border-primary-400 hover:bg-primary-50'
+                                                        ? brandOrPrimary(accentColor, 'bg-[var(--brand-accent)] border-[var(--brand-accent)] text-white', 'bg-primary-600 border-primary-600 text-white')
+                                                        : brandOrPrimary(accentColor, 'bg-white border-border-default text-text-default hover:border-[var(--brand-accent-border)] hover:bg-[var(--brand-accent-soft)]', 'bg-white border-border-default text-text-default hover:border-primary-400 hover:bg-primary-50')
                                                 }`}
                                                 title={selected ? 'הסר מהבחירה' : 'הוסף לבחירה'}
                                             >
@@ -140,7 +145,7 @@ const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
                                     <button
                                         type="button"
                                         onClick={() => onToggleRegionShowAll(group.region)}
-                                        className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                        className={`mt-1.5 text-xs font-bold hover:underline flex items-center gap-1 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)] hover:opacity-80', 'text-primary-600 hover:text-primary-800')}`}
                                     >
                                         + עוד {hiddenCount} יישובים
                                         <ChevronDownIcon className="w-3 h-3" />
@@ -150,7 +155,7 @@ const AreaCityGroupsPanel: React.FC<AreaCityGroupsPanelProps> = ({
                                     <button
                                         type="button"
                                         onClick={() => onToggleRegionShowAll(group.region)}
-                                        className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                        className={`mt-1.5 text-xs font-bold hover:underline flex items-center gap-1 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)] hover:opacity-80', 'text-primary-600 hover:text-primary-800')}`}
                                     >
                                         הצג פחות
                                         <ChevronDownIcon className="w-3 h-3 rotate-180" />
@@ -172,6 +177,8 @@ interface LocationSelectorProps {
     className?: string;
     /** If true, summary shows city names instead of radius text like "ירושלים +2 ק\"מ" */
     summarizeAsCityNames?: boolean;
+    /** Tenant brand color for public board styling */
+    accentColor?: string;
 }
 
 const LocationSelector: React.FC<LocationSelectorProps> = ({
@@ -180,6 +187,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
     placeholder = 'מיקום',
     className = '',
     summarizeAsCityNames = false,
+    accentColor,
 }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [isSummaryOpen, setIsSummaryOpen] = useState(false);
@@ -584,8 +592,12 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
     }
 
     return (
-        <div className={`relative ${className}`} ref={containerRef}>
-            <div className={`relative flex items-center bg-white border rounded-xl shadow-sm transition-all ${isOpen ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default hover:border-primary-300'}`}>
+        <div className={`relative ${className}`} ref={containerRef} style={brandAccentStyle(accentColor)}>
+            <div className={`relative flex items-center bg-white border rounded-xl shadow-sm transition-all ${
+                isOpen
+                    ? brandOrPrimary(accentColor, 'border-[var(--brand-accent)] ring-1 ring-[var(--brand-accent)]', 'border-primary-500 ring-1 ring-primary-500')
+                    : brandOrPrimary(accentColor, 'border-border-default hover:border-[var(--brand-accent-border)]', 'border-border-default hover:border-primary-300')
+            }`}>
                 
                 {/* Main Trigger */}
                 <button 
@@ -594,7 +606,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                     className="flex-grow flex items-center justify-between py-2.5 pl-2 pr-3 text-sm h-[42px] truncate min-w-0"
                 >
                     <div className="flex items-center gap-2 truncate">
-                        <MapPinIcon className={`w-4 h-4 flex-shrink-0 ${selectedLocations.length > 0 ? 'text-primary-500' : 'text-text-subtle'}`} />
+                        <MapPinIcon className={`w-4 h-4 flex-shrink-0 ${selectedLocations.length > 0 ? brandOrPrimary(accentColor, 'text-[var(--brand-accent)]', 'text-primary-500') : 'text-text-subtle'}`} />
                         <span className={`truncate ${selectedLocations.length > 0 ? 'text-text-default font-medium' : 'text-text-muted'}`}>
                             {displayValue}
                         </span>
@@ -607,7 +619,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                          <button
                             type="button"
                             onClick={(e) => { e.stopPropagation(); setIsSummaryOpen(!isSummaryOpen); setIsOpen(false); }}
-                            className={`p-1.5 rounded-full hover:bg-primary-50 transition-colors ${isSummaryOpen ? 'text-primary-600 bg-primary-50' : 'text-text-subtle'}`}
+                            className={`p-1.5 rounded-full transition-colors ${isSummaryOpen ? brandOrPrimary(accentColor, 'text-[var(--brand-accent)] bg-[var(--brand-accent-soft)]', 'text-primary-600 bg-primary-50') : brandOrPrimary(accentColor, 'text-text-subtle hover:bg-[var(--brand-accent-soft)]', 'text-text-subtle hover:bg-primary-50')}`}
                             title="צפה בבחירה"
                         >
                             <EyeIcon className="w-4 h-4" />
@@ -632,7 +644,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                         <button
                             type="button"
                             onClick={(e) => { e.stopPropagation(); setIsDropdownExpanded((prev) => !prev); }}
-                            className="absolute left-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg hover:bg-bg-hover text-text-subtle hover:text-primary-600 transition-colors"
+                            className={`absolute left-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg hover:bg-bg-hover text-text-subtle transition-colors ${brandOrPrimary(accentColor, 'hover:text-[var(--brand-accent)]', 'hover:text-primary-600')}`}
                             title={isDropdownExpanded ? 'כווץ תצוגה' : 'הרחב תצוגה'}
                         >
                             {isDropdownExpanded ? (
@@ -647,13 +659,13 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                         </button>
                         <button 
                             onClick={() => setActiveTab('regions')} 
-                            className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'regions' ? 'text-primary-600 border-b-2 border-primary-600 bg-white' : 'text-text-muted hover:text-text-default'}`}
+                            className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'regions' ? brandOrPrimary(accentColor, 'text-[var(--brand-accent)] border-b-2 border-[var(--brand-accent)] bg-white', 'text-primary-600 border-b-2 border-primary-600 bg-white') : 'text-text-muted hover:text-text-default'}`}
                         >
                             אזורים וערים
                         </button>
                         <button 
                             onClick={() => setActiveTab('radius')} 
-                            className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'radius' ? 'text-primary-600 border-b-2 border-primary-600 bg-white' : 'text-text-muted hover:text-text-default'}`}
+                            className={`flex-1 py-3 text-sm font-semibold transition-colors ${activeTab === 'radius' ? brandOrPrimary(accentColor, 'text-[var(--brand-accent)] border-b-2 border-[var(--brand-accent)] bg-white', 'text-primary-600 border-b-2 border-primary-600 bg-white') : 'text-text-muted hover:text-text-default'}`}
                         >
                             רדיוס מעיר
                         </button>
@@ -670,7 +682,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                             value={searchTerm}
                                             onChange={(e) => setSearchTerm(e.target.value)}
                                             placeholder="חפש עיר או אזור..." 
-                                            className="w-full bg-bg-subtle/50 border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
+                                            className={`w-full bg-bg-subtle/50 border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm outline-none ${brandOrPrimary(accentColor, 'focus:ring-1 focus:ring-[var(--brand-accent)]', 'focus:ring-1 focus:ring-primary-500')}`}
                                         />
                                     </div>
                                 </div>
@@ -685,6 +697,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                     isRegionFullySelected={isRegionFullySelected}
                                     isRegionPartiallySelected={isRegionPartiallySelected}
                                     toggleRegion={toggleRegion}
+                                    accentColor={accentColor}
                                     loading={allCitiesLoading}
                                     emptyMessage={
                                         allCityGroups.length === 0 && !allCitiesLoading
@@ -708,7 +721,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                 value={radiusCity}
                                                 onChange={(e) => setRadiusCity(e.target.value)}
                                                 placeholder="חפש עיר או אזור..."
-                                                className="w-full bg-bg-subtle/50 border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-1 focus:ring-primary-500 outline-none"
+                                                className={`w-full bg-bg-subtle/50 border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm outline-none ${brandOrPrimary(accentColor, 'focus:ring-1 focus:ring-[var(--brand-accent)]', 'focus:ring-1 focus:ring-primary-500')}`}
                                             />
                                         </div>
                                     </div>
@@ -758,8 +771,8 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                                             onClick={() => setRadiusCity(name)}
                                                                             className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] shadow-sm border transition-colors ${
                                                                                 isSelected
-                                                                                    ? 'bg-primary-600 border-primary-600 text-white'
-                                                                                    : 'bg-white border-border-default text-text-default hover:border-primary-400 hover:bg-primary-50'
+                                                                                    ? brandOrPrimary(accentColor, 'bg-[var(--brand-accent)] border-[var(--brand-accent)] text-white', 'bg-primary-600 border-primary-600 text-white')
+                                                                                    : brandOrPrimary(accentColor, 'bg-white border-border-default text-text-default hover:border-[var(--brand-accent-border)] hover:bg-[var(--brand-accent-soft)]', 'bg-white border-border-default text-text-default hover:border-primary-400 hover:bg-primary-50')
                                                                             }`}
                                                                             title="בחר כעיר מרכזית"
                                                                         >
@@ -773,7 +786,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => toggleRadiusRegionShowAll(group.region)}
-                                                                    className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                                                    className={`mt-1.5 text-xs font-bold hover:underline flex items-center gap-1 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)] hover:opacity-80', 'text-primary-600 hover:text-primary-800')}`}
                                                                 >
                                                                     + עוד {hiddenCount} יישובים
                                                                     <ChevronDownIcon className="w-3 h-3" />
@@ -783,7 +796,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                                 <button
                                                                     type="button"
                                                                     onClick={() => toggleRadiusRegionShowAll(group.region)}
-                                                                    className="mt-1.5 text-xs font-bold text-primary-600 hover:text-primary-800 hover:underline flex items-center gap-1"
+                                                                    className={`mt-1.5 text-xs font-bold hover:underline flex items-center gap-1 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)] hover:opacity-80', 'text-primary-600 hover:text-primary-800')}`}
                                                                 >
                                                                     הצג פחות
                                                                     <ChevronDownIcon className="w-3 h-3 rotate-180" />
@@ -809,7 +822,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                             >
                                                 -
                                             </button>
-                                            <span className="text-sm font-bold text-primary-600 bg-primary-50 px-2 py-0.5 rounded">
+                                            <span className={`text-sm font-bold px-2 py-0.5 rounded ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)] bg-[var(--brand-accent-soft)]', 'text-primary-600 bg-primary-50')}`}>
                                                 {radiusDist} ק"מ
                                             </span>
                                             <button
@@ -829,7 +842,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                         step="1"
                                         value={radiusDist}
                                         onChange={(e) => setRadiusDist(Number(e.target.value))}
-                                        className="w-full accent-primary-600 h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer"
+                                        className={`w-full h-2 bg-bg-subtle rounded-lg appearance-none cursor-pointer ${accentColor ? 'accent-[var(--brand-accent)]' : 'accent-primary-600'}`}
                                     />
                                     <div className="flex justify-between text-xs text-text-muted mt-1">
                                         <span>5 ק"מ</span>
@@ -861,7 +874,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                         placeholder="סנן רשימה..."
                                                         value={radiusCitiesFilter}
                                                         onChange={(e) => setRadiusCitiesFilter(e.target.value)}
-                                                        className="w-full bg-bg-subtle/30 border border-border-default rounded-md py-1.5 pl-2 pr-8 text-xs focus:ring-1 focus:ring-primary-500 outline-none"
+                                                        className={`w-full bg-bg-subtle/30 border border-border-default rounded-md py-1.5 pl-2 pr-8 text-xs outline-none ${brandOrPrimary(accentColor, 'focus:ring-1 focus:ring-[var(--brand-accent)]', 'focus:ring-1 focus:ring-primary-500')}`}
                                                     />
                                                 </div>
                                             )}
@@ -876,6 +889,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                 isRegionFullySelected={isRadiusAreaRegionFullySelected}
                                                 isRegionPartiallySelected={isRadiusAreaRegionPartiallySelected}
                                                 toggleRegion={toggleRadiusAreaRegionSelection}
+                                                accentColor={accentColor}
                                                 loading={radiusAreaLoading}
                                                 emptyMessage={
                                                     radiusAreaLoading
@@ -891,7 +905,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                 <button
                                     onClick={applyRadius}
                                     disabled={!radiusCity}
-                                    className="w-full bg-primary-600 text-white font-bold py-2.5 rounded-xl hover:bg-primary-700 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                                    className={`w-full text-white font-bold py-2.5 rounded-xl transition disabled:opacity-50 disabled:cursor-not-allowed shadow-sm ${brandOrPrimary(accentColor, 'bg-[var(--brand-accent)] hover:opacity-90', 'bg-primary-600 hover:bg-primary-700')}`}
                                 >
                                     החל חיפוש לפי מרחק
                                 </button>
@@ -903,7 +917,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                         <button onClick={() => onChange([])} className="text-xs font-bold text-text-muted hover:text-red-500 transition-colors">
                             נקה בחירה
                         </button>
-                        <button onClick={confirmSelection} className="bg-primary-600 text-white text-xs font-bold py-2 px-5 rounded-lg hover:bg-primary-700 transition shadow-sm">
+                        <button onClick={confirmSelection} className={`text-white text-xs font-bold py-2 px-5 rounded-lg transition shadow-sm ${brandOrPrimary(accentColor, 'bg-[var(--brand-accent)] hover:opacity-90', 'bg-primary-600 hover:bg-primary-700')}`}>
                             אישור ({selectedLocations.length})
                         </button>
                     </div>
@@ -931,7 +945,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                         {group.cities.map((city) => (
                                             <span
                                                 key={city}
-                                                className="inline-flex items-center gap-1 text-xs bg-primary-50 text-primary-700 px-2 py-1 rounded-md border border-primary-100"
+                                                className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border ${brandOrPrimary(accentColor, 'bg-[var(--brand-accent-soft)] text-[var(--brand-accent)] border-[var(--brand-accent-border)]', 'bg-primary-50 text-primary-700 border-primary-100')}`}
                                             >
                                                 {city}
                                                 <button
@@ -943,7 +957,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                                         onChange(newLocs);
                                                         if (newLocs.length === 0) setIsSummaryOpen(false);
                                                     }}
-                                                    className="hover:text-primary-900"
+                                                    className={brandOrPrimary(accentColor, 'hover:opacity-80', 'hover:text-primary-900')}
                                                 >
                                                     <XMarkIcon className="w-3 h-3" />
                                                 </button>
@@ -955,7 +969,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                         ) : (
                             <div className="flex flex-wrap gap-1.5">
                                 {selectedLocations.map((loc, i) => (
-                                    <span key={i} className="inline-flex items-center gap-1 text-xs bg-primary-50 text-primary-700 px-2 py-1 rounded-md border border-primary-100">
+                                    <span key={i} className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border ${brandOrPrimary(accentColor, 'bg-[var(--brand-accent-soft)] text-[var(--brand-accent)] border-[var(--brand-accent-border)]', 'bg-primary-50 text-primary-700 border-primary-100')}`}>
                                         {loc.value}
                                     </span>
                                 ))}

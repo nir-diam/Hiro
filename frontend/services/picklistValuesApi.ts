@@ -31,6 +31,9 @@ export const SECTOR_PICKLIST_KEY = 'sector';
 /** תעשיית אם (mainField) — parent category; children are subcategories with domain values (subField). */
 export const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
 
+/** דומיינים מקושרים לתגיות (AdminTagsView) — `PicklistCategory.id`. */
+export const TAG_DOMAIN_PICKLIST_CATEGORY_ID = 'b066daec-01f0-4c37-aae9-04d7e99a5805';
+
 export type PicklistSubcategoryRow = {
     id: string;
     name: string;

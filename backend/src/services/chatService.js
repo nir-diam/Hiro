@@ -331,6 +331,42 @@ const resolvePromptTemplate = async (promptId, params = {}) => {
   });
 };
 
+const SYSTEM_TEMPLATE_JOB_PUBLISHING = ({ message, contextData, overridePrompt }) => {
+  const job = contextData?.job || {};
+  return `
+You are Hiro, a marketing expert and recruiter helping optimize a public job landing page.
+Always converse in professional, engaging Hebrew.
+Use the current publishing content as ground truth.
+
+Current landing page content:
+${JSON.stringify(job, null, 2)}
+
+When the user asks to improve the title, description, or requirements, reply with a short Hebrew sentence and append a JSON block in this format:
+\`\`\`json
+{
+  "proposals": [
+    {
+      "field": "publicTitle" | "publicDescription" | "publicRequirements",
+      "currentValue": STRING | null,
+      "proposedValue": STRING,
+      "reason": "short Hebrew reason"
+    }
+  ]
+}
+\`\`\`
+
+Rules:
+- Allowed fields only: publicTitle, publicDescription, publicRequirements.
+- proposedValue must be ready to publish (Hebrew, professional tone).
+- If the user is only asking questions without actionable edits, reply in Hebrew without a JSON block.
+
+${overridePrompt ? String(overridePrompt) : ''}
+
+User message:
+${message || ''}
+`;
+};
+
 const SYSTEM_TEMPLATE_JOB_FIELDS = ({ message, contextData, overridePrompt }) => {
   const categories = Array.isArray(contextData?.categories) ? contextData.categories : [];
   const categoriesSummary = categories
@@ -651,7 +687,18 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       snippet: detectionPrompt?.slice?.(0, 400).replace(/\s+/g, ' ').trim(),
       context: contextData && { id: contextData.id, fullName: contextData.fullName },
     });
-    const detectionReply = await sendChat({ apiKey, systemPrompt: detectionPrompt, history, message });
+    const detectionReply = await sendChat({
+      apiKey,
+      systemPrompt: detectionPrompt,
+      history,
+      message,
+      promptId: 'candidate_ai_agent',
+      llmInputJson: {
+        chatType,
+        candidateId: contextData?.id || null,
+        message,
+      },
+    });
     console.debug('[chatService] field detection reply', { reply: detectionReply?.slice?.(0, 400) });
     await appendTurn(chatRow.id, message, detectionReply);
     const detectionData = tryParseJson(detectionReply);
@@ -767,6 +814,20 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
     console.debug('[chatService] raw company reply', { reply: reply?.slice?.(0, 400) });
     finalReply = filterCompanyProfileResponse(reply);
     await appendTurn(chatRow.id, message, finalReply);
+  } else if (chatType === 'job-publishing') {
+    const resolvedSystemPrompt = SYSTEM_TEMPLATE_JOB_PUBLISHING({
+      message,
+      contextData,
+      overridePrompt: systemPrompt,
+    });
+    const reply = await sendChat({
+      apiKey,
+      systemPrompt: resolvedSystemPrompt,
+      history,
+      message,
+    });
+    finalReply = reply;
+    await appendTurn(chatRow.id, message, finalReply);
   } else if (chatType === 'job-fields') {
     const resolvedSystemPrompt = await resolvePromptTemplate('Admin_Job_Categories_Smart_Agent', {
       message,
@@ -784,6 +845,12 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       systemPrompt: resolvedSystemPrompt,
       history,
       message,
+      promptId: 'Admin_Job_Categories_Smart_Agent',
+      llmInputJson: {
+        chatType,
+        message,
+        categoriesCount: Array.isArray(contextData?.categories) ? contextData.categories.length : 0,
+      },
     });
     console.debug('[chatService] raw job-fields reply', { reply: reply?.slice?.(0, 400) });
     finalReply = reply;

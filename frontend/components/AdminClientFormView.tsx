@@ -32,10 +32,17 @@ interface ClientData {
     mainContactEmail: string;
     mainContactPhone: string;
     smsSource: string;
+    domain: string;
     authorizedIps: string;
     primaryColor: string;
     logoUrl: string;
     matchingEnginePreset: 'balanced' | 'skills' | 'experience';
+    industry: string;
+    city: string;
+    region: string;
+    field: string;
+    organizationId: string;
+    metadata: Record<string, unknown>;
     
     // Quotas
     cvQuota: { used: number; total: number };
@@ -101,6 +108,118 @@ const formatDateInput = (v: string | Date | null | undefined): string => {
     return d.toISOString().slice(0, 10);
 };
 
+const parseClientMetadata = (raw: unknown): Record<string, unknown> => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    return { ...(raw as Record<string, unknown>) };
+};
+
+const getFormBusinessProfile = (formData: Pick<ClientData, 'industry' | 'metadata'>) => {
+    const meta = formData.metadata || {};
+    const mainField = String(formData.industry || meta.mainField || '').trim();
+    const mainField2 = Array.isArray(meta.mainField2)
+        ? meta.mainField2.map((v) => String(v || '').trim()).filter(Boolean)
+        : [];
+    const subField = Array.isArray(meta.subField)
+        ? meta.subField.map((v) => String(v || '').trim()).filter(Boolean)
+        : [];
+    const secondaryField = String(meta.secondaryField || '').trim();
+    const industryDisplay = [mainField, ...mainField2].filter(Boolean).join(' · ') || '—';
+    return { mainField, mainField2, subField, secondaryField, industryDisplay };
+};
+
+const formatMetadataValue = (value: unknown): string => {
+    if (value == null || value === '') return '—';
+    if (Array.isArray(value)) {
+        const items = value.map((v) => String(v ?? '').trim()).filter(Boolean);
+        return items.length ? items.join(', ') : '—';
+    }
+    if (typeof value === 'object') return JSON.stringify(value);
+    return String(value);
+};
+
+const formatSyncedAt = (value: unknown): string => {
+    if (!value) return '—';
+    const d = new Date(String(value));
+    if (Number.isNaN(d.getTime())) return String(value);
+    return d.toLocaleString('he-IL');
+};
+
+const METADATA_FIELD_LABELS: Record<string, string> = {
+    nameEn: 'שם באנגלית',
+    legalName: 'שם משפטי',
+    mainField: 'תעשייה',
+    mainField2: 'תעשיות נוספות',
+    subField: 'תחום עיסוק',
+    secondaryField: 'תחום עיסוק משני',
+    type: 'סוג / מגזר',
+    classification: 'סיווג',
+    description: 'תיאור',
+    snippet: 'תקציר',
+    website: 'אתר',
+    linkedinUrl: 'LinkedIn',
+    address: 'כתובת',
+    location: 'מיקום',
+    hqCountry: 'מדינה',
+    employeeCount: 'גודל (עובדים)',
+    foundedYear: 'שנת הקמה',
+    businessModel: 'מודל עסקי',
+    productType: 'סוג מוצר/שירות',
+    structure: 'מבנה ארגוני',
+    parentCompany: 'חברת אם',
+    subsidiaries: 'חברות בנות',
+    growthIndicator: 'מגמת צמיחה',
+    activityStatus: 'סטטוס פעילות',
+    dataConfidence: 'רמת ביטחון בנתונים',
+    lastVerified: 'אימות אחרון',
+    tags: 'תגיות',
+    techTags: 'תגיות טכנולוגיה',
+    aliases: 'שמות נוספים',
+    organizationPhone: 'טלפון (ארגון)',
+    organizationEmail: 'אימייל (ארגון)',
+    organizationId: 'מזהה ארגון',
+    organizationSyncedAt: 'סנכרון אחרון',
+    notes: 'הערות',
+    contactRole: 'תפקיד איש קשר',
+};
+
+const METADATA_DISPLAY_ORDER = [
+    'nameEn',
+    'legalName',
+    'mainField',
+    'mainField2',
+    'subField',
+    'secondaryField',
+    'type',
+    'classification',
+    'description',
+    'snippet',
+    'website',
+    'linkedinUrl',
+    'address',
+    'location',
+    'hqCountry',
+    'employeeCount',
+    'foundedYear',
+    'businessModel',
+    'productType',
+    'structure',
+    'parentCompany',
+    'subsidiaries',
+    'growthIndicator',
+    'activityStatus',
+    'dataConfidence',
+    'lastVerified',
+    'tags',
+    'techTags',
+    'aliases',
+    'organizationPhone',
+    'organizationEmail',
+    'organizationId',
+    'organizationSyncedAt',
+    'notes',
+    'contactRole',
+] as const;
+
 const clientApiToFormData = (raw: Record<string, unknown>): ClientData => {
     const usersRaw = raw.users;
     const users: ClientUser[] = Array.isArray(usersRaw)
@@ -112,6 +231,13 @@ const clientApiToFormData = (raw: Record<string, unknown>): ClientData => {
               lastLogin: String(u.lastLogin || '-'),
           }))
         : [];
+
+    const linksRaw = raw.organizationLinks;
+    const links = Array.isArray(linksRaw) ? (linksRaw as Array<Record<string, unknown>>) : [];
+    const primaryLink = links.find((l) => l.isPrimary) || links.find((l) => l.organizationId) || links[0];
+    const organizationId = String(
+        primaryLink?.organizationId || raw.organizationId || raw.organization_id || '',
+    );
 
     return {
         id: String(raw.id || ''),
@@ -126,10 +252,22 @@ const clientApiToFormData = (raw: Record<string, unknown>): ClientData => {
         mainContactEmail: String(raw.mainContactEmail || ''),
         mainContactPhone: String(raw.mainContactPhone || ''),
         smsSource: String(raw.smsSource || ''),
+        domain: String(raw.domain || ''),
         authorizedIps: String(raw.authorizedIps || ''),
         primaryColor: String(raw.primaryColor || '#8B5CF6'),
         logoUrl: String(raw.logoUrl || ''),
         matchingEnginePreset: 'balanced',
+        industry: String(raw.industry || ''),
+        city: String(raw.city || ''),
+        region: String(raw.region || ''),
+        field: String(raw.field || ''),
+        organizationId,
+        metadata: (() => {
+            const meta = parseClientMetadata(raw.metadata);
+            const industry = String(raw.industry || '').trim();
+            if (industry && !meta.mainField) meta.mainField = industry;
+            return meta;
+        })(),
         cvQuota: { used: Number(raw.cvQuotaUsed ?? 0), total: Number(raw.cvQuotaTotal ?? 0) },
         smsQuota: { used: Number(raw.smsUsed ?? 0), total: Number(raw.smsTotal ?? 0) },
         usersQuota: { used: Number(raw.usersUsed ?? 0), total: Number(raw.usersTotal ?? 0) },
@@ -157,6 +295,7 @@ const buildClientCreatePayload = (form: ClientData): Record<string, unknown> => 
     mainContactEmail: form.mainContactEmail || null,
     mainContactPhone: form.mainContactPhone || null,
     smsSource: form.smsSource || null,
+    domain: form.domain || null,
     authorizedIps: form.authorizedIps || null,
     primaryColor: form.primaryColor || null,
     logoUrl: form.logoUrl || null,
@@ -191,6 +330,7 @@ const buildClientUpdatePatch = (form: ClientData, initial: ClientData): Record<s
     if (form.mainContactEmail !== initial.mainContactEmail) p.mainContactEmail = form.mainContactEmail || null;
     if (form.mainContactPhone !== initial.mainContactPhone) p.mainContactPhone = form.mainContactPhone || null;
     if (form.smsSource !== initial.smsSource) p.smsSource = form.smsSource || null;
+    if (form.domain !== initial.domain) p.domain = form.domain || null;
     if (form.authorizedIps !== initial.authorizedIps) p.authorizedIps = form.authorizedIps || null;
     if (form.primaryColor !== initial.primaryColor) p.primaryColor = form.primaryColor || null;
     if (form.logoUrl !== initial.logoUrl) p.logoUrl = form.logoUrl || null;
@@ -254,6 +394,153 @@ const FormInput: React.FC<{
         />
     </div>
 );
+
+const ReadOnlyField: React.FC<{ label: string; value: unknown; isLink?: boolean }> = ({ label, value, isLink }) => {
+    const text = label === 'סנכרון אחרון' || label === METADATA_FIELD_LABELS.organizationSyncedAt
+        ? formatSyncedAt(value)
+        : formatMetadataValue(value);
+    const href = isLink && typeof value === 'string' && value.startsWith('http') ? value : null;
+
+    return (
+        <div>
+            <label className="block text-xs font-bold text-text-muted uppercase mb-1.5 tracking-wide">{label}</label>
+            {href ? (
+                <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="block w-full bg-bg-subtle border border-border-default rounded-lg p-2.5 text-sm text-primary-600 hover:underline truncate"
+                >
+                    {text}
+                </a>
+            ) : (
+                <div className="w-full bg-bg-subtle border border-border-default rounded-lg p-2.5 text-sm text-text-default whitespace-pre-wrap break-words min-h-[42px]">
+                    {text}
+                </div>
+            )}
+        </div>
+    );
+};
+
+const MetadataChipList: React.FC<{ items: string[] }> = ({ items }) => (
+    <div className="flex flex-wrap gap-1.5">
+        {items.map((item) => (
+            <span
+                key={item}
+                className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-primary-50 text-primary-700 border border-primary-100"
+            >
+                {item}
+            </span>
+        ))}
+    </div>
+);
+
+const ClientBusinessProfileFields: React.FC<{ formData: ClientData }> = ({ formData }) => {
+    const profile = getFormBusinessProfile(formData);
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <ReadOnlyField label="תעשייה" value={profile.industryDisplay} />
+            <div>
+                <label className="block text-xs font-bold text-text-muted uppercase mb-1.5 tracking-wide">תחום עיסוק</label>
+                {profile.subField.length > 0 ? (
+                    <MetadataChipList items={profile.subField} />
+                ) : (
+                    <p className="text-sm font-semibold text-text-default">—</p>
+                )}
+            </div>
+            <div className="md:col-span-2">
+                <ReadOnlyField label="תחום עיסוק משני" value={profile.secondaryField || '—'} />
+            </div>
+        </div>
+    );
+};
+
+const ClientOrganizationProfileSection: React.FC<{ formData: ClientData }> = ({ formData }) => {
+    const meta = formData.metadata || {};
+    const hasOrgLink = Boolean(formData.organizationId);
+    const metaKeys = Object.keys(meta);
+    const orderedKeys = [
+        ...METADATA_DISPLAY_ORDER.filter((k) => k in meta),
+        ...metaKeys.filter((k) => !METADATA_DISPLAY_ORDER.includes(k as typeof METADATA_DISPLAY_ORDER[number])).sort(),
+    ];
+    const hasProfile =
+        hasOrgLink ||
+        formData.industry ||
+        formData.city ||
+        formData.region ||
+        formData.field ||
+        Boolean(formData.logoUrl) ||
+        orderedKeys.some((k) => formatMetadataValue(meta[k]) !== '—');
+
+    const chipFields = new Set(['tags', 'techTags', 'aliases', 'mainField2', 'businessModel', 'productType', 'subsidiaries']);
+    const linkFields = new Set(['website', 'linkedinUrl']);
+    const businessFieldKeys = new Set(['mainField', 'mainField2', 'subField', 'secondaryField']);
+
+    if (!hasProfile) {
+        return (
+            <div className="bg-bg-card border border-border-default rounded-2xl p-6 shadow-sm">
+                <h3 className="text-lg font-bold text-text-default mb-2">פרופיל חברה (מסונכרן מהארגון)</h3>
+                <p className="text-sm text-text-muted">
+                    אין עדיין נתונים מסונכרנים. קשר את הלקוח ל־Organization בעת יצירה, או בצע העשרה ושמירה בקטלוג החברות.
+                </p>
+            </div>
+        );
+    }
+
+    return (
+        <div className="bg-bg-card border border-border-default rounded-2xl p-6 shadow-sm space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                <div>
+                    <h3 className="text-lg font-bold text-text-default">פרופיל חברה (מסונכרן מהארגון)</h3>
+                    <p className="text-sm text-text-muted mt-1">
+                        נתונים אלו מתעדכנים אוטומטית מ־Organization כשמבצעים העשרה או שמירה בקטלוג החברות.
+                    </p>
+                </div>
+                {formData.logoUrl ? (
+                    <img
+                        src={formData.logoUrl}
+                        alt=""
+                        className="w-14 h-14 rounded-xl object-contain border border-border-default bg-bg-subtle p-1 shrink-0"
+                    />
+                ) : null}
+            </div>
+
+            <ClientBusinessProfileFields formData={formData} />
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2 border-t border-border-subtle">
+                <ReadOnlyField label="מזהה ארגון מקושר" value={formData.organizationId || '—'} />
+                <ReadOnlyField label="עיר / מיקום (עמודה)" value={formData.city} />
+                <ReadOnlyField label="אזור (עמודה)" value={formData.region} />
+                <ReadOnlyField label="סוג / מגזר (עמודה)" value={formData.field} />
+            </div>
+
+            {orderedKeys.filter((k) => !businessFieldKeys.has(k)).length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-2 border-t border-border-subtle">
+                    {orderedKeys.filter((k) => !businessFieldKeys.has(k)).map((key) => {
+                        const label = METADATA_FIELD_LABELS[key] || key;
+                        const value = meta[key];
+                        if (chipFields.has(key) && Array.isArray(value) && value.length > 0) {
+                            return (
+                                <div key={key} className="md:col-span-2">
+                                    <label className="block text-xs font-bold text-text-muted uppercase mb-1.5 tracking-wide">{label}</label>
+                                    <MetadataChipList items={value.map((v) => String(v)).filter(Boolean)} />
+                                </div>
+                            );
+                        }
+                        return (
+                            <ReadOnlyField
+                                key={key}
+                                label={label}
+                                value={value}
+                                isLink={linkFields.has(key)}
+                            />
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
+};
 
 const ModuleCard: React.FC<{
     title: string;
@@ -412,7 +699,7 @@ const AdminClientFormView: React.FC = () => {
     const isEditing = !!clientId;
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
-    const [activeTab, setActiveTab] = useState<'details' | 'modules' | 'quotas' | 'branding' | 'users'>('details');
+    const [activeTab, setActiveTab] = useState<'details' | 'organization' | 'modules' | 'quotas' | 'branding' | 'users'>('details');
     const [isUserModalOpen, setIsUserModalOpen] = useState(false);
     const [editingUser, setEditingUser] = useState<ClientUser | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
@@ -433,10 +720,17 @@ const AdminClientFormView: React.FC = () => {
         mainContactEmail: '',
         mainContactPhone: '',
         smsSource: '',
+        domain: '',
         authorizedIps: '',
         primaryColor: '#8B5CF6',
         logoUrl: '',
         matchingEnginePreset: 'balanced',
+        industry: '',
+        city: '',
+        region: '',
+        field: '',
+        organizationId: '',
+        metadata: {},
         cvQuota: { used: 0, total: 500 },
         smsQuota: { used: 0, total: 100 },
         usersQuota: { used: 1, total: 3 },
@@ -666,6 +960,14 @@ const AdminClientFormView: React.FC = () => {
                         >
                             <BuildingOffice2Icon className="w-5 h-5"/> פרטים כלליים
                         </button>
+                        {isEditing && (
+                            <button 
+                                onClick={() => setActiveTab('organization')}
+                                className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${activeTab === 'organization' ? 'bg-primary-50 text-primary-700 shadow-sm' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}`}
+                            >
+                                <BuildingOffice2Icon className="w-5 h-5"/> פרופיל חברה
+                            </button>
+                        )}
                          <button 
                             onClick={() => setActiveTab('modules')}
                             className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-all ${activeTab === 'modules' ? 'bg-primary-50 text-primary-700 shadow-sm' : 'text-text-muted hover:bg-bg-subtle hover:text-text-default'}`}
@@ -696,6 +998,9 @@ const AdminClientFormView: React.FC = () => {
                 {/* Mobile Tabs */}
                 <div className="md:hidden w-full border-b border-border-default overflow-x-auto flex bg-bg-card shrink-0">
                     <TabButton id="details" label="כללי" icon={<BuildingOffice2Icon className="w-4 h-4"/>} isActive={activeTab === 'details'} onClick={() => setActiveTab('details')} />
+                    {isEditing && (
+                        <TabButton id="organization" label="פרופיל" icon={<BuildingOffice2Icon className="w-4 h-4"/>} isActive={activeTab === 'organization'} onClick={() => setActiveTab('organization')} />
+                    )}
                     <TabButton id="modules" label="מודולים" icon={<SparklesIcon className="w-4 h-4"/>} isActive={activeTab === 'modules'} onClick={() => setActiveTab('modules')} />
                     <TabButton id="quotas" label="מכסות" icon={<ChartBarIcon className="w-4 h-4"/>} isActive={activeTab === 'quotas'} onClick={() => setActiveTab('quotas')} />
                     <TabButton id="branding" label="מיתוג" icon={<PaintBrushIcon className="w-4 h-4"/>} isActive={activeTab === 'branding'} onClick={() => setActiveTab('branding')} />
@@ -709,6 +1014,21 @@ const AdminClientFormView: React.FC = () => {
                         {/* TAB: GENERAL DETAILS */}
                         {activeTab === 'details' && (
                             <div className="animate-fade-in space-y-6">
+                                {isEditing && (formData.organizationId || Object.keys(formData.metadata || {}).length > 0) && (
+                                    <div className="bg-primary-50 border border-primary-200 rounded-xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                                        <div>
+                                            <p className="text-sm font-bold text-primary-900">פרופיל חברה מסונכרן זמין</p>
+                                            <p className="text-xs text-primary-700 mt-0.5">נתוני Organization, metadata והלוגו מוצגים בלשונית «פרופיל חברה».</p>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={() => setActiveTab('organization')}
+                                            className="shrink-0 text-sm font-bold text-white bg-primary-600 hover:bg-primary-700 px-4 py-2 rounded-lg transition"
+                                        >
+                                            צפה בפרופיל חברה
+                                        </button>
+                                    </div>
+                                )}
                                 <div className="bg-bg-card border border-border-default rounded-2xl p-6 shadow-sm">
                                     <h3 className="text-lg font-bold text-text-default mb-4">פרטי החברה</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -745,6 +1065,13 @@ const AdminClientFormView: React.FC = () => {
                                     </div>
                                 </div>
 
+                                {isEditing && (
+                                    <div className="bg-bg-card border border-border-default rounded-2xl p-6 shadow-sm">
+                                        <h3 className="text-lg font-bold text-text-default mb-4">פרופיל עסקי</h3>
+                                        <ClientBusinessProfileFields formData={formData} />
+                                    </div>
+                                )}
+
                                 <div className="bg-bg-card border border-border-default rounded-2xl p-6 shadow-sm">
                                     <h3 className="text-lg font-bold text-text-default mb-4">איש קשר ראשי</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -758,9 +1085,16 @@ const AdminClientFormView: React.FC = () => {
                                     <h3 className="text-lg font-bold text-text-default mb-4">הגדרות טכניות</h3>
                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                         <FormInput label="מקור סמס (Sender ID)" value={formData.smsSource} onChange={v => setFormData({...formData, smsSource: v})} />
+                                        <FormInput label="דומיין" value={formData.domain} onChange={v => setFormData({...formData, domain: v})} placeholder="jobs.example.com" />
                                         <FormInput label="כתובות IP מורשות" value={formData.authorizedIps} onChange={v => setFormData({...formData, authorizedIps: v})} />
                                     </div>
                                 </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'organization' && isEditing && (
+                            <div className="animate-fade-in">
+                                <ClientOrganizationProfileSection formData={formData} />
                             </div>
                         )}
 

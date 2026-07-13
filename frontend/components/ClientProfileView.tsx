@@ -20,12 +20,13 @@ import ClientEventsTab from './ClientEventsTab';
 import ClientDocumentsTab from './ClientDocumentsTab';
 import ClientTasksTab from './ClientTasksTab'; 
 import ClientFinanceTab from './ClientFinanceTab'; // Changed import
+import ClientHistoryTab from './ClientHistoryTab';
 import AccordionSection from './AccordionSection';
 import DocumentViewerModal from './DocumentViewerModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 
-type Tab = 'details' | 'tasks' | 'contacts' | 'jobs' | 'events' | 'documents' | 'finance'; 
+type Tab = 'details' | 'tasks' | 'contacts' | 'jobs' | 'events' | 'documents' | 'finance' | 'history'; 
 
 const StatCard: React.FC<{ title: string; value: string; icon: React.ReactElement; colorClass: { bg: string; text: string; } }> = ({ title, value, icon, colorClass }) => (
     <div className="bg-bg-card p-4 rounded-xl border border-border-default flex items-center gap-4 shadow-sm hover:shadow-md transition-shadow">
@@ -132,6 +133,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
         { id: 'events', label: t('client_profile.tab_events'), icon: <CalendarDaysIcon className="w-5 h-5" /> },
         { id: 'documents', label: t('client_profile.tab_documents'), icon: <DocumentTextIcon className="w-5 h-5" /> },
         { id: 'finance', label: 'כספים', icon: <BanknotesIcon className="w-5 h-5" /> },
+        { id: 'history', label: 'היסטוריית לקוח', icon: <ClockIcon className="w-5 h-5" /> },
     ];
 
     if (isLoading) {
@@ -160,6 +162,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
             case 'events': return <ClientEventsTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'documents': return <ClientDocumentsTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'finance': return <ClientFinanceTab clientId={clientId!} clientName={client.displayName || client.name} />;
+            case 'history': return <ClientHistoryTab clientId={clientId!} clientName={client.displayName || client.name} />;
             default: return null;
         }
     };

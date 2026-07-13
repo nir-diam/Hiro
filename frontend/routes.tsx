@@ -67,6 +67,10 @@ import CommissionsView from './components/CommissionsView';
 
 // Settings Layout
 import SettingsLayout from './components/SettingsLayout';
+import PublishingSettingsView from './components/PublishingSettingsView';
+import CompanyImagesSettingsView from './components/CompanyImagesSettingsView';
+import JobLandingPage from './components/JobLandingPage';
+import PublicPublishingBoardView from './components/PublicPublishingBoardView';
 import AdminSettingsLayout from './components/AdminSettingsLayout';
 
 import AdminCompanyCorrectionsView from './components/AdminCompanyCorrectionsView';
@@ -82,6 +86,7 @@ import AdminMatchingEngineView from './components/AdminMatchingEngineView';
 import AdminPicklistsView from './components/AdminPicklistsView';
 import AdminTagCorrectionsView from './components/AdminTagCorrectionsView';
 import AdminEventsView from './components/AdminEventsView';
+import AdminLogsView from './components/AdminLogsView';
 import AdminHelpCenterView from './components/AdminHelpCenterView';
 import AdminBusinessLogicView from './components/AdminBusinessLogicView';
 import AdminReferenceInfoView from './components/AdminReferenceInfoView';
@@ -906,6 +911,10 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/jobs/existing/events', element: <JobEventsView /> },
         { path: '/jobs/:jobId/publish', element: <PublishJobView /> },
         { path: '/jobs/:jobId/screen', element: <JobScreeningView /> },
+        { path: '/jobs/:clientName/public/board', element: <PublicPublishingBoardView /> },
+        { path: '/jobs/public/board', element: <PublicPublishingBoardView /> },
+        { path: '/jobs/:clientName/public/:jobIdOrCode', element: <JobLandingPage /> },
+        { path: '/jobs/public/:jobIdOrCode', element: <JobLandingPage /> },
         { path: '/clients', element: <ClientsListView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/new', element: <NewClientView onCancel={() => {}} onSave={props.handleSaveClient} /> },
         { path: '/clients/:clientId', element: <ClientProfileView openMessageModal={props.openMessageModal} /> },
@@ -932,6 +941,8 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="company" replace /> },
                  { path: 'company', element: <CompanySettingsView /> },
+                 { path: 'publishing', element: <PublishingSettingsView /> },
+                 { path: 'company-images', element: <CompanyImagesSettingsView /> },
                  { path: 'statuses', element: <StatusSettingsView /> },
                  { path: 'pipelines', element: <PipelineSettingsView /> },
                  { path: 'documents', element: <DocumentTemplatesView /> },
@@ -983,6 +994,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                 { path: 'picklists', element: <AdminPicklistsView /> },
                 { path: 'help-center', element: <AdminHelpCenterView /> },
                 { path: 'events', element: <AdminEventsView /> },
+                { path: 'logs', element: <AdminLogsView /> },
                 { path: 'system-events', element: <AdminSystemEventsView /> },
                 { path: 'business-logic', element: <AdminBusinessLogicView /> },
                 { path: 'reference-info', element: <AdminReferenceInfoView /> },

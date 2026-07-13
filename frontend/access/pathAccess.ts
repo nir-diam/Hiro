@@ -1,11 +1,15 @@
 /** Maps URL prefix → page permission key. Align with backend `permissionService.js`. */
 export function permissionForPath(pathname: string): string {
+    if (/^\/jobs\/[^/]+\/public(\/|$)/.test(pathname)) {
+        return 'page:public_job_landing';
+    }
     const rules: { prefix: string; perm: string }[] = [
         { prefix: '/admin', perm: 'page:admin' },
         { prefix: '/settings', perm: 'page:settings' },
         { prefix: '/finance', perm: 'page:finance' },
         { prefix: '/reports', perm: 'page:reports' },
         { prefix: '/clients', perm: 'page:clients' },
+        { prefix: '/jobs/public', perm: 'page:public_job_landing' },
         { prefix: '/jobs', perm: 'page:jobs' },
         { prefix: '/candidates', perm: 'page:candidates' },
         { prefix: '/communications', perm: 'page:communications' },

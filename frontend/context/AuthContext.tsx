@@ -18,8 +18,8 @@ function redirectToLogin() {
         localStorage.removeItem('user');
         sessionStorage.clear();
     } catch { /* ignore */ }
-    const isPortal = window.location.hash.startsWith('#/candidate-portal');
-    window.location.replace(isPortal ? '/#/candidate-portal/login' : '/#/login');
+    const isPortal = window.location.pathname.startsWith('/candidate-portal');
+    window.location.replace(isPortal ? '/candidate-portal/login' : '/login');
 }
 
 export type AuthUser = {

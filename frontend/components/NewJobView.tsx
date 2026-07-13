@@ -16,6 +16,8 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import { WorkingHoursInput } from './WorkingHoursInput';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import { authHeaders } from '../utils/authHeaders';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
 import type { PicklistValueRow } from '../services/picklistValuesApi';
 import {
@@ -1623,11 +1625,46 @@ const JobQuestionCard: React.FC<{
 };
 
 /** When תחום/תפקיד come from AI or an existing job row, keep a SelectedJobField so the control is filled. */
-const jobFieldFromCategoryRole = (category: string, role: string): SelectedJobField | null => {
+const jobFieldFromCategoryRole = (category: string, role: string, fieldType = ''): SelectedJobField | null => {
     const c = String(category ?? '').trim();
     const r = String(role ?? '').trim();
+    const ft = String(fieldType ?? '').trim();
     if (!c || !r) return null;
-    return { category: c, fieldType: '', role: r };
+    return { category: c, fieldType: ft, role: r };
+};
+
+/** Prefer structured taxonomy path from analyze API (vector + closed-list LLM). */
+const jobFieldFromAnalyzeTaxonomy = (raw: Record<string, unknown>): SelectedJobField | null => {
+    const jf = raw?.jobField;
+    if (jf && typeof jf === 'object' && !Array.isArray(jf)) {
+        const o = jf as Record<string, unknown>;
+        const category = String(o.category ?? '').trim();
+        const role = String(o.role ?? '').trim();
+        const fieldType = String(o.fieldType ?? o.cluster ?? '').trim();
+        if (category && role) {
+            return {
+                category,
+                fieldType,
+                role,
+                categoryId: o.categoryId != null ? String(o.categoryId) : undefined,
+                clusterId: o.clusterId != null ? String(o.clusterId) : undefined,
+                roleId: o.roleId != null ? String(o.roleId) : undefined,
+            };
+        }
+    }
+    const field = raw?.field != null ? String(raw.field).trim() : '';
+    const role = raw?.role != null ? String(raw.role).trim() : '';
+    return jobFieldFromCategoryRole(field, role);
+};
+
+const formatJobFieldLabel = (jobField: SelectedJobField | null | undefined): string => {
+    if (!jobField?.category?.trim()) return '';
+    const parts = [jobField.category.trim()];
+    if (jobField.fieldType?.trim()) parts.push(jobField.fieldType.trim());
+    if (jobField.role?.trim() && jobField.role.trim() !== jobField.fieldType?.trim()) {
+        parts.push(jobField.role.trim());
+    }
+    return parts.join(' > ');
 };
 
 const isJobFieldComplete = (jobField: SelectedJobField | null | undefined): boolean =>
@@ -1732,6 +1769,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const navigate = useNavigate();
     const { jobId } = useParams<{ jobId: string }>();
     const { t } = useLanguage();
+    const { user } = useAuth();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const isTenantUser = Boolean(user?.clientId) && !isPlatformAdmin;
     const apiBase = import.meta.env.VITE_API_BASE || '';
 
     const [formData, setFormData] = useState(initialJobState);
@@ -2057,12 +2097,25 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         };
     }, [apiBase]);
 
+    useEffect(() => {
+        if (!isTenantUser || !user?.clientId || isEditing) return;
+        const match = activeClients.find((c) => c.id === user.clientId);
+        if (!match) return;
+        setFormData((prev) => (prev.clientName.trim() ? prev : { ...prev, clientName: match.label }));
+        setIsClientConfirmed(true);
+    }, [isTenantUser, user?.clientId, activeClients, isEditing]);
+
     const clientSelectOptions = useMemo(() => {
+        const pool = isTenantUser && user?.clientId
+            ? activeClients.filter((c) => c.id === user.clientId)
+            : activeClients;
         const current = formData.clientName.trim();
-        if (!current) return activeClients;
-        if (activeClients.some((c) => c.label === current)) return activeClients;
-        return [{ id: `legacy:${current}`, label: current }, ...activeClients];
-    }, [activeClients, formData.clientName]);
+        if (!current) return pool;
+        if (pool.some((c) => c.label === current)) return pool;
+        return [{ id: `legacy:${current}`, label: current }, ...pool];
+    }, [activeClients, formData.clientName, isTenantUser, user?.clientId]);
+
+    const isClientLocked = isClientConfirmed || (isTenantUser && Boolean(formData.clientName.trim()));
 
     /** UUID of Client row — whenever שם הלקוח matches a client from /api/clients (no need to click "אשר"). */
     const resolvedClientId = useMemo(() => {
@@ -2309,6 +2362,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 missingList.push(t('form.availability'));
             }
             if (extractedData.city) { filled.add('locations'); filledList.push('מיקום'); } else missingList.push('מיקום');
+            const parsedTaxonomyField = jobFieldFromAnalyzeTaxonomy(extractedData as Record<string, unknown>);
+            if (parsedTaxonomyField) {
+                filled.add('jobField');
+                filledList.push('תחום');
+            } else {
+                missingList.push('תחום');
+            }
             if (extractedData.internalNotes) { filled.add('internalNotes'); filledList.push('הערות פנימיות'); } else missingList.push('הערות פנימיות');
             if (pwhFromAi) {
                 filled.add('preferredWorkingHours');
@@ -2455,7 +2515,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     extractedData.role != null && String(extractedData.role).trim()
                         ? String(extractedData.role).trim()
                         : prev.aiRole;
-                const fromAiJobField = jobFieldFromCategoryRole(nextAiField, nextAiRole);
+                const fromAiJobField =
+                    jobFieldFromAnalyzeTaxonomy(extractedData as Record<string, unknown>) ??
+                    jobFieldFromCategoryRole(nextAiField, nextAiRole);
 
                 return {
                 ...prev,
@@ -2996,7 +3058,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         try {
             const res = await fetch(`${apiBase}/api/jobs`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify(buildJobPayload()),
             });
             if (!res.ok) {
@@ -3082,9 +3144,11 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                      <h1 className="text-2xl font-extrabold text-text-default">
                         {isEditing ? t('new_job.title_edit', {title: formData.jobTitle}) : t('new_job.title_new')}
                     </h1>
-                    <p className="text-sm text-text-muted mt-1">
-                        {t('new_job.subtitle')}
-                    </p>
+                    {isPlatformAdmin ? (
+                        <p className="text-sm text-text-muted mt-1">
+                            {t('new_job.subtitle')}
+                        </p>
+                    ) : null}
                 </div>
                 <div className="flex items-center gap-3">
                      <button
@@ -3209,13 +3273,15 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         <div className="lg:col-span-1">
                            <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.client_name')}</label>
-                            {isClientConfirmed ? (
+                            {isClientLocked ? (
                                 <div className="flex items-center gap-2">
                                     <div className="w-full bg-primary-50 border border-primary-200 text-primary-900 font-bold text-sm rounded-lg p-2.5 flex items-center justify-between">
                                         <span>{formData.clientName}</span>
                                         <CheckCircleIcon className="w-4 h-4 text-primary-600" />
                                     </div>
-                                    <button type="button" onClick={() => setIsClientConfirmed(false)} className="text-sm font-semibold text-text-muted hover:text-primary-600 underline flex-shrink-0">{t('new_job.replace')}</button>
+                                    {!isTenantUser ? (
+                                        <button type="button" onClick={() => setIsClientConfirmed(false)} className="text-sm font-semibold text-text-muted hover:text-primary-600 underline flex-shrink-0">{t('new_job.replace')}</button>
+                                    ) : null}
                                 </div>
                             ) : (
                                 <div className="flex items-center gap-2">
@@ -3259,7 +3325,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                 }`}
                             >
                                 <span className={`truncate ${formData.jobField ? 'text-text-default' : 'text-text-muted'}`}>
-                                    {formData.jobField ? `${formData.jobField.category} > ${formData.jobField.role}` : t('new_job.choose_field_placeholder') || 'בחר תחום...'}
+                                    {formData.jobField ? formatJobFieldLabel(formData.jobField) : t('new_job.choose_field_placeholder') || 'בחר תחום...'}
                                 </span>
                                 <BriefcaseIcon className="w-4 h-4 text-text-subtle" />
                             </button>

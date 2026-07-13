@@ -7,9 +7,19 @@ interface DrawerProps {
     title: string;
     children: React.ReactNode;
     footer: React.ReactNode;
+    maxWidthClass?: string;
+    headerActions?: React.ReactNode;
 }
 
-const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, title, children, footer }) => {
+const Drawer: React.FC<DrawerProps> = ({
+    isOpen,
+    onClose,
+    title,
+    children,
+    footer,
+    maxWidthClass = 'max-w-md',
+    headerActions,
+}) => {
     const titleId = useId();
 
     useEffect(() => {
@@ -44,15 +54,18 @@ const Drawer: React.FC<DrawerProps> = ({ isOpen, onClose, title, children, foote
             aria-labelledby={titleId}
         >
             <div
-                className="fixed top-0 left-0 h-full w-full max-w-md bg-bg-card shadow-2xl flex flex-col transform transition-transform"
+                className={`fixed top-0 left-0 h-full w-full ${maxWidthClass} bg-bg-card shadow-2xl flex flex-col transform transition-all duration-300`}
                 onClick={(e) => e.stopPropagation()}
                 style={{ animation: 'slideInFromLeft 0.3s forwards' }}
             >
-                <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0">
-                    <h2 id={titleId} className="text-xl font-bold text-text-default">{title}</h2>
-                    <button type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור">
-                        <XMarkIcon className="w-6 h-6" />
-                    </button>
+                <header className="flex items-center justify-between p-4 border-b border-border-default flex-shrink-0 gap-2">
+                    <h2 id={titleId} className="text-xl font-bold text-text-default min-w-0 truncate">{title}</h2>
+                    <div className="flex items-center gap-1 flex-shrink-0">
+                        {headerActions}
+                        <button type="button" onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover" aria-label="סגור">
+                            <XMarkIcon className="w-6 h-6" />
+                        </button>
+                    </div>
                 </header>
                 <main className="flex-1 overflow-y-auto p-6">
                     {children}

@@ -7,12 +7,14 @@ import {
     XMarkIcon, UserGroupIcon, PhoneIcon, EnvelopeIcon, ChartBarIcon, 
     CheckCircleIcon, ExclamationTriangleIcon, BriefcaseIcon, ArrowRightIcon,
     FunnelIcon, ClockIcon, MapPinIcon, ChatBubbleBottomCenterTextIcon, WhatsappIcon, UserIcon,
-    EllipsisVerticalIcon, DocumentArrowDownIcon, PlayIcon, CalendarDaysIcon, ClipboardDocumentCheckIcon
+    EllipsisVerticalIcon, DocumentArrowDownIcon, PlayIcon, CalendarDaysIcon, ClipboardDocumentCheckIcon, LinkIcon
 } from './Icons';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import ActivityLogModal from './ActivityLogModal';
+import { authHeaders } from '../utils/authHeaders';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import ContactDrawer from './ContactDrawer';
@@ -65,6 +67,57 @@ export interface Contact {
     stageId?: string;
     createdAt?: string;
 }
+
+export type LinkedOrganizationItem = {
+    linkId: string;
+    organizationId: string | null;
+    organizationTmpId: string | null;
+    isPrimary: boolean;
+    isPending: boolean;
+    name: string;
+    mainField: string;
+    subFields: string[];
+    secondaryField: string;
+    website: string;
+    location: string;
+    logo: string;
+    employeeCount: string;
+    statusLabel: string;
+};
+
+const normalizeLinkedOrganization = (raw: Record<string, unknown>): LinkedOrganizationItem => {
+    const org = (raw.organization && typeof raw.organization === 'object') ? raw.organization as Record<string, unknown> : null;
+    const tmp = (raw.organizationTmp && typeof raw.organizationTmp === 'object') ? raw.organizationTmp as Record<string, unknown> : null;
+    const isPending = Boolean(raw.organizationTmpId && !raw.organizationId);
+    const source = org || tmp || {};
+    const subRaw = source.subField;
+    const subFields = Array.isArray(subRaw)
+        ? subRaw.map((v) => String(v || '').trim()).filter(Boolean)
+        : subRaw
+          ? [String(subRaw).trim()].filter(Boolean)
+          : [];
+    return {
+        linkId: String(raw.id || ''),
+        organizationId: raw.organizationId ? String(raw.organizationId) : null,
+        organizationTmpId: raw.organizationTmpId ? String(raw.organizationTmpId) : null,
+        isPrimary: Boolean(raw.isPrimary),
+        isPending,
+        name: String(source.name || '—'),
+        mainField: String(source.mainField || ''),
+        subFields,
+        secondaryField: String(source.secondaryField || ''),
+        website: String(source.website || ''),
+        location: String(source.location || source.address || ''),
+        logo: String(source.logo || ''),
+        employeeCount: String(source.employeeCount || ''),
+        statusLabel: isPending ? 'ממתין לאישור' : String(source.activityStatus || source.dataConfidence || 'מאושר'),
+    };
+};
+
+const formatWebsiteHost = (url: string) =>
+    String(url || '')
+        .replace(/^https?:\/\/(www\.)?/i, '')
+        .replace(/\/$/, '') || '—';
 
 // --- PIPELINE DEFINITIONS ---
 interface PipelineStage {
@@ -467,7 +520,8 @@ const ContactGridCard: React.FC<{
     onAction: (action: 'email' | 'sms' | 'whatsapp') => void;
     onStartProcess: (contact: Contact, type: 'sales' | 'retention') => void;
     onViewProfile: (contact: Contact) => void;
-}> = ({ contact, isSelected, onSelect, onAction, onStartProcess, onViewProfile }) => {
+    onDelete: (contact: Contact) => void;
+}> = ({ contact, isSelected, onSelect, onAction, onStartProcess, onViewProfile, onDelete }) => {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
@@ -514,6 +568,12 @@ const ContactGridCard: React.FC<{
                                 className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2 border-t border-border-subtle"
                             >
                                 <PlusIcon className="w-4 h-4 text-purple-600"/> פתח תהליך שימור
+                            </button>
+                            <button 
+                                onClick={(e) => { e.stopPropagation(); setIsMenuOpen(false); onDelete(contact); }}
+                                className="w-full text-right px-4 py-2.5 text-sm hover:bg-red-50 text-red-600 flex items-center gap-2 border-t border-border-subtle"
+                            >
+                                <TrashIcon className="w-4 h-4"/> מחק איש קשר
                             </button>
                         </div>
                     )}
@@ -573,7 +633,9 @@ const ClientGridCard: React.FC<{
     activePipelineColor: string;
     onStatusChange: (clientId: number, newStatus: ClientStatus) => void;
     onStageChange: (clientId: number, newStage: string) => void;
-}> = ({ client, onClick, stageName, activePipelineColor, onStatusChange, onStageChange }) => {
+    onDelete?: (client: Client) => void;
+    isDeleting?: boolean;
+}> = ({ client, onClick, stageName, activePipelineColor, onStatusChange, onStageChange, onDelete, isDeleting }) => {
     let currentPipeline = pipelines[0];
     for (const pipeline of pipelines) {
         if (pipeline.stages.some(s => s.id === client.pipelineStage)) {
@@ -606,6 +668,17 @@ const ClientGridCard: React.FC<{
                 </div>
              </div>
              <div className="flex flex-col items-end gap-1">
+                 {onDelete ? (
+                     <button
+                         type="button"
+                         onClick={(e) => { e.stopPropagation(); onDelete(client); }}
+                         disabled={isDeleting}
+                         className="p-1.5 rounded-lg text-text-subtle hover:text-red-600 hover:bg-red-50 transition disabled:opacity-50"
+                         title="מחק לקוח"
+                     >
+                         <TrashIcon className="w-4 h-4" />
+                     </button>
+                 ) : null}
                  <div className="w-10 h-10 rounded-lg bg-bg-subtle border border-border-default flex items-center justify-center text-sm font-bold text-text-muted shrink-0 overflow-hidden">
                     {client.logo ? (
                         <img src={client.logo} alt={client.name} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
@@ -722,7 +795,11 @@ const QuickAddClientModal: React.FC<{
 
 const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig) => void }> = ({ openMessageModal }) => {
     const { t } = useLanguage();
+    const { user, ready: authReady } = useAuth();
     const navigate = useNavigate();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
+    const isTenantUser = Boolean(tenantClientId);
     
     // --- Tabs State ---
     const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks'>('companies');
@@ -730,11 +807,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     // --- Clients Data & State ---
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [clients, setClients] = useState<Client[]>(clientsData);
+    const [linkedOrganizations, setLinkedOrganizations] = useState<LinkedOrganizationItem[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!apiBase) return;
+        if (!apiBase || !authReady || isTenantUser) return;
         let active = true;
         setIsLoading(true);
         setError(null);
@@ -756,14 +835,53 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 if (active) setIsLoading(false);
             });
         return () => { active = false; };
-    }, [apiBase]);
+    }, [apiBase, authReady, isTenantUser]);
 
     useEffect(() => {
-        if (!apiBase || activeTab !== 'contacts') return;
+        if (!apiBase || !authReady || !tenantClientId) return;
+        let active = true;
+        setIsLoading(true);
+        setError(null);
+        fetch(`${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`, {
+            headers: authHeaders(true),
+        })
+            .then((r) => {
+                if (!r.ok) throw new Error('טעינת חברות מקושרות נכשלה');
+                return r.json();
+            })
+            .then((data) => {
+                if (!active) return;
+                const list = Array.isArray(data) ? data : [];
+                setLinkedOrganizations(list.map((row) => normalizeLinkedOrganization(row as Record<string, unknown>)));
+            })
+            .catch((e: any) => {
+                if (!active) return;
+                setError(e?.message || 'טעינת חברות מקושרות נכשלה');
+            })
+            .finally(() => {
+                if (active) setIsLoading(false);
+            });
+        return () => { active = false; };
+    }, [apiBase, authReady, tenantClientId]);
+
+    useEffect(() => {
+        if (!apiBase || activeTab !== 'contacts' || !authReady) return;
+
+        if (!isPlatformAdmin && !tenantClientId) {
+            setContacts([]);
+            setContactsError(null);
+            setContactsLoading(false);
+            return;
+        }
+
+        const contactsUrl = isPlatformAdmin
+            ? `${apiBase}/api/clients/all-contacts`
+            : `${apiBase}/api/clients/${encodeURIComponent(tenantClientId!)}/contacts`;
+
         let active = true;
         setContactsLoading(true);
         setContactsError(null);
-        fetch(`${apiBase}/api/clients/all-contacts`)
+        fetch(contactsUrl, { headers: authHeaders(true) })
             .then((r) => {
                 if (!r.ok) throw new Error('טעינת אנשי קשר נכשלה');
                 return r.json();
@@ -783,7 +901,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         return () => {
             active = false;
         };
-    }, [apiBase, activeTab, clients]);
+    }, [apiBase, activeTab, clients, authReady, isPlatformAdmin, tenantClientId]);
 
     const { viewMode, setViewMode } = useScreenTablePreferences('clients_list', {
         defaultLayoutMode: 'list',
@@ -808,6 +926,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [selectedContactForDrawer, setSelectedContactForDrawer] = useState<Contact | null>(null);
     const [isContactDrawerOpen, setIsContactDrawerOpen] = useState(false);
     const [activeActionMenuId, setActiveActionMenuId] = useState<string | null>(null);
+    const [contactToDelete, setContactToDelete] = useState<Contact | null>(null);
+    const [contactDeleteLoading, setContactDeleteLoading] = useState(false);
 
     // New Client Drawer State
     const [selectedClientForDrawer, setSelectedClientForDrawer] = useState<Client | null>(null);
@@ -865,13 +985,39 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     // --- Stats Calculation ---
     const stats = useMemo(() => {
+        if (isTenantUser) {
+            const approved = linkedOrganizations.filter((o) => !o.isPending).length;
+            const pending = linkedOrganizations.filter((o) => o.isPending).length;
+            return {
+                totalOpenJobs: 0,
+                activeClients: approved,
+                totalValue: pending,
+                winRate: linkedOrganizations.length,
+            };
+        }
         const totalOpenJobs = clients.reduce((acc, c) => acc + (c.status === 'פעיל' ? c.openJobs : 0), 0);
         const activeClients = clients.filter(c => c.status === 'פעיל').length;
         const totalValue = clients.reduce((acc, c) => acc + (c.pipelineValue || 0), 0);
         const winRate = 18; // Mock
 
         return { totalOpenJobs, activeClients, totalValue, winRate };
-    }, [clients]);
+    }, [clients, isTenantUser, linkedOrganizations]);
+
+    const filteredLinkedOrganizations = useMemo(() => {
+        const q = searchTerm.trim().toLowerCase();
+        if (!q) return linkedOrganizations;
+        return linkedOrganizations.filter((org) => {
+            const hay = [
+                org.name,
+                org.mainField,
+                org.secondaryField,
+                org.location,
+                org.website,
+                ...org.subFields,
+            ].join(' ').toLowerCase();
+            return hay.includes(q);
+        });
+    }, [linkedOrganizations, searchTerm]);
 
     // --- Filter Logic ---
     const activePipeline = pipelines.find(p => p.id === activePipelineId); // Can be undefined if 'all'
@@ -1080,7 +1226,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             const metadata = clientAfter ? buildClientMetadataPatch(clientAfter) : { pipelineStage: stageId };
             const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ metadata }),
             });
             if (!res.ok) throw new Error('Update failed');
@@ -1122,7 +1268,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             const metadata = clientAfter ? buildClientMetadataPatch(clientAfter) : { pipelineStage: newStage, notes };
             const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ metadata }),
             });
             if (!res.ok) throw new Error('Update failed');
@@ -1133,6 +1279,58 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     const handleNavigateToProfile = (id: string) => {
         navigate(`/clients/${id}`);
+    };
+
+    const handleDeleteClient = async (client: Client) => {
+        if (!window.confirm(`האם למחוק את הלקוח "${client.name}"? פעולה זו אינה ניתנת לביטול.`)) return;
+        if (!apiBase || client.id.startsWith('tmp-')) {
+            setClients((prev) => prev.filter((c) => c.id !== client.id));
+            return;
+        }
+        setDeleteBusyId(client.id);
+        setError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(client.id)}`, {
+                method: 'DELETE',
+                headers: authHeaders(true),
+            });
+            if (!res.ok && res.status !== 204) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'מחיקת לקוח נכשלה');
+            }
+            setClients((prev) => prev.filter((c) => c.id !== client.id));
+            setActiveActionMenuId(null);
+            if (selectedClientForDrawer?.id === client.id) {
+                setIsClientDrawerOpen(false);
+                setSelectedClientForDrawer(null);
+            }
+        } catch (e: any) {
+            setError(e?.message || 'מחיקת לקוח נכשלה');
+        } finally {
+            setDeleteBusyId(null);
+        }
+    };
+
+    const handleUnlinkOrganization = async (org: LinkedOrganizationItem) => {
+        if (!tenantClientId || !apiBase) return;
+        if (!window.confirm(`האם להסיר את הקישור ל"${org.name}"? החברה תישאר במאגר הגלובלי.`)) return;
+        setDeleteBusyId(org.linkId);
+        setError(null);
+        try {
+            const res = await fetch(
+                `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/organization-link/${encodeURIComponent(org.linkId)}`,
+                { method: 'DELETE', headers: authHeaders(true) },
+            );
+            if (!res.ok && res.status !== 204) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body?.message || 'הסרת קישור נכשלה');
+            }
+            setLinkedOrganizations((prev) => prev.filter((o) => o.linkId !== org.linkId));
+        } catch (e: any) {
+            setError(e?.message || 'הסרת קישור נכשלה');
+        } finally {
+            setDeleteBusyId(null);
+        }
     };
 
     const handleOpenClientDrawer = (client: Client) => {
@@ -1166,7 +1364,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         try {
             const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ status: newStatus }),
             });
             if (!res.ok) throw new Error('Update failed');
@@ -1194,7 +1392,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
             const res = await fetch(`${apiBase}/api/clients/${clientId}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ metadata }),
             });
             if (!res.ok) throw new Error('Update failed');
@@ -1352,6 +1550,49 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         alert(`תהליך ${type === 'sales' ? 'מכירה' : 'שימור'} נפתח עבור ${contact.name}!`);
     };
 
+    const resolveContactClientId = (contact: Contact): string | null => {
+        if (contact.clientId) return contact.clientId;
+        const match = clients.find((c) => c.name === contact.clientName);
+        return match?.id ?? null;
+    };
+
+    const handleDeleteContact = (contact: Contact) => {
+        setContactToDelete(contact);
+        setActiveActionMenuId(null);
+        setIsContactDrawerOpen(false);
+        setSelectedContactForDrawer(null);
+    };
+
+    const confirmDeleteContact = async () => {
+        if (!contactToDelete) return;
+        const contactId = contactToDelete.id;
+        const clientId = resolveContactClientId(contactToDelete);
+        setContactDeleteLoading(true);
+        try {
+            if (apiBase && clientId) {
+                const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}`, {
+                    method: 'DELETE',
+                    headers: authHeaders(true),
+                });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(typeof body?.message === 'string' ? body.message : 'מחיקת איש קשר נכשלה');
+                }
+            }
+            setContacts((prev) => prev.filter((c) => c.id !== contactId));
+            setSelectedContactIds((prev) => {
+                const next = new Set(prev);
+                next.delete(contactId);
+                return next;
+            });
+            setContactToDelete(null);
+        } catch (e: any) {
+            alert(e?.message || 'מחיקת איש קשר נכשלה');
+        } finally {
+            setContactDeleteLoading(false);
+        }
+    };
+
     // Click outside handler for popover and menus
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -1494,6 +1735,18 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                     <ArrowRightIcon className="w-4 h-4 text-text-subtle"/>
                                     עדכון סטטוס מהיר
                                 </button>
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        setActiveActionMenuId(null);
+                                        void handleDeleteClient(client);
+                                    }}
+                                    disabled={deleteBusyId === client.id}
+                                    className="w-full text-right px-4 py-2.5 text-sm hover:bg-red-50 text-red-600 flex items-center gap-2 border-t border-border-default disabled:opacity-50"
+                                >
+                                    <TrashIcon className="w-4 h-4"/>
+                                    {deleteBusyId === client.id ? 'מוחק...' : 'מחק לקוח'}
+                                </button>
                             </div>
                         )}
                     </div>
@@ -1535,14 +1788,18 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                     <div>
                         <h1 className="text-2xl font-black text-text-default">{t('clients.title')}</h1>
-                        <p className="text-sm text-text-muted">ניהול קשרי לקוחות, אנשי קשר ותהליכי מכירה</p>
+                        <p className="text-sm text-text-muted">
+                            {isTenantUser
+                                ? 'חברות מהמאגר הגלובלי המקושרות ללקוח שלך'
+                                : 'ניהול קשרי לקוחות, אנשי קשר ותהליכי מכירה'}
+                        </p>
                     </div>
                     <button 
                         onClick={() => navigate('/clients/new')}
                         className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md flex items-center gap-2 w-full md:w-auto justify-center"
                     >
                         <PlusIcon className="w-5 h-5"/>
-                        <span>לקוח חדש</span>
+                        <span>{isTenantUser ? 'קשר חברה לארגון' : 'לקוח חדש'}</span>
                     </button>
                  </div>
 
@@ -1558,6 +1815,35 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  </div>
 
                  <div className={`grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 ${showMobileStats ? 'block' : 'hidden lg:grid'}`}>
+                    {isTenantUser ? (
+                        <>
+                            <StatCard
+                                title="חברות מקושרות"
+                                value={linkedOrganizations.length.toString()}
+                                icon={<BuildingOffice2Icon className="w-6 h-6 text-blue-600"/>}
+                                color="bg-blue-100"
+                            />
+                            <StatCard
+                                title="מאושרות במאגר"
+                                value={stats.activeClients.toString()}
+                                icon={<CheckCircleIcon className="w-6 h-6 text-green-600"/>}
+                                color="bg-green-100"
+                            />
+                            <StatCard
+                                title="ממתינות לאישור"
+                                value={stats.totalValue.toString()}
+                                icon={<ClockIcon className="w-6 h-6 text-orange-600"/>}
+                                color="bg-orange-100"
+                            />
+                            <StatCard
+                                title="ראשיות"
+                                value={linkedOrganizations.filter((o) => o.isPrimary).length.toString()}
+                                icon={<ChartBarIcon className="w-6 h-6 text-purple-600"/>}
+                                color="bg-purple-100"
+                            />
+                        </>
+                    ) : (
+                        <>
                     <StatCard 
                         title="משרות פתוחות" 
                         value={stats.totalOpenJobs.toString()} 
@@ -1583,6 +1869,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                         icon={<ChartBarIcon className="w-6 h-6 text-orange-600"/>} 
                         color="bg-orange-100" 
                     />
+                        </>
+                    )}
                 </div>
              </div>
 
@@ -1593,7 +1881,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'companies' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <BuildingOffice2Icon className="w-5 h-5 inline-block ml-2"/>
-                     תיקי לקוחות
+                     {isTenantUser ? 'חברות מקושרות' : 'תיקי לקוחות'}
                  </button>
                  <button 
                     onClick={() => setActiveTab('contacts')} 
@@ -1622,7 +1910,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                         <input 
                             type="text" 
-                            placeholder={activeTab === 'companies' ? "חיפוש לקוח..." : "חיפוש איש קשר..."} 
+                            placeholder={
+                                activeTab === 'companies'
+                                    ? (isTenantUser ? 'חיפוש חברה...' : 'חיפוש לקוח...')
+                                    : 'חיפוש איש קשר...'
+                            } 
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 transition-all" 
@@ -1631,7 +1923,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  </div>
 
                  {/* Filters Row - Only for Companies tab */}
-                 {activeTab === 'companies' && (
+                 {activeTab === 'companies' && !isTenantUser && (
                      <div className="w-full grid grid-cols-2 md:grid-cols-4 lg:flex lg:flex-wrap gap-3 items-center pt-2 border-t border-border-subtle">
                         {/* Status Filter */}
                         <div className="relative">
@@ -1820,7 +2112,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  )}
 
                  <div className="w-full flex justify-end gap-3 pt-2 border-t border-border-subtle">
-                     {activeTab === 'companies' ? (
+                     {activeTab === 'companies' && !isTenantUser ? (
                          <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
                               {/* Client Column Visibility Popover Trigger */}
                             <div className="relative" ref={clientSettingsRef}>
@@ -1929,8 +2221,106 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
              {/* Content Area */}
              <div className="bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col overflow-hidden">
+                 {error ? (
+                     <div className="p-6 text-center text-sm font-semibold text-red-600">{error}</div>
+                 ) : null}
+                 {isLoading ? (
+                     <div className="p-12 text-center text-sm text-text-muted">טוען...</div>
+                 ) : null}
                  {activeTab === 'companies' ? (
-                     viewMode === 'table' ? (
+                     isTenantUser ? (
+                         <div className="overflow-y-auto custom-scrollbar p-6 bg-bg-card">
+                             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                                 {filteredLinkedOrganizations.map((org) => (
+                                     <div
+                                         key={org.linkId}
+                                         className="bg-bg-card border border-border-default rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow"
+                                     >
+                                         <div className="flex items-start gap-4">
+                                             {org.logo ? (
+                                                 <img src={org.logo} alt="" className="w-14 h-14 rounded-xl object-contain border border-border-default bg-bg-subtle p-1 shrink-0" />
+                                             ) : (
+                                                 <div className="w-14 h-14 rounded-xl bg-bg-subtle border border-border-default flex items-center justify-center shrink-0">
+                                                     <BuildingOffice2Icon className="w-7 h-7 text-text-muted" />
+                                                 </div>
+                                             )}
+                                             <div className="min-w-0 flex-1">
+                                                 <div className="flex flex-wrap items-center gap-2">
+                                                     <h3 className="font-bold text-text-default truncate">{org.name}</h3>
+                                                     {org.isPrimary ? (
+                                                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 border border-primary-100">ראשית</span>
+                                                     ) : null}
+                                                     {org.isPending ? (
+                                                         <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-100">ממתין לאישור</span>
+                                                     ) : null}
+                                                 </div>
+                                                 <p className="text-sm text-text-muted mt-1">{org.mainField || '—'}</p>
+                                             </div>
+                                             <button
+                                                 type="button"
+                                                 onClick={() => void handleUnlinkOrganization(org)}
+                                                 disabled={deleteBusyId === org.linkId}
+                                                 className="shrink-0 p-2 rounded-lg text-text-subtle hover:text-red-600 hover:bg-red-50 transition disabled:opacity-50"
+                                                 title="הסר קישור"
+                                             >
+                                                 <TrashIcon className="w-4 h-4" />
+                                             </button>
+                                         </div>
+                                         {org.subFields.length > 0 ? (
+                                             <div className="mt-4">
+                                                 <p className="text-xs font-semibold text-text-muted mb-2">תחום עיסוק</p>
+                                                 <div className="flex flex-wrap gap-1.5">
+                                                     {org.subFields.map((sf) => (
+                                                         <span key={sf} className="text-xs font-semibold px-2 py-1 rounded-full bg-secondary-100 text-secondary-800">{sf}</span>
+                                                     ))}
+                                                 </div>
+                                             </div>
+                                         ) : null}
+                                         {org.secondaryField ? (
+                                             <div className="mt-3">
+                                                 <p className="text-xs font-semibold text-text-muted mb-1">תחום עיסוק משני</p>
+                                                 <p className="text-sm text-text-default">{org.secondaryField}</p>
+                                             </div>
+                                         ) : null}
+                                         <dl className="mt-4 pt-4 border-t border-border-subtle space-y-2 text-sm">
+                                             <div className="flex justify-between gap-3">
+                                                 <dt className="text-text-muted">מיקום</dt>
+                                                 <dd className="font-semibold text-right">{org.location || '—'}</dd>
+                                             </div>
+                                             <div className="flex justify-between gap-3">
+                                                 <dt className="text-text-muted">עובדים</dt>
+                                                 <dd className="font-semibold">{org.employeeCount || '—'}</dd>
+                                             </div>
+                                             <div className="flex justify-between gap-3 items-center">
+                                                 <dt className="text-text-muted">אתר</dt>
+                                                 <dd className="font-semibold text-right">
+                                                     {org.website ? (
+                                                         <a href={org.website} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline inline-flex items-center gap-1">
+                                                             <span>{formatWebsiteHost(org.website)}</span>
+                                                             <LinkIcon className="w-4 h-4" />
+                                                         </a>
+                                                     ) : '—'}
+                                                 </dd>
+                                             </div>
+                                         </dl>
+                                     </div>
+                                 ))}
+                             </div>
+                             {!isLoading && filteredLinkedOrganizations.length === 0 ? (
+                                 <div className="text-center py-12 flex flex-col items-center justify-center text-text-muted">
+                                     <BuildingOffice2Icon className="w-12 h-12 mb-3 opacity-20"/>
+                                     <p>אין חברות מקושרות עדיין.</p>
+                                     <button
+                                         type="button"
+                                         onClick={() => navigate('/clients/new')}
+                                         className="mt-4 text-sm font-bold text-primary-600 hover:text-primary-700"
+                                     >
+                                         קשר חברה לארגון
+                                     </button>
+                                 </div>
+                             ) : null}
+                         </div>
+                     ) : viewMode === 'table' ? (
                         <div className="overflow-x-auto custom-scrollbar bg-bg-card">
                              <table className="w-full text-sm text-right border-collapse min-w-[900px]">
                                  <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-20 border-b border-border-default shadow-sm">
@@ -2011,6 +2401,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                             activePipelineColor={displayStageColor}
                                             onStatusChange={handleStatusChange}
                                             onStageChange={handleStageChange}
+                                            onDelete={(c) => void handleDeleteClient(c)}
+                                            isDeleting={deleteBusyId === client.id}
                                         />
                                     );
                                 })}
@@ -2168,6 +2560,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                         >
                                                                             <PlusIcon className="w-4 h-4 text-purple-600"/> פתח תהליך שימור
                                                                         </button>
+                                                                        <button 
+                                                                            onClick={(e) => { e.stopPropagation(); handleDeleteContact(contact); }}
+                                                                            className="w-full text-right px-4 py-2.5 text-sm hover:bg-red-50 text-red-600 flex items-center gap-2 border-t border-border-subtle"
+                                                                        >
+                                                                            <TrashIcon className="w-4 h-4"/> מחק איש קשר
+                                                                        </button>
                                                                     </div>
                                                                 )}
                                                             </div>
@@ -2226,6 +2624,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                         onAction={(action) => handleSingleContactAction(action, contact)}
                                         onStartProcess={handleStartProcess}
                                         onViewProfile={handleOpenContactDrawer}
+                                        onDelete={handleDeleteContact}
                                     />
                                 ))
                                 )}
@@ -2317,6 +2716,38 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 isOpen={isClientDrawerOpen}
                 onClose={() => setIsClientDrawerOpen(false)}
             />
+
+            {contactToDelete ? (
+                <div
+                    className="fixed inset-0 bg-black bg-opacity-40 z-[70] flex items-center justify-center p-4"
+                    onClick={() => !contactDeleteLoading && setContactToDelete(null)}
+                >
+                    <div className="bg-bg-card rounded-lg shadow-xl p-6 w-full max-w-sm" onClick={(e) => e.stopPropagation()}>
+                        <h3 className="text-lg font-bold mb-2">מחיקת איש קשר</h3>
+                        <p className="text-text-muted mb-4">
+                            האם למחוק את {contactToDelete.name}? לא ניתן לשחזר פעולה זו.
+                        </p>
+                        <div className="flex justify-end gap-2">
+                            <button
+                                type="button"
+                                disabled={contactDeleteLoading}
+                                onClick={() => setContactToDelete(null)}
+                                className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover disabled:opacity-50"
+                            >
+                                ביטול
+                            </button>
+                            <button
+                                type="button"
+                                disabled={contactDeleteLoading}
+                                onClick={() => void confirmDeleteContact()}
+                                className="bg-red-600 text-white font-semibold py-2 px-4 rounded-lg disabled:opacity-50"
+                            >
+                                {contactDeleteLoading ? 'מוחק…' : 'מחק'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
         </div>
     );
 };

@@ -1,9 +1,14 @@
 
 import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, Cog6ToothIcon, DocumentTextIcon } from './Icons';
+import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, Cog6ToothIcon, DocumentTextIcon, BuildingOffice2Icon } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import SearchableSelect from './SearchableSelect';
+import { authHeaders } from '../utils/authHeaders';
 import { fetchStaffUsers, createStaffUser, type StaffUserDto } from '../services/usersApi';
+
+const ADMIN_COORDINATORS_CLIENT_KEY = 'hiro_admin_coordinators_client_id';
 
 export interface CoordinatorRow {
     id: string;
@@ -36,9 +41,10 @@ type AddModalProps = {
     open: boolean;
     onClose: () => void;
     onCreated: () => void;
+    clientId?: string | null;
 };
 
-const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }) => {
+const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated, clientId }) => {
     const { t } = useLanguage();
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
@@ -72,6 +78,7 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
                 role,
                 phone: phone.trim() || undefined,
                 extension: extension.trim() || undefined,
+                clientId: clientId || undefined,
             });
             onCreated();
             onClose();
@@ -172,7 +179,29 @@ const AddStaffUserModal: React.FC<AddModalProps> = ({ open, onClose, onCreated }
 
 const CoordinatorsSettingsView: React.FC = () => {
     const { t } = useLanguage();
+    const { user } = useAuth();
     const navigate = useNavigate();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const tenantClientId = user?.clientId?.trim() || null;
+    const [adminClientId, setAdminClientId] = useState<string | null>(() => {
+        if (typeof sessionStorage === 'undefined') return null;
+        return sessionStorage.getItem(ADMIN_COORDINATORS_CLIENT_KEY);
+    });
+    const [clientOptions, setClientOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [clientsListLoading, setClientsListLoading] = useState(false);
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const effectiveClientId = isPlatformAdmin ? adminClientId : tenantClientId;
+    const adminNeedsClient = isPlatformAdmin && !effectiveClientId;
+
+    const handleAdminClientChange = useCallback((val: string | number | null) => {
+        const id = val ? String(val) : null;
+        setAdminClientId(id);
+        if (typeof sessionStorage !== 'undefined') {
+            if (id) sessionStorage.setItem(ADMIN_COORDINATORS_CLIENT_KEY, id);
+            else sessionStorage.removeItem(ADMIN_COORDINATORS_CLIENT_KEY);
+        }
+    }, []);
+
     const [coordinators, setCoordinators] = useState<CoordinatorRow[]>([]);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
@@ -188,7 +217,16 @@ const CoordinatorsSettingsView: React.FC = () => {
         setLoading(true);
         setLoadError(null);
         try {
-            const rows = await fetchStaffUsers();
+            if (!isPlatformAdmin && !tenantClientId) {
+                setCoordinators([]);
+                setLoadError('אין לחשבון משתמש לקוח מקושר');
+                return;
+            }
+            if (isPlatformAdmin && !effectiveClientId) {
+                setCoordinators([]);
+                return;
+            }
+            const rows = await fetchStaffUsers(effectiveClientId);
             setCoordinators(rows.map(mapDto));
         } catch (e: any) {
             setLoadError(e?.message || 'טעינה נכשלה');
@@ -196,7 +234,54 @@ const CoordinatorsSettingsView: React.FC = () => {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [effectiveClientId, isPlatformAdmin, tenantClientId]);
+
+    useEffect(() => {
+        if (!apiBase || !isPlatformAdmin) {
+            setClientOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setClientsListLoading(true);
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            headers: authHeaders(true),
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : ((rows as { data?: unknown })?.data ?? []);
+                const opts = (Array.isArray(list) ? list : [])
+                    .map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        label: String(c.displayName || c.name || '').trim(),
+                    }))
+                    .filter((o) => o.id && o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setClientOptions(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setClientOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setClientsListLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [apiBase, isPlatformAdmin]);
+
+    useEffect(() => {
+        if (!isPlatformAdmin || adminClientId || !clientOptions.length) return;
+        const saved = typeof sessionStorage !== 'undefined'
+            ? sessionStorage.getItem(ADMIN_COORDINATORS_CLIENT_KEY)
+            : null;
+        const savedValid = saved && clientOptions.some((o) => o.id === saved);
+        handleAdminClientChange(savedValid ? saved : clientOptions[0].id);
+    }, [isPlatformAdmin, adminClientId, clientOptions, handleAdminClientChange]);
+
+    const selectedClientLabel = useMemo(() => {
+        if (!effectiveClientId) return null;
+        return clientOptions.find((o) => o.id === effectiveClientId)?.label || null;
+    }, [clientOptions, effectiveClientId]);
 
     useEffect(() => {
         void load();
@@ -250,26 +335,66 @@ const CoordinatorsSettingsView: React.FC = () => {
 
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6">
-            <AddStaffUserModal open={addOpen} onClose={() => setAddOpen(false)} onCreated={load} />
+            <AddStaffUserModal
+                open={addOpen}
+                onClose={() => setAddOpen(false)}
+                onCreated={load}
+                clientId={effectiveClientId}
+            />
 
-            <header className="flex flex-col md:flex-row items-center justify-between gap-2 mb-4">
-                <div>
-                    <h1 className="text-2xl font-bold text-text-default">{t('coordinators.title')}</h1>
-                    <p className="text-sm text-text-muted">{t('coordinators.subtitle')}</p>
+            <header className="flex flex-col gap-4 mb-4">
+                <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-4">
+                    <div>
+                        <h1 className="text-2xl font-bold text-text-default">{t('coordinators.title')}</h1>
+                        <p className="text-sm text-text-muted">{t('coordinators.subtitle')}</p>
+                        {!isPlatformAdmin && selectedClientLabel && (
+                            <p className="text-sm text-primary-700 mt-1 font-semibold">לקוח: {selectedClientLabel}</p>
+                        )}
+                        {isPlatformAdmin && selectedClientLabel && (
+                            <p className="text-sm text-primary-700 mt-1 font-semibold">מציג נתונים עבור: {selectedClientLabel}</p>
+                        )}
+                    </div>
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-end gap-3 w-full lg:w-auto">
+                        {isPlatformAdmin ? (
+                            <div className="w-full sm:w-72">
+                                <label className="block text-xs font-bold text-text-muted mb-1.5">בחירת לקוח</label>
+                                <SearchableSelect
+                                    options={clientOptions}
+                                    value={adminClientId}
+                                    onChange={handleAdminClientChange}
+                                    placeholder={clientsListLoading ? 'טוען לקוחות...' : 'בחרו לקוח'}
+                                    className="w-full"
+                                    icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
+                                    disabled={clientsListLoading}
+                                />
+                            </div>
+                        ) : null}
+                        <button
+                            type="button"
+                            onClick={() => setAddOpen(true)}
+                            disabled={adminNeedsClient}
+                            className="w-full sm:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <PlusIcon className="w-5 h-5" />
+                            <span>{t('coordinators.add_new')}</span>
+                        </button>
+                    </div>
                 </div>
-                <button
-                    type="button"
-                    onClick={() => setAddOpen(true)}
-                    className="w-full md:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm"
-                >
-                    <PlusIcon className="w-5 h-5" />
-                    <span>{t('coordinators.add_new')}</span>
-                </button>
             </header>
+
+            {adminNeedsClient && !loading && (
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-6 text-center text-amber-900 mb-4">
+                    <BuildingOffice2Icon className="w-8 h-8 mx-auto mb-2 text-amber-600" />
+                    <p className="font-bold">בחרו לקוח מהרשימה למעלה</p>
+                    <p className="text-sm mt-1 text-amber-800">כמנהל מערכת, יש לבחור לקוח כדי לצפות ולנהל את צוות הגיוס שלו.</p>
+                </div>
+            )}
 
             {loadError && <p className="text-sm text-red-600 mb-3">{loadError}</p>}
             {loading && <p className="text-sm text-text-muted mb-3">טוען...</p>}
 
+            {!adminNeedsClient && (
+            <>
             <div className="p-3 bg-bg-subtle rounded-xl border border-border-default mb-4 flex flex-col md:flex-row items-center gap-3">
                 <div className="relative w-full md:w-auto md:flex-grow">
                     <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
@@ -360,6 +485,8 @@ const CoordinatorsSettingsView: React.FC = () => {
                 <p>{t('coordinators.summary_rows', { count: sortedAndFilteredCoordinators.length })}</p>
                 <p>{t('coordinators.summary_total', { total: coordinators.length, active: activeCoordinatorsCount })}</p>
             </footer>
+            </>
+            )}
         </div>
     );
 };

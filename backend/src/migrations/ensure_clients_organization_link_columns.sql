@@ -1,0 +1,2 @@
+-- DEPRECATED: replaced by client_organization_links.sql + drop_clients_organization_columns.sql
+-- Kept for reference only.

@@ -292,6 +292,10 @@ const findByPostingCode = async (code) => {
   return hydrateJobSkills(job);
 };
 
+const {
+  classifyJobTaxonomyForAnalyze,
+} = require('./jobTaxonomyClassificationService');
+
 const analyzeRawDescription = async (rawText) => {
   if (!rawText || !String(rawText).trim()) {
     const err = new Error('Raw job description is required');
@@ -325,6 +329,11 @@ const analyzeRawDescription = async (rawText) => {
     systemPrompt,
     history: [],
     message: String(rawText),
+    promptId: 'create_new_job',
+    llmInputJson: {
+      rawDescriptionLength: String(rawText).length,
+      rawDescriptionPreview: String(rawText).slice(0, 4000),
+    },
   });
 
   // eslint-disable-next-line no-console
@@ -365,6 +374,28 @@ const analyzeRawDescription = async (rawText) => {
   }
 
   enrichJobAnalyzeResult(parsed);
+
+  // Taxonomy: ignore free-form field/role from the parse prompt — classify via vector Top-K + closed-list LLM.
+  const aiSuggestedField = parsed.field;
+  const aiSuggestedRole = parsed.role;
+  delete parsed.field;
+  delete parsed.role;
+
+  try {
+    const taxonomy = await classifyJobTaxonomyForAnalyze(parsed, rawText);
+    Object.assign(parsed, taxonomy);
+    if (aiSuggestedField || aiSuggestedRole) {
+      parsed.aiSuggestedField = aiSuggestedField ?? null;
+      parsed.aiSuggestedRole = aiSuggestedRole ?? null;
+    }
+  } catch (taxonomyErr) {
+    // eslint-disable-next-line no-console
+    console.error('[jobService.analyzeRawDescription] taxonomy classification failed:', taxonomyErr);
+    parsed.field = 'כללי';
+    parsed.role = 'כללי';
+    parsed.jobField = { category: 'כללי', fieldType: 'כללי', role: 'כללי' };
+    parsed.requiresManualReview = true;
+  }
 
   // Resolve location/city via City table: exact match first, then fuzzy. Only set when found.
   const rawLocation = parsed.city || parsed.location || '';

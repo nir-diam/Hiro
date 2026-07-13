@@ -401,6 +401,14 @@ const generateRoleSynonyms = async (roleId) => {
     apiKey,
     systemPrompt,
     message: `Generate search-specific synonyms for "${role.value}".`,
+    promptId: 'job_categories_synonyms_ai_completed',
+    llmInputJson: {
+      roleId: role.id,
+      roleValue: role.value || '',
+      clusterName: cluster?.name || '',
+      categoryName: category?.name || '',
+      existingSynonyms: role.synonyms || [],
+    },
   });
 
   const candidates = parseSynonymArray(reply);

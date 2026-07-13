@@ -74,23 +74,43 @@ const listCategoryValuesByKey = async (key) => {
   return sortPicklistValues(rows);
 };
 
+const formatPicklistRowsForLlmPrompt = (rows, notFoundMessage) => {
+  if (!rows.length) return notFoundMessage;
+  const list = rows.map((r) => ({
+    value: String(r.value ?? '').trim(),
+    label: String((r.displayName || r.label || r.value) ?? '').trim(),
+  })).filter((x) => x.value || x.label);
+  return JSON.stringify(list, null, 2);
+};
+
 /** Active values as JSON text for LLM prompts (e.g. cv_parsing `${Mobility}` / `${DrivingLicenses}`). */
 const formatCategoryValuesForLlmPrompt = async (categoryKey) => {
   const k = String(categoryKey || '').trim();
   if (!k) return '(empty category key)';
   try {
     const rows = await listCategoryValuesByKey(k);
-    if (!rows.length) {
-      return `(No active picklist values for category key "${k}".)`;
-    }
-    const list = rows.map((r) => ({
-      value: String(r.value ?? '').trim(),
-      label: String((r.displayName || r.label || r.value) ?? '').trim(),
-    })).filter((x) => x.value || x.label);
-    return JSON.stringify(list, null, 2);
+    return formatPicklistRowsForLlmPrompt(rows, `(No active picklist values for category key "${k}".)`);
   } catch (e) {
     console.warn('[picklist] formatCategoryValuesForLlmPrompt', k, e.message);
     return `(Could not load picklist "${k}".)`;
+  }
+};
+
+/** Active values as JSON text for LLM prompts by category UUID. */
+const formatCategoryValuesForLlmPromptByCategoryId = async (categoryId) => {
+  const id = String(categoryId || '').trim();
+  if (!id) return '(empty category id)';
+  try {
+    const rows = await PicklistCategoryValue.findAll({
+      where: { categoryId: id, isActive: true },
+    });
+    return formatPicklistRowsForLlmPrompt(
+      sortPicklistValues(rows),
+      `(No active picklist values for category id "${id}".)`,
+    );
+  } catch (e) {
+    console.warn('[picklist] formatCategoryValuesForLlmPromptByCategoryId', id, e.message);
+    return `(Could not load picklist category "${id}".)`;
   }
 };
 
@@ -99,6 +119,7 @@ const createCategoryValue = async (categoryId, payload) => {
 };
 
 const BUSINESS_FIELD_CATEGORY_ID = '16c81e14-316d-403d-951a-263d02f57f4b';
+const AUTHORIZED_MARKET_DOMAINS_CATEGORY_ID = 'b066daec-01f0-4c37-aae9-04d7e99a5805';
 
 /**
  * Returns the list of allowed mainField values (subcategory names under the business field category).
@@ -212,6 +233,7 @@ module.exports = {
   listCategoryValues,
   listCategoryValuesByKey,
   formatCategoryValuesForLlmPrompt,
+  formatCategoryValuesForLlmPromptByCategoryId,
   createCategoryValue,
   updateCategoryValue,
   deleteCategoryValue,
@@ -223,5 +245,6 @@ module.exports = {
   ensureCategoryValueByLabel,
   getMainFieldOptionNames,
   BUSINESS_FIELD_CATEGORY_ID,
+  AUTHORIZED_MARKET_DOMAINS_CATEGORY_ID,
 };
 

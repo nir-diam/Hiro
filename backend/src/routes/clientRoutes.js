@@ -1,6 +1,7 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
-const { attachDbUser } = require('../middleware/permissionMiddleware');
+const optionalAuth = authMiddleware.optionalAuth;
+const { attachDbUser, optionalAttachDbUser } = require('../middleware/permissionMiddleware');
 const clientController = require('../controllers/clientController');
 const clientUsageSettingController = require('../controllers/clientUsageSettingController');
 const matchingEngineController = require('../controllers/matchingEngineController');
@@ -14,10 +15,10 @@ const recruitmentSourceController = require('../controllers/recruitmentSourceCon
 
 const router = express.Router();
 
-router.get('/', clientController.list);
-router.get('/all-contacts', clientContactController.listAll);
+router.get('/', optionalAuth, optionalAttachDbUser, clientController.list);
+router.get('/all-contacts', authMiddleware, attachDbUser, clientContactController.listAll);
 router.get('/all-tasks', clientTaskController.listAll);
-router.get('/:id/contacts', clientContactController.list);
+router.get('/:id/contacts', authMiddleware, attachDbUser, clientContactController.list);
 router.post('/:id/contacts', clientContactController.create);
 router.put('/:id/contacts/:contactId', clientContactController.update);
 router.delete('/:id/contacts/:contactId', clientContactController.remove);
@@ -46,6 +47,27 @@ router.get('/:id/finance', clientFinanceController.get);
 router.put('/:id/finance', clientFinanceController.update);
 
 router.get('/:id/staff-users', clientController.listStaffUsers);
+
+router.get(
+  '/:id/linked-organizations',
+  authMiddleware,
+  attachDbUser,
+  clientController.listLinkedOrganizations,
+);
+
+router.post(
+  '/:id/organization-link',
+  authMiddleware,
+  attachDbUser,
+  clientController.linkOrganization,
+);
+
+router.delete(
+  '/:id/organization-link/:linkId',
+  authMiddleware,
+  attachDbUser,
+  clientController.unlinkOrganization,
+);
 
 router.get(
   '/:id/usage-settings',
@@ -106,9 +128,9 @@ router.delete(
 );
 
 router.get('/:id', clientController.get);
-router.post('/', clientController.create);
-router.put('/:id', clientController.update);
-router.delete('/:id', clientController.remove);
+router.post('/', optionalAuth, optionalAttachDbUser, clientController.create);
+router.put('/:id', optionalAuth, optionalAttachDbUser, clientController.update);
+router.delete('/:id', optionalAuth, optionalAttachDbUser, clientController.remove);
 
 module.exports = router;
 

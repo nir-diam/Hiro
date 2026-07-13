@@ -24,10 +24,8 @@ const ShareProfileModal: React.FC<ShareProfileModalProps> = ({ isOpen, onClose, 
     if (!isOpen) return null;
     
     // Construct the URL dynamically based on current location to avoid hardcoded domain issues
-    const baseUrl = window.location.href.split('#')[0];
     const slug = candidate.name.toLowerCase().replace(/\s+/g, '-');
-    // For display, we might want a cleaner URL if we had a real domain, but for functionality:
-    const publicLink = `${baseUrl}#/p/${slug}`;
+    const publicLink = `${window.location.origin}/p/${slug}`;
 
     const handleCopy = () => {
         navigator.clipboard.writeText(publicLink);

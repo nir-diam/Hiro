@@ -1,6 +1,7 @@
 
-import React, { useCallback, useEffect, useState } from 'react';
-import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, SparklesIcon, TagIcon, ArrowPathIcon } from './Icons';
+import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import { InformationCircleIcon, TrashIcon, ArrowUpTrayIcon, CheckCircleIcon, ArrowTopRightOnSquareIcon, EnvelopeIcon, LinkIcon, ChevronUpIcon, ChevronDownIcon, ChartBarIcon, TargetIcon, BanknotesIcon, SparklesIcon, TagIcon, ArrowPathIcon, BuildingOffice2Icon } from './Icons';
+import SearchableSelect from './SearchableSelect';
 import UsageSettingsTab from './UsageSettingsTab';
 import CompanyTagsSettingsView from './CompanyTagsSettingsView';
 import CustomFieldsSettingsView from './CustomFieldsSettingsView';
@@ -10,10 +11,36 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { fetchClientMatchingEngineConfigs, type ClientMatchingEnginePresetDto } from '../services/matchingEngineClientApi';
 import { fetchClientUsageSettings, saveClientUsageSettings } from '../services/usageSettingsApi';
+import {
+    fetchPosthogAnalytics,
+    savePosthogAnalytics,
+  DEFAULT_POSTHOG_HOST,
+  POSTHOG_HOST_OPTIONS,
+  fetchLandingContact,
+  saveLandingContact,
+  type PosthogAnalyticsConfig,
+  type LandingContact,
+} from '../services/publishingApi';
+import {
+  fetchClientBranding,
+  saveClientBranding,
+  uploadClientLogo,
+  type ClientBranding,
+} from '../services/clientBrandingApi';
+import { authHeaders } from '../utils/authHeaders';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
 
 type ClientOption = { id: string; name: string; displayName?: string };
+
+type ClientDetailsRow = {
+  id: string;
+  name: string;
+  displayName?: string | null;
+  domain?: string | null;
+  createdAt?: string;
+  metadata?: Record<string, unknown>;
+};
 
 function buildMatchingEngineAuthHeaders(): HeadersInit {
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
@@ -149,8 +176,205 @@ const renderField = (label: string, name: string, value: string, onChange: (e: R
     );
 };
 
+const ClientBrandingSection: React.FC<{ clientId: string | null }> = ({ clientId }) => {
+    const { t } = useLanguage();
+    const [branding, setBranding] = useState<ClientBranding>({ logoUrl: null, primaryColor: '#1e293b' });
+    const [savedBranding, setSavedBranding] = useState<ClientBranding>({ logoUrl: null, primaryColor: '#1e293b' });
+    const [brandingLoading, setBrandingLoading] = useState(false);
+    const [brandingLoadError, setBrandingLoadError] = useState<string | null>(null);
+    const [brandingSaveError, setBrandingSaveError] = useState<string | null>(null);
+    const [isSavingBranding, setIsSavingBranding] = useState(false);
+    const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+    const [brandingSaveSuccess, setBrandingSaveSuccess] = useState(false);
+    const logoInputRef = React.useRef<HTMLInputElement>(null);
 
-const ParametersTab: React.FC = () => {
+    useEffect(() => {
+        if (!clientId) {
+            setBranding({ logoUrl: null, primaryColor: '#1e293b' });
+            setSavedBranding({ logoUrl: null, primaryColor: '#1e293b' });
+            return;
+        }
+        let cancelled = false;
+        setBrandingLoading(true);
+        setBrandingLoadError(null);
+        fetchClientBranding(clientId)
+            .then((data) => {
+                if (cancelled) return;
+                const normalized = {
+                    logoUrl: data.logoUrl,
+                    primaryColor: data.primaryColor || '#1e293b',
+                };
+                setBranding(normalized);
+                setSavedBranding(normalized);
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setBrandingLoadError(e.message || 'טעינת מיתוג נכשלה');
+            })
+            .finally(() => {
+                if (!cancelled) setBrandingLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [clientId]);
+
+    const normalizeBrandColor = (color: string) =>
+        (color.trim().toLowerCase() || '#1e293b');
+
+    const brandingDirty =
+        (branding.logoUrl || null) !== (savedBranding.logoUrl || null) ||
+        normalizeBrandColor(branding.primaryColor) !== normalizeBrandColor(savedBranding.primaryColor);
+
+    const handleSaveBranding = async () => {
+        if (!clientId) return;
+        setBrandingSaveError(null);
+        setBrandingSaveSuccess(false);
+        setIsSavingBranding(true);
+        try {
+            const saved = await saveClientBranding(clientId, {
+                logoUrl: branding.logoUrl,
+                primaryColor: branding.primaryColor.trim() || '#1e293b',
+            });
+            const normalized = {
+                logoUrl: saved.logoUrl,
+                primaryColor: saved.primaryColor || '#1e293b',
+            };
+            setBranding(normalized);
+            setSavedBranding(normalized);
+            setBrandingSaveSuccess(true);
+            setTimeout(() => setBrandingSaveSuccess(false), 2500);
+        } catch (e: unknown) {
+            setBrandingSaveError(e instanceof Error ? e.message : 'שמירת מיתוג נכשלה');
+        } finally {
+            setIsSavingBranding(false);
+        }
+    };
+
+    const handleLogoFile = async (file: File) => {
+        if (!clientId) return;
+        setBrandingSaveError(null);
+        setBrandingSaveSuccess(false);
+        setIsUploadingLogo(true);
+        try {
+            const publicUrl = await uploadClientLogo(clientId, file);
+            setBranding((prev) => ({ ...prev, logoUrl: publicUrl }));
+        } catch (e: unknown) {
+            setBrandingSaveError(e instanceof Error ? e.message : 'העלאת לוגו נכשלה');
+        } finally {
+            setIsUploadingLogo(false);
+        }
+    };
+
+    return (
+        <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-4 md:p-6 space-y-4">
+            <div>
+                <h3 className="text-lg font-bold text-text-default">לוגו וצבע מותג</h3>
+                <p className="text-sm text-text-muted mt-1">
+                    משמש בדפי נחיתה, מודעות Nano Banana ופרסום משרות.
+                </p>
+            </div>
+            {!clientId ? (
+                <p className="text-sm text-text-muted">{t('company_settings.usage_no_client')}</p>
+            ) : brandingLoading ? (
+                <p className="text-sm text-text-muted">טוען...</p>
+            ) : (
+                <>
+                    {brandingLoadError && <p className="text-sm text-red-600">{brandingLoadError}</p>}
+                    {brandingSaveError && <p className="text-sm text-red-600">{brandingSaveError}</p>}
+                    {brandingSaveSuccess && (
+                        <p className="text-sm text-green-600 font-medium">המיתוג נשמר בהצלחה</p>
+                    )}
+                    <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
+                        <label className="font-semibold text-text-muted">{t('company_settings.logo')}</label>
+                        <div className="flex items-center gap-4 flex-wrap">
+                            <div className="w-48 h-20 bg-bg-card border border-border-default rounded-md flex items-center justify-center p-2 shadow-sm">
+                                {branding.logoUrl ? (
+                                    <img
+                                        src={branding.logoUrl}
+                                        alt="לוגו החברה"
+                                        className="max-w-full max-h-full object-contain"
+                                    />
+                                ) : (
+                                    <span className="text-xs text-text-muted">אין לוגו</span>
+                                )}
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <input
+                                    ref={logoInputRef}
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        const file = e.target.files?.[0];
+                                        if (file) void handleLogoFile(file);
+                                        e.target.value = '';
+                                    }}
+                                />
+                                <button
+                                    type="button"
+                                    disabled={isUploadingLogo || isSavingBranding}
+                                    onClick={() => logoInputRef.current?.click()}
+                                    className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm disabled:opacity-60"
+                                >
+                                    <ArrowUpTrayIcon className="w-5 h-5" />
+                                    <span>{isUploadingLogo ? 'מעלה...' : t('company_settings.upload_logo')}</span>
+                                </button>
+                                {branding.logoUrl && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setBranding((prev) => ({ ...prev, logoUrl: null }))}
+                                        disabled={isUploadingLogo || isSavingBranding}
+                                        className="p-2 text-text-subtle hover:text-red-600 disabled:opacity-60"
+                                        title="הסר לוגו"
+                                    >
+                                        <TrashIcon className="w-5 h-5" />
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
+                        <label className="font-semibold text-text-muted">צבע מותג ראשי</label>
+                        <div className="flex items-center gap-3 flex-wrap">
+                            <input
+                                type="color"
+                                value={/^#[0-9a-fA-F]{6}$/.test(branding.primaryColor) ? branding.primaryColor : '#1e293b'}
+                                onChange={(e) => setBranding((prev) => ({ ...prev, primaryColor: e.target.value }))}
+                                className="w-12 h-10 rounded border border-border-default cursor-pointer"
+                            />
+                            <input
+                                type="text"
+                                value={branding.primaryColor}
+                                onChange={(e) => setBranding((prev) => ({ ...prev, primaryColor: e.target.value }))}
+                                placeholder="#1e293b"
+                                className="w-32 bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 font-mono dir-ltr"
+                                dir="ltr"
+                            />
+                            <div
+                                className="h-10 flex-1 min-w-[120px] rounded-lg border border-border-default"
+                                style={{ backgroundColor: branding.primaryColor || '#1e293b' }}
+                            />
+                        </div>
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                        {brandingDirty && !isSavingBranding && !isUploadingLogo && (
+                            <p className="text-xs text-text-muted">יש שינויים שלא נשמרו</p>
+                        )}
+                        <button
+                            type="button"
+                            onClick={() => void handleSaveBranding()}
+                            className="bg-primary-600 text-white font-bold py-2 px-5 rounded-lg hover:bg-primary-700 transition shadow-md disabled:opacity-50"
+                        >
+                            {isSavingBranding ? 'שומר...' : 'שמור לוגו וצבע'}
+                        </button>
+                    </div>
+                </>
+            )}
+        </div>
+    );
+};
+
+const ParametersTab: React.FC<{ clientId: string | null }> = ({ clientId }) => {
     const { t } = useLanguage();
     const [params, setParams] = useState({
         companyEmail: 'hr@humand.co.il',
@@ -162,7 +386,75 @@ const ParametersTab: React.FC = () => {
         thankYouPageUrl: '',
         privacyPolicyUrl: '',
     });
+    const [landingContact, setLandingContact] = useState<LandingContact>({
+        contactEmail: '',
+        contactPhone1: '',
+        contactPhone2: '',
+    });
+    const [savedLandingContact, setSavedLandingContact] = useState<LandingContact>({
+        contactEmail: '',
+        contactPhone1: '',
+        contactPhone2: '',
+    });
+    const [landingContactLoading, setLandingContactLoading] = useState(false);
+    const [landingContactLoadError, setLandingContactLoadError] = useState<string | null>(null);
+    const [landingContactSaveError, setLandingContactSaveError] = useState<string | null>(null);
+    const [isSavingLandingContact, setIsSavingLandingContact] = useState(false);
+    const [landingContactSaveSuccess, setLandingContactSaveSuccess] = useState(false);
     const [isSignatureOpen, setIsSignatureOpen] = useState(true);
+
+    useEffect(() => {
+        if (!clientId) {
+            setLandingContact({ contactEmail: '', contactPhone1: '', contactPhone2: '' });
+            setSavedLandingContact({ contactEmail: '', contactPhone1: '', contactPhone2: '' });
+            return;
+        }
+        let cancelled = false;
+        setLandingContactLoading(true);
+        setLandingContactLoadError(null);
+        fetchLandingContact(clientId)
+            .then((data) => {
+                if (cancelled) return;
+                setLandingContact(data);
+                setSavedLandingContact(data);
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setLandingContactLoadError(e.message || 'טעינה נכשלה');
+            })
+            .finally(() => {
+                if (!cancelled) setLandingContactLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [clientId]);
+
+    const landingContactDirty =
+        landingContact.contactEmail.trim() !== savedLandingContact.contactEmail.trim() ||
+        landingContact.contactPhone1.trim() !== savedLandingContact.contactPhone1.trim() ||
+        landingContact.contactPhone2.trim() !== savedLandingContact.contactPhone2.trim();
+
+    const handleSaveLandingContact = async () => {
+        if (!clientId) return;
+        setLandingContactSaveError(null);
+        setLandingContactSaveSuccess(false);
+        setIsSavingLandingContact(true);
+        try {
+            const saved = await saveLandingContact({
+                contactEmail: landingContact.contactEmail.trim(),
+                contactPhone1: landingContact.contactPhone1.trim(),
+                contactPhone2: landingContact.contactPhone2.trim(),
+            }, clientId);
+            setLandingContact(saved);
+            setSavedLandingContact(saved);
+            setLandingContactSaveSuccess(true);
+            setTimeout(() => setLandingContactSaveSuccess(false), 2500);
+        } catch (e: unknown) {
+            setLandingContactSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+        } finally {
+            setIsSavingLandingContact(false);
+        }
+    };
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
@@ -176,28 +468,6 @@ const ParametersTab: React.FC = () => {
                 <p><strong>{t('company_settings.params_warning')}</strong></p>
             </div>
 
-            {/* Logo Section */}
-            <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
-                <label className="font-semibold text-text-muted">{t('company_settings.logo')}</label>
-                <div className="flex items-center gap-4 flex-wrap">
-                    <div className="w-48 h-20 bg-bg-card border border-border-default rounded-md flex items-center justify-center p-2 shadow-sm">
-                        {/* Placeholder for the logo */}
-                        <img src="https://hiro.co.il/wp-content/uploads/2021/11/logo-2.svg" alt="מימד אנושי לוגו" className="max-w-full max-h-full object-contain" />
-                    </div>
-                    <div className="flex items-center gap-4">
-                         <button className="flex items-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
-                            <ArrowUpTrayIcon className="w-5 h-5"/>
-                            <span>{t('company_settings.upload_logo')}</span>
-                        </button>
-                        <button className="p-2 text-text-subtle hover:text-red-600"><TrashIcon className="w-5 h-5"/></button>
-                    </div>
-                    <a href="#" className="flex items-center gap-1 text-sm text-primary-600 hover:underline">
-                        <InformationCircleIcon className="w-4 h-4"/>
-                        <span>{t('company_settings.compress_link')}</span>
-                    </a>
-                </div>
-            </div>
-            
             {/* Email Section */}
             <div className="space-y-4">
                  <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-4 items-center">
@@ -218,6 +488,65 @@ const ParametersTab: React.FC = () => {
                         <a href="#" className="flex items-center gap-1 text-primary-600 hover:underline"><ArrowTopRightOnSquareIcon className="w-4 h-4"/> {t('company_settings.more_info')}</a>
                     </div>
                  </div>
+            </div>
+
+            {/* Landing page contact — shown on job landing pages */}
+            <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-4 md:p-6 space-y-4">
+                <div>
+                    <h3 className="text-lg font-bold text-text-default">פרטי קשר לדפי נחיתה</h3>
+                    <p className="text-sm text-text-muted mt-1">
+                        אימייל וטלפונים שמוצגים בעמודי פרסום משרות (מקטע &quot;יצירת קשר&quot;).
+                    </p>
+                </div>
+                {!clientId ? (
+                    <p className="text-sm text-text-muted">{t('company_settings.usage_no_client')}</p>
+                ) : landingContactLoading ? (
+                    <p className="text-sm text-text-muted">טוען...</p>
+                ) : (
+                    <>
+                        {landingContactLoadError && (
+                            <p className="text-sm text-red-600">{landingContactLoadError}</p>
+                        )}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="md:col-span-2">
+                                <SettingsInput
+                                    label="אימייל"
+                                    type="email"
+                                    value={landingContact.contactEmail}
+                                    onChange={(v) => setLandingContact((prev) => ({ ...prev, contactEmail: v }))}
+                                />
+                            </div>
+                            <SettingsInput
+                                label="טלפון 1"
+                                type="tel"
+                                value={landingContact.contactPhone1}
+                                onChange={(v) => setLandingContact((prev) => ({ ...prev, contactPhone1: v }))}
+                            />
+                            <SettingsInput
+                                label="טלפון 2"
+                                type="tel"
+                                value={landingContact.contactPhone2}
+                                onChange={(v) => setLandingContact((prev) => ({ ...prev, contactPhone2: v }))}
+                            />
+                        </div>
+                        {landingContactSaveError && (
+                            <p className="text-sm text-red-600">{landingContactSaveError}</p>
+                        )}
+                        {landingContactSaveSuccess && (
+                            <p className="text-sm text-green-600 font-medium">נשמר בהצלחה</p>
+                        )}
+                        <div className="flex justify-end">
+                            <button
+                                type="button"
+                                onClick={handleSaveLandingContact}
+                                disabled={!landingContactDirty || isSavingLandingContact}
+                                className="bg-primary-600 text-white font-bold py-2.5 px-6 rounded-lg hover:bg-primary-700 transition shadow-md disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {isSavingLandingContact ? 'שומר...' : 'שמור פרטי קשר'}
+                            </button>
+                        </div>
+                    </>
+                )}
             </div>
 
             {/* Other Fields Section */}
@@ -280,7 +609,7 @@ const ParametersTab: React.FC = () => {
                                 <button className="p-2 hover:bg-bg-hover rounded-md"><LinkIcon className="w-5 h-5" /></button>
                             </div>
                             <div className="p-4 min-h-[200px] bg-bg-input">
-                                <img src="https://hiro.co.il/wp-content/uploads/2021/11/logo-2.svg" alt="מימד אנושי לוגו" className="max-w-full max-h-full object-contain h-24" />
+                                <span className="text-sm text-text-muted">לוגו החברה יוצג כאן (מוגדר בלשונית פרטים אישיים)</span>
                             </div>
                         </div>
 
@@ -414,7 +743,15 @@ const FinanceDefaultsTab: React.FC = () => {
 const CompanySettingsView: React.FC = () => {
     const { t } = useLanguage();
     const { user } = useAuth();
-    const usageClientId = user?.clientId ?? null;
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const tenantClientId = user?.clientId?.trim() || null;
+    const [adminClientId, setAdminClientId] = useState<string | null>(null);
+    const [clientOptions, setClientOptions] = useState<ClientOption[]>([]);
+    const [clientsListLoading, setClientsListLoading] = useState(false);
+    const usageClientId = isPlatformAdmin ? adminClientId : tenantClientId;
+    const [clientDetails, setClientDetails] = useState<ClientDetailsRow | null>(null);
+    const [clientDetailsLoading, setClientDetailsLoading] = useState(false);
+    const [clientDetailsError, setClientDetailsError] = useState<string | null>(null);
     const [activeTab, setActiveTab] = useState<'details' | 'parameters' | 'quota' | 'usage' | 'tags' | 'custom_fields' | 'health' | 'client_health' | 'finance_defaults'>('details');
     const [monthlyGoal, setMonthlyGoal] = useState('20');
     const [matchingConfigs, setMatchingConfigs] = useState<ClientMatchingEnginePresetDto[]>([]);
@@ -426,6 +763,14 @@ const CompanySettingsView: React.FC = () => {
     const [matchingUsageLoadError, setMatchingUsageLoadError] = useState<string | null>(null);
     const [matchingPresetSaveError, setMatchingPresetSaveError] = useState<string | null>(null);
     const [isSavingMatchingPreset, setIsSavingMatchingPreset] = useState(false);
+    const [posthogKey, setPosthogKey] = useState('');
+    const [posthogHost, setPosthogHost] = useState(DEFAULT_POSTHOG_HOST);
+    const [savedPosthog, setSavedPosthog] = useState<PosthogAnalyticsConfig>({ key: '', host: DEFAULT_POSTHOG_HOST });
+    const [posthogLoading, setPosthogLoading] = useState(false);
+    const [posthogLoadError, setPosthogLoadError] = useState<string | null>(null);
+    const [posthogSaveError, setPosthogSaveError] = useState<string | null>(null);
+    const [isSavingPosthog, setIsSavingPosthog] = useState(false);
+    const [posthogSaveSuccess, setPosthogSaveSuccess] = useState(false);
 
     useEffect(() => {
         if (!usageClientId) {
@@ -479,6 +824,69 @@ const CompanySettingsView: React.FC = () => {
 
     useEffect(() => {
         if (!usageClientId) {
+            setPosthogKey('');
+            setPosthogHost(DEFAULT_POSTHOG_HOST);
+            setSavedPosthog({ key: '', host: DEFAULT_POSTHOG_HOST });
+            setPosthogLoadError(null);
+            return;
+        }
+        let cancelled = false;
+        setPosthogLoading(true);
+        setPosthogLoadError(null);
+        fetchPosthogAnalytics(usageClientId)
+            .then((cfg) => {
+                if (cancelled) return;
+                const next = {
+                    key: cfg.key || '',
+                    host: cfg.host || DEFAULT_POSTHOG_HOST,
+                };
+                setPosthogKey(next.key);
+                setPosthogHost(next.host);
+                setSavedPosthog(next);
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setPosthogLoadError(e.message || 'טעינת הגדרות PostHog נכשלה');
+            })
+            .finally(() => {
+                if (!cancelled) setPosthogLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [usageClientId]);
+
+    const handleSavePosthog = useCallback(async () => {
+        if (!usageClientId) return;
+        setPosthogSaveError(null);
+        setPosthogSaveSuccess(false);
+        setIsSavingPosthog(true);
+        try {
+            const saved = await savePosthogAnalytics({
+                key: posthogKey.trim(),
+                host: posthogHost.trim() || DEFAULT_POSTHOG_HOST,
+            }, usageClientId);
+            const next = {
+                key: saved.key || '',
+                host: saved.host || DEFAULT_POSTHOG_HOST,
+            };
+            setSavedPosthog(next);
+            setPosthogKey(next.key);
+            setPosthogHost(next.host);
+            setPosthogSaveSuccess(true);
+            setTimeout(() => setPosthogSaveSuccess(false), 2500);
+        } catch (e: unknown) {
+            setPosthogSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+        } finally {
+            setIsSavingPosthog(false);
+        }
+    }, [usageClientId, posthogKey, posthogHost]);
+
+    const posthogDirty =
+        posthogKey.trim() !== savedPosthog.key.trim() ||
+        (posthogHost.trim() || DEFAULT_POSTHOG_HOST) !== (savedPosthog.host || DEFAULT_POSTHOG_HOST);
+
+    useEffect(() => {
+        if (!usageClientId) {
             setMatchingConfigs([]);
             setMatchingConfigsError(null);
             setMatchingConfigsLoading(false);
@@ -503,18 +911,19 @@ const CompanySettingsView: React.FC = () => {
     }, [usageClientId]);
 
     useEffect(() => {
-        if (!usageClientId) {
-            setMatchingClientOptions([]);
+        if (!API_BASE) {
+            setClientOptions([]);
             return;
         }
         let cancelled = false;
+        setClientsListLoading(true);
         (async () => {
             try {
-                const res = await fetch(`${API_BASE}/api/clients`, { headers: buildMatchingEngineAuthHeaders() });
+                const res = await fetch(`${API_BASE}/api/clients?activeOnly=true`, { headers: authHeaders(true), cache: 'no-store' });
                 if (!res.ok || cancelled) return;
                 const data = await res.json();
                 const list = Array.isArray(data) ? data : (data.data ?? []);
-                setMatchingClientOptions(
+                setClientOptions(
                     list.map((c: Record<string, unknown>) => ({
                         id: String(c.id ?? ''),
                         name: String(c.name ?? ''),
@@ -522,27 +931,103 @@ const CompanySettingsView: React.FC = () => {
                     })),
                 );
             } catch {
-                if (!cancelled) setMatchingClientOptions([]);
+                if (!cancelled) setClientOptions([]);
+            } finally {
+                if (!cancelled) setClientsListLoading(false);
             }
         })();
         return () => {
             cancelled = true;
         };
+    }, []);
+
+    useEffect(() => {
+        if (!usageClientId || !API_BASE) {
+            setClientDetails(null);
+            setClientDetailsError(null);
+            return;
+        }
+        let cancelled = false;
+        setClientDetailsLoading(true);
+        setClientDetailsError(null);
+        fetch(`${API_BASE}/api/clients/${encodeURIComponent(usageClientId)}`, {
+            headers: authHeaders(true),
+            cache: 'no-store',
+        })
+            .then((res) => {
+                if (!res.ok) throw new Error('טעינת פרטי לקוח נכשלה');
+                return res.json();
+            })
+            .then((row: ClientDetailsRow) => {
+                if (!cancelled) setClientDetails(row);
+            })
+            .catch((e: Error) => {
+                if (!cancelled) setClientDetailsError(e.message || 'טעינת פרטי לקוח נכשלה');
+            })
+            .finally(() => {
+                if (!cancelled) setClientDetailsLoading(false);
+            });
+        return () => { cancelled = true; };
     }, [usageClientId]);
+
+    const selectedClientLabel = useMemo(() => {
+        if (!usageClientId) return '';
+        const hit = clientOptions.find((c) => c.id === usageClientId);
+        return hit?.displayName || hit?.name || clientDetails?.displayName || clientDetails?.name || '';
+    }, [clientOptions, usageClientId, clientDetails]);
+
+    useEffect(() => {
+        if (!usageClientId) {
+            setMatchingClientOptions([]);
+            return;
+        }
+        setMatchingClientOptions(clientOptions.filter((c) => c.id));
+    }, [usageClientId, clientOptions]);
 
     const renderContent = () => {
         switch (activeTab) {
             case 'details':
                 return (
                     <div className="space-y-6 animate-fade-in">
+                        {!usageClientId && (
+                            <p className="text-sm text-text-muted text-right py-2">
+                                {isPlatformAdmin
+                                    ? 'בחרו לקוח מהרשימה למעלה כדי לצפות ולערוך הגדרות.'
+                                    : 'אין לחשבון משתמש מזהה לקוח — לא ניתן להציג הגדרות.'}
+                            </p>
+                        )}
+                        {clientDetailsError && (
+                            <p className="text-sm text-red-600 text-right">{clientDetailsError}</p>
+                        )}
+                        {usageClientId && (
+                        <>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                            <SettingsInput label={t('company_settings.field_company_name')} value="מימד אנושי" />
-                            <SettingsInput label={t('company_settings.field_display_name')} value="מימד אנושי" />
-                            <SettingsInput label={t('company_settings.field_creation_date')} value="12/05/2022" />
-                            <SettingsInput label={t('company_settings.field_sms_source')} value="humand" />
+                            <SettingsInput
+                                label={t('company_settings.field_company_name')}
+                                value={clientDetailsLoading ? '…' : (clientDetails?.name || selectedClientLabel || '—')}
+                            />
+                            <SettingsInput
+                                label={t('company_settings.field_display_name')}
+                                value={clientDetailsLoading ? '…' : (clientDetails?.displayName || clientDetails?.name || '—')}
+                            />
+                            <SettingsInput
+                                label={t('company_settings.field_creation_date')}
+                                value={clientDetails?.createdAt
+                                    ? new Date(clientDetails.createdAt).toLocaleDateString('he-IL')
+                                    : '—'}
+                            />
+                            <SettingsInput
+                                label={t('company_settings.field_sms_source')}
+                                value={String((clientDetails?.metadata as Record<string, unknown> | undefined)?.smsSource || clientDetails?.domain || '—')}
+                            />
                             <SettingsInput label={t('company_settings.field_ips')} value="" />
-                            <SettingsInput label={t('company_settings.field_verified_phones')} value="0527372555" />
+                            <SettingsInput
+                                label={t('company_settings.field_verified_phones')}
+                                value={String((clientDetails?.metadata as Record<string, unknown> | undefined)?.verifiedPhones || '—')}
+                            />
                         </div>
+
+                        <ClientBrandingSection clientId={usageClientId} />
                         
                         {/* Matching Engine — preset cards + selection stored in client_usage_settings.matching_engine_preset_id */}
                         <div className="bg-white p-6 rounded-2xl border border-border-subtle shadow-sm mt-6">
@@ -697,6 +1182,95 @@ const CompanySettingsView: React.FC = () => {
                             </p>
                         </div>
 
+                        {/* PostHog — per-client landing page analytics */}
+                        <div className="bg-white p-6 rounded-2xl border border-border-subtle shadow-sm mt-6">
+                            <div className="flex items-center justify-between mb-4 gap-4 flex-wrap">
+                                <div className="flex items-center gap-2">
+                                    <ChartBarIcon className="w-5 h-5 text-primary-500" />
+                                    <h3 className="text-lg font-bold text-text-default">PostHog — אנליטיקה לדפי פרסום</h3>
+                                </div>
+                                {usageClientId && (
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleSavePosthog()}
+                                        disabled={isSavingPosthog || posthogLoading || !posthogDirty}
+                                        className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold transition-all ${
+                                            posthogDirty && !posthogLoading
+                                                ? 'bg-primary-600 text-white hover:bg-primary-700 shadow-lg shadow-primary-500/20'
+                                                : 'bg-bg-subtle text-text-muted cursor-not-allowed'
+                                        }`}
+                                    >
+                                        {isSavingPosthog ? (
+                                            <ArrowPathIcon className="w-5 h-5 animate-spin" />
+                                        ) : (
+                                            <CheckCircleIcon className="w-5 h-5" />
+                                        )}
+                                        שמור הגדרות PostHog
+                                    </button>
+                                )}
+                            </div>
+                            {!usageClientId && (
+                                <p className="text-sm text-text-muted text-right py-2">
+                                    אין לחשבון משתמש מזהה לקוח — לא ניתן להגדיר PostHog.
+                                </p>
+                            )}
+                            {usageClientId && posthogLoading && (
+                                <p className="text-sm text-text-muted text-right py-2">טוען הגדרות PostHog…</p>
+                            )}
+                            {usageClientId && posthogLoadError && (
+                                <p className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-2 text-right">
+                                    {posthogLoadError}
+                                </p>
+                            )}
+                            {usageClientId && posthogSaveError && (
+                                <p className="text-sm text-red-600 text-right py-2">{posthogSaveError}</p>
+                            )}
+                            {usageClientId && posthogSaveSuccess && (
+                                <p className="text-sm text-green-700 bg-green-50 border border-green-200 rounded-lg px-3 py-2 mb-2 text-right">
+                                    הגדרות PostHog נשמרו בהצלחה.
+                                </p>
+                            )}
+                            {usageClientId && !posthogLoading && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                    <SettingsInput
+                                        label="מפתח פרויקט (Project API Key)"
+                                        subLabel="phc_…"
+                                        value={posthogKey}
+                                        onChange={setPosthogKey}
+                                        placeholder="phc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                                    />
+                                    <div className="flex flex-col gap-1.5">
+                                        <label className="text-sm font-semibold text-text-default text-right">
+                                            אזור (API Host)
+                                        </label>
+                                        <p className="text-xs text-text-muted text-right">
+                                            חייב להתאים לאזור הפרויקט ב־PostHog (Settings → Project → Region).
+                                        </p>
+                                        <select
+                                            value={
+                                                POSTHOG_HOST_OPTIONS.some((o) => o.value === posthogHost)
+                                                    ? posthogHost
+                                                    : DEFAULT_POSTHOG_HOST
+                                            }
+                                            onChange={(e) => setPosthogHost(e.target.value)}
+                                            className="w-full bg-bg-subtle border border-border-default rounded-xl px-4 py-3 font-medium text-text-default focus:bg-white focus:ring-2 focus:ring-primary-500 outline-none transition-all text-right"
+                                        >
+                                            {POSTHOG_HOST_OPTIONS.map((opt) => (
+                                                <option key={opt.value} value={opt.value}>
+                                                    {opt.label}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                </div>
+                            )}
+                            <p className="text-xs text-text-muted mt-4 text-right leading-relaxed">
+                                המפתח נשמר בהגדרות הלקוח ונטען אוטומטית בדפי הגיוס הציבוריים שלכם (צפיות, התחלת מועמדות,
+                                הגשות). אם לא הוגדר מפתח ללקוח, המערכת תשתמש ב־<code className="font-mono text-[11px]">VITE_POSTHOG_KEY</code> מקובץ הסביבה — אם קיים.
+                                אם בקונסול מופיע 401 על <code className="font-mono text-[11px]">/flags</code> או 404 על config — בדרך כלל האזור שגוי (US במקום EU או להיפך).
+                            </p>
+                        </div>
+
                         {/* Goals Section */}
                         <div className="bg-bg-subtle/50 p-5 rounded-xl border border-border-default mt-6">
                             <div className="flex items-center gap-2 mb-4 text-primary-700">
@@ -715,9 +1289,18 @@ const CompanySettingsView: React.FC = () => {
                                 {t('company_settings.goals_desc')}
                             </p>
                         </div>
+                        </>
+                        )}
                     </div>
                 );
             case 'quota':
+                if (!isPlatformAdmin) {
+                    return (
+                        <p className="text-sm text-text-muted text-right py-4">
+                            מכסות שימוש זמינות למנהלי מערכת בלבד.
+                        </p>
+                    );
+                }
                 return (
                      <div className="space-y-6 animate-fade-in">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -751,7 +1334,7 @@ const CompanySettingsView: React.FC = () => {
                     </div>
                 );
             case 'parameters':
-                 return <ParametersTab />;
+                 return <ParametersTab clientId={usageClientId} />;
             case 'usage':
                 return <UsageSettingsTab clientId={usageClientId} />;
             case 'tags':
@@ -773,7 +1356,27 @@ const CompanySettingsView: React.FC = () => {
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6">
             <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } } .animate-fade-in { animation: fadeIn 0.3s ease-out; }`}</style>
             <header className="flex-shrink-0 mb-6">
-                <h1 className="text-2xl font-bold text-text-default mb-4">{t('company_settings.title')}</h1>
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-4">
+                    <h1 className="text-2xl font-bold text-text-default">{t('company_settings.title')}</h1>
+                    {isPlatformAdmin ? (
+                        <div className="min-w-[14rem] w-full sm:w-auto">
+                            <SearchableSelect
+                                options={clientOptions.map((c) => ({
+                                    id: c.id,
+                                    label: c.displayName || c.name,
+                                }))}
+                                value={adminClientId}
+                                onChange={(val) => setAdminClientId(val ? String(val) : null)}
+                                placeholder="בחרו לקוח"
+                                className="w-full"
+                                icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
+                                disabled={clientsListLoading}
+                            />
+                        </div>
+                    ) : selectedClientLabel ? (
+                        <p className="text-sm font-semibold text-primary-700">לקוח: {selectedClientLabel}</p>
+                    ) : null}
+                </div>
                 <div className="border-b border-border-default overflow-x-auto">
                     <nav className="flex items-center -mb-px min-w-max gap-2">
                         <TabButton title={t('company_settings.tab_details')} isActive={activeTab === 'details'} onClick={() => setActiveTab('details')} />

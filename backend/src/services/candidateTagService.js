@@ -212,6 +212,55 @@ const deleteCandidateTag = async (id) => {
   return entry;
 };
 
+const refreshJobSkillsFromSystemTags = async (jobId) => {
+  if (!jobId) return;
+  const rows = await listJobTags(jobId);
+  const skills = mapSystemTagsToJobSkills(rows);
+  await Job.update({ skills }, { where: { id: jobId } });
+};
+
+const reassignJobTag = async (id, targetTagId) => {
+  if (!id || !targetTagId) return null;
+  const jobTag = await SystemTag.findOne({
+    where: { id, type: SYSTEM_TAG_TYPE_JOB },
+  });
+  if (!jobTag) return null;
+  if (jobTag.tag_id === targetTagId) return jobTag;
+  const targetTag = await Tag.findByPk(targetTagId);
+  if (!targetTag) return null;
+
+  const jobId = jobTag.entity_id;
+  const existing = await SystemTag.findOne({
+    where: jobTagTypeWhere({
+      entity_id: jobId,
+      tag_id: targetTagId,
+    }),
+  });
+
+  if (existing) {
+    await jobTag.destroy();
+    await recordTagUsage(targetTag);
+    await refreshJobSkillsFromSystemTags(jobId);
+    return existing;
+  }
+
+  await jobTag.update({ tag_id: targetTagId });
+  await recordTagUsage(targetTag);
+  await refreshJobSkillsFromSystemTags(jobId);
+  return jobTag;
+};
+
+const deleteJobTag = async (id) => {
+  const entry = await SystemTag.findOne({
+    where: { id, type: SYSTEM_TAG_TYPE_JOB },
+  });
+  if (!entry) return null;
+  const jobId = entry.entity_id;
+  await entry.destroy();
+  await refreshJobSkillsFromSystemTags(jobId);
+  return entry;
+};
+
 const bulkUpdateCandidateTags = async (actions = []) => {
   const validActions = Array.isArray(actions) ? actions : [];
   if (!validActions.length) return [];
@@ -227,6 +276,26 @@ const bulkUpdateCandidateTags = async (actions = []) => {
       continue;
     }
     await deleteCandidateTag(entry.candidateTagId);
+  }
+  return validActions;
+};
+
+const bulkUpdateJobTags = async (actions = []) => {
+  const validActions = Array.isArray(actions) ? actions : [];
+  if (!validActions.length) return [];
+  for (const entry of validActions) {
+    const jobTagId = entry?.jobTagId || entry?.job_tag_id;
+    if (!jobTagId) {
+      throw new Error('Missing job tag id');
+    }
+    if (entry.action === 'reassign') {
+      if (!entry.targetTagId) {
+        throw new Error('Missing target tag for reassign');
+      }
+      await reassignJobTag(jobTagId, entry.targetTagId);
+      continue;
+    }
+    await deleteJobTag(jobTagId);
   }
   return validActions;
 };
@@ -1185,6 +1254,9 @@ module.exports = {
   deleteCandidateTag,
   reassignCandidateTag,
   bulkUpdateCandidateTags,
+  deleteJobTag,
+  reassignJobTag,
+  bulkUpdateJobTags,
   listCandidateTags: async (candidateId) =>
     SystemTag.findAll({
       where: candidateTagTypeWhere({ entity_id: candidateId, is_active: true }),

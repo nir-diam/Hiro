@@ -1,6 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, PlusIcon, PencilIcon, TrashIcon, CheckIcon, XMarkIcon, 
     SparklesIcon, TagIcon, BuildingOffice2Icon, CheckCircleIcon, NoSymbolIcon,
@@ -8,7 +8,122 @@ import {
     Bars3Icon, Squares2X2Icon, TableCellsIcon, ListBulletIcon, CalendarDaysIcon, ArrowDownTrayIcon
 } from './Icons';
 import HiroAIChat from './HiroAIChat';
+import AuditHistoryRow from './AuditHistoryRow';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
+import { formatTagHistoryActionType, formatTagHistoryDescription } from '../utils/tagHistoryText';
+import { authHeaders } from '../utils/authHeaders';
+import { resolveEntryTimestamp } from '../utils/auditHistoryFormat';
+import {
+    fetchPicklistCategoryValues,
+    TAG_DOMAIN_PICKLIST_CATEGORY_ID,
+} from '../services/picklistValuesApi';
+
+const normalizePicklistOptions = (rows: { label?: string; value?: string }[]) =>
+    rows
+        .map((item) => ({
+            label: String(item.label || item.value || '').trim(),
+            value: String(item.value || item.label || '').trim(),
+        }))
+        .filter((item) => item.label && item.value);
+
+type PicklistOption = { label: string; value: string };
+
+const DomainPicklistField: React.FC<{
+    selected: string[];
+    options: PicklistOption[];
+    onChange: (domains: string[]) => void;
+    loading?: boolean;
+    compact?: boolean;
+}> = ({ selected, options, onChange, loading = false, compact = false }) => {
+    const [search, setSearch] = useState('');
+    const optionValues = useMemo(() => new Set(options.map((o) => o.value)), [options]);
+    const unknownSelected = useMemo(
+        () => selected.filter((d) => !optionValues.has(d)),
+        [selected, optionValues],
+    );
+    const filtered = useMemo(() => {
+        const q = search.trim();
+        if (!q) return options;
+        return options.filter(
+            (o) => o.label.includes(q) || o.value.includes(q),
+        );
+    }, [options, search]);
+
+    const toggle = (value: string) => {
+        onChange(
+            selected.includes(value)
+                ? selected.filter((d) => d !== value)
+                : [...selected, value],
+        );
+    };
+
+    if (loading) {
+        return <div className="text-sm text-text-muted py-2">טוען דומיינים...</div>;
+    }
+
+    return (
+        <div className={`space-y-3 ${compact ? '' : ''}`}>
+            {unknownSelected.length > 0 && (
+                <div className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                    ערכים שלא ברשימה: {unknownSelected.join(', ')}
+                </div>
+            )}
+            {options.length === 0 ? (
+                <div className="text-sm text-text-muted">לא נמצאו דומיינים בפיקליסט</div>
+            ) : (
+                <>
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => setSearch(e.target.value)}
+                        placeholder="חיפוש דומיין..."
+                        className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm"
+                    />
+                    <div className={`border border-border-default rounded-lg overflow-y-auto bg-bg-input ${compact ? 'max-h-36' : 'max-h-48'}`}>
+                        {filtered.length === 0 ? (
+                            <div className="p-3 text-sm text-text-muted text-center">לא נמצאו תוצאות</div>
+                        ) : (
+                            filtered.map((option) => (
+                                <label
+                                    key={option.value}
+                                    className="flex items-center gap-2 px-3 py-2 text-sm hover:bg-bg-subtle cursor-pointer border-b border-border-subtle last:border-0"
+                                >
+                                    <input
+                                        type="checkbox"
+                                        checked={selected.includes(option.value)}
+                                        onChange={() => toggle(option.value)}
+                                        className="w-4 h-4 rounded text-primary-600"
+                                    />
+                                    <span>{option.label}</span>
+                                </label>
+                            ))
+                        )}
+                    </div>
+                </>
+            )}
+            {selected.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                    {selected.map((domain) => (
+                        <span
+                            key={domain}
+                            className="inline-flex items-center gap-1 bg-primary-50 text-primary-700 border border-primary-200 px-2 py-0.5 rounded-full text-xs font-medium"
+                        >
+                            {options.find((o) => o.value === domain)?.label || domain}
+                            <button
+                                type="button"
+                                onClick={() => toggle(domain)}
+                                className="text-primary-500 hover:text-red-500"
+                                aria-label={`הסר ${domain}`}
+                            >
+                                <XMarkIcon className="w-3 h-3" />
+                            </button>
+                        </span>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
 
 // --- NEW DATA MODEL ---
 type TagStatus = 'active' | 'draft' | 'deprecated' | 'archived' | 'pending';
@@ -57,11 +172,23 @@ interface TagHistoryEntry {
     tagId: string;
     action: 'create' | 'update' | 'delete' | string;
     actor?: string;
+    actorDisplayName?: string;
+    userName?: string;
+    userEmail?: string;
     changes?: {
         before?: Partial<Tag>;
         after?: Partial<Tag>;
+        eventKind?: string;
+        targetTagName?: string;
+        targetTagId?: string;
+        candidateCount?: number;
+        jobCount?: number;
+        jobTitle?: string;
     };
     createdAt?: string;
+    created_at?: string;
+    updatedAt?: string;
+    updated_at?: string;
 }
 
 interface UsageCandidate {
@@ -118,6 +245,88 @@ const normalizeIncomingSynonyms = (synonyms?: any[]): TagSynonym[] => {
     return normalized as TagSynonym[];
 };
 
+type TagSynonymDisplayItem = {
+    phrase: string;
+    kind: TagSynonym['type'] | 'alias';
+    language?: string;
+};
+
+const SYNONYM_KIND_STYLES: Record<string, string> = {
+    alias: 'bg-violet-50 text-violet-800 border-violet-200',
+    synonym: 'bg-sky-50 text-sky-800 border-sky-200',
+    abbreviation: 'bg-amber-50 text-amber-800 border-amber-200',
+    typo: 'bg-slate-50 text-slate-600 border-slate-200',
+};
+
+const SYNONYM_KIND_LABELS: Record<string, string> = {
+    alias: 'כינוי',
+    synonym: 'נרדפת',
+    abbreviation: 'קיצור',
+    typo: 'שגיאה',
+};
+
+const buildTagSynonymDisplayItems = (tag: Tag): TagSynonymDisplayItem[] => {
+    const items: TagSynonymDisplayItem[] = [];
+    const seen = new Set<string>();
+
+    const add = (phrase: string, kind: TagSynonymDisplayItem['kind'], language?: string) => {
+        const clean = String(phrase || '').trim();
+        if (!clean) return;
+        const key = clean.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        items.push({ phrase: clean, kind, language });
+    };
+
+    (tag.aliases || []).forEach((alias) => add(alias, 'alias'));
+    (tag.synonyms || []).forEach((syn) => {
+        if (!syn?.phrase) return;
+        add(syn.phrase, syn.type || 'synonym', syn.language || undefined);
+    });
+
+    return items;
+};
+
+const formatTagSynonymsForExport = (tag: Tag) =>
+    buildTagSynonymDisplayItems(tag)
+        .map((item) => item.phrase)
+        .join(', ');
+
+const TagSynonymsPills: React.FC<{ tag: Tag; maxVisible?: number }> = ({ tag, maxVisible = 8 }) => {
+    const items = buildTagSynonymDisplayItems(tag);
+    if (!items.length) {
+        return <span className="text-text-muted/40 text-xs italic">אין מילים נרדפות</span>;
+    }
+
+    const visible = items.slice(0, maxVisible);
+    const hiddenCount = items.length - visible.length;
+
+    return (
+        <div className="flex flex-wrap gap-1.5 items-center">
+            {visible.map((item) => (
+                <span
+                    key={`${item.kind}-${item.phrase}`}
+                    title={`${SYNONYM_KIND_LABELS[item.kind] || item.kind}${item.language && item.language !== '-' ? ` · ${item.language}` : ''}`}
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border leading-tight ${SYNONYM_KIND_STYLES[item.kind] || SYNONYM_KIND_STYLES.synonym}`}
+                >
+                    <span className="truncate max-w-[140px]">{item.phrase}</span>
+                    <span className="text-[9px] opacity-70 font-semibold uppercase">
+                        {SYNONYM_KIND_LABELS[item.kind] || item.kind}
+                    </span>
+                </span>
+            ))}
+            {hiddenCount > 0 && (
+                <span
+                    className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-bg-subtle text-text-muted border border-border-subtle"
+                    title={items.slice(maxVisible).map((item) => item.phrase).join(', ')}
+                >
+                    +{hiddenCount}
+                </span>
+            )}
+        </div>
+    );
+};
+
 type SourceFilterValue = 'ai' | 'manual' | 'candidate' | 'curator' | 'job';
 
 const SOURCE_FILTER_OPTIONS: { value: SourceFilterValue; label: string }[] = [
@@ -128,7 +337,7 @@ const SOURCE_FILTER_OPTIONS: { value: SourceFilterValue; label: string }[] = [
     { value: 'job', label: 'job' },
 ];
 
-type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'status' | 'updatedAt' | 'source' | 'usageCount' | 'jobUsageCount';
+type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'synonyms' | 'status' | 'updatedAt' | 'source' | 'usageCount' | 'jobUsageCount';
 type SortConfig = { key: SortKey | null; direction: 'asc' | 'desc' };
 
 const getRelativeTimeLabel = (date?: Date | string) => {
@@ -193,8 +402,14 @@ const getSourceDisplayName = (value?: TagSource) => {
     if (value === 'admin' || value === 'system') return 'רכז';
     return value;
 };
-const getTagDisplayName = (tag?: Tag | null) => {
-    return tag?.displayNameHe || tag?.displayNameEn || tag?.tagKey || 'בחר תגית';
+const getTagDisplayName = (
+    tag?: Tag | null,
+    opts?: { includeType?: boolean; typeOptions?: { label: string; value: string }[] },
+) => {
+    const name = tag?.displayNameHe || tag?.displayNameEn || tag?.tagKey || 'בחר תגית';
+    if (!opts?.includeType || !tag?.type || name === 'בחר תגית') return name;
+    const typeLabel = opts.typeOptions?.find((o) => o.value === tag.type)?.label || tag.type;
+    return `${name} (${typeLabel})`;
 };
 interface BlockingCandidate {
     candidate_tag_id: string;
@@ -205,6 +420,17 @@ interface BlockingCandidate {
     fullName?: string;
     email?: string;
     phone?: string;
+}
+
+interface BlockingJob {
+    job_tag_id: string;
+    jobTagId?: string;
+    job_id?: string;
+    jobId?: string;
+    title?: string;
+    status?: string;
+    client?: string;
+    postingCode?: string;
 }
 
 // --- HELPER COMPONENTS ---
@@ -263,10 +489,22 @@ interface TagEditorModalProps {
     onSave: (tag: Tag) => void;
     allTags: Tag[];
     tagNameOptions: string[];
-    typePicklistOptions: { label: string; value: string }[];
+    typePicklistOptions: PicklistOption[];
+    domainPicklistOptions: PicklistOption[];
+    domainPicklistLoading?: boolean;
 }
 
-const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, onSave, allTags, tagNameOptions, typePicklistOptions }) => {
+const TagEditorModal: React.FC<TagEditorModalProps> = ({
+    isOpen,
+    onClose,
+    tag,
+    onSave,
+    allTags,
+    tagNameOptions,
+    typePicklistOptions,
+    domainPicklistOptions,
+    domainPicklistLoading = false,
+}) => {
     // Form State
     const [formData, setFormData] = useState<Tag>({
         id: '', tagKey: '', displayNameHe: '', displayNameEn: '', type: 'role', category: '',
@@ -338,127 +576,6 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
     const [historyEntries, setHistoryEntries] = useState<TagHistoryEntry[]>([]);
     const [historyLoading, setHistoryLoading] = useState(false);
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const historyFieldLabels: Record<string, string> = {
-        displayNameHe: 'שם (עברית)',
-        displayNameEn: 'שם (אנגלית)',
-        type: 'סוג',
-        category: 'קטגוריה',
-        status: 'סטטוס',
-        qualityState: 'איכות',
-        source: 'מקור',
-        aliases: 'שמות אחרים',
-        synonyms: 'מילים נרדפות',
-        internalNote: 'הערה פנימית',
-    };
-    const actionLabels: Record<string, string> = {
-        create: 'נוצר',
-        update: 'עודכן',
-        delete: 'נמחק',
-    };
-    const formatHistoryValue = (value: any) => {
-        if (Array.isArray(value)) {
-            return value.length ? value.join(', ') : '—';
-        }
-        if (value === null || value === undefined || value === '') return '—';
-        if (typeof value === 'boolean') return value ? 'כן' : 'לא';
-        return String(value);
-    };
-    const normalizeSynonymList = (value: any) => {
-        if (!value) return [];
-        return ensureArray(value)
-            .map((item) => {
-                if (!item) return '';
-                if (typeof item === 'string') return item.trim();
-                return (item.phrase || '').trim();
-            })
-            .filter(Boolean)
-            .sort();
-    };
-    const areArraysEqual = (field: string, beforeValue: any, afterValue: any) => {
-        if (!Array.isArray(beforeValue) && !Array.isArray(afterValue)) {
-            return false;
-        }
-        if (field === 'synonyms') {
-            const beforeList = normalizeSynonymList(beforeValue);
-            const afterList = normalizeSynonymList(afterValue);
-            return beforeList.join('|') === afterList.join('|');
-        }
-        if (Array.isArray(beforeValue) || Array.isArray(afterValue)) {
-            const beforeList = Array.isArray(beforeValue) ? beforeValue.map((item) => String(item || '').trim()).sort() : [];
-            const afterList = Array.isArray(afterValue) ? afterValue.map((item) => String(item || '').trim()).sort() : [];
-            return beforeList.join('|') === afterList.join('|');
-        }
-        return false;
-    };
-    const valuesAreEqual = (field: string, beforeValue: any, afterValue: any) => {
-        if (field === 'synonyms' || field === 'aliases') {
-            return areArraysEqual(field, beforeValue, afterValue);
-        }
-        if (typeof beforeValue === 'string' && typeof afterValue === 'string') {
-            return beforeValue.trim() === afterValue.trim();
-        }
-        return beforeValue === afterValue;
-    };
-    const getHistoryDiffRows = (entry: TagHistoryEntry) => {
-        const before = entry.changes?.before || {};
-        const after = entry.changes?.after || {};
-        const rows = Object.entries(historyFieldLabels)
-            .map(([field, label]) => {
-                const beforeValue = (before as any)[field];
-                const afterValue = (after as any)[field];
-                if (valuesAreEqual(field, beforeValue, afterValue)) return null;
-                return {
-                    field,
-                    label,
-                    before: formatHistoryValue(beforeValue),
-                    after: formatHistoryValue(afterValue),
-                };
-            })
-            .filter((row): row is { field: string; label: string; before: string; after: string } => Boolean(row));
-        if (rows.length) return rows;
-        const changedFields = Object.keys(historyFieldLabels).filter((field) => {
-            const beforeValue = (before as any)[field];
-            const afterValue = (after as any)[field];
-            return !valuesAreEqual(field, beforeValue, afterValue);
-        });
-        return changedFields.map((field) => {
-            const beforeValue = (before as any)[field];
-            const afterValue = (after as any)[field];
-            return {
-                field,
-                label: historyFieldLabels[field],
-                before: formatHistoryValue(beforeValue),
-                after: formatHistoryValue(afterValue),
-            };
-        });
-    };
-
-    const getSanitizedHistoryPayload = (entry: TagHistoryEntry) => {
-        const payload = entry.changes ? JSON.parse(JSON.stringify(entry.changes)) : {};
-        ['before', 'after'].forEach((key) => {
-            if (payload[key]?.embedding) {
-                delete payload[key].embedding;
-            }
-        });
-        return payload;
-    };
-    const renderJsonValue = (value: any) => {
-        if (Array.isArray(value)) {
-            if (!value.length) return '—';
-            return (
-                <div className="flex flex-wrap gap-1">
-                    {value.map((item, idx) => (
-                        <span key={idx} className="text-text-default">
-                            {typeof item === 'object' ? JSON.stringify(item) : item}
-                        </span>
-                    ))}
-                </div>
-            );
-        }
-        if (value === null || value === undefined || value === '') return '—';
-        if (typeof value === 'object') return JSON.stringify(value);
-        return String(value);
-    };
     useEffect(() => {
         if (!isOpen || !tag?.id) {
             setHistoryEntries([]);
@@ -474,6 +591,7 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
                 const baseUrl = apiBase || '';
                 const res = await fetch(`${baseUrl}/api/tags/${tag.id}/history`, {
                     signal: controller.signal,
+                    headers: authHeaders(),
                 });
                 if (!res.ok) {
                     throw new Error('Failed to fetch history');
@@ -957,12 +1075,13 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
                             </div>
 
                              <div className="bg-bg-card p-5 rounded-xl border border-border-default space-y-4">
-                                <h3 className="font-bold text-text-default">דומיינים מקושרים (CSV)</h3>
-                                <textarea 
-                                    value={formData.domains.join(', ')} 
-                                    onChange={(e) => setFormData(prev => ({...prev, domains: e.target.value.split(',').map(s => s.trim()).filter(Boolean)}))}
-                                    className="w-full bg-bg-input border border-border-default rounded-lg p-3 text-sm h-20 resize-none"
-                                    placeholder="הייטק, פיננסים, שירות לקוחות..."
+                                <h3 className="font-bold text-text-default">דומיינים מקושרים</h3>
+                                <p className="text-xs text-text-muted">בחר מתוך רשימת הדומיינים המוגדרת במערכת (פיקליסט)</p>
+                                <DomainPicklistField
+                                    selected={formData.domains || []}
+                                    options={domainPicklistOptions}
+                                    loading={domainPicklistLoading}
+                                    onChange={(domains) => setFormData((prev) => ({ ...prev, domains }))}
                                 />
                             </div>
                         </div>
@@ -975,37 +1094,28 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
                             {!historyLoading && historyEntries.length === 0 && (
                                 <div className="p-4 text-center text-text-muted">אין היסטוריית עדכונים</div>
                             )}
-                            {!historyLoading && historyEntries.map(entry => {
-                                const diffRows = getHistoryDiffRows(entry);
-                                const payload = getSanitizedHistoryPayload(entry);
-                                return (
-                                <div key={entry.id} className="border border-border-default rounded-xl p-3 bg-bg-card/70">
-                                       
-                                        <details className="mt-3 text-[10px]">
-                                            <summary className="font-semibold text-primary-600 cursor-pointer">JSON של השינוי</summary>
-                                            <div className="mt-2 grid gap-4 text-[11px]">
-                                                {(['before', 'after'] as const).map((key) => {
-                                                    const section = payload[key] || {};
-                                                    const entries = Object.entries(section);
-                                                    return (
-                                                        <div key={key} className="bg-bg-input rounded-xl p-3 space-y-2">
-                                                            <div className="text-[10px] font-semibold text-text-muted uppercase">{key}</div>
-                                                            {entries.length ? entries.map(([field, value]) => (
-                                                                <div key={field} className="grid grid-cols-[90px,1fr] gap-1 text-[10px]">
-                                                                    <div className="text-text-muted">{field}</div>
-                                                                    <div className="text-text-default">{renderJsonValue(value)}</div>
-                                                                </div>
-                                                            )) : (
-                                                                <div className="text-text-muted">אין נתונים</div>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        </details>
+                            {!historyLoading && historyEntries.length > 0 && (
+                                <>
+                                    <div className="hidden md:grid md:grid-cols-[minmax(140px,1fr)_minmax(140px,1fr)_100px_minmax(0,2fr)] gap-4 px-1 pb-2 text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                                        <span>מתי</span>
+                                        <span>מי</span>
+                                        <span>פעולה</span>
+                                        <span>תיאור השינוי</span>
                                     </div>
-                                );
-                            })}
+                                    {historyEntries.map(entry => (
+                                        <AuditHistoryRow
+                                            key={entry.id}
+                                            timestamp={resolveEntryTimestamp(entry as Record<string, unknown>)}
+                                            actor={entry.actor}
+                                            actorDisplayName={entry.actorDisplayName}
+                                            userName={entry.userName}
+                                            userEmail={entry.userEmail}
+                                            actionLabel={formatTagHistoryActionType(entry)}
+                                            description={formatTagHistoryDescription(entry)}
+                                        />
+                                    ))}
+                                </>
+                            )}
                         </div>
                     )}
                 </div>
@@ -1025,9 +1135,11 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({ isOpen, onClose, tag, o
 const PICKLIST_CATEGORY_ID = '7605ff08-fc40-49ef-9e90-4c6490c5c25c';
 
 const AdminTagsView: React.FC = () => {
+    const [searchParams] = useSearchParams();
+    const readUrlSearch = () => (searchParams.get('search') || searchParams.get('q') || '').trim();
     const [tags, setTags] = useState<Tag[]>([]);
-    const [searchTerm, setSearchTerm] = useState('');
-    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState('');
+    const [searchTerm, setSearchTerm] = useState(() => readUrlSearch());
+    const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => readUrlSearch());
     const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
     const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
     const [selectedStatuses, setSelectedStatuses] = useState<TagStatus[]>([]);
@@ -1051,19 +1163,24 @@ const AdminTagsView: React.FC = () => {
     const [newSynTypes, setNewSynTypes] = useState<Record<number, 'synonym' | 'alias' | 'abbreviation'>>({});
     const [isSynSaving, setIsSynSaving] = useState(false);
     const [blockingCandidates, setBlockingCandidates] = useState<BlockingCandidate[]>([]);
+    const [blockingJobs, setBlockingJobs] = useState<BlockingJob[]>([]);
     const [isBlockingModalOpen, setIsBlockingModalOpen] = useState(false);
     const [pendingTagDelete, setPendingTagDelete] = useState<Tag | null>(null);
     const [isResolvingBlocking, setIsResolvingBlocking] = useState(false);
     const [blockingError, setBlockingError] = useState<string | null>(null);
     const [deleteErrorMessage, setDeleteErrorMessage] = useState<string | null>(null);
     const [blockingSearch, setBlockingSearch] = useState('');
+    const [blockingJobSearch, setBlockingJobSearch] = useState('');
     const [isDeleteErrorModalOpen, setIsDeleteErrorModalOpen] = useState(false);
     const [candidateActions, setCandidateActions] = useState<Record<string, { action: 'delete' | 'reassign'; targetTagId: string | null }>>({});
+    const [jobActions, setJobActions] = useState<Record<string, { action: 'delete' | 'reassign'; targetTagId: string | null }>>({});
     const [bulkDropdownOpen, setBulkDropdownOpen] = useState(false);
     const [inlineDropdownOpenFor, setInlineDropdownOpenFor] = useState<string | null>(null);
     const bulkDropdownRef = useRef<HTMLDivElement>(null);
     const inlineDropdownRef = useRef<HTMLDivElement | null>(null);
-    const [typePicklistOptions, setTypePicklistOptions] = useState<{ label: string; value: string }[]>([]);
+    const [typePicklistOptions, setTypePicklistOptions] = useState<PicklistOption[]>([]);
+    const [domainPicklistOptions, setDomainPicklistOptions] = useState<PicklistOption[]>([]);
+    const [domainPicklistLoading, setDomainPicklistLoading] = useState(false);
     const [typeDropdownOpen, setTypeDropdownOpen] = useState(false);
     const [categoryDropdownOpen, setCategoryDropdownOpen] = useState(false);
     const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
@@ -1101,6 +1218,14 @@ const AdminTagsView: React.FC = () => {
         const t = setTimeout(() => setDebouncedSearchTerm(searchTerm.trim()), 300);
         return () => clearTimeout(t);
     }, [searchTerm]);
+
+    const urlSearch = readUrlSearch();
+    useEffect(() => {
+        if (!urlSearch) return;
+        setSearchTerm(urlSearch);
+        setDebouncedSearchTerm(urlSearch);
+    }, [urlSearch]);
+
     const resolveSuggestedType = useCallback((suggestion: any) => {
         const normalize = (value?: string) => (value || '').toString().trim().toLowerCase();
         const picklist = typePicklistOptions || [];
@@ -1187,6 +1312,7 @@ const AdminTagsView: React.FC = () => {
         displayNameEn: { label: 'שם (אנגלית)' },
         type: { label: 'סוג' },
         category: { label: 'קטגוריה' },
+        synonyms: { label: 'מילים נרדפות' },
         status: { label: 'סטטוס' },
         updatedAt: { label: 'תאריך' },
         source: { label: 'מקור' },
@@ -1249,6 +1375,12 @@ const AdminTagsView: React.FC = () => {
             case 'category':
                 return (
                     <td className="p-4 text-text-muted break-words">{tag.category}</td>
+                );
+            case 'synonyms':
+                return (
+                    <td className="p-4 align-top min-w-[220px] max-w-[320px]">
+                        <TagSynonymsPills tag={tag} />
+                    </td>
                 );
             case 'status':
                 return (
@@ -1414,9 +1546,11 @@ const AdminTagsView: React.FC = () => {
         ],
     );
     const prevListQueryKeyRef = useRef(listQueryKey);
+    const fetchGenerationRef = useRef(0);
 
     const fetchTags = useCallback(async (targetPage: number) => {
         if (!apiBase) return;
+        const generation = ++fetchGenerationRef.current;
         setLoading(true);
         setError(null);
         try {
@@ -1432,7 +1566,9 @@ const AdminTagsView: React.FC = () => {
             if (activityFrom) params.set('activityFrom', activityFrom);
             if (activityTo) params.set('activityTo', activityTo);
             const currentSortKey = sortConfig.key || 'tagKey';
-            const serverSortKey = currentSortKey === 'jobUsageCount' ? 'tagKey' : currentSortKey;
+            const serverSortKey = currentSortKey === 'jobUsageCount' || currentSortKey === 'synonyms'
+                ? 'tagKey'
+                : currentSortKey;
             params.set('sort', serverSortKey);
             params.set('direction', sortConfig.direction);
             const res = await fetch(`${apiBase}/api/tags?${params.toString()}`, {
@@ -1440,6 +1576,7 @@ const AdminTagsView: React.FC = () => {
             });
             if (!res.ok) throw new Error('Failed to load tags');
             const payload = await res.json();
+            if (generation !== fetchGenerationRef.current) return;
             const data = Array.isArray(payload.data)
                 ? payload.data
                 : Array.isArray(payload)
@@ -1449,11 +1586,14 @@ const AdminTagsView: React.FC = () => {
             setTotalRecords(Number(payload.total ?? payload?.data?.length ?? data.length));
             refreshUsageCounts(data.map((tag: Tag) => tag.id));
         } catch (err: any) {
+            if (generation !== fetchGenerationRef.current) return;
             setError(err.message || 'Load failed');
             setTags([]);
             setTotalRecords(0);
         } finally {
-            setLoading(false);
+            if (generation === fetchGenerationRef.current) {
+                setLoading(false);
+            }
         }
     }, [
         apiBase,
@@ -1510,6 +1650,24 @@ const AdminTagsView: React.FC = () => {
     useEffect(() => {
         loadTypeOptions();
     }, [loadTypeOptions]);
+
+    const loadDomainOptions = useCallback(async () => {
+        if (!apiBase) return;
+        setDomainPicklistLoading(true);
+        try {
+            const rows = await fetchPicklistCategoryValues(apiBase, TAG_DOMAIN_PICKLIST_CATEGORY_ID);
+            setDomainPicklistOptions(normalizePicklistOptions(rows));
+        } catch (err) {
+            console.error('[AdminTagsView] failed to load domain picklist', err);
+            setDomainPicklistOptions([]);
+        } finally {
+            setDomainPicklistLoading(false);
+        }
+    }, [apiBase]);
+
+    useEffect(() => {
+        loadDomainOptions();
+    }, [loadDomainOptions]);
 
     const computeCollisions = useCallback((allTags: Tag[]): { collisionTags: Tag[]; sharedPhrases: Record<string, string[]> } => {
         const phraseToTagIds = new Map<string, string[]>();
@@ -1660,6 +1818,9 @@ const AdminTagsView: React.FC = () => {
         return tags.filter(tag => tag.id !== pendingTagDelete.id);
     }, [tags, pendingTagDelete]);
 
+    const tagDisplayWithType = (tag?: Tag | null) =>
+        getTagDisplayName(tag, { includeType: true, typeOptions: typePicklistOptions });
+
     const filteredReassignOptions = useMemo(() => {
         const query = bulkTagSearch.trim().toLowerCase();
         if (!query) return availableReassignTags;
@@ -1691,16 +1852,23 @@ const AdminTagsView: React.FC = () => {
     }, [bulkActionType, availableReassignTags]);
 
     const hasReassignWithoutTarget = useMemo(() => {
-        return blockingCandidates.some(candidate => {
+        const candidateMissing = blockingCandidates.some(candidate => {
             const id = candidate.candidate_tag_id || candidate.candidateTagId;
             if (!id) return false;
             const actionEntry = candidateActions[id];
             return actionEntry?.action === 'reassign' && !actionEntry.targetTagId;
         });
-    }, [blockingCandidates, candidateActions]);
+        const jobMissing = blockingJobs.some(job => {
+            const id = job.job_tag_id || job.jobTagId;
+            if (!id) return false;
+            const actionEntry = jobActions[id];
+            return actionEntry?.action === 'reassign' && !actionEntry.targetTagId;
+        });
+        return candidateMissing || jobMissing;
+    }, [blockingCandidates, candidateActions, blockingJobs, jobActions]);
 
     const applyBulkAction = () => {
-        if (!blockingCandidates.length) return;
+        if (!blockingCandidates.length && !blockingJobs.length) return;
         if (bulkActionType === 'reassign' && !bulkTargetTagId) {
             setBlockingError('אנא בחר תגית יעד לפני החלת שינוי גורף');
             return;
@@ -1713,6 +1881,14 @@ const AdminTagsView: React.FC = () => {
                 targetTagId: bulkActionType === 'reassign' ? bulkTargetTagId : null,
             });
         });
+        blockingJobs.forEach(job => {
+            const jobTagId = job.job_tag_id || job.jobTagId;
+            if (!jobTagId) return;
+            updateJobAction(jobTagId, {
+                action: bulkActionType,
+                targetTagId: bulkActionType === 'reassign' ? bulkTargetTagId : null,
+            });
+        });
     };
 
     const updateCandidateAction = (candidateTagId: string, updates: Partial<{ action: 'delete' | 'reassign'; targetTagId: string | null }>) => {
@@ -1720,6 +1896,16 @@ const AdminTagsView: React.FC = () => {
             ...prev,
             [candidateTagId]: {
                 ...(prev[candidateTagId] || { action: 'delete', targetTagId: null }),
+                ...updates,
+            },
+        }));
+    };
+
+    const updateJobAction = (jobTagId: string, updates: Partial<{ action: 'delete' | 'reassign'; targetTagId: string | null }>) => {
+        setJobActions(prev => ({
+            ...prev,
+            [jobTagId]: {
+                ...(prev[jobTagId] || { action: 'delete', targetTagId: null }),
                 ...updates,
             },
         }));
@@ -1779,7 +1965,7 @@ const AdminTagsView: React.FC = () => {
             if (editingTag) {
                 const res = await fetch(`${apiBase}/api/tags/${editingTag.id}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
                     body: JSON.stringify(payload),
                 });
                 await extractServerMessage(res, 'Update failed');
@@ -1788,7 +1974,7 @@ const AdminTagsView: React.FC = () => {
             } else {
                 const res = await fetch(`${apiBase}/api/tags`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
                     body: JSON.stringify(payload),
                 });
                 await extractServerMessage(res, 'Create failed');
@@ -1805,7 +1991,7 @@ const AdminTagsView: React.FC = () => {
     };
     
     const deleteTagById = async (id: string) => {
-        const res = await fetch(`${apiBase}/api/tags/${id}`, { method: 'DELETE' });
+        const res = await fetch(`${apiBase}/api/tags/${id}`, { method: 'DELETE', headers: authHeaders() });
         if (res.ok) return;
         const text = await res.text();
         let payload: any = { message: text };
@@ -1823,10 +2009,20 @@ const AdminTagsView: React.FC = () => {
     };
 
     const openBlockingModal = (tag: Tag, payload: any) => {
+        const candidates = Array.isArray(payload.candidates) ? payload.candidates : [];
+        const jobs = Array.isArray(payload.jobs) ? payload.jobs : [];
         setPendingTagDelete(tag);
-        setBlockingCandidates(payload.candidates);
-        setCandidateActions(payload.candidates.reduce((acc: Record<string, { action: 'delete' | 'reassign'; targetTagId: string | null }>, candidate: BlockingCandidate) => {
+        setBlockingCandidates(candidates);
+        setBlockingJobs(jobs);
+        setCandidateActions(candidates.reduce((acc: Record<string, { action: 'delete' | 'reassign'; targetTagId: string | null }>, candidate: BlockingCandidate) => {
             const key = candidate.candidate_tag_id || candidate.candidateTagId;
+            if (key) {
+                acc[key] = { action: 'delete', targetTagId: null };
+            }
+            return acc;
+        }, {}));
+        setJobActions(jobs.reduce((acc: Record<string, { action: 'delete' | 'reassign'; targetTagId: string | null }>, job: BlockingJob) => {
+            const key = job.job_tag_id || job.jobTagId;
             if (key) {
                 acc[key] = { action: 'delete', targetTagId: null };
             }
@@ -1834,7 +2030,14 @@ const AdminTagsView: React.FC = () => {
         }, {}));
         setBlockingError(payload.helperError || null);
         setBlockingSearch('');
+        setBlockingJobSearch('');
         setIsBlockingModalOpen(true);
+    };
+
+    const hasBlockingUsage = (payload: any) => {
+        const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+        const jobs = Array.isArray(payload?.jobs) ? payload.jobs : [];
+        return candidates.length > 0 || jobs.length > 0;
     };
 
     const handleDelete = async (tag: Tag) => {
@@ -1852,7 +2055,7 @@ const AdminTagsView: React.FC = () => {
         } catch (err: any) {
             setTags(prevTags);
             const payload = err.payload;
-            if (payload?.candidates && payload.candidates.length) {
+            if (hasBlockingUsage(payload)) {
                 openBlockingModal(tag, payload);
                 return;
             }
@@ -1866,8 +2069,10 @@ const AdminTagsView: React.FC = () => {
         return candidate.fullName || candidate.full_name || candidate.email || candidate.phone || 'ללא שם';
     };
 
-    const getUsageCandidateName = (entry: UsageCandidate) => {
-        return entry.candidate?.fullName || 'ללא שם';
+    const getJobDisplayName = (job: BlockingJob) => {
+        const title = job.title?.trim() || 'ללא כותרת';
+        const client = job.client?.trim();
+        return client ? `${title} · ${client}` : title;
     };
 
     const filteredBlockingCandidates = useMemo(() => {
@@ -1878,9 +2083,19 @@ const AdminTagsView: React.FC = () => {
         );
     }, [blockingCandidates, blockingSearch]);
 
+    const filteredBlockingJobs = useMemo(() => {
+        const normalized = blockingJobSearch.trim().toLowerCase();
+        if (!normalized) return blockingJobs;
+        return blockingJobs.filter(job =>
+            getJobDisplayName(job).toLowerCase().includes(normalized)
+        );
+    }, [blockingJobs, blockingJobSearch]);
+
     const resetBlockingForm = () => {
         setBlockingCandidates([]);
+        setBlockingJobs([]);
         setCandidateActions({});
+        setJobActions({});
         setBlockingError(null);
         setBulkActionType('delete');
         setBulkTargetTagId('');
@@ -1899,7 +2114,7 @@ const AdminTagsView: React.FC = () => {
     };
 
     const resolveBlockingCandidates = async () => {
-        if (!pendingTagDelete || !blockingCandidates.length) return;
+        if (!pendingTagDelete || (!blockingCandidates.length && !blockingJobs.length)) return;
         setIsResolvingBlocking(true);
         setBlockingError(null);
         const prevTags = [...tags];
@@ -1920,10 +2135,45 @@ const AdminTagsView: React.FC = () => {
                 })
                 .filter(Boolean) as { candidateTagId: string; action: 'delete' | 'reassign'; targetTagId: string | null }[];
 
+            const jobActionsPayload = blockingJobs
+                .map(entry => {
+                    const jobTagId = entry.job_tag_id || entry.jobTagId;
+                    if (!jobTagId) return null;
+                    const action = jobActions[jobTagId] || { action: 'delete', targetTagId: null };
+                    if (action.action === 'reassign' && !action.targetTagId) {
+                        throw new Error('אנא בחר תגית יעד לכל משרה שמשנים');
+                    }
+                    return {
+                        jobTagId,
+                        action: action.action,
+                        targetTagId: action.targetTagId,
+                    };
+                })
+                .filter(Boolean) as { jobTagId: string; action: 'delete' | 'reassign'; targetTagId: string | null }[];
+
+            const allResolved = [...actions, ...jobActionsPayload];
+            const hasReassign = allResolved.some((row) => row.action === 'reassign');
+            const mergeTargetId =
+                allResolved.find((row) => row.action === 'reassign' && row.targetTagId)?.targetTagId ||
+                bulkTargetTagId ||
+                null;
+            const mergeTargetTag = mergeTargetId ? tags.find((t) => t.id === mergeTargetId) : null;
+
             const res = await fetch(`${apiBase}/api/admin/candidate-tags/bulk-update`, {
                 method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ actions }),
+                        headers: authHeaders(true),
+                body: JSON.stringify({
+                    actions,
+                    jobActions: jobActionsPayload,
+                    deletionContext: {
+                        tagId: pendingTagDelete.id,
+                        mode: hasReassign ? 'merge' : 'force',
+                        targetTagId: hasReassign ? mergeTargetId : null,
+                        targetTagName: mergeTargetTag ? getTagDisplayName(mergeTargetTag) : null,
+                        candidateCount: blockingCandidates.length,
+                        jobCount: blockingJobs.length,
+                    },
+                }),
                     });
                     if (!res.ok) throw new Error(await res.text() || 'Request failed');
 
@@ -1933,7 +2183,7 @@ const AdminTagsView: React.FC = () => {
             closeBlockingModal();
         } catch (err: any) {
             setTags(prevTags);
-            setBlockingError(err.message || 'Failed to update candidate associations');
+            setBlockingError(err.message || 'Failed to update tag associations');
         } finally {
             setIsResolvingBlocking(false);
         }
@@ -2070,36 +2320,43 @@ const AdminTagsView: React.FC = () => {
         const selected = tags.filter((t) => selectedTagIds.has(t.id));
         if (!selected.length) return;
 
-        const columns = columnOrder.map((key) => ({
-            key,
-            label: columnMeta[key].label,
-            getValue: (tag: Tag) => {
-                switch (key) {
-                    case 'tagKey':
-                        return tag.tagKey;
-                    case 'displayNameHe':
-                        return tag.displayNameHe;
-                    case 'displayNameEn':
-                        return tag.displayNameEn;
-                    case 'type':
-                        return tag.type;
-                    case 'category':
-                        return tag.category;
-                    case 'status':
-                        return `${tag.status} / ${tag.qualityState}`;
-                    case 'updatedAt':
-                        return formatDateTime(tag.updatedAt || tag.updated_at);
-                    case 'source':
-                        return getSourceDisplayName(tag.source);
-                    case 'usageCount':
-                        return String(getCandidateUsageCount(tag));
-                    case 'jobUsageCount':
-                        return String(getJobUsageCount(tag));
-                    default:
-                        return '';
-                }
+        const columns = [
+            ...columnOrder.map((key) => ({
+                key,
+                label: columnMeta[key].label,
+                getValue: (tag: Tag) => {
+                    switch (key) {
+                        case 'tagKey':
+                            return tag.tagKey;
+                        case 'displayNameHe':
+                            return tag.displayNameHe;
+                        case 'displayNameEn':
+                            return tag.displayNameEn;
+                        case 'type':
+                            return tag.type;
+                        case 'category':
+                            return tag.category;
+                        case 'status':
+                            return `${tag.status} / ${tag.qualityState}`;
+                        case 'updatedAt':
+                            return formatDateTime(tag.updatedAt || tag.updated_at);
+                        case 'source':
+                            return getSourceDisplayName(tag.source);
+                        case 'usageCount':
+                            return String(getCandidateUsageCount(tag));
+                        case 'jobUsageCount':
+                            return String(getJobUsageCount(tag));
+                        default:
+                            return '';
+                    }
+                },
+            })),
+            {
+                key: 'synonyms',
+                label: columnMeta.synonyms.label,
+                getValue: (tag: Tag) => formatTagSynonymsForExport(tag),
             },
-        }));
+        ];
 
         const stamp = new Date().toISOString().slice(0, 10);
         downloadRowsAsXlsx(selected, columns, `tags_${stamp}.xlsx`);
@@ -2171,7 +2428,7 @@ const AdminTagsView: React.FC = () => {
             const message: string = err instanceof Error ? err.message : 'Delete failed';
             setTags(preserved);
             const payload = err?.payload;
-            if (payload?.candidates && payload.candidates.length) {
+            if (hasBlockingUsage(payload)) {
                 const failedTag = preserved.find(t => t.id === err?.failingId) || preserved[0];
                 if (failedTag) {
                     openBlockingModal(failedTag, payload);
@@ -2575,6 +2832,15 @@ const AdminTagsView: React.FC = () => {
                                     </th>
                                 ))}
                                 <th className="p-4 w-[8%]"></th>
+                                <th
+                                    className="p-4 cursor-pointer select-none min-w-[220px]"
+                                    onClick={() => toggleSort('synonyms')}
+                                >
+                                    <div className="flex items-center justify-between gap-1">
+                                        <span>{columnMeta.synonyms.label}</span>
+                                        {renderSortIndicator('synonyms')}
+                                    </div>
+                                </th>
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
@@ -2606,6 +2872,7 @@ const AdminTagsView: React.FC = () => {
                                             </div>
                                         )}
                                     </td>
+                                    {renderColumnCell(tag, 'synonyms')}
                                 </tr>
                             ))}
                         </tbody>
@@ -2663,6 +2930,8 @@ const AdminTagsView: React.FC = () => {
                 allTags={tags}
                 tagNameOptions={tagNameOptions}
                 typePicklistOptions={typePicklistOptions}
+                domainPicklistOptions={domainPicklistOptions}
+                domainPicklistLoading={domainPicklistLoading}
             />
 
             <HiroAIChat
@@ -2671,14 +2940,16 @@ const AdminTagsView: React.FC = () => {
                 tagsText={tags.map(t => `${t.displayNameHe} (${t.category})`).join(', ')}
             />
 
-            {/* Blocking candidates modal */}
+            {/* Blocking tag usage modal */}
             {isBlockingModalOpen && pendingTagDelete && (
                 <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[130] flex items-center justify-center p-4">
                     <div className="bg-white rounded-2xl shadow-2xl border border-border-default w-full max-w-2xl max-h-[80vh] overflow-hidden">
                         <div className="flex items-center justify-between p-4 border-b border-border-default bg-bg-subtle/40">
                             <div>
                                 <h3 className="text-lg font-bold text-text-default">התגית נעולה</h3>
-                                <p className="text-sm text-text-muted">מועמדים שמחזיקים את התגית "{pendingTagDelete.displayNameHe}" עדיין קושרים אותה.</p>
+                                <p className="text-sm text-text-muted">
+                                    התגית "{pendingTagDelete.displayNameHe}" משויכת ל-{blockingCandidates.length} מועמדים ו-{blockingJobs.length} משרות.
+                                </p>
                             </div>
                             <button
                                 onClick={() => !isResolvingBlocking && closeBlockingModal()}
@@ -2690,8 +2961,8 @@ const AdminTagsView: React.FC = () => {
                         </div>
                         <div className="p-4 space-y-4 max-h-[60vh] overflow-y-auto">
                             <div className="space-y-1">
-                                <div className="text-sm font-semibold">מה עושים עם המועמדים?</div>
-                                <p className="text-xs text-text-muted">בחרו לכל מועמד אם להסיר את התגית או להעביר אותו לתגית אחרת, ואז לחצו שמירה.</p>
+                                <div className="text-sm font-semibold">מה עושים עם הקישורים?</div>
+                                <p className="text-xs text-text-muted">בחרו לכל מועמד/משרה אם להסיר את התגית או להעביר לתגית אחרת, או השתמשו ב"החל על כולם".</p>
                             </div>
                         <div className="bg-bg-card border border-border-default rounded-xl px-4 py-3 space-y-2 text-xs">
                             <div className="font-semibold text-text-default">החל על כולם</div>
@@ -2718,7 +2989,7 @@ const AdminTagsView: React.FC = () => {
                                             >
                                                 <span>
                                                     {bulkTargetTagId
-                                                        ? getTagDisplayName(tags.find(t => t.id === bulkTargetTagId) || null)
+                                                        ? tagDisplayWithType(tags.find(t => t.id === bulkTargetTagId) || null)
                                                         : 'בחר תגית יעד'}
                                                 </span>
                                                 <ChevronDownIcon className={`w-4 h-4 transition ${bulkDropdownOpen ? 'rotate-180' : ''}`} />
@@ -2745,7 +3016,7 @@ const AdminTagsView: React.FC = () => {
                                                                 }}
                                                                 className="w-full text-left px-3 py-2 text-xs hover:bg-bg-subtle"
                                                             >
-                                                                {getTagDisplayName(tag)}
+                                                                {tagDisplayWithType(tag)}
                                                             </button>
                                                         ))}
                                                         {!filteredReassignOptions.length && (
@@ -2765,6 +3036,8 @@ const AdminTagsView: React.FC = () => {
                                 </button>
                             </div>
                             </div>
+                            {blockingCandidates.length > 0 && (
+                            <>
                             <div>
                                 <input
                                     type="text"
@@ -2775,6 +3048,7 @@ const AdminTagsView: React.FC = () => {
                                 />
                             </div>
                             <div className="bg-bg-card rounded-xl border border-border-default overflow-hidden">
+                                <div className="px-3 py-2 text-xs font-bold text-text-muted border-b border-border-subtle">מועמדים ({blockingCandidates.length})</div>
                                 <table className="w-full text-sm text-right">
                                     <thead className="bg-bg-subtle text-text-muted text-xs uppercase">
                                         <tr>
@@ -2809,7 +3083,7 @@ const AdminTagsView: React.FC = () => {
                                                                     >
                                                                         <span>
                                                                             {actionEntry?.targetTagId
-                                                                                ? getTagDisplayName(tags.find(t => t.id === actionEntry.targetTagId) || null)
+                                                                                ? tagDisplayWithType(tags.find(t => t.id === actionEntry.targetTagId) || null)
                                                                                 : 'בחר תגית יעד'}
                                                                         </span>
                                                                         <ChevronDownIcon className={`w-4 h-4 transition ${inlineDropdownOpenFor === candidateTagId ? 'rotate-180' : ''}`} />
@@ -2836,7 +3110,7 @@ const AdminTagsView: React.FC = () => {
                                                                                         }}
                                                                                         className="w-full text-left px-3 py-2 text-xs hover:bg-bg-subtle"
                                                                                     >
-                                                                                        {getTagDisplayName(tag)}
+                                                                                        {tagDisplayWithType(tag)}
                                                                                     </button>
                                                                                 ))}
                                                                                 {!filteredInlineOptions.length && (
@@ -2864,6 +3138,113 @@ const AdminTagsView: React.FC = () => {
                                     </tbody>
                                 </table>
                             </div>
+                            </>
+                            )}
+                            {blockingJobs.length > 0 && (
+                            <>
+                            <div>
+                                <input
+                                    type="text"
+                                    value={blockingJobSearch}
+                                    onChange={(e) => setBlockingJobSearch(e.target.value)}
+                                    placeholder="חפש משרה..."
+                                    className="w-full bg-white border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                                />
+                            </div>
+                            <div className="bg-bg-card rounded-xl border border-border-default overflow-hidden">
+                                <div className="px-3 py-2 text-xs font-bold text-text-muted border-b border-border-subtle">משרות ({blockingJobs.length})</div>
+                                <table className="w-full text-sm text-right">
+                                    <thead className="bg-bg-subtle text-text-muted text-xs uppercase">
+                                        <tr>
+                                            <th className="p-3">משרה</th>
+                                            <th className="p-3 w-[220px]">פעולה</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-border-subtle">
+                                        {filteredBlockingJobs.map(job => {
+                                            const jobTagId = job.job_tag_id || job.jobTagId;
+                                            const actionEntry = jobTagId ? jobActions[jobTagId] : undefined;
+                                            const selectedAction = actionEntry?.action || 'delete';
+                                            const inlineKey = jobTagId ? `job-${jobTagId}` : null;
+                                            return (
+                                                <tr key={jobTagId || Math.random()}>
+                                                    <td className="p-3 font-medium">{getJobDisplayName(job)}</td>
+                                                    <td className="p-3 text-xs text-text-muted">
+                                                        <div className="space-y-2">
+                                                            <select
+                                                                value={selectedAction}
+                                                                onChange={(e) => jobTagId && updateJobAction(jobTagId, { action: e.target.value as 'delete' | 'reassign' })}
+                                                                className="w-full bg-bg-input border border-border-default rounded-xl py-1.5 px-3 text-sm"
+                                                            >
+                                                                <option value="delete">הסר את התגית</option>
+                                                                <option value="reassign">העבר תגית</option>
+                                                            </select>
+                                                            {selectedAction === 'reassign' && jobTagId && (
+                                                                <div className="relative" ref={inlineDropdownOpenFor === inlineKey ? inlineDropdownRef : null}>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => setInlineDropdownOpenFor(prev => (prev === inlineKey ? null : inlineKey))}
+                                                                        className="w-full bg-bg-input border border-border-default rounded-xl py-1.5 px-3 text-xs text-left flex items-center justify-between"
+                                                                    >
+                                                                        <span>
+                                                                            {actionEntry?.targetTagId
+                                                                                ? tagDisplayWithType(tags.find(t => t.id === actionEntry.targetTagId) || null)
+                                                                                : 'בחר תגית יעד'}
+                                                                        </span>
+                                                                        <ChevronDownIcon className={`w-4 h-4 transition ${inlineDropdownOpenFor === inlineKey ? 'rotate-180' : ''}`} />
+                                                                    </button>
+                                                                    {inlineDropdownOpenFor === inlineKey && (
+                                                                        <div className="mt-2 bg-white border border-border-default rounded-xl shadow-lg">
+                                                                            <div className="px-3 pt-3">
+                                                                                <input
+                                                                                    type="text"
+                                                                                    value={inlineTagSearch}
+                                                                                    onChange={(e) => setInlineTagSearch(e.target.value)}
+                                                                                    placeholder="חפש תגית יעד"
+                                                                                    className="w-full bg-bg-input border border-border-default rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-primary-500 transition"
+                                                                                />
+                                                                            </div>
+                                                                            <div className="max-h-48 overflow-y-auto">
+                                                                                {filteredInlineOptions.map(tag => (
+                                                                                    <button
+                                                                                        key={tag.id}
+                                                                                        type="button"
+                                                                                        onClick={() => {
+                                                                                            updateJobAction(jobTagId, { targetTagId: tag.id });
+                                                                                            setInlineDropdownOpenFor(null);
+                                                                                        }}
+                                                                                        className="w-full text-left px-3 py-2 text-xs hover:bg-bg-subtle"
+                                                                                    >
+                                                                                        {tagDisplayWithType(tag)}
+                                                                                    </button>
+                                                                                ))}
+                                                                                {!filteredInlineOptions.length && (
+                                                                                    <div className="px-3 py-2 text-xs text-text-muted">לא נמצאו תגיות</div>
+                                                                                )}
+                                                                            </div>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {(filteredBlockingJobs.length === 0) && (
+                                            <tr>
+                                                <td colSpan={2} className="p-4 text-center text-text-muted">
+                                                    {blockingJobs.length === 0
+                                                        ? 'אין משרות רשומות'
+                                                        : 'לא נמצאו משרות שתואמות לחיפוש'}
+                                                </td>
+                                            </tr>
+                                        )}
+                                    </tbody>
+                                </table>
+                            </div>
+                            </>
+                            )}
                             {blockingError && (
                                 <div className="text-xs text-red-600">{blockingError}</div>
                             )}
@@ -3001,11 +3382,13 @@ const AdminTagsView: React.FC = () => {
                                             />
                                         </div>
                                         <div className="md:col-span-2">
-                                            <label className="block text-xs text-text-subtle mb-1">דומיינים (Comma separated)</label>
-                                            <input 
-                                                value={Array.isArray(sugg.domains) ? sugg.domains.join(', ') : sugg.domains || ''} 
-                                                onChange={(e) => setAiSuggestions(prev => prev.map((item, i) => i === idx ? { ...item, domains: e.target.value.split(',').map(d => d.trim()).filter(Boolean) } : item))} 
-                                                className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm"
+                                            <label className="block text-xs text-text-subtle mb-1">דומיינים מקושרים</label>
+                                            <DomainPicklistField
+                                                compact
+                                                selected={Array.isArray(sugg.domains) ? sugg.domains : []}
+                                                options={domainPicklistOptions}
+                                                loading={domainPicklistLoading}
+                                                onChange={(domains) => setAiSuggestions((prev) => prev.map((item, i) => (i === idx ? { ...item, domains } : item)))}
                                             />
                                         </div>
                                     </div>

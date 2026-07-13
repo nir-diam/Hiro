@@ -4,8 +4,9 @@ import {
     MagnifyingGlassIcon, Cog6ToothIcon, Squares2X2Icon, TableCellsIcon,
     PencilIcon, PaperAirplaneIcon, ChevronDownIcon, CheckCircleIcon,
     ClockIcon, DocumentArrowDownIcon, ExclamationTriangleIcon,
-    AdjustmentsHorizontalIcon, FunnelIcon, TrophyIcon, ArrowPathIcon
+    AdjustmentsHorizontalIcon, FunnelIcon, TrophyIcon, ArrowPathIcon, BuildingOffice2Icon
 } from './Icons';
+import SearchableSelect from './SearchableSelect';
 import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
@@ -13,6 +14,7 @@ import { type Job } from './JobsView';
 import type { Candidate } from './CandidatesListView';
 import { useAuth } from '../context/AuthContext';
 import { useLanguage } from '../context/LanguageContext';
+import { authHeaders } from '../utils/authHeaders';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 type ReferralStatus =
@@ -602,6 +604,8 @@ const userLabelsFromRows = (
 const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask, onOpenCandidateSummary }) => {
     const { user } = useAuth();
     const { t } = useLanguage();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const isTenantUser = Boolean(user?.clientId) && !isPlatformAdmin;
     const today = new Date();
     const thirtyDaysAgo = new Date(new Date().setDate(today.getDate() - 30));
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -651,6 +655,8 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     const [jobs, setJobs] = useState<Job[]>([]);
     const [jobsListLoading, setJobsListLoading] = useState(false);
     const [apiClientLabels, setApiClientLabels] = useState<string[]>([]);
+    const [clientOptions, setClientOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [adminClientId, setAdminClientId] = useState<string | null>(null);
     const [clientsListLoading, setClientsListLoading] = useState(false);
     const [coordinatorApiLabels, setCoordinatorApiLabels] = useState<string[]>([]);
     const [coordinatorsListLoading, setCoordinatorsListLoading] = useState(false);
@@ -698,12 +704,11 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         setJobsListLoading(true);
         (async () => {
             try {
-                const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
-                const res = await fetch(`${apiBase}/api/jobs`, {
-                    headers: {
-                        Accept: 'application/json',
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
+                const url = isTenantUser
+                    ? `${apiBase}/api/jobs/for-compose`
+                    : `${apiBase}/api/jobs`;
+                const res = await fetch(url, {
+                    headers: authHeaders(true),
                     cache: 'no-store',
                 });
                 if (!res.ok) throw new Error('Failed to fetch jobs');
@@ -721,7 +726,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         return () => {
             active = false;
         };
-    }, [apiBase]);
+    }, [apiBase, isTenantUser]);
 
     useEffect(() => {
         const t = setTimeout(() => setDebouncedSearch(filters.searchTerm), 300);
@@ -762,7 +767,11 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
             if (filters.referralDate) params.set('referralDate', filters.referralDate);
             if (filters.referralDateEnd) params.set('referralDateEnd', filters.referralDateEnd);
             if (filters.status) params.set('status', filters.status);
-            if (filters.clientNames.length) params.set('clientNames', filters.clientNames.join(','));
+            if (isPlatformAdmin && adminClientId) {
+                params.set('clientId', adminClientId);
+            } else if (filters.clientNames.length) {
+                params.set('clientNames', filters.clientNames.join(','));
+            }
             if (filters.jobTitles.length) params.set('jobTitles', filters.jobTitles.join(','));
             if (filters.coordinators.length) params.set('coordinators', filters.coordinators.join(','));
             if (filters.lastUpdatedBys.length) params.set('lastUpdatedBys', filters.lastUpdatedBys.join(','));
@@ -775,7 +784,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
             params.set('sortKey', String(sk));
             params.set('sortDir', sd);
             const res = await fetch(`${apiBase}/api/email-uploads/screening-cv-referrals?${params.toString()}`, {
-                headers: { Authorization: `Bearer ${token}` },
+                headers: authHeaders(true),
                 cache: 'no-store',
             });
             const raw: unknown = res.ok ? await res.json() : null;
@@ -827,6 +836,8 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         filters.referralDateEnd,
         filters.status,
         filters.clientNames,
+        isPlatformAdmin,
+        adminClientId,
         filters.jobTitles,
         filters.coordinators,
         filters.lastUpdatedBys,
@@ -852,7 +863,11 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         if (filters.referralDate) params.set('referralDate', filters.referralDate);
         if (filters.referralDateEnd) params.set('referralDateEnd', filters.referralDateEnd);
         if (filters.status) params.set('status', filters.status);
-        if (filters.clientNames.length) params.set('clientNames', filters.clientNames.join(','));
+        if (isPlatformAdmin && adminClientId) {
+            params.set('clientId', adminClientId);
+        } else if (filters.clientNames.length) {
+            params.set('clientNames', filters.clientNames.join(','));
+        }
         if (filters.jobTitles.length) params.set('jobTitles', filters.jobTitles.join(','));
         if (filters.coordinators.length) params.set('coordinators', filters.coordinators.join(','));
         if (filters.lastUpdatedBys.length) params.set('lastUpdatedBys', filters.lastUpdatedBys.join(','));
@@ -891,6 +906,8 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         filters.referralDateEnd,
         filters.status,
         filters.clientNames,
+        isPlatformAdmin,
+        adminClientId,
         filters.jobTitles,
         filters.coordinators,
         filters.lastUpdatedBys,
@@ -926,34 +943,36 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
     }, [totalPages, page]);
 
     useEffect(() => {
-        if (!apiBase) {
+        if (!apiBase || !isPlatformAdmin) {
             setApiClientLabels([]);
+            setClientOptions([]);
             return;
         }
         let cancelled = false;
         setClientsListLoading(true);
-        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         fetch(`${apiBase}/api/clients?activeOnly=true`, {
-            credentials: 'include',
-            headers: {
-                Accept: 'application/json',
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
+            headers: authHeaders(true),
+            cache: 'no-store',
         })
             .then((res) => (res.ok ? res.json() : []))
             .then((rows: unknown) => {
                 if (cancelled) return;
                 const list = Array.isArray(rows) ? rows : [];
-                const labels = list
-                    .map((c: Record<string, unknown>) =>
-                        String((c.displayName as string) || (c.name as string) || '').trim(),
-                    )
-                    .filter(Boolean);
-                const unique = [...new Set(labels)].sort((a, b) => a.localeCompare(b, 'he'));
-                setApiClientLabels(unique);
+                const opts = list
+                    .map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        label: String((c.displayName as string) || (c.name as string) || '').trim(),
+                    }))
+                    .filter((o) => o.id && o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setClientOptions(opts);
+                setApiClientLabels(opts.map((o) => o.label));
             })
             .catch(() => {
-                if (!cancelled) setApiClientLabels([]);
+                if (!cancelled) {
+                    setApiClientLabels([]);
+                    setClientOptions([]);
+                }
             })
             .finally(() => {
                 if (!cancelled) setClientsListLoading(false);
@@ -961,7 +980,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
         return () => {
             cancelled = true;
         };
-    }, [apiBase]);
+    }, [apiBase, isPlatformAdmin]);
 
     useEffect(() => {
         if (!apiBase) {
@@ -1183,6 +1202,12 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
          setSelectedJob(buildFallbackJob(jobTitle, clientName));
          setIsDrawerOpen(true);
     };
+
+    const handleOpenCandidateSummaryClick = (e: React.MouseEvent, referral: Referral) => {
+        e.stopPropagation();
+        if (!referral.candidateId) return;
+        onOpenCandidateSummary(referralToSummaryCandidate(referral));
+    };
     
     const handleColumnToggle = (columnId: string) => {
         if (visibleColumns.includes(columnId) && visibleColumns.length <= 1) return;
@@ -1347,7 +1372,17 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                         <div className="w-6 h-6 rounded-full bg-primary-100 flex items-center justify-center text-[10px] font-bold text-primary-700">
                             {referral.avatar}
                         </div>
-                        <span className="font-semibold text-text-default">{referral.candidateName}</span>
+                        {referral.candidateId ? (
+                            <button
+                                type="button"
+                                onClick={(e) => handleOpenCandidateSummaryClick(e, referral)}
+                                className="font-semibold text-primary-600 hover:underline text-right"
+                            >
+                                {referral.candidateName}
+                            </button>
+                        ) : (
+                            <span className="font-semibold text-text-default">{referral.candidateName}</span>
+                        )}
                     </div>
                 );
             case 'jobTitle':
@@ -1410,6 +1445,23 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                         <input type="text" name="searchTerm" value={filters.searchTerm} onChange={handleFilterChange} placeholder="חיפוש מועמד, לקוח או משרה..." className="w-full bg-bg-input border border-border-default rounded-xl py-2.5 pl-3 pr-10 text-sm focus:ring-1 focus:ring-primary-500 focus:border-primary-500 transition-shadow" />
                     </div>
 
+                    {isPlatformAdmin ? (
+                        <div className="w-full xl:w-56 flex-shrink-0">
+                            <SearchableSelect
+                                options={clientOptions}
+                                value={adminClientId}
+                                onChange={(val) => {
+                                    setPage(1);
+                                    setAdminClientId(val ? String(val) : null);
+                                }}
+                                placeholder={t('jobs.filter_client')}
+                                className="w-full"
+                                icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
+                                disabled={clientsListLoading}
+                            />
+                        </div>
+                    ) : null}
+
                     <div className="flex bg-bg-subtle p-1 rounded-xl border border-border-default overflow-x-auto no-scrollbar w-full xl:w-auto">
                         {['today', 'week', 'month', 'quarter'].map(p => (
                              <button key={p} onClick={() => applyDatePreset(p as any)} className={`flex-1 xl:flex-none px-4 py-1.5 text-xs font-bold rounded-lg transition-all whitespace-nowrap ${filters.dateRange === p ? 'bg-white shadow text-primary-600' : 'text-text-muted hover:text-text-default'}`}>
@@ -1434,6 +1486,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                         <div><label className="block text-xs font-bold text-text-muted mb-1">תאריך מ-</label><input type="date" name="referralDate" value={filters.referralDate} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">תאריך עד-</label><input type="date" name="referralDateEnd" value={filters.referralDateEnd} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" /></div>
                         <div><label className="block text-xs font-bold text-text-muted mb-1">סטטוס / שלב</label><select name="status" value={filters.status} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm"><option value="">הכל</option>{statusOptions.map(s=><option key={s} value={s}>{s}</option>)}</select></div>
+                        {isPlatformAdmin ? (
                         <div>
                             <label htmlFor="filter-referrals-client" className="block text-xs font-bold text-text-muted mb-1">
                                 לקוח
@@ -1452,6 +1505,7 @@ const ReferralsReportView: React.FC<ReferralsReportViewProps> = ({ onOpenNewTask
                                 emptyOptionsText="אין לקוחות ברשימה"
                             />
                         </div>
+                        ) : null}
                         <div><label className="block text-xs font-bold text-text-muted mb-1">מועמד</label><input type="text" name="candidateName" value={filters.candidateName} onChange={handleFilterChange} className="w-full bg-white border-border-default rounded-lg py-2 px-3 text-sm" placeholder="שם מועמד..." /></div>
                         <div>
                             <label htmlFor="filter-referrals-job" className="block text-xs font-bold text-text-muted mb-1">

@@ -25,7 +25,7 @@ const User = sequelize.define(
       ),
       defaultValue: 'recruiter',
     },
-    isActive: { type: DataTypes.BOOLEAN, defaultValue: true },
+    isActive: { type: DataTypes.BOOLEAN, defaultValue: true, field: 'is_active' },
     phone: DataTypes.STRING,
     extension: DataTypes.STRING,
     dataScope: {

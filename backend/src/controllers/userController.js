@@ -2,10 +2,13 @@ const crypto = require('crypto');
 const { Op } = require('sequelize');
 const User = require('../models/User');
 const Client = require('../models/Client');
-const ClientContact = require('../models/ClientContact');
-const emailService = require('../services/emailService');
-
-const STAFF_ROLES = ['manager', 'recruiter'];
+const {
+  STAFF_ROLES,
+  publicAppOrigin,
+  createStaffClientContactIfNeeded,
+  sendStaffPasswordResetEmail,
+  inviteStaffUser,
+} = require('../services/staffUserProvisioningService');
 
 /** Non-null client UUID for tenant-scoped staff, or null if unassigned. */
 const tenantClientIdOf = (u) => {
@@ -29,59 +32,6 @@ const stripPassword = (u) => {
   const row = u.get ? u.get({ plain: true }) : u;
   const { password, activationGuid, ...rest } = row;
   return rest;
-};
-
-const publicAppOrigin = () =>
-  String(process.env.PUBLIC_APP_URL || 'https://hiro.co.il').replace(/\/$/, '');
-
-/**
- * Adds a `client_contacts` row for staff tied to a tenant. Skips if that email already exists for the client.
- * @returns {Promise<import('sequelize').Model|null>} new row, or null if skipped
- */
-const createStaffClientContactIfNeeded = async (clientId, { name, email, role, phone, extension, useInvite }) => {
-  if (!clientId) return null;
-  const emailNorm = String(email || '').trim();
-  if (!emailNorm) return null;
-
-  const dup = await ClientContact.findOne({ where: { clientId, email: emailNorm } });
-  if (dup) return null;
-
-  const displayName = (name && String(name).trim()) || emailNorm;
-  const roleLabel = role === 'manager' ? 'מנהל/ת' : 'מגייס/ת';
-  const ext = extension != null ? String(extension).trim() : '';
-  const notes = ext ? `שלוחה: ${ext}` : '';
-  const phoneStr = phone != null ? String(phone).trim() : '';
-
-  return ClientContact.create({
-    clientId,
-    name: displayName,
-    email: emailNorm,
-    phone: phoneStr,
-    mobilePhone: phoneStr,
-    role: roleLabel,
-    hasSystemAccess: true,
-    isInvited: !!useInvite,
-    isActive: true,
-    notes,
-  });
-};
-
-const sendStaffActivationEmail = async (user, activationUrl, { userRole, clientName, senderEmail }) => {
-  const subject = 'הפעלת חשבון במערכת Hiro';
-  const html = `<p>שלום${user.name ? ` ${user.name}` : ''},</p>
-<p>הוזמנתם להצטרף למערכת Hiro. לחצו על הקישור להגדרת סיסמה:</p>
-<p><a href="${activationUrl}">${activationUrl}</a></p>
-<p>הקישור תקף לפעם אחת.</p>`;
-  const text = `הוזמנתם להצטרף למערכת Hiro. להגדרת סיסמה: ${activationUrl}`;
-  await emailService.sendEmail({
-    toEmail: user.email,
-    subject,
-    text,
-    html,
-    userRole,
-    clientName,
-    senderEmail,
-  });
 };
 
 const loadActor = async (req) => {
@@ -215,7 +165,9 @@ const create = async (req, res) => {
       return res.status(400).json({ message: 'Role must be manager or recruiter' });
     }
     const existing = await User.findOne({ where: { email } });
-    if (existing) return res.status(409).json({ message: 'Email already exists' });
+    if (existing && !useInvite) {
+      return res.status(409).json({ message: 'Email already exists' });
+    }
 
     let clientId = null;
     if (canManageStaffAcrossTenants(actor)) {
@@ -249,63 +201,40 @@ const create = async (req, res) => {
     }
 
     if (useInvite) {
-      const activationGuid = crypto.randomUUID();
-      const tempPassword = crypto.randomBytes(32).toString('hex');
       let clientName = null;
       if (clientId) {
         const c = await Client.findByPk(clientId, { attributes: ['displayName', 'name'] });
         if (c) clientName = c.displayName || c.name || null;
       }
 
-      const user = await User.create({
-        email,
-        password: tempPassword,
-        name: name || email,
-        role,
-        phone: phone || null,
-        extension: extension || null,
-        isActive: false,
-        activationGuid,
-        clientId,
-      });
-
-      let contactRow = null;
       try {
-        contactRow = await createStaffClientContactIfNeeded(clientId, {
-          name,
+        const result = await inviteStaffUser({
           email,
+          name,
           role,
           phone,
           extension,
-          useInvite: true,
-        });
-      } catch (contactErr) {
-        await user.destroy();
-        return res.status(400).json({
-          message: contactErr.message || 'Failed to create client contact',
-        });
-      }
-
-      const activationUrl = `${publicAppOrigin()}/#/activation?guid=${activationGuid}`;
-      try {
-        await sendStaffActivationEmail(user, activationUrl, {
-          userRole: actor.role,
+          clientId,
+          actor,
           clientName,
-          senderEmail: actor.email ? String(actor.email).trim() : null,
         });
-      } catch (sendErr) {
-        await user.destroy();
-        if (contactRow) await contactRow.destroy();
-        return res.status(502).json({
-          message: sendErr.message || 'Failed to send invitation email',
+        return res.status(201).json({
+          ...stripPassword(result.user),
+          inviteSent: !!result.inviteSent,
+          reactivated: !!result.reactivated,
+          message: result.reactivated && !result.inviteSent
+            ? 'User reactivated'
+            : 'Invitation email sent',
+        });
+      } catch (inviteErr) {
+        if (inviteErr.code === 'EMAIL_EXISTS_ACTIVE') {
+          return res.status(409).json({ message: 'Email already exists' });
+        }
+        const status = inviteErr.message?.includes('send') ? 502 : 400;
+        return res.status(status).json({
+          message: inviteErr.message || 'Failed to send invitation email',
         });
       }
-
-      return res.status(201).json({
-        ...stripPassword(user),
-        inviteSent: true,
-        message: 'Invitation email sent',
-      });
     }
 
     const user = await User.create({
@@ -404,4 +333,60 @@ const update = async (req, res) => {
   }
 };
 
-module.exports = { list, getById, create, update };
+const resetPassword = async (req, res) => {
+  try {
+    const actor = await loadActor(req);
+    if (!actor) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const user = await User.findOne({
+      where: { id: req.params.id, role: { [Op.in]: STAFF_ROLES } },
+    });
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    if (!canManageStaffAcrossTenants(actor)) {
+      if (!(await sameTenantAsActor(actor, user))) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+    }
+
+    const activationGuid = crypto.randomUUID();
+    const tempPassword = crypto.randomBytes(32).toString('hex');
+
+    let clientName = null;
+    const clientId = tenantClientIdOf(user);
+    if (clientId) {
+      const c = await Client.findByPk(clientId, { attributes: ['displayName', 'name'] });
+      if (c) clientName = c.displayName || c.name || null;
+    }
+
+    await user.update({
+      password: tempPassword,
+      activationGuid,
+    });
+
+    const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
+    try {
+      await sendStaffPasswordResetEmail(user, activationUrl, {
+        userRole: actor.role,
+        clientName,
+        senderEmail: actor.email ? String(actor.email).trim() : null,
+      });
+    } catch (sendErr) {
+      return res.status(502).json({
+        message: sendErr.message || 'Failed to send password reset email',
+      });
+    }
+
+    return res.json({
+      ok: true,
+      message: 'Password reset email sent',
+      email: user.email,
+    });
+  } catch (err) {
+    return res.status(400).json({ message: err.message || 'Failed to reset password' });
+  }
+};
+
+module.exports = { list, getById, create, update, resetPassword };

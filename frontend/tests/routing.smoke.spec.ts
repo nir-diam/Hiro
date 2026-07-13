@@ -1,22 +1,19 @@
 import { test, expect } from '@playwright/test';
 
-const h = (path: string) => `/#${path.startsWith('/') ? path : '/' + path}`;
+const p = (path: string) => (path.startsWith('/') ? path : '/' + path);
 
 test.describe('Routing Smoke', () => {
   test('Sidebar routes open and update URL', async ({ page }) => {
     await page.goto('/');
 
-    // נווט באמצעות לינקים (טקסטים אופייניים; עדכן אם שונים)
-    // אם אין סיידבר, אפשר לדלג — העיקר לוודא שהנתיבים עצמם חיים.
-    const tryClick = async (label: string, hashPath: string) => {
+    const tryClick = async (label: string, routePath: string) => {
       const link = page.getByRole('link', { name: new RegExp(label, 'i') });
       if (await link.count()) {
         await link.first().click();
-        await expect(page).toHaveURL(new RegExp(`${h(hashPath)}$`));
+        await expect(page).toHaveURL(new RegExp(`${p(routePath)}$`));
       } else {
-        // fallback: נווט ישירות ב-URL
-        await page.goto(h(hashPath));
-        await expect(page).toHaveURL(new RegExp(`${h(hashPath)}$`));
+        await page.goto(p(routePath));
+        await expect(page).toHaveURL(new RegExp(`${p(routePath)}$`));
       }
     };
 
@@ -26,13 +23,10 @@ test.describe('Routing Smoke', () => {
   });
 
   test('404/NotFound and settings index redirect exist', async ({ page }) => {
-    // 404 רך
-    await page.goto(h('/this-route-does-not-exist'));
-    // אמור להפנות ל-NotFound או למסך בית; נבדוק שלא קורס:
-    await expect(page).toHaveURL(/#\/(this-route-does-not-exist|.*)/);
+    await page.goto(p('/this-route-does-not-exist'));
+    await expect(page).toHaveURL(/\/(this-route-does-not-exist|.*)/);
 
-    // settings index → redirect ל-tab דיפולטי (למשל general)
-    await page.goto(h('/settings'));
-    await expect(page).toHaveURL(/#\/settings(\/[a-z-]+)?$/);
+    await page.goto(p('/settings'));
+    await expect(page).toHaveURL(/\/settings(\/[a-z-]+)?$/);
   });
 });

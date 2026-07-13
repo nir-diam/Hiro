@@ -7,6 +7,7 @@ const tagEmbeddingService = require('./tagEmbeddingService');
 const { syncSystemTagsActiveForCatalogTag } = require('./candidateTagService');
 const { sendSingleTurnChat } = require('./geminiService');
 const promptService = require('./promptService');
+const picklistService = require('./picklistService');
 const { sequelize } = require('../config/db');
 
 const fireAndForget = (promise) => {
@@ -291,12 +292,20 @@ const list = async (options = {}) => {
   const hasDateFilter = Boolean(
     createdFrom || createdTo || updatedFrom || updatedTo || activityDate || activityFrom || activityTo,
   );
+  const hasExplicitScope = Boolean(
+    normalizedSearch ||
+    normalizedSynonym ||
+    hasDateFilter ||
+    (Array.isArray(sources) && sources.length) ||
+    (Array.isArray(types) && types.length) ||
+    (Array.isArray(categories) && categories.length),
+  );
 
   if (Array.isArray(statuses) && statuses.length) {
     where.status = { [Op.in]: statuses };
-  } else if (!normalizedSearch && !hasDateFilter) {
-    // Only hide pending tags on unfiltered/unscoped browsing.
-    // When a search term or date filter is provided, include all statuses.
+  } else if (!hasExplicitScope) {
+    // Default browse with no filters: hide pending (they have a dedicated queue).
+    // When status shows "הכל" but source/type/search/etc. is set, include pending too.
     where.status = { [Op.ne]: 'pending' };
   }
 
@@ -486,7 +495,31 @@ const applyAudit = (payload = {}, options = {}) => {
   payload.updatedBy = options.updatedBy || actor;
 };
 
-const recordTagHistory = async ({ tagId, action, actor, before, after }) => {
+const clonePlain = (row) => JSON.parse(JSON.stringify(row.get({ plain: true })));
+
+const HISTORY_SKIP_FIELDS = new Set([
+  'updatedAt',
+  'updated_at',
+  'createdAt',
+  'created_at',
+  'embedding',
+  'usageCount',
+  'usage_count',
+  'lastUsedAt',
+  'last_used_at',
+]);
+
+const hasMeaningfulTagDiff = (before, after) => {
+  if (!before || !after) return true;
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    if (HISTORY_SKIP_FIELDS.has(key)) continue;
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) return true;
+  }
+  return false;
+};
+
+const recordTagHistory = async ({ tagId, action, actor, before, after, meta = {} }) => {
   if (!tagId) return;
   try {
     await TagHistory.create({
@@ -496,11 +529,43 @@ const recordTagHistory = async ({ tagId, action, actor, before, after }) => {
       changes: {
         ...(before ? { before } : {}),
         ...(after ? { after } : {}),
+        ...meta,
       },
     });
   } catch (err) {
     console.error('[tagService] failed to record tag history', err?.message || err);
   }
+};
+
+const recordTagDeletionResolution = async ({
+  tagId,
+  actor,
+  mode,
+  targetTagId,
+  targetTagName,
+  candidateCount = 0,
+  jobCount = 0,
+  beforeTag,
+  actorName,
+  actorEmail,
+}) => {
+  if (!tagId || !mode) return;
+  const eventKind = mode === 'merge' ? 'merge' : 'force_delete';
+  await recordTagHistory({
+    tagId,
+    action: mode === 'merge' ? 'update' : 'delete',
+    actor,
+    before: beforeTag || undefined,
+    meta: {
+      eventKind,
+      targetTagId: targetTagId || null,
+      targetTagName: targetTagName || null,
+      candidateCount: Number(candidateCount) || 0,
+      jobCount: Number(jobCount) || 0,
+      ...(actorName ? { actorName } : {}),
+      ...(actorEmail ? { actorEmail } : {}),
+    },
+  });
 };
 
 const normalizeTagKey = (value) => {
@@ -510,6 +575,13 @@ const normalizeTagKey = (value) => {
     .replace(/[^a-z0-9]/g, '_')
     .replace(/_+/g, '_')
     .replace(/^_+|_+$/g, '');
+};
+
+const actorMetaFromOptions = (options = {}) => {
+  const meta = {};
+  if (options.actorName) meta.actorName = options.actorName;
+  if (options.actorEmail) meta.actorEmail = options.actorEmail;
+  return meta;
 };
 
 const create = async (payload, options = {}) => {
@@ -525,7 +597,8 @@ const create = async (payload, options = {}) => {
     tagId: created.id,
     action: 'create',
     actor: payload.createdBy || options.actingUser,
-    after: created.get({ plain: true }),
+    after: clonePlain(created),
+    meta: actorMetaFromOptions(options),
   }));
   fireAndForget(tagEmbeddingService.scheduleTagEmbedding(created));
   return created;
@@ -535,7 +608,7 @@ const normalizeTagStatus = (status) => String(status || '').trim().toLowerCase()
 
 const update = async (id, payload, options = {}) => {
   const tag = await getById(id);
-  const beforeState = tag.get({ plain: true });
+  const beforeState = clonePlain(tag);
   if (payload.tagKey === '' || (!payload.tagKey && (payload.displayNameEn || payload.displayNameHe))) {
     payload.tagKey = normalizeTagKey(payload.displayNameEn || payload.displayNameHe || tag.tagKey);
   }
@@ -569,14 +642,18 @@ const update = async (id, payload, options = {}) => {
   }
 
   await tag.reload();
+  const afterState = clonePlain(tag);
 
-  fireAndForget(recordTagHistory({
-    tagId: tag.id,
-    action: 'update',
-    actor: payload.updatedBy || options.actingUser,
-    before: beforeState,
-    after: tag.get({ plain: true }),
-  }));
+  if (hasMeaningfulTagDiff(beforeState, afterState)) {
+    fireAndForget(recordTagHistory({
+      tagId: tag.id,
+      action: 'update',
+      actor: payload.updatedBy || options.actingUser,
+      before: beforeState,
+      after: afterState,
+      meta: actorMetaFromOptions(options),
+    }));
+  }
 
   fireAndForget(tagEmbeddingService.scheduleTagEmbedding(tag));
   return tag;
@@ -630,8 +707,13 @@ Input List: ${JSON.stringify(tagsPayload.map(t => t.displayNameHe || t.tagKey))}
 Return ONLY the JSON Array of objects. No markdown formatting.`;
 
   const template = await loadTagPromptTemplate();
+  const authorizedMarketDomainsList = await picklistService.formatCategoryValuesForLlmPromptByCategoryId(
+    picklistService.AUTHORIZED_MARKET_DOMAINS_CATEGORY_ID,
+  );
   const systemPrompt = template
-    ? template.replace('{JSON}', JSON.stringify(tagsPayload.map(t => t.displayNameHe || t.tagKey)))
+    ? template
+      .replace('{JSON}', JSON.stringify(tagsPayload.map(t => t.displayNameHe || t.tagKey)))
+      .replace('{AUTHORIZED_MARKET_DOMAINS_LIST}', authorizedMarketDomainsList)
     : defaultPrompt;
 
   const userMessage = `Input tags (JSON): ${JSON.stringify(tagsPayload)}`;
@@ -640,6 +722,8 @@ Return ONLY the JSON Array of objects. No markdown formatting.`;
     apiKey,
     systemPrompt,
     message: userMessage,
+    promptId: 'tag_ai_enriched',
+    llmInputJson: tagsPayload,
   });
 
   let parsed = [];
@@ -686,5 +770,13 @@ Return ONLY the JSON Array of objects. No markdown formatting.`;
   });
 };
 
-module.exports = { list, getById, create, update, remove, enrichSuggestions };
+module.exports = {
+  list,
+  getById,
+  create,
+  update,
+  remove,
+  enrichSuggestions,
+  recordTagDeletionResolution,
+};
 

@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const Organization = require('../models/Organization');
+const OrganizationChangeHistory = require('../models/OrganizationChangeHistory');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const { sendChat, resolveGeminiApiKey } = require('./geminiService');
 const OrganizationTmp = require('../models/OrganizationTmp');
@@ -7,7 +8,11 @@ const OrganizationAiDecision = require('../models/OrganizationAiDecision');
 const picklistService = require('./picklistService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
 const { scheduleOrganizationEmbedding } = require('./organizationEmbeddingService');
-const { scheduleOrganizationEnrichment } = require('./organizationEnrichmentService');
+const {
+  scheduleOrganizationEnrichment,
+  scheduleOrganizationEnrichmentIfNeeded,
+} = require('./organizationEnrichmentService');
+const { promoteClientsForNewOrganization, syncOrganizationToLinkedClients } = require('./clientOrganizationSyncService');
 const { embedTextCached } = require('./embeddingService');
 const promptService = require('./promptService');
 const {
@@ -180,6 +185,120 @@ const list = async ({
   return { data, total: count, page, limit };
 };
 
+const GLOBAL_LOOKUP_ATTRIBUTES = [
+  'id',
+  'name',
+  'nameEn',
+  'legalName',
+  'aliases',
+  'mainField',
+  'mainField2',
+  'subField',
+  'website',
+  'phone',
+  'address',
+  'location',
+  'description',
+  'snippet',
+  'employeeCount',
+  'type',
+  'logo',
+  'linkedinUrl',
+  'activityStatus',
+];
+
+const scoreOrganizationMatch = (org, queryLower) => {
+  let score = 0;
+  let matchedAlias = null;
+  const pushScore = (value, nextScore, alias = null) => {
+    if (nextScore > score) {
+      score = nextScore;
+      if (alias) matchedAlias = alias;
+    }
+  };
+
+  const name = String(org.name || '').trim().toLowerCase();
+  const nameEn = String(org.nameEn || '').trim().toLowerCase();
+  const legalName = String(org.legalName || '').trim().toLowerCase();
+
+  if (name === queryLower) pushScore(name, 120);
+  else if (name.startsWith(queryLower)) pushScore(name, 100);
+  else if (name.includes(queryLower)) pushScore(name, 85);
+
+  if (nameEn === queryLower) pushScore(nameEn, 95);
+  else if (nameEn.startsWith(queryLower)) pushScore(nameEn, 90);
+  else if (nameEn.includes(queryLower)) pushScore(nameEn, 75);
+
+  if (legalName.startsWith(queryLower)) pushScore(legalName, 70);
+  else if (legalName.includes(queryLower)) pushScore(legalName, 60);
+
+  for (const alias of Array.isArray(org.aliases) ? org.aliases : []) {
+    const a = String(alias || '').trim();
+    if (!a) continue;
+    const lower = a.toLowerCase();
+    if (lower === queryLower) pushScore(lower, 92, a);
+    else if (lower.startsWith(queryLower)) pushScore(lower, 88, a);
+    else if (lower.includes(queryLower)) pushScore(lower, 72, a);
+  }
+
+  return { score, matchedAlias };
+};
+
+/** Fast typeahead for new-client form — top N global companies with enrichment metadata. */
+const globalLookup = async (query, { limit = 6 } = {}) => {
+  const trimmed = String(query || '').trim();
+  if (trimmed.length < 2) return [];
+
+  const safeLimit = Math.min(10, Math.max(1, Number(limit) || 6));
+  const queryLower = trimmed.toLowerCase();
+  const searchWhere = organizationSearchWhere(trimmed);
+  const activityWhere = {
+    [Op.or]: [
+      { activityStatus: { [Op.ne]: 'merged' } },
+      { activityStatus: null },
+    ],
+  };
+
+  const rows = await Organization.findAll({
+    attributes: GLOBAL_LOOKUP_ATTRIBUTES,
+    where: { [Op.and]: [activityWhere, searchWhere] },
+    limit: Math.max(safeLimit * 4, 24),
+    order: [['name', 'ASC']],
+  });
+
+  return rows
+    .map((row) => {
+      const json = row.toJSON ? row.toJSON() : { ...row.get() };
+      const { score, matchedAlias } = scoreOrganizationMatch(json, queryLower);
+      return {
+        id: json.id,
+        name: json.name,
+        nameEn: json.nameEn || null,
+        legalName: json.legalName || null,
+        aliases: Array.isArray(json.aliases) ? json.aliases : [],
+        mainField: json.mainField || null,
+        mainField2: Array.isArray(json.mainField2) ? json.mainField2 : [],
+        subField: Array.isArray(json.subField) ? json.subField : [],
+        website: json.website || null,
+        phone: json.phone || null,
+        address: json.address || null,
+        location: json.location || null,
+        description: json.description || json.snippet || null,
+        snippet: json.snippet || null,
+        employeeCount: json.employeeCount || null,
+        type: json.type || null,
+        logo: json.logo || null,
+        linkedinUrl: json.linkedinUrl || null,
+        matchedAlias,
+        _score: score,
+      };
+    })
+    .filter((row) => row._score > 0)
+    .sort((a, b) => b._score - a._score || String(a.name).localeCompare(String(b.name), 'he'))
+    .slice(0, safeLimit)
+    .map(({ _score, ...rest }) => rest);
+};
+
 const getById = async (id) => {
   const org = await Organization.findByPk(id, { attributes: API_ATTRIBUTES });
   if (!org) {
@@ -264,7 +383,81 @@ const sanitizePayload = (payload) => {
   return out;
 };
 
-const create = async (payload) => {
+const fireAndForget = (promise) => {
+  if (!promise || typeof promise.catch !== 'function') return;
+  promise.catch((err) => {
+    console.error('[organizationService] background task failed', err?.message || err);
+  });
+};
+
+const clonePlain = (record) => {
+  if (!record) return null;
+  const plain = record.get ? record.get({ plain: true }) : record;
+  return JSON.parse(JSON.stringify(plain));
+};
+
+const ORG_HISTORY_SKIP_FIELDS = new Set([
+  'updatedAt',
+  'updated_at',
+  'createdAt',
+  'created_at',
+  'embedding',
+  'candidateCount',
+  'candidate_count',
+  'history',
+  'comments',
+  'snippet',
+  'latitude',
+  'longitude',
+  'email',
+  'phone',
+  'growthTrend',
+  'relation',
+]);
+
+const hasMeaningfulOrgDiff = (before, after) => {
+  if (!before || !after) return true;
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  for (const key of keys) {
+    if (ORG_HISTORY_SKIP_FIELDS.has(key)) continue;
+    if (JSON.stringify(before[key]) !== JSON.stringify(after[key])) return true;
+  }
+  return false;
+};
+
+const actorMetaFromOptions = (options = {}) => {
+  const meta = {};
+  if (options.actorName) meta.actorName = options.actorName;
+  if (options.actorEmail) meta.actorEmail = options.actorEmail;
+  return meta;
+};
+
+const recordOrganizationHistory = async ({
+  organizationId,
+  action,
+  actor,
+  before,
+  after,
+  meta = {},
+}) => {
+  if (!organizationId) return;
+  try {
+    await OrganizationChangeHistory.create({
+      organizationId,
+      action,
+      actor: actor || 'system',
+      changes: {
+        ...(before ? { before } : {}),
+        ...(after ? { after } : {}),
+        ...meta,
+      },
+    });
+  } catch (err) {
+    console.error('[organizationService] failed to record organization history', err?.message || err);
+  }
+};
+
+const create = async (payload, options = {}) => {
   const clean = sanitizePayload(payload);
   const existing = await findByAnyName(clean);
   if (existing) {
@@ -283,12 +476,25 @@ const create = async (payload) => {
     await ensureIndustryPicklistEntries(mf, []);
   }
   const org = await Organization.create(clean);
+  fireAndForget(recordOrganizationHistory({
+    organizationId: org.id,
+    action: 'create',
+    actor: options.actingUser,
+    after: clonePlain(org),
+    meta: actorMetaFromOptions(options),
+  }));
   scheduleOrganizationEmbedding(org);
+  try {
+    await promoteClientsForNewOrganization(org);
+  } catch (err) {
+    console.error('[organizationService] promoteClientsForNewOrganization failed', err?.message || err);
+  }
   return org;
 };
 
-const update = async (id, payload) => {
+const update = async (id, payload, options = {}) => {
   const org = await getById(id);
+  const beforeState = clonePlain(org);
   const clean = sanitizePayload(payload);
   await ensureIndustryPicklistEntries(clean.mainField || org.mainField, clean.subField || org.subField);
   const extraMains = clean.mainField2 ?? org.mainField2 ?? [];
@@ -296,12 +502,35 @@ const update = async (id, payload) => {
     await ensureIndustryPicklistEntries(mf, []);
   }
   await org.update(clean);
+  await org.reload();
+  const afterState = clonePlain(org);
+  if (hasMeaningfulOrgDiff(beforeState, afterState)) {
+    fireAndForget(recordOrganizationHistory({
+      organizationId: org.id,
+      action: 'update',
+      actor: options.actingUser,
+      before: beforeState,
+      after: afterState,
+      meta: actorMetaFromOptions(options),
+    }));
+  }
   scheduleOrganizationEmbedding(org);
+  if (options.syncLinkedClients !== false) {
+    fireAndForget(syncOrganizationToLinkedClients(org.id));
+  }
   return org;
 };
 
-const remove = async (id) => {
+const remove = async (id, options = {}) => {
   const org = await getById(id);
+  const beforeState = clonePlain(org);
+  fireAndForget(recordOrganizationHistory({
+    organizationId: org.id,
+    action: 'delete',
+    actor: options.actingUser,
+    before: beforeState,
+    meta: actorMetaFromOptions(options),
+  }));
   await org.destroy();
 };
 
@@ -548,7 +777,7 @@ const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies 
       return null;
     }
 
-    const inputJson = JSON.stringify({
+    const inputPayload = {
       original_term: term,
       context,
       existing_companies: similarCompanies.map((c) => ({
@@ -562,7 +791,9 @@ const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies 
         name: c.name,
         similarity: c.similarity ?? 0,
       })),
-    });
+    };
+
+    const inputJson = JSON.stringify(inputPayload);
 
     const systemPrompt = promptRow.template.replace('{{input_json}}', inputJson);
 
@@ -574,6 +805,8 @@ const askAiForOrgDecision = async ({ term, context = 'resume', similarCompanies 
       history: [],
       message: 'Classify the company term provided in the system prompt. Return JSON only.',
       responseMimeType: 'application/json',
+      promptId: 'organization_ai_enriched',
+      llmInputJson: inputPayload,
     });
 
     const text = typeof rawText === 'string' ? rawText : JSON.stringify(rawText);
@@ -678,6 +911,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
   const existing = await findByName(trimmed);
   if (existing) {
     console.log(`[orgService] "${trimmed}" → already in Organization (${existing.id}) — skipping AI`);
+    scheduleOrganizationEnrichmentIfNeeded(existing);
     return existing;
   }
 
@@ -730,6 +964,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
         console.log(`[orgService] merge_company: added alias "${trimmed}" → "${targetOrg.name}"`);
       }
       saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_merge' });
+      scheduleOrganizationEnrichmentIfNeeded(targetOrg);
       return targetOrg;
     }
   }
@@ -743,6 +978,7 @@ const findOrCreateByName = async (name, defaults = {}) => {
         console.log(`[orgService] map_generic: added alias "${trimmed}" → "${targetOrg.name}"`);
       }
       saveDecision({ reviewStatus: 'approved', reviewerAction: 'auto_map_generic' });
+      scheduleOrganizationEnrichmentIfNeeded(targetOrg);
       return targetOrg;
     }
   }
@@ -777,6 +1013,11 @@ const findOrCreateByName = async (name, defaults = {}) => {
     const org = await Organization.create(orgPayload);
     scheduleOrganizationEmbedding(org);
     scheduleOrganizationEnrichment(org);   // company_enrichment prompt via Gemini
+    try {
+      await promoteClientsForNewOrganization(org);
+    } catch (err) {
+      console.error('[organizationService] promoteClientsForNewOrganization failed', err?.message || err);
+    }
     saveDecision();                        // uses reviewStatus from band (or 'manual')
     return org;
   }
@@ -795,8 +1036,61 @@ const findOrCreateByName = async (name, defaults = {}) => {
   return tmpOrg;
 };
 
+/**
+ * When a new client is created manually (not linked to an existing Organization),
+ * stage the company name in OrganizationTmp for admin review / corrections queue.
+ */
+const stageOrganizationFromClientCreate = async (payload = {}) => {
+  const name = String(payload.name || payload.clientName || '').trim();
+  if (!name) return null;
+
+  const linkedId = payload.linkedOrganizationId || payload.organizationId;
+  if (linkedId) {
+    const linked = await Organization.findByPk(linkedId);
+    if (linked) return null;
+  }
+
+  const existing = await findByName(name);
+  if (existing) return null;
+
+  const existingTmp = await findTmpByName(name);
+  if (existingTmp) return existingTmp;
+
+  const meta = payload.metadata && typeof payload.metadata === 'object' ? payload.metadata : {};
+  const aliases = Array.isArray(meta.aliases)
+    ? meta.aliases.map((a) => String(a || '').trim()).filter(Boolean)
+    : [];
+  const mainField = String(payload.mainField || payload.industry || meta.mainField || '').trim() || null;
+  const subFields = Array.isArray(payload.subField)
+    ? payload.subField.map((s) => String(s || '').trim()).filter(Boolean)
+    : Array.isArray(meta.subField)
+      ? meta.subField.map((s) => String(s || '').trim()).filter(Boolean)
+      : [];
+  const secondaryField = String(payload.secondaryField || meta.secondaryField || '').trim() || null;
+
+  const clientId = payload.clientId ? String(payload.clientId) : '';
+  const comments = clientId
+    ? `מקור: יצירת לקוח חדש (client ${clientId})`
+    : 'מקור: יצירת לקוח חדש';
+
+  return OrganizationTmp.create({
+    name,
+    mainField,
+    subField: subFields.length ? subFields.join(', ') : null,
+    secondaryField,
+    website: meta.website ? String(meta.website).trim() : null,
+    location: meta.address ? String(meta.address).trim() : null,
+    description: meta.description ? String(meta.description).trim() : null,
+    aliases,
+    isCompany: true,
+    dataConfidence: 'Pending Review',
+    comments,
+  });
+};
+
 module.exports = {
   list,
+  globalLookup,
   getById,
   create,
   update,
@@ -805,5 +1099,6 @@ module.exports = {
   findByName,
   findOrCreateByName,
   findGenericBucketOrganizations,
+  stageOrganizationFromClientCreate,
 };
 

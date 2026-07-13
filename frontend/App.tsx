@@ -208,6 +208,8 @@ const AppContent: React.FC = () => {
 
     const isStandalonePage = 
         location.pathname.startsWith('/p/') || 
+        location.pathname.startsWith('/jobs/public') ||
+        /^\/jobs\/[^/]+\/public\//.test(location.pathname) ||
         location.pathname === '/login' || 
         location.pathname === '/activation' ||
         location.pathname === '/landing' ||
@@ -322,6 +324,7 @@ const AppContent: React.FC = () => {
                     candidate={summaryCandidate}
                     onViewFullProfile={handleViewFullProfileFromDrawer}
                     onOpenMessageModal={openMessageModal}
+                    onOpenNewTask={openNewTask}
                     isFavorite={summaryCandidate ? favorites.has(summaryCandidate.id) : false}
                     onToggleFavorite={toggleFavorite}
                 />

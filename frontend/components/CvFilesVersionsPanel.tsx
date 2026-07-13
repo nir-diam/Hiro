@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { ClockIcon, DocumentTextIcon } from './Icons';
+import { ChevronDownIcon, ChevronUpIcon, ClockIcon, DocumentTextIcon } from './Icons';
 import { ParsedSearchTextWithTags } from './ParsedSearchTextWithTags';
 import type { TagDetailForHighlight } from '../utils/parsedSearchTextSpans';
 import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
@@ -41,6 +41,15 @@ function formatVersionDate(value?: string | null): string {
         minute: '2-digit',
     });
 }
+
+const DOC_VIEWER_HEIGHT_MIN = 400;
+const DOC_VIEWER_HEIGHT_MAX = 1800;
+const DOC_VIEWER_HEIGHT_STEP = 100;
+const DOC_VIEWER_HEIGHT_DEFAULT = 1000;
+const DOC_VIEWER_ZOOM_MIN = 75;
+const DOC_VIEWER_ZOOM_MAX = 150;
+const DOC_VIEWER_ZOOM_STEP = 10;
+const DOC_VIEWER_ZOOM_DEFAULT = 100;
 
 function fileKindLabel(resumeUrl: string): string {
     const lower = resumeUrl.toLowerCase();
@@ -128,6 +137,8 @@ export const CvFilesVersionsPanel: React.FC<{
     const [draftText, setDraftText] = useState('');
     const [saving, setSaving] = useState(false);
     const [saveError, setSaveError] = useState<string | null>(null);
+    const [docViewerHeight, setDocViewerHeight] = useState(DOC_VIEWER_HEIGHT_DEFAULT);
+    const [docViewerZoom, setDocViewerZoom] = useState(DOC_VIEWER_ZOOM_DEFAULT);
 
     const url = String(resumeUrl ?? '').trim();
     const plainSearch = normalizeSearchTextLineBreaks(searchText);
@@ -444,41 +455,94 @@ export const CvFilesVersionsPanel: React.FC<{
                                     <p className="text-xs text-text-muted">נוצר בתאריך: {originalDate}</p>
                                 </div>
                             </div>
-                            {url ? (
-                                <a
-                                    href={url}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="text-sm font-semibold text-primary-600 hover:underline"
-                                >
-                                    פתח / הורד
-                                </a>
-                            ) : null}
+                            <div className="flex items-center gap-3 shrink-0">
+                                {url ? (
+                                    <div className="flex items-center gap-1 rounded-lg border border-border-default bg-bg-subtle/50 p-1">
+                                        <button
+                                            type="button"
+                                            title="הקטן תצוגה"
+                                            aria-label="הקטן תצוגה"
+                                            onClick={() => {
+                                                setDocViewerHeight((h) =>
+                                                    Math.max(DOC_VIEWER_HEIGHT_MIN, h - DOC_VIEWER_HEIGHT_STEP),
+                                                );
+                                                setDocViewerZoom((z) =>
+                                                    Math.max(DOC_VIEWER_ZOOM_MIN, z - DOC_VIEWER_ZOOM_STEP),
+                                                );
+                                            }}
+                                            disabled={
+                                                docViewerHeight <= DOC_VIEWER_HEIGHT_MIN &&
+                                                docViewerZoom <= DOC_VIEWER_ZOOM_MIN
+                                            }
+                                            className="w-8 h-8 flex items-center justify-center rounded-md text-text-muted hover:bg-white hover:text-primary-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                            <ChevronDownIcon className="w-5 h-5" />
+                                        </button>
+                                        <span className="text-xs font-semibold text-text-muted tabular-nums min-w-[4.5rem] text-center">
+                                            {docViewerZoom}%
+                                        </span>
+                                        <button
+                                            type="button"
+                                            title="הגדל תצוגה"
+                                            aria-label="הגדל תצוגה"
+                                            onClick={() => {
+                                                setDocViewerHeight((h) =>
+                                                    Math.min(DOC_VIEWER_HEIGHT_MAX, h + DOC_VIEWER_HEIGHT_STEP),
+                                                );
+                                                setDocViewerZoom((z) =>
+                                                    Math.min(DOC_VIEWER_ZOOM_MAX, z + DOC_VIEWER_ZOOM_STEP),
+                                                );
+                                            }}
+                                            disabled={
+                                                docViewerHeight >= DOC_VIEWER_HEIGHT_MAX &&
+                                                docViewerZoom >= DOC_VIEWER_ZOOM_MAX
+                                            }
+                                            className="w-8 h-8 flex items-center justify-center rounded-md text-text-muted hover:bg-white hover:text-primary-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                                        >
+                                            <ChevronUpIcon className="w-5 h-5" />
+                                        </button>
+                                    </div>
+                                ) : null}
+                                {url ? (
+                                    <a
+                                        href={url}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-sm font-semibold text-primary-600 hover:underline"
+                                    >
+                                        פתח / הורד
+                                    </a>
+                                ) : null}
+                            </div>
                         </div>
 
                         {versionChips}
 
                         <div className="flex-1 overflow-auto p-4 bg-bg-subtle/30 custom-scrollbar min-h-0">
                             {url ? (
-                                <div className="flex flex-col gap-3 h-full min-h-[50vh]">
-                                    <div className="flex-1 min-h-[50vh] border border-border-default rounded-2xl overflow-auto bg-black/5">
+                                <div className="flex flex-col gap-3">
+                                    <div
+                                        className="border border-border-default rounded-2xl overflow-auto bg-black/5"
+                                        style={{ height: docViewerHeight }}
+                                    >
                                         {isImage ? (
                                             <img
                                                 src={url}
                                                 alt="מסמך מקורי"
-                                                className="object-contain w-full h-full min-h-[50vh]"
+                                                className="object-contain w-full h-full"
+                                                style={{ zoom: docViewerZoom / 100 }}
                                             />
                                         ) : (
                                             <iframe
                                                 style={{
                                                     width: '100%',
                                                     minWidth: '200px',
-                                                    height: '100%',
-                                                    minHeight: '50vh',
+                                                    height: docViewerHeight,
+                                                    zoom: docViewerZoom / 100,
                                                 }}
                                                 src={isDocx ? docxViewerUrl : url}
                                                 title="מסמך מקורי"
-                                                className="w-full"
+                                                className="w-full border-0"
                                             />
                                         )}
                                     </div>

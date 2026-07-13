@@ -291,6 +291,68 @@ If you choose "merge", you MUST set "target_tag" to the exact case-sensitive str
     category: 'analysis',
   },
   {
+    id: 'job_taxonomy_mapping',
+    name: 'סיווג טקסונומי למשרה (Vector + LLM)',
+    description:
+      'ממפה כותרת ותוכן משרה לנתיב הטקסונומיה המדויק ביותר מתוך רשימה סגורה (Top-K וקטורי).',
+    template: `You are an expert Taxonomy Engine for the recruitment and HR domain.
+Your task is to map a given job position to the most accurate classification path within a closed list of available paths.
+
+INPUT DATA:
+
+- Raw Job Title: {{jobTitle}}
+- Job Content & Tags: {{jobContent}}
+- Available Paths (Vector Top-K): {{availablePathsJson}}
+
+CRITICAL RULES:
+
+1. Analyze the Job Title and Content against the provided "Available Paths".
+2. Select the single best match for the "primary_path". You MUST copy industry, cluster, role, and path_id EXACTLY from one entry in Available Paths.
+3. Evaluate if the job is genuinely hybrid (cross-functional across different industries). If yes, populate "secondary_path" from a DIFFERENT Available Path entry. If it's a standard job, "secondary_path" MUST be null.
+4. Assign a "confidence" score between 0.0 and 1.0 based on how perfectly the job fits the chosen path.
+5. NEVER invent industries, clusters, roles, or path_id values that are not in Available Paths.
+
+CRITICAL FALLBACK RULE (THRESHOLD MANAGEMENT):
+
+- Review your primary path confidence score. If the confidence score is LOWER THAN 0.5 (Confidence < 0.5), or if no available path provides a logical fit, you MUST trigger a fallback:
+A) Set "fallback_applied" to true.
+B) Force the "primary_path" object values (industry, cluster, role) to be exactly "כללי".
+- If the confidence score is 0.5 or higher, set "fallback_applied" to false.
+
+OUTPUT FORMAT:
+Return ONLY a valid JSON object. No markdown wrapping (no \`\`\`json), no conversational text.
+
+JSON SCHEMA:
+{
+  "mapping_decision": {
+    "primary_path": {
+      "path_id": "string (from Available Paths, or omit on fallback)",
+      "industry": "string (exact Hebrew from Available Paths, or 'כללי' if fallback)",
+      "cluster": "string (exact Hebrew from Available Paths, or 'כללי' if fallback)",
+      "role": "string (exact Hebrew from Available Paths, or 'כללי' if fallback)",
+      "confidence": float (0.0 to 1.0),
+      "reasoning": "Brief explanation in Hebrew"
+    },
+    "secondary_path": {
+      "path_id": "string",
+      "industry": "string",
+      "cluster": "string",
+      "role": "string",
+      "confidence": float
+    },
+    "fallback_applied": boolean,
+    "normalization": {
+      "canonical_title": "string (Hebrew)",
+      "aliases_found": ["string"]
+    }
+  }
+}`,
+    model: 'gemini-3-flash-preview',
+    temperature: 0.1,
+    variables: ['jobTitle', 'jobContent', 'availablePathsJson'],
+    category: 'jobs',
+  },
+  {
     id: 'job_categories_synonyms_ai_completed',
     name: 'יצירת טייטלים ספציפיים לחיפוש',
     description: 'מייצר מילים נרדפות וטייטלים חלופיים איכותיים לתפקיד ספציפי.',

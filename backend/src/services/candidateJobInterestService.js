@@ -165,7 +165,7 @@ async function addFieldInterest(candidateId, selection, opts = {}) {
       linkedJobIdsOut.push(jid);
     }
   } else if (matchingJobs.length === 0) {
-    const record = await jobCandidateService.associateCandidateWithJob({
+    const { record } = await jobCandidateService.associateCandidateWithJob({
       jobId: null,
       candidateId: cid,
       status,

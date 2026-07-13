@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, TagIcon, 
     CheckCircleIcon, ExclamationTriangleIcon, SparklesIcon, 
@@ -17,6 +18,15 @@ import {
     saveTagCorrectionAgentEnabled,
     type TagAiDecisionDto,
 } from '../services/tagCorrectionsApi';
+
+const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isValidTagId(id: unknown): id is string {
+    if (id == null) return false;
+    const s = String(id).trim();
+    if (!s || s === 'null' || s === 'undefined') return false;
+    return TAG_ID_RE.test(s);
+}
 
 // --- TYPES ---
 interface UnmatchedTag {
@@ -153,6 +163,13 @@ const getHesitationBucket = (level: number | null | undefined): 'low' | 'medium'
     return 'low';
 };
 
+const getEffectiveAiDecision = (decision: TagAiDecisionDto): 'merge' | 'create' | 'delete' => {
+    const reviewer = decision.reviewerAction;
+    if (reviewer === 'create' || reviewer === 'delete') return reviewer;
+    if (reviewer === 'merge' || reviewer === 'auto_merge') return 'merge';
+    return decision.aiDecision;
+};
+
 const getDecisionStatusBucket = (
     d: TagAiDecisionDto,
     manualQueuedIds: Set<string>,
@@ -177,6 +194,13 @@ const getDecisionStatusBucket = (
 
 const AdminTagCorrectionsView: React.FC = () => {
     const { t } = useLanguage();
+    const navigate = useNavigate();
+
+    const openTagsListSearch = useCallback((term: string) => {
+        const q = term.trim();
+        if (!q) return;
+        navigate(`/admin/tags/list?search=${encodeURIComponent(q)}`);
+    }, [navigate]);
 
     const [activeTab, setActiveTab] = useState<'manual' | 'ai' | 'blacklist'>('ai');
     const [isAgentOn, setIsAgentOn] = useState(true);
@@ -245,26 +269,45 @@ const AdminTagCorrectionsView: React.FC = () => {
     // AI occurrences popup (shows candidates/jobs linked to a pending tag)
     const [aiOccurrencesPopup, setAiOccurrencesPopup] = useState<{
         decisionId: string;
-        pendingTagId: string;
+        pendingTagId: string | null;
+        occurrencesSource: 'pending' | 'merged' | 'created' | 'none';
         term: string;
+        targetLabel?: string;
         candidates: { id: string; name: string }[];
         jobs: { id: string; title: string }[];
         loading: boolean;
     } | null>(null);
 
     const openAiOccurrences = async (decision: TagAiDecisionDto) => {
-        setAiOccurrencesPopup({ decisionId: decision.id, pendingTagId: decision.pendingTagId, term: decision.originalTerm, candidates: [], jobs: [], loading: true });
+        setAiOccurrencesPopup({
+            decisionId: decision.id,
+            pendingTagId: decision.pendingTagId,
+            occurrencesSource: 'none',
+            term: decision.originalTerm,
+            targetLabel: decision.aiSuggestedTarget || undefined,
+            candidates: [],
+            jobs: [],
+            loading: true,
+        });
         try {
-            const res = await fetch(`${apiBase}/api/tags/${decision.pendingTagId}/candidates`);
+            const res = await fetch(`${apiBase}/api/tags/ai-decisions/${encodeURIComponent(decision.id)}/occurrences`);
             const body = res.ok ? await res.json() : {};
-            const rawCandidates = Array.isArray(body) ? body : (Array.isArray(body.candidates) ? body.candidates : []);
-            const rawJobs = Array.isArray(body.jobs) ? body.jobs : [];
+            const rawCandidates = Array.isArray(body?.candidates) ? body.candidates : [];
+            const rawJobs = Array.isArray(body?.jobs) ? body.jobs : [];
             const candidates = rawCandidates.map((e: any) => ({
                 id: e.candidate_id || e.candidateId || e.id,
                 name: e.full_name || e.fullName || e.email || e.phone || 'מועמד',
             }));
             const jobs = rawJobs.map((j: any) => ({ id: j.id, title: j.title || j.name || 'משרה' }));
-            setAiOccurrencesPopup((prev) => prev ? { ...prev, candidates, jobs, loading: false } : null);
+            setAiOccurrencesPopup((prev) => prev ? {
+                ...prev,
+                occurrencesSource: body?.source === 'pending' || body?.source === 'merged' || body?.source === 'created'
+                    ? body.source
+                    : 'none',
+                candidates,
+                jobs,
+                loading: false,
+            } : null);
         } catch {
             setAiOccurrencesPopup((prev) => prev ? { ...prev, loading: false } : null);
         }
@@ -436,7 +479,7 @@ const AdminTagCorrectionsView: React.FC = () => {
             if (!res.ok) return;
             const body = await res.json();
             const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
-            setUnmatched(list.map(mapPendingTagEntry));
+            setUnmatched(list.filter((entry) => isValidTagId(entry?.id)).map(mapPendingTagEntry));
             setListTotal(typeof body.total === 'number' ? body.total : list.length);
             setListTotalPages(typeof body.totalPages === 'number' ? body.totalPages : 1);
             if (body.stats) {
@@ -517,6 +560,7 @@ const AdminTagCorrectionsView: React.FC = () => {
     const groupedTags = useMemo(() => {
         const map = new Map<string, GroupedTag>();
         unmatched.forEach(tag => {
+            if (!isValidTagId(tag.id)) return;
             const existing = map.get(tag.originalTerm);
             if (existing) {
                 existing.ids.push(tag.id);
@@ -568,11 +612,16 @@ const AdminTagCorrectionsView: React.FC = () => {
         }
         setLinkedCandidatesLoading(true);
         setLinkedCandidates([]); setLinkedJobs([]);
+        const tagIds = selectedGroup.ids.filter(isValidTagId);
+        if (!tagIds.length) {
+            setLinkedCandidatesLoading(false);
+            return;
+        }
         const loadCandidates = async () => {
             try {
                 const responses = await Promise.all(
-                    selectedGroup.ids.map(async (id) => {
-                        const res = await fetch(`${apiBase}/api/tags/${id}/candidates`);
+                    tagIds.map(async (id) => {
+                        const res = await fetch(`${apiBase}/api/tags/${encodeURIComponent(id)}/candidates`);
                         if (!res.ok) return { candidates: [], jobs: [] };
                         const body = await res.json();
                         if (Array.isArray(body)) return { candidates: body, jobs: [] };
@@ -1210,7 +1259,15 @@ const AdminTagCorrectionsView: React.FC = () => {
                                             )}
                                             <td className="p-4 align-top">
                                                 <div className="flex items-center gap-2 mb-1">
-                                                    <div className="font-bold text-text-default text-base" dir="auto">{decision.originalTerm}</div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openTagsListSearch(decision.originalTerm)}
+                                                        className="font-bold text-text-default text-base text-right hover:text-primary-600 hover:underline transition-colors"
+                                                        dir="auto"
+                                                        title="חפש בתגיות"
+                                                    >
+                                                        {decision.originalTerm}
+                                                    </button>
                                                     <button
                                                         onClick={() => void openAiOccurrences(decision)}
                                                         className="text-[10px] font-bold bg-gray-100 text-gray-700 px-2 py-0.5 rounded-full flex-shrink-0 hover:bg-gray-200 transition-colors flex items-center gap-1 border border-transparent hover:border-gray-300"
@@ -1245,19 +1302,36 @@ const AdminTagCorrectionsView: React.FC = () => {
                                             <td className="p-4 text-text-muted align-top text-xs leading-relaxed" dir="auto">{decision.contextSample}</td>
                                             <td className="p-4 align-top">
                                                 <div className="flex items-center gap-2 mb-2">
-                                                    {decision.aiDecision === 'merge' ? (
-                                                        <span className="flex items-center gap-1 text-primary-700 bg-primary-50 px-2 py-1 rounded-md text-xs font-bold border border-primary-100">
-                                                            <LinkIcon className="w-3.5 h-3.5" /> מיזוג לתגית &quot;{decision.aiSuggestedTarget}&quot;
-                                                        </span>
-                                                    ) : decision.aiDecision === 'create' ? (
-                                                        <span className="flex items-center gap-1 text-green-700 bg-green-50 px-2 py-1 rounded-md text-xs font-bold border border-green-100">
-                                                            <PlusIcon className="w-3.5 h-3.5" /> יצירת תגית חדשה
-                                                        </span>
-                                                    ) : (
-                                                        <span className="flex items-center gap-1 text-red-700 bg-red-50 px-2 py-1 rounded-md text-xs font-bold border border-red-100">
-                                                            <TrashIcon className="w-3.5 h-3.5" /> מחיקה / התעלמות
-                                                        </span>
-                                                    )}
+                                                    {(() => {
+                                                        const effective = getEffectiveAiDecision(decision);
+                                                        const wasOverridden = decision.status === 'overridden'
+                                                            || decision.reviewStatus === 'overridden';
+                                                        if (effective === 'merge') {
+                                                            return (
+                                                                <span className="flex items-center gap-1 text-primary-700 bg-primary-50 px-2 py-1 rounded-md text-xs font-bold border border-primary-100">
+                                                                    <LinkIcon className="w-3.5 h-3.5" /> מיזוג לתגית &quot;{decision.aiSuggestedTarget}&quot;
+                                                                    {wasOverridden && decision.reviewerAction && decision.reviewerAction !== 'merge' && decision.reviewerAction !== 'auto_merge' && (
+                                                                        <span className="text-[9px] font-normal opacity-60">(הוחלף)</span>
+                                                                    )}
+                                                                </span>
+                                                            );
+                                                        }
+                                                        if (effective === 'create') {
+                                                            return (
+                                                                <span className="flex items-center gap-1 text-green-700 bg-green-50 px-2 py-1 rounded-md text-xs font-bold border border-green-100">
+                                                                    <PlusIcon className="w-3.5 h-3.5" /> יצירת תגית חדשה
+                                                                    {wasOverridden && decision.aiDecision !== 'create' && (
+                                                                        <span className="text-[9px] font-normal opacity-60">(דריסה)</span>
+                                                                    )}
+                                                                </span>
+                                                            );
+                                                        }
+                                                        return (
+                                                            <span className="flex items-center gap-1 text-red-700 bg-red-50 px-2 py-1 rounded-md text-xs font-bold border border-red-100">
+                                                                <TrashIcon className="w-3.5 h-3.5" /> מחיקה / התעלמות
+                                                            </span>
+                                                        );
+                                                    })()}
                                                 </div>
                                                 <p className="text-xs text-text-muted leading-tight">{decision.aiReasoning}</p>
                                             </td>
@@ -1360,9 +1434,31 @@ const AdminTagCorrectionsView: React.FC = () => {
                                                         </div>
                                                     </span>
                                                 ) : decision.status === 'overridden' ? (
-                                                    <span className="text-xs font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-1.5 rounded flex items-center gap-1 shadow-sm">
-                                                        <CheckCircleIcon className="w-3.5 h-3.5" />דורס ואושר
-                                                    </span>
+                                                    <div className="flex flex-col gap-1.5">
+                                                        <span className="text-xs font-bold text-green-700 bg-green-50 border border-green-200 px-2 py-1.5 rounded flex items-center gap-1 shadow-sm">
+                                                            <CheckCircleIcon className="w-3.5 h-3.5" />דורס ואושר
+                                                        </span>
+                                                        <select
+                                                            className="w-full bg-white border border-border-default rounded-lg py-1 px-2 text-[10px] focus:ring-1 focus:ring-primary-500 cursor-pointer text-text-muted shadow-sm"
+                                                            onChange={(e) => {
+                                                                const newVal = e.target.value;
+                                                                if (newVal === 'merge') {
+                                                                    openMergeModal(decision);
+                                                                } else if (newVal === 'create' || newVal === 'delete' || newVal === 'blacklist' || newVal === 'manual') {
+                                                                    void handleSingleAiAction(decision.id, newVal as 'create' | 'delete' | 'blacklist' | 'manual');
+                                                                }
+                                                                e.target.value = '';
+                                                            }}
+                                                            defaultValue=""
+                                                        >
+                                                            <option value="" disabled>שנה שוב</option>
+                                                            <option value="create">בצע שוב: יצירת תגית חדשה</option>
+                                                            <option value="merge">שנה ל-מיזוג לתגית אחרת</option>
+                                                            <option value="delete">שנה למחיקת המונח</option>
+                                                            <option value="manual">העבר לתיקון ידני</option>
+                                                            <option value="blacklist">העבר לרשימה שחורה</option>
+                                                        </select>
+                                                    </div>
                                                 ) : (
                                                     <select
                                                         className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2 text-xs focus:ring-1 focus:ring-primary-500 cursor-pointer text-text-default shadow-sm"
@@ -1562,7 +1658,15 @@ const AdminTagCorrectionsView: React.FC = () => {
                                                 return (
                                                     <tr key={decision.id} className="hover:bg-red-50/30 transition-colors">
                                                         <td className="p-4 align-top">
-                                                            <div className="font-bold text-text-default text-sm" dir="auto">{decision.originalTerm}</div>
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => openTagsListSearch(decision.originalTerm)}
+                                                                className="font-bold text-text-default text-sm text-right hover:text-primary-600 hover:underline transition-colors"
+                                                                dir="auto"
+                                                                title="חפש בתגיות"
+                                                            >
+                                                                {decision.originalTerm}
+                                                            </button>
                                                         </td>
                                                         <td className="p-4 align-top">
                                                             <span className={`inline-block px-1.5 py-0.5 rounded uppercase font-bold border text-[10px] ${typeCls}`}>
@@ -1809,10 +1913,12 @@ const AdminTagCorrectionsView: React.FC = () => {
                         <span className="font-bold text-text-default" dir="auto">
                             {aiOccurrencesPopup.loading ? 'טוען...' : (
                                 aiOccurrencesPopup.candidates.length > 0
-                                    ? `נמצא ב-${aiOccurrencesPopup.candidates.length} קורות חיים`
+                                    ? `נמצא ב-${aiOccurrencesPopup.candidates.length} קורות חיים${aiOccurrencesPopup.occurrencesSource === 'merged' && aiOccurrencesPopup.targetLabel ? ` (תגית ממוזגת: ${aiOccurrencesPopup.targetLabel})` : ''}`
                                     : aiOccurrencesPopup.jobs.length > 0
-                                        ? `נמצא ב-${aiOccurrencesPopup.jobs.length} משרות`
-                                        : `"${aiOccurrencesPopup.term}" — לא נמצאו קישורים`
+                                        ? `נמצא ב-${aiOccurrencesPopup.jobs.length} משרות${aiOccurrencesPopup.occurrencesSource === 'merged' && aiOccurrencesPopup.targetLabel ? ` (תגית ממוזגת: ${aiOccurrencesPopup.targetLabel})` : ''}`
+                                        : aiOccurrencesPopup.occurrencesSource === 'merged'
+                                            ? `"${aiOccurrencesPopup.term}" ממוזג ל"${aiOccurrencesPopup.targetLabel || 'תגית אחרת'}" — לא נמצאו קישורים פעילים`
+                                            : `"${aiOccurrencesPopup.term}" — לא נמצאו קישורים`
                             )}
                         </span>
                         <button onClick={() => setAiOccurrencesPopup(null)} className="p-1 rounded-md hover:bg-bg-hover text-text-muted hover:text-text-default transition-colors">
@@ -1829,7 +1935,13 @@ const AdminTagCorrectionsView: React.FC = () => {
                         )}
 
                         {!aiOccurrencesPopup.loading && aiOccurrencesPopup.candidates.length === 0 && aiOccurrencesPopup.jobs.length === 0 && (
-                            <div className="py-8 text-center text-text-muted text-sm">לא נמצאו קורות חיים או משרות מקושרות</div>
+                            <div className="py-8 text-center text-text-muted text-sm px-4">
+                                {aiOccurrencesPopup.occurrencesSource === 'merged'
+                                    ? `התגית המקורית ממוזגת ל"${aiOccurrencesPopup.targetLabel || 'תגית קיימת'}". לא נמצאו מועמדים או משרות מקושרים לתגית היעד.`
+                                    : aiOccurrencesPopup.occurrencesSource === 'created'
+                                        ? 'התגית נוצרה במערכת — לא נמצאו קישורים פעילים עדיין'
+                                        : 'לא נמצאו קורות חיים או משרות מקושרות'}
+                            </div>
                         )}
 
                         {!aiOccurrencesPopup.loading && aiOccurrencesPopup.candidates.length > 0 && (

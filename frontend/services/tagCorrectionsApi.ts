@@ -25,7 +25,8 @@ export type CandidateTagMatchDto = {
 
 export type TagAiDecisionDto = {
     id: string;
-    pendingTagId: string;
+    pendingTagId: string | null;
+    resolvedTargetTagId?: string | null;
     originalTerm: string;
     detectedType: string;
     contextSample: string;

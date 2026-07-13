@@ -1,13 +1,14 @@
 
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { 
     MagnifyingGlassIcon, PlusIcon, SparklesIcon, GlobeAmericasIcon, 
     MapPinIcon, Squares2X2Icon, TableCellsIcon, 
     TrashIcon, XMarkIcon, LinkedInIcon, BriefcaseIcon,
     ChartBarIcon, BoltIcon, ShieldCheckIcon, Cog6ToothIcon, ChatBubbleBottomCenterTextIcon,
     BuildingOffice2Icon, ExclamationTriangleIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, FunnelIcon,
-    AvatarIcon, ArrowTopRightOnSquareIcon, UserGroupIcon, ArrowUpTrayIcon, ArrowDownTrayIcon
+    AvatarIcon, ArrowTopRightOnSquareIcon, UserGroupIcon, ArrowUpTrayIcon, ArrowDownTrayIcon,
+    EnvelopeIcon, PhoneIcon,
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
@@ -22,6 +23,10 @@ import {
 import BusinessFieldHierarchyFields, { mainFieldsFromApi, mainFieldsToApi } from './BusinessFieldHierarchyFields';
 import { FormMultiSelect } from './FormMultiSelect';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
+import AuditHistoryRow from './AuditHistoryRow';
+import { authHeaders } from '../utils/authHeaders';
+import { resolveEntryTimestamp } from '../utils/auditHistoryFormat';
+import { formatCompanyHistoryActionType, formatCompanyHistoryDescription, type CompanyHistoryEntryLike } from '../utils/companyHistoryText';
 
 // --- Types ---
 type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'משולב' | 'לא ידוע';
@@ -50,7 +55,9 @@ interface Company {
     // Links
     website: string;
     logo?: string;
-    linkedinUrl: string;    
+    linkedinUrl: string;
+    email?: string;
+    phone?: string;
     
     // Hard Facts
     foundedYear: string;
@@ -291,6 +298,8 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         website: String(o.website ?? ''),
         logo: typeof o.logo === 'string' && o.logo.trim() ? o.logo.trim() : undefined,
         linkedinUrl: String(o.linkedinUrl ?? ''),
+        email: o.email != null && o.email !== '' ? String(o.email) : '',
+        phone: o.phone != null && o.phone !== '' ? String(o.phone) : '',
         foundedYear: String(o.foundedYear ?? ''),
         location: String(o.location ?? ''),
         hqCountry: String(o.hqCountry ?? ''),
@@ -341,6 +350,8 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         website: c.website || null,
         logo: c.logo || null,
         linkedinUrl: c.linkedinUrl || null,
+        email: c.email || null,
+        phone: c.phone || null,
         foundedYear: c.foundedYear || null,
         location: c.location || null,
         hqCountry: c.hqCountry || null,
@@ -456,11 +467,13 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
             return c.secondaryField && !resolvedSubs.includes(c.secondaryField) ? c.secondaryField : '';
         })(),
         employeeCount: coerceEmployeeCountBucket(raw.employeeCount) || c.employeeCount,
-        website: (typeof raw.website === 'string' && raw.website) || c.website,
-        logo: (typeof raw.logo === 'string' && raw.logo.trim() ? raw.logo.trim() : undefined) || c.logo,
-        linkedinUrl: (typeof raw.linkedinUrl === 'string' && raw.linkedinUrl) || c.linkedinUrl,
-        foundedYear: (typeof raw.foundedYear === 'string' && raw.foundedYear) || c.foundedYear,
-        location: (typeof raw.location === 'string' && raw.location) || c.location,
+        website: (typeof raw.website === 'string' && raw.website) ? raw.website : c.website,
+        logo: (typeof raw.logo === 'string' && raw.logo.trim()) ? raw.logo.trim() : c.logo,
+        linkedinUrl: (typeof raw.linkedinUrl === 'string' && raw.linkedinUrl) ? raw.linkedinUrl : c.linkedinUrl,
+        email: (typeof raw.email === 'string' && raw.email && !String(c.email || '').trim()) ? raw.email : (c.email || ''),
+        phone: (typeof raw.phone === 'string' && raw.phone && !String(c.phone || '').trim()) ? raw.phone : (c.phone || ''),
+        foundedYear: (typeof raw.foundedYear === 'string' && raw.foundedYear) ? raw.foundedYear : c.foundedYear,
+        location: (typeof raw.location === 'string' && raw.location) ? raw.location : c.location,
         hqCountry: (typeof raw.hqCountry === 'string' && raw.hqCountry) || c.hqCountry,
         type: (typeof raw.type === 'string' && raw.type) || c.type,
         classification: (typeof raw.classification === 'string' && raw.classification) ? normalizeClassification(raw.classification) : c.classification,
@@ -482,7 +495,7 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         dataConfidence: raw.dataConfidence != null && raw.dataConfidence !== '' ? asDataConfidence(raw.dataConfidence) : 'Pending Review',
         lastVerified: new Date().toISOString().split('T')[0],
         activityStatus: (typeof raw.activityStatus === 'string' && raw.activityStatus) ? raw.activityStatus as Company['activityStatus'] : c.activityStatus,
-        address: (typeof raw.address === 'string' && raw.address) || c.address,
+        address: (typeof raw.address === 'string' && raw.address) ? raw.address : c.address,
     };
 }
 
@@ -830,7 +843,7 @@ const CompanyModal: React.FC<{
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const logoFileInputRef = useRef<HTMLInputElement>(null);
     const [logoUploading, setLogoUploading] = useState(false);
-    const [activeTab, setActiveTab] = useState<'details' | 'users'>('details');
+    const [activeTab, setActiveTab] = useState<'details' | 'users' | 'history'>('details');
     const [formData, setFormData] = useState<Company>({
         id: 0,
         name: '', nameEn: '', legalName: '', aliases: [],
@@ -838,7 +851,7 @@ const CompanyModal: React.FC<{
         mainField: '', subField: [], secondaryField: '',
         mainField2: [],
         employeeCount: '',
-        website: '', linkedinUrl: '', logo: '',
+        website: '', linkedinUrl: '', email: '', phone: '', logo: '',
         foundedYear: '', location: '', hqCountry: 'Israel',
         address: '', activityStatus: 'לא ידוע',
         type: 'הייטק', classification: 'פרטית',
@@ -853,6 +866,45 @@ const CompanyModal: React.FC<{
     const [techTagsInput, setTechTagsInput] = useState('');
     const [subsidiariesInput, setSubsidiariesInput] = useState('');
     const [aliasesInput, setAliasesInput] = useState('');
+    const [historyEntries, setHistoryEntries] = useState<CompanyHistoryEntryLike[]>([]);
+    const [historyLoading, setHistoryLoading] = useState(false);
+
+    useEffect(() => {
+        if (!isOpen || !company?.id || !isPersistedOrganizationId(company.id)) {
+            setHistoryEntries([]);
+            setHistoryLoading(false);
+            return;
+        }
+        const controller = new AbortController();
+        let active = true;
+        setHistoryLoading(true);
+
+        (async () => {
+            try {
+                const res = await fetch(
+                    `${apiBase}/api/organizations/${encodeURIComponent(String(company.id))}/history`,
+                    { signal: controller.signal, headers: authHeaders() },
+                );
+                if (!res.ok) throw new Error('Failed to fetch history');
+                const payload = await res.json();
+                if (active) {
+                    setHistoryEntries(Array.isArray(payload) ? payload : []);
+                }
+            } catch (err: unknown) {
+                if ((err as Error).name !== 'AbortError') {
+                    console.error('[CompanyModal] failed to load history', err);
+                }
+                if (active) setHistoryEntries([]);
+            } finally {
+                if (active) setHistoryLoading(false);
+            }
+        })();
+
+        return () => {
+            active = false;
+            controller.abort();
+        };
+    }, [isOpen, company?.id, apiBase]);
 
     useEffect(() => {
         if (isOpen) {
@@ -874,7 +926,7 @@ const CompanyModal: React.FC<{
                     mainField: '', subField: [], secondaryField: '',
         mainField2: [],
                     employeeCount: '',
-                    website: '', linkedinUrl: '', logo: '',
+                    website: '', linkedinUrl: '', email: '', phone: '', logo: '',
                     foundedYear: '', location: '', hqCountry: 'Israel',
                     address: '', activityStatus: 'לא ידוע',
                     type: 'הייטק', classification: 'פרטית',
@@ -1025,10 +1077,16 @@ const CompanyModal: React.FC<{
                         >
                             משתמשים
                         </button>
+                        <button 
+                            className={`px-4 py-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'history' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default hover:border-border-default'}`}
+                            onClick={() => setActiveTab('history')}
+                        >
+                            היסטוריה
+                        </button>
                     </div>
                 )}
                 
-                {activeTab === 'details' ? (
+                {activeTab === 'details' && (
                     <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-8">
                      {/* Full form content here - Same as before */}
                      {/* Identity */}
@@ -1079,6 +1137,32 @@ const CompanyModal: React.FC<{
                                         <LinkedInIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
                                     )}
                                     <input type="url" name="linkedinUrl" value={formData.linkedinUrl} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="linkedin.com/company/..." dir="ltr" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">אימייל</label>
+                                <div className="relative">
+                                    {formData.email ? (
+                                        <a href={`mailto:${formData.email}`} className="absolute left-3 top-1/2 -translate-y-1/2 text-primary-500 hover:text-primary-700 transition-colors" title="שלח אימייל">
+                                            <EnvelopeIcon className="w-4 h-4" />
+                                        </a>
+                                    ) : (
+                                        <EnvelopeIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
+                                    )}
+                                    <input type="email" name="email" value={formData.email || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="info@company.co.il" dir="ltr" />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">טלפון</label>
+                                <div className="relative">
+                                    {formData.phone ? (
+                                        <a href={`tel:${formData.phone.replace(/\s/g, '')}`} className="absolute left-3 top-1/2 -translate-y-1/2 text-primary-500 hover:text-primary-700 transition-colors" title="התקשר">
+                                            <PhoneIcon className="w-4 h-4" />
+                                        </a>
+                                    ) : (
+                                        <PhoneIcon className="w-4 h-4 text-text-subtle absolute left-3 top-1/2 -translate-y-1/2" />
+                                    )}
+                                    <input type="tel" name="phone" value={formData.phone || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 pl-9 text-sm focus:ring-2 focus:ring-primary-500" placeholder="03-1234567" dir="ltr" />
                                 </div>
                             </div>
                             <div className="md:col-span-3">
@@ -1315,11 +1399,46 @@ const CompanyModal: React.FC<{
                         </div>
                     </section>
                 </form>
-                ) : (
+                )}
+                {activeTab === 'users' && (
+                    <div className="flex-1 overflow-y-auto">
                     <CompanyUsersTab
                         companyName={formData.name}
                         organizationId={formData.id}
                     />
+                    </div>
+                )}
+                {activeTab === 'history' && (
+                    <div className="flex-1 overflow-y-auto p-6 space-y-3">
+                        {historyLoading && (
+                            <div className="p-4 text-center text-text-muted">טוען היסטוריה...</div>
+                        )}
+                        {!historyLoading && historyEntries.length === 0 && (
+                            <div className="p-4 text-center text-text-muted">אין היסטוריית עדכונים</div>
+                        )}
+                        {!historyLoading && historyEntries.length > 0 && (
+                            <>
+                                <div className="hidden md:grid md:grid-cols-[minmax(140px,1fr)_minmax(140px,1fr)_100px_minmax(0,2fr)] gap-4 px-1 pb-2 text-[10px] font-bold uppercase tracking-wider text-text-muted">
+                                    <span>מתי</span>
+                                    <span>מי</span>
+                                    <span>פעולה</span>
+                                    <span>תיאור השינוי</span>
+                                </div>
+                                {historyEntries.map((entry) => (
+                                    <AuditHistoryRow
+                                        key={entry.id}
+                                        timestamp={resolveEntryTimestamp(entry as Record<string, unknown>)}
+                                        actor={entry.actor}
+                                        actorDisplayName={entry.actorDisplayName}
+                                        userName={entry.userName}
+                                        userEmail={entry.userEmail}
+                                        actionLabel={formatCompanyHistoryActionType(entry)}
+                                        description={formatCompanyHistoryDescription(entry)}
+                                    />
+                                ))}
+                            </>
+                        )}
+                    </div>
                 )}
 
                 <footer className="p-4 border-t border-border-default bg-bg-subtle flex justify-between items-center">
@@ -1430,6 +1549,7 @@ const CompanyPaginationBar: React.FC<CompanyPaginationBarProps> = ({
 
 const AdminCompaniesView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [searchParams] = useSearchParams();
     const [companies, setCompanies] = useState<Company[]>([]);
     const [companiesLoading, setCompaniesLoading] = useState(false);
     const [isEnriching, setIsEnriching] = useState(false);
@@ -1574,6 +1694,13 @@ const AdminCompaniesView: React.FC = () => {
         const t = setTimeout(() => setDebouncedSearchTerm(searchTerm), 350);
         return () => clearTimeout(t);
     }, [searchTerm]);
+
+    const urlSearch = (searchParams.get('search') || searchParams.get('q') || '').trim();
+    useEffect(() => {
+        if (!urlSearch) return;
+        setSearchTerm(urlSearch);
+        setDebouncedSearchTerm(urlSearch);
+    }, [urlSearch]);
 
     useEffect(() => {
         const filtersChanged = prevListQueryKeyRef.current !== listQueryKey;
@@ -2011,6 +2138,8 @@ const AdminCompaniesView: React.FC = () => {
                             employeeCount: 'Unknown',
                             website: '',
                             linkedinUrl: '',
+                            email: '',
+                            phone: '',
                             foundedYear: '',
                             location: 'Unknown',
                             hqCountry: 'Israel',

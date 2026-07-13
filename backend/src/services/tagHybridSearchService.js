@@ -46,8 +46,15 @@ const displayLabel = (tag) =>
 
 const normalizeTagType = (value) => String(value || '').trim().toLowerCase();
 
+/** Map UI / decision detected_type labels to catalog Tag.type values. */
+const catalogTagType = (value) => {
+  const normalized = normalizeTagType(value);
+  if (normalized === 'education') return 'degree';
+  return normalized;
+};
+
 const buildTypeFilter = (tagType) => {
-  const normalized = normalizeTagType(tagType);
+  const normalized = catalogTagType(tagType);
   if (!normalized) return null;
   return { type: normalized };
 };
@@ -146,7 +153,7 @@ const resolveTargetTagIdByName = async (name, options = {}) => {
   if (!found?.id) return null;
 
   const typeFilter = buildTypeFilter(options.tagType);
-  if (typeFilter && normalizeTagType(found.type) !== typeFilter.type) {
+  if (typeFilter && catalogTagType(found.type) !== typeFilter.type) {
     return null;
   }
   return found.id;

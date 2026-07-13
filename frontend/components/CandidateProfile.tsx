@@ -82,14 +82,19 @@ const EditableField: React.FC<{
     icon?: React.ReactNode;
     multiline?: boolean;
     collapsible?: boolean;
-}> = ({ value, placeholder, onSave, className = "", icon, multiline = false, collapsible = false }) => {
+    /** Shown when value is empty (defaults to placeholder). */
+    emptyText?: string;
+}> = ({ value, placeholder, onSave, className = "", icon, multiline = false, collapsible = false, emptyText }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [localValue, setLocalValue] = useState(value);
     const [isExpanded, setIsExpanded] = useState(false);
     const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
+    const trimmedValue = String(localValue ?? '').trim();
+    const hasValue = trimmedValue !== '';
+    const emptyDisplay = emptyText ?? placeholder;
 
     // Calculate split point at 50% of the text length
-    const isLongText = collapsible && localValue && localValue.length > 100; // Minimum threshold to even consider collapsing
+    const isLongText = collapsible && hasValue && localValue.length > 100; // Minimum threshold to even consider collapsing
     const cutOffPoint = Math.floor(localValue.length / 2);
     
     const displayValue = !isEditing && !isExpanded && isLongText 
@@ -159,7 +164,11 @@ const EditableField: React.FC<{
                             className="cursor-pointer hover:bg-bg-hover/50 rounded-md py-0.5 px-1 min-h-[1.5em]"
                         >
                             <p className="whitespace-pre-line break-words leading-relaxed">
-                                {displayValue || <span className="text-text-subtle opacity-60 italic">{placeholder}</span>}
+                                {hasValue ? (
+                                    displayValue
+                                ) : (
+                                    <span className="text-text-subtle opacity-60 italic">{emptyDisplay}</span>
+                                )}
                             </p>
                         </div>
                         
@@ -1368,8 +1377,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const isIncompleteProfile = String(candidateData.status || '').trim() === 'חסר נתונים';
   const missingProfileLabels = buildMissingProfileFieldLabels(candidateData, displayAge);
-  /** Hide as soon as required local fields are filled — do not wait for server status refresh. */
-  const showMissingDetailsBanner = isIncompleteProfile && missingProfileLabels.length > 0;
+  /** Show while required local fields are missing — do not wait for server status refresh. */
+  const showMissingDetailsBanner = missingProfileLabels.length > 0;
+  const showApproveDataCorrectionsButton =
+    isIncompleteProfile && typeof onApproveDataCorrections === 'function';
   const missingDetailsBannerLine = `פרטים חסרים: ${missingProfileLabels.join(', ')}`;
 
   const showSaveFooter = Boolean(!hideActions && onSaveCandidate);
@@ -1472,19 +1483,27 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                           <span className="min-w-0 leading-snug max-w-[220px] sm:max-w-[280px]">
                                               {missingDetailsBannerLine}
                                           </span>
-                                          {typeof onApproveDataCorrections === 'function' ? (
-                                              <button
-                                                  type="button"
-                                                  disabled={approveCorrectionsLoading}
-                                                  onClick={(e) => {
-                                                      e.stopPropagation();
-                                                      void onApproveDataCorrections();
-                                                  }}
-                                                  className="mr-2 shrink-0 bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 font-bold"
-                                              >
-                                                  {approveCorrectionsLoading ? 'מעביר…' : 'אישור פרטים'}
-                                              </button>
-                                          ) : null}
+                                      </div>
+                                  ) : showApproveDataCorrectionsButton ? (
+                                      <div
+                                          className="sm:mr-3 flex flex-wrap items-center gap-2 px-2.5 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-lg border border-amber-200 shadow-sm shrink-0"
+                                          dir="rtl"
+                                      >
+                                          <ExclamationTriangleIcon className="w-4 h-4 shrink-0 text-amber-600" />
+                                          <span className="min-w-0 leading-snug max-w-[220px] sm:max-w-[280px]">
+                                              הפרטים הושלמו — ניתן לאשר את המועמד
+                                          </span>
+                                          <button
+                                              type="button"
+                                              disabled={approveCorrectionsLoading}
+                                              onClick={(e) => {
+                                                  e.stopPropagation();
+                                                  void onApproveDataCorrections();
+                                              }}
+                                              className="mr-2 shrink-0 bg-amber-100 hover:bg-amber-200 text-amber-800 px-2 py-0.5 rounded text-[10px] transition-colors disabled:opacity-50 font-bold"
+                                          >
+                                              {approveCorrectionsLoading ? 'מעביר…' : 'אישור פרטים'}
+                                          </button>
                                       </div>
                                   ) : null}
                               </div>
@@ -1492,6 +1511,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                   <EditableField
                                       value={displayAge}
                                       placeholder="גיל"
+                                      emptyText="לא צוין"
                                       onSave={(val) => onFormChange({ ...candidateData, age: val })}
                                       className="font-semibold min-w-[40px]"
                                   />

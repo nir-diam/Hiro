@@ -9,8 +9,10 @@ import {
     GlobeAmericasIcon, 
     ClipboardDocumentListIcon,
     DocumentTextIcon,
-    ArrowPathIcon, // Icon for Pipelines
+    ArrowPathIcon,
+    MegaphoneIcon,
     FlagIcon,
+    PhotoIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 
@@ -25,6 +27,8 @@ const SettingsLayout: React.FC = () => {
 
     const navItems = [
         { to: '/settings/company', label: t('nav.company_settings'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
+        { to: '/settings/publishing', label: 'דפי נחיתה ופרסום', icon: <MegaphoneIcon className="w-5 h-5" /> },
+        { to: '/settings/company-images', label: 'תמונות שנוצרו', icon: <PhotoIcon className="w-5 h-5" /> },
         { to: '/settings/statuses', label: 'עריכת סטטוסים', icon: <FlagIcon className="w-5 h-5" /> },
         { to: '/settings/pipelines', label: 'תהליכי עבודה', icon: <ArrowPathIcon className="w-5 h-5" /> },
         { to: '/settings/documents', label: 'Document Studio', icon: <DocumentTextIcon className="w-5 h-5" /> }, // New

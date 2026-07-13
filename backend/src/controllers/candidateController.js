@@ -10,6 +10,7 @@ const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const Candidate = require('../models/Candidate');
+const Client = require('../models/Client');
 const User = require('../models/User');
 const jobCandidateService = require('../services/jobCandidateService');
 const jobService = require('../services/jobService');
@@ -950,12 +951,27 @@ const loadPromptTemplate = async (promptId) => {
   }
 };
 
+const PROFILE_SUMMARY_PROMPT_ID = 'candidate_Profile Summary AI-Enhanced';
+const EXPERIENCE_AI_PROMPT_ID = 'experience_ai';
+
 const buildExperiencePrompt = async (contextParts) => {
-  const template = await loadPromptTemplate('candidate_Profile Summary AI-Enhanced');
+  const template = await loadPromptTemplate(PROFILE_SUMMARY_PROMPT_ID);
   if (template) {
-    return template.replace(/{{contextParts}}/g, contextParts.join('\n'));
+    return {
+      promptId: PROFILE_SUMMARY_PROMPT_ID,
+      systemPrompt: template.replace(/{{contextParts}}/g, contextParts.join('\n')),
+    };
   }
-  return `
+  const fallbackTemplate = await loadPromptTemplate(EXPERIENCE_AI_PROMPT_ID);
+  if (fallbackTemplate) {
+    return {
+      promptId: EXPERIENCE_AI_PROMPT_ID,
+      systemPrompt: fallbackTemplate.replace(/{{contextParts}}/g, contextParts.join('\n')),
+    };
+  }
+  return {
+    promptId: EXPERIENCE_AI_PROMPT_ID,
+    systemPrompt: `
 פעל כיועץ קריירה ומומחה לכתיבת קורות חיים (CV Expert) בעברית.
 המטרה: כתיבה או שכתוב של תיאור ניסיון תעסוקתי בעברית בצורה מקצועית.
 הנתונים עליהם יש להתבסס:
@@ -964,7 +980,8 @@ ${contextParts.join('\n')}
 1. כתוב 3-5 נקודות קצרות ומקצועיות בגוף ראשון עבר.
 2. אם קיים תיאור - שפר אותו; אם לא, צור תיאור חדש.
 3. החזר רק את רשימת הנקודות בעברית, ללא מבואות.
-`.trim();
+`.trim(),
+  };
 };
 
 const CandidateOrganization = require('../models/CandidateOrganization');
@@ -1020,7 +1037,7 @@ const generateExperienceSummary = async (req, res) => {
       return res.status(400).json({ message: 'חובה לספק לפחות תפקיד או חברה כדי לגבש תיאור.' });
     }
 
-    const prompt = await buildExperiencePrompt(contextParts);
+    const { promptId, systemPrompt } = await buildExperiencePrompt(contextParts);
     const apiKey =
       process.env.GEMINI_API_KEY ||
       process.env.API_KEY ||
@@ -1032,8 +1049,10 @@ const generateExperienceSummary = async (req, res) => {
 
     const text = await sendSingleTurnChat({
       apiKey,
-      systemPrompt: prompt,
-      message: prompt,
+      systemPrompt,
+      message: systemPrompt,
+      promptId,
+      llmInputJson: { contextParts },
     });
 
     const summary = (text || '').trim();
@@ -1251,7 +1270,8 @@ const buildCandidateModelSchemaJsonForPrompt = () => {
  * and the truncation salvager (`salvageTruncatedJson`) plus the validate-and-repair
  * pass cover whatever leaks through.
  */
-const buildResumeResponseSchema = () => ({
+const buildResumeResponseSchema = 
+() => ({
   type: 'object',
   description: 'Parsed CV data. Every key MUST be present even if its value is null/empty.',
   propertyOrdering: [
@@ -1476,6 +1496,11 @@ const parseResumeWithAi = async ({ resumeText }) => {
     systemPrompt,
     message: `CV TEXT (verbatim, do not summarize before extracting):\n\n${cvText}`,
     generationConfig,
+    promptId: 'cv_parsing',
+    llmInputJson: {
+      cvTextLength: cvText.length,
+      cvTextPreview: cvText.slice(0, 4000),
+    },
   });
   const rawStr = String(raw || '');
   let parsed = tryParseJson(rawStr);
@@ -1511,6 +1536,12 @@ const parseResumeWithAi = async ({ resumeText }) => {
         systemPrompt,
         message: repairMessage,
         generationConfig,
+        promptId: 'cv_parsing',
+        llmInputJson: {
+          pass: 'repair',
+          missingKeys: missing,
+          cvTextLength: cvText.length,
+        },
       });
       const repairedParsed = tryParseJson(repairRaw);
       if (repairedParsed && typeof repairedParsed === 'object') {
@@ -2379,115 +2410,8 @@ const attachMedia = async (req, res) => {
     if (type === 'resume') {
       const extraText = await fetchResumeText(url, baseCandidate.id);
       console.log('[attachMedia] resume extraText length', baseCandidate.id, extraText ? extraText.length : 0);
-      // Persist raw text for search/embedding + allow downstream keyword match
-      const baseUpdates = extraText && extraText.trim()
-        ? { searchText: extraText.slice(0, 50000), searchTextSavedAt: new Date() }
-        : {};
-
-      // Prefer AI parsing (Gemini) to populate candidate fields; fallback to regex parsing.
-      let mergedUpdates = { ...baseUpdates };
-      let aiTagEntries = [];
-      try {
-        const ai = await parseResumeWithAi({ resumeText: extraText || '' });
-        if (ai && typeof ai === 'object') {
-          const candidateUpdates = { ...buildPersistFieldsFromAiParse(ai, {}) };
-          if (
-            ai.industryAnalysis &&
-            typeof ai.industryAnalysis === 'object' &&
-            Object.keys(ai.industryAnalysis).length
-          ) {
-            const prev =
-              baseCandidate.industryAnalysis && typeof baseCandidate.industryAnalysis === 'object'
-                ? baseCandidate.industryAnalysis
-                : {};
-            candidateUpdates.industryAnalysis = { ...prev, ...ai.industryAnalysis };
-          }
-
-          // Skills: merge into candidate.skills (JSONB)
-          const softFromAi = normalizeStringArray(ai.skills?.soft);
-          const techFromAi = normalizeStringArray(ai.skills?.technical);
-          if (softFromAi.length || techFromAi.length) {
-            const existingSkills = baseCandidate.skills && typeof baseCandidate.skills === 'object'
-              ? baseCandidate.skills
-              : { soft: [], technical: [] };
-            const existingSoft = normalizeStringArray(existingSkills.soft);
-            const existingTech = normalizeStringArray(existingSkills.technical);
-            candidateUpdates.skills = {
-              soft: Array.from(new Set([...existingSoft, ...softFromAi])).slice(0, 50),
-              technical: Array.from(new Set([...existingTech, ...techFromAi])).slice(0, 50),
-            };
-          }
-
-          // If Gemini returned empty/missing skills, do a dedicated skills extraction pass (Gemini), then fallback heuristic.
-          const currentSoft = normalizeStringArray(candidateUpdates.skills?.soft);
-          const currentTech = normalizeStringArray(candidateUpdates.skills?.technical);
-          if ((!currentSoft.length && !currentTech.length) && (extraText || '').trim().length > 50) {
-            try {
-              const skillsOnly = await parseSkillsWithAi({ resumeText: extraText });
-              const soft2 = normalizeStringArray(skillsOnly?.skills?.soft);
-              const tech2 = normalizeStringArray(skillsOnly?.skills?.technical);
-              if (soft2.length || tech2.length) {
-                const existingSkills = baseCandidate.skills && typeof baseCandidate.skills === 'object'
-                  ? baseCandidate.skills
-                  : { soft: [], technical: [] };
-                const existingSoft = normalizeStringArray(existingSkills.soft);
-                const existingTech = normalizeStringArray(existingSkills.technical);
-                candidateUpdates.skills = {
-                  soft: Array.from(new Set([...existingSoft, ...soft2])).slice(0, 50),
-                  technical: Array.from(new Set([...existingTech, ...tech2])).slice(0, 50),
-                };
-                console.log('[attachMedia-ai] skills second-pass', baseCandidate.id, { soft: soft2.length, technical: tech2.length });
-              } else {
-                const heur = extractSkillsHeuristic(extraText);
-                if (heur.soft.length || heur.technical.length) {
-                  candidateUpdates.skills = {
-                    soft: heur.soft,
-                    technical: heur.technical,
-                  };
-                  console.log('[attachMedia-ai] skills heuristic', baseCandidate.id, { soft: heur.soft.length, technical: heur.technical.length });
-                } else {
-                  console.log('[attachMedia-ai] skills still empty after second-pass + heuristic', baseCandidate.id);
-                }
-              }
-            } catch (e) {
-              console.error('[attachMedia-ai] skills second-pass error', baseCandidate.id, e.message || e);
-            }
-          }
-
-          aiTagEntries = Array.isArray(ai.tags) ? ai.tags : [];
-
-          const exp = normalizeWorkExperience(ai.workExperience);
-          if (exp.length) candidateUpdates.workExperience = exp;
-
-          const edu = normalizeEducation(ai.education);
-          if (edu.length) candidateUpdates.education = edu;
-
-          const langs = normalizeLanguages(ai.languages);
-          if (langs.length) candidateUpdates.languages = langs;
-
-          mergedUpdates = { ...mergedUpdates, ...candidateUpdates };
-          console.log('[attachMedia-ai]', baseCandidate.id, 'updates keys', Object.keys(candidateUpdates));
-        } else {
-          console.log('[attachMedia-ai]', baseCandidate.id, 'no ai result, fallback to regex');
-          const fallback = buildParsedUpdates(baseCandidate, extraText);
-          mergedUpdates = { ...mergedUpdates, ...fallback };
-        }
-      } catch (e) {
-       
-      }
-
-      const needsUpdate = Object.keys(mergedUpdates).length > 0;
-      if (needsUpdate) {
-        await candidateService.update(baseCandidate.id, mergedUpdates);
-      }
-      if (aiTagEntries.length) {
-
-        await candidateTagService.syncTagsForCandidate(baseCandidate.id, aiTagEntries);
-      }
-      // Fire-and-forget embedding with extra text
-      void tryEmbedCandidate(baseCandidate.id, extraText);
-      const refreshedCandidate = await candidateService.getById(baseCandidate.id);
-      await ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
+      const refreshedCandidate = await enrichCandidateFromResumeText(baseCandidate, extraText || '', {});
+      await candidateCompletenessService.refreshCandidateDataStatusAfterSave(baseCandidate.id, req);
       return res.json(refreshedCandidate);
     }
     res.json(baseCandidate);
@@ -2504,7 +2428,11 @@ const attachMedia = async (req, res) => {
  */
 const putResumeFileInS3 = async (candidateId, fileBase64, filename, mimeType) => {
   if (!fileBase64) return null;
-  const buffer = Buffer.from(fileBase64, 'base64');
+  let buffer = decodeFileBase64Payload(fileBase64);
+  if (!buffer?.length) {
+    buffer = Buffer.from(String(fileBase64).replace(/\s/g, ''), 'base64');
+  }
+  if (!buffer?.length) return null;
   const name = filename ? path.basename(filename) : `resume-${Date.now()}.bin`;
   const key = `resumes/${candidateId}/${Date.now()}-${name}`;
   const command = new PutObjectCommand({
@@ -2527,6 +2455,146 @@ const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeT
     resumeUploadedAt: new Date(),
   });
   return out.publicUrl;
+};
+
+const LANDING_FORM_PRESERVE_FIELDS = new Set([
+  'email',
+  'phone',
+  'fullName',
+  'firstName',
+  'lastName',
+  'location',
+  'address',
+  'idNumber',
+  'drivingLicense',
+  'drivingLicenses',
+  'source',
+  'candidateNotes',
+  'internalNotes',
+]);
+
+const filterPreservedCandidateFields = (updates, baseCandidate, preserveFields) => {
+  const out = { ...updates };
+  for (const key of preserveFields) {
+    if (!Object.prototype.hasOwnProperty.call(out, key)) continue;
+    const existing = baseCandidate?.[key];
+    if (existing == null) continue;
+    if (typeof existing === 'string' && !existing.trim()) continue;
+    if (Array.isArray(existing) && !existing.length) continue;
+    delete out[key];
+  }
+  return out;
+};
+
+const enrichCandidateFromResumeText = async (baseCandidate, extraText, options = {}) => {
+  const preserveFields =
+    options.preserveFormFields === true
+      ? LANDING_FORM_PRESERVE_FIELDS
+      : options.preserveFields || new Set();
+
+  const baseUpdates =
+    extraText && extraText.trim()
+      ? { searchText: extraText.slice(0, 50000), searchTextSavedAt: new Date() }
+      : {};
+
+  let mergedUpdates = { ...baseUpdates };
+  let aiTagEntries = [];
+  try {
+    const ai = await parseResumeWithAi({ resumeText: extraText || '' });
+    if (ai && typeof ai === 'object') {
+      const candidateUpdates = { ...buildPersistFieldsFromAiParse(ai, {}) };
+      if (
+        ai.industryAnalysis &&
+        typeof ai.industryAnalysis === 'object' &&
+        Object.keys(ai.industryAnalysis).length
+      ) {
+        const prev =
+          baseCandidate.industryAnalysis && typeof baseCandidate.industryAnalysis === 'object'
+            ? baseCandidate.industryAnalysis
+            : {};
+        candidateUpdates.industryAnalysis = { ...prev, ...ai.industryAnalysis };
+      }
+
+      const softFromAi = normalizeStringArray(ai.skills?.soft);
+      const techFromAi = normalizeStringArray(ai.skills?.technical);
+      if (softFromAi.length || techFromAi.length) {
+        const existingSkills =
+          baseCandidate.skills && typeof baseCandidate.skills === 'object'
+            ? baseCandidate.skills
+            : { soft: [], technical: [] };
+        const existingSoft = normalizeStringArray(existingSkills.soft);
+        const existingTech = normalizeStringArray(existingSkills.technical);
+        candidateUpdates.skills = {
+          soft: Array.from(new Set([...existingSoft, ...softFromAi])).slice(0, 50),
+          technical: Array.from(new Set([...existingTech, ...techFromAi])).slice(0, 50),
+        };
+      }
+
+      const currentSoft = normalizeStringArray(candidateUpdates.skills?.soft);
+      const currentTech = normalizeStringArray(candidateUpdates.skills?.technical);
+      if ((!currentSoft.length && !currentTech.length) && (extraText || '').trim().length > 50) {
+        try {
+          const skillsOnly = await parseSkillsWithAi({ resumeText: extraText });
+          const soft2 = normalizeStringArray(skillsOnly?.skills?.soft);
+          const tech2 = normalizeStringArray(skillsOnly?.skills?.technical);
+          if (soft2.length || tech2.length) {
+            const existingSkills =
+              baseCandidate.skills && typeof baseCandidate.skills === 'object'
+                ? baseCandidate.skills
+                : { soft: [], technical: [] };
+            const existingSoft = normalizeStringArray(existingSkills.soft);
+            const existingTech = normalizeStringArray(existingSkills.technical);
+            candidateUpdates.skills = {
+              soft: Array.from(new Set([...existingSoft, ...soft2])).slice(0, 50),
+              technical: Array.from(new Set([...existingTech, ...tech2])).slice(0, 50),
+            };
+          } else {
+            const heur = extractSkillsHeuristic(extraText);
+            if (heur.soft.length || heur.technical.length) {
+              candidateUpdates.skills = {
+                soft: heur.soft,
+                technical: heur.technical,
+              };
+            }
+          }
+        } catch (e) {
+          console.error('[enrichCandidateFromResumeText] skills second-pass error', baseCandidate.id, e.message || e);
+        }
+      }
+
+      aiTagEntries = Array.isArray(ai.tags) ? ai.tags : [];
+
+      const exp = normalizeWorkExperience(ai.workExperience);
+      if (exp.length) candidateUpdates.workExperience = exp;
+
+      const edu = normalizeEducation(ai.education);
+      if (edu.length) candidateUpdates.education = edu;
+
+      const langs = normalizeLanguages(ai.languages);
+      if (langs.length) candidateUpdates.languages = langs;
+
+      mergedUpdates = { ...mergedUpdates, ...candidateUpdates };
+    } else {
+      const fallback = buildParsedUpdates(baseCandidate, extraText);
+      mergedUpdates = { ...mergedUpdates, ...fallback };
+    }
+  } catch (e) {
+    const fallback = buildParsedUpdates(baseCandidate, extraText);
+    mergedUpdates = { ...mergedUpdates, ...fallback };
+  }
+
+  mergedUpdates = filterPreservedCandidateFields(mergedUpdates, baseCandidate, preserveFields);
+
+  if (Object.keys(mergedUpdates).length > 0) {
+    await candidateService.update(baseCandidate.id, mergedUpdates);
+  }
+  if (aiTagEntries.length) {
+    await candidateTagService.syncTagsForCandidate(baseCandidate.id, aiTagEntries);
+  }
+  void tryEmbedCandidate(baseCandidate.id, extraText);
+  const refreshedCandidate = await candidateService.getById(baseCandidate.id);
+  await ensureOrganizationsFromExperience(refreshedCandidate.workExperience, refreshedCandidate.id);
+  return refreshedCandidate;
 };
 
 // Rebuild embeddings for all candidates with resumeUrl (best-effort)
@@ -2633,6 +2701,34 @@ const extractFromBuffer = async (buffer, ct) => {
   return '';
 };
 
+/** Extract resume text directly from an uploaded base64 payload (same path as createFromAi). */
+const extractResumeTextFromUpload = async (fileBase64, mimeType) => {
+  let buffer = decodeFileBase64Payload(fileBase64);
+  if (!buffer?.length) {
+    buffer = Buffer.from(String(fileBase64 || '').replace(/\s/g, ''), 'base64');
+  }
+  if (!buffer?.length) return '';
+
+  let text = '';
+  try {
+    if ((mimeType || '').startsWith('image/')) {
+      text = await extractTextFromImageBuffer(buffer);
+    } else {
+      text = await extractFromBuffer(buffer, mimeType);
+    }
+    if (!text || !String(text).trim()) {
+      if (!isPdfMagicBuffer(buffer) && !String(mimeType || '').toLowerCase().includes('pdf')) {
+        text = buffer.toString('utf8');
+      }
+    }
+  } catch (e) {
+    console.warn('[extractResumeTextFromUpload]', e.message || e);
+  }
+
+  if (looksLikeRawPdfUtf8String(text)) return '';
+  return normalizeResumeSearchText(text || '');
+};
+
 const fetchResumeText = async (resumeUrl, candidateIdForLog = '') => {
   let extraText = '';
   try {
@@ -2673,6 +2769,37 @@ const fetchResumeText = async (resumeUrl, candidateIdForLog = '') => {
     console.log('[embed-fetch-error]', candidateIdForLog, e.message || e);
   }
   return normalizeResumeSearchText(extraText);
+};
+
+/**
+ * Upload resume to S3 and run the same AI/regex enrichment as attachMedia.
+ * Extracts text from the upload buffer first, then falls back to fetching from S3.
+ */
+const processResumeUploadForCandidate = async (
+  candidateId,
+  fileBase64,
+  filename,
+  mimeType,
+  options = {},
+) => {
+  const bufferText = await extractResumeTextFromUpload(fileBase64, mimeType);
+  const resumeUrl = await uploadResumeForCandidate(candidateId, fileBase64, filename, mimeType);
+  if (!resumeUrl) return null;
+
+  let extraText = bufferText;
+  if (!extraText.trim()) {
+    extraText = await fetchResumeText(resumeUrl, candidateId);
+  }
+  console.log('[processResumeUploadForCandidate]', candidateId, {
+    bufferTextLen: bufferText.length,
+    extraTextLen: extraText.length,
+    preserveFormFields: options.preserveFormFields === true,
+  });
+
+  const baseCandidate = await candidateService.getById(candidateId);
+  const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', options);
+  await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, null);
+  return { resumeUrl, candidate: refreshed };
 };
 
 const extFromContentType = (ct) => {
@@ -3154,6 +3281,14 @@ const generateInternalOpinion = async (req, res) => {
       systemPrompt,
       history: [],
       message: 'צור את חוות הדעת המקצועית עכשיו בפורמט HTML.',
+      promptId: 'internal_opinion',
+      llmInputJson: {
+        candidateId: candidate.id,
+        candidateSummary: candidateSummary.slice(0, 4000),
+        jobContext: jobContext.slice(0, 4000),
+        hasScreeningAnswers: screeningAnswersText !== 'אין תשובות לשאלון',
+        hasCurrentDraft: !!currentDraftText,
+      },
     });
 
     const html = (text && text.trim()) ? text.trim() : '<p>לא התקבלה תשובה מהמערכת.</p>';
@@ -3756,6 +3891,40 @@ const listScreeningRejections = async (req, res) => {
       return res.json([]);
     }
 
+    const role = String(req.user?.role || '').toLowerCase();
+    const isBroad = role === 'admin' || role === 'super_admin';
+    let tenantClientLabels = null;
+    if (!isBroad) {
+      const tenantClientId = await getStaffClientIdFromRequest(req);
+      if (tenantClientId) {
+        const client = await Client.findByPk(tenantClientId, {
+          attributes: ['id', 'name', 'displayName', 'domain', 'metadata'],
+        });
+        if (client) {
+          const plain = client.get({ plain: true });
+          const labels = new Set();
+          const add = (v) => {
+            const s = String(v || '').trim();
+            if (s) labels.add(s);
+          };
+          add(plain.name);
+          add(plain.displayName);
+          add(plain.domain);
+          if (plain.metadata && typeof plain.metadata === 'object') {
+            add(plain.metadata.nameEn);
+            if (Array.isArray(plain.metadata.aliases)) {
+              for (const alias of plain.metadata.aliases) add(alias);
+            }
+          }
+          tenantClientLabels = [...labels];
+        }
+      }
+      if (!tenantClientLabels?.length) {
+        res.set('Cache-Control', 'private, no-store');
+        return res.json([]);
+      }
+    }
+
     const rows = await JobCandidateScreening.findAll({
       where: { screeningStatus: 'rejected' },
       include: [
@@ -3783,6 +3952,12 @@ const listScreeningRejections = async (req, res) => {
         screeningLevel: 'סינון מועמד',
         reason: reasonParts.length ? reasonParts.map((x) => String(x).trim()).join(' — ') : '—',
       };
+    }).filter((row) => {
+      if (isBroad || !tenantClientLabels?.length) return isBroad;
+      const name = String(row.clientName || '').trim();
+      if (!name) return false;
+      const lower = name.toLowerCase();
+      return tenantClientLabels.some((l) => String(l).trim().toLowerCase() === lower || l === name);
     });
 
     res.set('Cache-Control', 'private, no-store');
@@ -3934,6 +4109,8 @@ module.exports = {
   freeSearch,
   uploadResumeForCandidate,
   putResumeFileInS3,
+  processResumeUploadForCandidate,
+  enrichCandidateFromResumeText,
   generateExperienceSummary,
   fetchResumeText,
   fetchResumeBinaryForMail,

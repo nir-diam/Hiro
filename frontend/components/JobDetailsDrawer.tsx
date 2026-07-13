@@ -1,19 +1,23 @@
 
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
     XMarkIcon, BriefcaseIcon, CalendarDaysIcon, UserGroupIcon, MapPinIcon, 
     WalletIcon, ClockIcon, ArrowLeftIcon, UserIcon, PencilIcon, CheckCircleIcon,
     SparklesIcon, EnvelopeIcon, DocumentTextIcon
 } from './Icons';
-import { candidatesData as mockCandidates } from './CandidatesListView';
 import { useLanguage } from '../context/LanguageContext';
+import {
+    normalizeJobEventFromApi,
+    type JobEvent,
+    getJobEventApiHeaders,
+} from './JobEventsView';
 
 // --- TYPES ---
 type JobStatus = 'פתוחה' | 'מוקפאת' | 'מאוישת' | 'טיוטה';
 
 interface Job {
-  id: number;
+  id: string | number;
   title: string;
   client: string;
   status: JobStatus;
@@ -23,23 +27,19 @@ interface Job {
   location: string;
   jobType: string | string[];
   description: string;
-  requirements: string[]; // Can be empty if everything is in description
+  requirements: string[];
   salaryMin: number;
   salaryMax: number;
 }
 
-// --- MOCK DATA ---
-const mockJobEvents = [
-
-    
-];
-
-const mockCandidatesEnhanced = mockCandidates.map((c, i) => ({
-    ...c,
-    matchScore: 95 - (i * 7), // Fake varying scores
-    statusColor: i === 0 ? 'bg-purple-100 text-purple-700' : i === 1 ? 'bg-yellow-100 text-yellow-700' : 'bg-blue-100 text-blue-700',
-    statusText: i === 0 ? 'ראיון מתקדם' : i === 1 ? 'סינון טלפוני' : 'חדש'
-}));
+type JobCandidateSummary = {
+  id: string;
+  name: string;
+  title?: string;
+  status?: string;
+  matchScore?: number;
+  avatar?: string;
+};
 
 // --- COMPONENTS ---
 
@@ -186,12 +186,34 @@ const DetailsContent: React.FC<{ job: Job }> = ({ job }) => {
     );
 };
 
-const EventsContent: React.FC<{ job: Job }> = ({ job }) => (
+const EventsContent: React.FC<{ events: JobEvent[]; loading: boolean; error: string | null }> = ({ events, loading, error }) => {
+    if (loading) {
+        return (
+            <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4 animate-fade-in">
+                טוען אירועים...
+            </div>
+        );
+    }
+    if (error) {
+        return (
+            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-4 animate-fade-in">
+                {error}
+            </div>
+        );
+    }
+    if (!events.length) {
+        return (
+            <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4 animate-fade-in">
+                אין אירועים להצגה למשרה זו.
+            </div>
+        );
+    }
+
+    return (
     <div className="relative pb-4 pl-3 pr-2 animate-fade-in">
-        {/* Timeline Vertical Line */}
         <div className="absolute top-4 bottom-0 right-[23px] w-0.5 bg-gradient-to-b from-border-default via-border-default to-transparent"></div>
 
-        {mockJobEvents.map((event, index) => {
+        {events.map((event) => {
              let icon = <PencilIcon className="w-3.5 h-3.5"/>;
              let colors = "bg-gray-100 text-gray-600 border-gray-200";
              
@@ -206,11 +228,10 @@ const EventsContent: React.FC<{ job: Job }> = ({ job }) => (
                     </div>
                     
                     <div className="flex-1 bg-white border border-border-default p-3.5 rounded-xl rounded-tr-none shadow-sm group-hover:shadow-md transition-shadow relative top-2">
-                         {/* Triangle */}
                          <div className="absolute top-0 right-[-6px] w-3 h-3 bg-white border-t border-r border-border-default transform -rotate-[135deg]"></div>
                          
                          <div className="flex justify-between items-start mb-1.5">
-                            <span className="font-bold text-xs text-text-default bg-bg-subtle px-2 py-0.5 rounded-md border border-border-subtle">{event.user}</span>
+                            <span className="font-bold text-xs text-text-default bg-bg-subtle px-2 py-0.5 rounded-md border border-border-subtle">{event.user || event.type}</span>
                             <span className="text-[10px] font-medium text-text-muted">{new Date(event.timestamp).toLocaleString('he-IL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</span>
                         </div>
                         <p className="text-xs text-text-muted leading-relaxed font-medium">{event.description}</p>
@@ -218,58 +239,88 @@ const EventsContent: React.FC<{ job: Job }> = ({ job }) => (
                 </div>
             );
         })}
-        
-        <div className="flex justify-center mt-4">
-             <button className="text-xs font-bold text-primary-600 bg-primary-50 px-4 py-2 rounded-full hover:bg-primary-100 transition-colors">
-                 טען אירועים נוספים
-             </button>
-        </div>
     </div>
-);
+    );
+};
 
-const CandidatesContent: React.FC<{ job: Job }> = ({ job }) => (
+const CandidatesContent: React.FC<{
+    job: Job;
+    candidates: JobCandidateSummary[];
+    loading: boolean;
+    error: string | null;
+    onViewAll: () => void;
+}> = ({ job, candidates, loading, error, onViewAll }) => {
+    if (loading) {
+        return (
+            <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4 animate-fade-in">
+                טוען מועמדים...
+            </div>
+        );
+    }
+    if (error) {
+        return (
+            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-4 animate-fade-in">
+                {error}
+            </div>
+        );
+    }
+    if (!candidates.length) {
+        return (
+            <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4 animate-fade-in">
+                אין מועמדים משויכים למשרה זו.
+            </div>
+        );
+    }
+
+    return (
     <div className="space-y-3 animate-fade-in">
-        {mockCandidates.slice(0, 6).map((candidate, idx) => {
-             const enhanced = mockCandidatesEnhanced[idx % mockCandidatesEnhanced.length];
+        {candidates.slice(0, 8).map((candidate) => {
+             const initials = (candidate.avatar || candidate.name || '??').slice(0, 2);
+             const matchScore = typeof candidate.matchScore === 'number' ? candidate.matchScore : null;
              return (
-                <div key={candidate.id} className="group flex items-center gap-3 bg-white p-3 rounded-xl border border-border-default shadow-sm hover:shadow-md hover:border-primary-300 transition-all cursor-pointer relative overflow-hidden">
-                    {/* Hover indicator strip */}
+                <div key={candidate.id} className="group flex items-center gap-3 bg-white p-3 rounded-xl border border-border-default shadow-sm hover:shadow-md hover:border-primary-300 transition-all relative overflow-hidden">
                     <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary-500 opacity-0 group-hover:opacity-100 transition-opacity"></div>
                     
                     <div className="relative shrink-0">
                         <div className="w-12 h-12 flex items-center justify-center bg-gradient-to-br from-primary-50 to-primary-100 text-primary-700 rounded-xl font-extrabold text-sm border border-primary-200 shadow-inner">
-                            {candidate.avatar}
-                        </div>
-                        <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-0.5 shadow-sm border border-border-default">
-                             <div className={`w-2.5 h-2.5 rounded-full ${idx < 2 ? 'bg-green-500' : 'bg-gray-300'}`}></div>
+                            {initials}
                         </div>
                     </div>
                     
                     <div className="flex-1 min-w-0">
                         <div className="flex justify-between items-center mb-1">
                             <p className="font-bold text-text-default text-sm truncate group-hover:text-primary-700 transition-colors">{candidate.name}</p>
-                            <div className="flex items-center gap-1 bg-green-50 text-green-700 px-1.5 py-0.5 rounded border border-green-100">
-                                <SparklesIcon className="w-3 h-3" />
-                                <span className="text-[10px] font-bold">{enhanced.matchScore}%</span>
-                            </div>
+                            {matchScore != null && (
+                                <div className="flex items-center gap-1 bg-green-50 text-green-700 px-1.5 py-0.5 rounded border border-green-100">
+                                    <SparklesIcon className="w-3 h-3" />
+                                    <span className="text-[10px] font-bold">{matchScore}%</span>
+                                </div>
+                            )}
                         </div>
-                        <div className="flex justify-between items-center">
-                            <p className="text-xs text-text-muted truncate">{candidate.title}</p>
-                            <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border border-transparent ${enhanced.statusColor}`}>
-                                {enhanced.statusText}
-                            </span>
+                        <div className="flex justify-between items-center gap-2">
+                            <p className="text-xs text-text-muted truncate">{candidate.title || '—'}</p>
+                            {candidate.status ? (
+                                <span className="text-[10px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-700 shrink-0">
+                                    {candidate.status}
+                                </span>
+                            ) : null}
                         </div>
                     </div>
                 </div>
-            )
+            );
         })}
         
-        <button className="w-full py-3 text-sm font-bold text-primary-600 bg-white border-2 border-dashed border-primary-200 rounded-xl hover:bg-primary-50 hover:border-primary-300 transition-all flex items-center justify-center gap-2 group">
+        <button
+            type="button"
+            onClick={onViewAll}
+            className="w-full py-3 text-sm font-bold text-primary-600 bg-white border-2 border-dashed border-primary-200 rounded-xl hover:bg-primary-50 hover:border-primary-300 transition-all flex items-center justify-center gap-2 group"
+        >
             <UserGroupIcon className="w-4 h-4 group-hover:scale-110 transition-transform" />
-            צפה בכל המועמדים ({job.associatedCandidates})
+            צפה בכל המועמדים ({job.associatedCandidates || candidates.length})
         </button>
     </div>
-);
+    );
+};
 
 
 interface JobDetailsDrawerProps {
@@ -283,14 +334,99 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
   const titleId = useId();
   const navigate = useNavigate();
   const { t } = useLanguage();
+  const apiBase = import.meta.env.VITE_API_BASE || '';
+  const [jobEvents, setJobEvents] = useState<JobEvent[]>([]);
+  const [jobCandidates, setJobCandidates] = useState<JobCandidateSummary[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [candidatesLoading, setCandidatesLoading] = useState(false);
+  const [eventsError, setEventsError] = useState<string | null>(null);
+  const [candidatesError, setCandidatesError] = useState<string | null>(null);
+
+  const jobApiId = job ? String(job.id).trim() : '';
 
   useEffect(() => {
     if (isOpen) {
-      setActiveTab('details'); // Reset to details tab when opened
+      setActiveTab('details');
     }
   }, [isOpen]);
+
+  const loadJobEvents = useCallback(async () => {
+    if (!apiBase || !jobApiId) {
+      setJobEvents([]);
+      return;
+    }
+    setEventsLoading(true);
+    setEventsError(null);
+    try {
+      const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobApiId)}/events`, {
+        headers: getJobEventApiHeaders(false),
+        cache: 'no-store',
+      });
+      if (!res.ok) throw new Error('טעינת האירועים נכשלה');
+      const data = await res.json();
+      const list = Array.isArray(data) ? data : [];
+      setJobEvents(list.map((row) => normalizeJobEventFromApi(row as Record<string, unknown>)));
+    } catch (err: any) {
+      setEventsError(err?.message || 'טעינת האירועים נכשלה');
+      setJobEvents([]);
+    } finally {
+      setEventsLoading(false);
+    }
+  }, [apiBase, jobApiId]);
+
+  const loadJobCandidates = useCallback(async () => {
+    if (!apiBase || !jobApiId) {
+      setJobCandidates([]);
+      return;
+    }
+    setCandidatesLoading(true);
+    setCandidatesError(null);
+    try {
+      const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+      const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(jobApiId)}/candidates`, {
+        headers: {
+          Accept: 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        cache: 'no-store',
+      });
+      if (!res.ok) throw new Error('טעינת המועמדים נכשלה');
+      const payload = await res.json();
+      const rows = Array.isArray(payload?.candidates) ? payload.candidates : Array.isArray(payload) ? payload : [];
+      setJobCandidates(
+        rows.map((row: Record<string, unknown>) => {
+          const name = String(row.fullName || row.name || 'מועמד').trim();
+          return {
+            id: String(row.id ?? ''),
+            name,
+            title: String(row.title || row.professionalSummary || '').trim() || undefined,
+            status: row.status != null ? String(row.status) : undefined,
+            matchScore: typeof row.matchScore === 'number' ? row.matchScore : undefined,
+            avatar: name.slice(0, 2),
+          };
+        }).filter((c: JobCandidateSummary) => c.id),
+      );
+    } catch (err: any) {
+      setCandidatesError(err?.message || 'טעינת המועמדים נכשלה');
+      setJobCandidates([]);
+    } finally {
+      setCandidatesLoading(false);
+    }
+  }, [apiBase, jobApiId]);
+
+  useEffect(() => {
+    if (!isOpen || !jobApiId) {
+      setJobEvents([]);
+      setJobCandidates([]);
+      setEventsError(null);
+      setCandidatesError(null);
+      return;
+    }
+    if (activeTab === 'events') void loadJobEvents();
+    if (activeTab === 'candidates') void loadJobCandidates();
+  }, [isOpen, jobApiId, activeTab, loadJobEvents, loadJobCandidates]);
   
-  const handleViewFullProfile = (jobId: number) => {
+  const handleViewFullProfile = (jobId: string | number) => {
     onClose();
     navigate(`/jobs/edit/${jobId}`);
   };
@@ -300,8 +436,16 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
   const renderContent = () => {
     switch(activeTab) {
       case 'details': return <DetailsContent job={job} />;
-      case 'events': return <EventsContent job={job} />;
-      case 'candidates': return <CandidatesContent job={job} />;
+      case 'events': return <EventsContent events={jobEvents} loading={eventsLoading} error={eventsError} />;
+      case 'candidates': return (
+        <CandidatesContent
+          job={job}
+          candidates={jobCandidates}
+          loading={candidatesLoading}
+          error={candidatesError}
+          onViewAll={() => handleViewFullProfile(job.id)}
+        />
+      );
       default: return null;
     }
   };

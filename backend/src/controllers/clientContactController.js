@@ -1,12 +1,36 @@
 const clientContactService = require('../services/clientContactService');
+const clientService = require('../services/clientService');
 
-const list = async (req, res) => {
-  const rows = await clientContactService.listByClientId(req.params.id);
-  res.json(rows);
+const assertCanListClientContacts = (actor, clientId) => {
+  if (!actor) {
+    const err = new Error('Unauthorized');
+    err.status = 401;
+    throw err;
+  }
+  if (clientService.isPlatformAdmin(actor)) return;
+  if (!actor.clientId || String(actor.clientId) !== String(clientId)) {
+    const err = new Error('You may only view contacts for your own client');
+    err.status = 403;
+    throw err;
+  }
 };
 
-const listAll = async (_req, res) => {
+const list = async (req, res) => {
   try {
+    const clientId = String(req.params.id || '').trim();
+    assertCanListClientContacts(req.dbUser, clientId);
+    const rows = await clientContactService.listByClientIdWithClient(clientId);
+    res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list contacts' });
+  }
+};
+
+const listAll = async (req, res) => {
+  try {
+    if (!clientService.isPlatformAdmin(req.dbUser)) {
+      return res.status(403).json({ message: 'Only platform admins can list all contacts' });
+    }
     const rows = await clientContactService.listAllWithClient();
     res.json(rows);
   } catch (err) {

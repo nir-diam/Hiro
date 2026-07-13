@@ -8,6 +8,7 @@ router.use(authMiddleware, requirePagePermission('page:settings'));
 
 router.get('/', userController.list);
 router.post('/', userController.create);
+router.post('/:id/reset-password', userController.resetPassword);
 router.get('/:id', userController.getById);
 router.put('/:id', userController.update);
 

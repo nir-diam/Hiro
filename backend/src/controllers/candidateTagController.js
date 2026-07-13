@@ -1,4 +1,5 @@
 const candidateTagService = require('../services/candidateTagService');
+const tagService = require('../services/tagService');
 const Tag = require('../models/Tag');
 
 const listForCandidate = async (req, res) => {
@@ -75,10 +76,54 @@ const remove = async (req, res) => {
 const bulkUpdate = async (req, res) => {
   try {
     const actions = Array.isArray(req.body.actions) ? req.body.actions : [];
-    if (!actions.length) {
+    const jobActions = Array.isArray(req.body.jobActions) ? req.body.jobActions : [];
+    const deletionContext = req.body.deletionContext || null;
+    if (!actions.length && !jobActions.length) {
       return res.status(400).json({ message: 'No actions provided' });
     }
-    await candidateTagService.bulkUpdateCandidateTags(actions);
+    if (actions.length) {
+      await candidateTagService.bulkUpdateCandidateTags(actions);
+    }
+    if (jobActions.length) {
+      await candidateTagService.bulkUpdateJobTags(jobActions);
+    }
+
+    if (deletionContext?.tagId && deletionContext?.mode) {
+      const tag = await Tag.findByPk(deletionContext.tagId);
+      let targetTagName = deletionContext.targetTagName || null;
+      if (!targetTagName && deletionContext.targetTagId) {
+        const target = await Tag.findByPk(deletionContext.targetTagId, {
+          attributes: ['displayNameHe', 'displayNameEn', 'tagKey'],
+        });
+        if (target) {
+          const plain = target.get({ plain: true });
+          targetTagName = plain.displayNameHe || plain.displayNameEn || plain.tagKey;
+        }
+      }
+      const actorCtx = req.dbUser
+        ? (() => {
+            const p = req.dbUser.get ? req.dbUser.get({ plain: true }) : req.dbUser;
+            return { id: p.id, name: p.name || p.email, email: p.email };
+          })()
+        : {
+            id: req.user?.sub || req.user?.id || 'system',
+            name: req.user?.name || req.user?.email || null,
+            email: req.user?.email || null,
+          };
+      await tagService.recordTagDeletionResolution({
+        tagId: deletionContext.tagId,
+        actor: actorCtx.id,
+        mode: deletionContext.mode,
+        targetTagId: deletionContext.targetTagId,
+        targetTagName,
+        candidateCount: deletionContext.candidateCount,
+        jobCount: deletionContext.jobCount,
+        beforeTag: tag ? tag.get({ plain: true }) : undefined,
+        actorName: actorCtx.name,
+        actorEmail: actorCtx.email,
+      });
+    }
+
     res.json({ success: true });
   } catch (err) {
     console.error('[candidateTagController.bulkUpdate]', err);

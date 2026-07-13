@@ -45,6 +45,8 @@ export interface SavedSearch {
 
 interface SavedSearchesContextType {
   savedSearches: SavedSearch[];
+  loadingSearchId: string | number | null;
+  setLoadingSearchId: (id: string | number | null) => void;
   addSearch: (name: string, isPublic: boolean, searchParams: any, additionalFilters: any[], languageFilters: any[], filterState?: FilterState, alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] }) => Promise<void>;
   deleteSearch: (id: number | string) => Promise<void>;
   updateSearch: (id: number | string, name: string, isPublic: boolean, searchParams: any, additionalFilters: any[], languageFilters: any[], filterState?: FilterState, alertConfig?: { isAlert: boolean; frequency: 'daily' | 'weekly'; notificationMethods: ('email' | 'system')[] }) => Promise<void>;
@@ -74,6 +76,7 @@ const writeLocalSearches = (searches: SavedSearch[]) => {
 export const SavedSearchesProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [savedSearches, setSavedSearches] = useState<SavedSearch[]>(readLocalSearches);
   const [loaded, setLoaded] = useState(false);
+  const [loadingSearchId, setLoadingSearchId] = useState<string | number | null>(null);
 
   const loadFromBackend = useCallback(() => {
     fetchSavedSearches()
@@ -216,12 +219,14 @@ export const SavedSearchesProvider: React.FC<{ children: React.ReactNode }> = ({
 
   const value = useMemo(() => ({
     savedSearches,
+    loadingSearchId,
+    setLoadingSearchId,
     addSearch,
     deleteSearch,
     updateSearch,
     blacklistFromSearch,
     removeFromSearchBlacklist,
-  }), [savedSearches, addSearch, deleteSearch, updateSearch, blacklistFromSearch, removeFromSearchBlacklist]);
+  }), [savedSearches, loadingSearchId, addSearch, deleteSearch, updateSearch, blacklistFromSearch, removeFromSearchBlacklist]);
 
   return (
     <SavedSearchesContext.Provider value={value}>

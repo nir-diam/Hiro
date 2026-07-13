@@ -4,6 +4,7 @@ const OrganizationTmp = require('../models/OrganizationTmp');
 const OrganizationHistory = require('../models/OrganizationHistory');
 const Candidate = require('../models/Candidate');
 const CandidateOrganization = require('../models/CandidateOrganization');
+const { promoteClientsFromTmp } = require('../services/clientOrganizationSyncService');
 
 const ATTRIBUTES_TO_COPY = [
   'name',
@@ -58,6 +59,29 @@ const shouldLinkCandidateToOrg = (entry, payload, actionType) => {
   return isCompany !== false;
 };
 
+const resolveTargetOrganizationId = async ({ actionType, organizationId, resolvedValue, entries }) => {
+  if (actionType !== 'link' && actionType !== 'create') return null;
+
+  if (organizationId) {
+    const org = await Organization.findByPk(organizationId);
+    if (org?.id) return org.id;
+  }
+
+  const nameCandidates = [];
+  if (resolvedValue) nameCandidates.push(String(resolvedValue).trim());
+  for (const entry of entries) {
+    if (entry.name) nameCandidates.push(String(entry.name).trim());
+  }
+  for (const name of nameCandidates) {
+    if (!name) continue;
+    const org = await Organization.findOne({
+      where: { name: { [Op.iLike]: name } },
+    });
+    if (org?.id) return org.id;
+  }
+  return null;
+};
+
 const resolve = async (req, res) => {
   const {
     ids,
@@ -79,6 +103,11 @@ const resolve = async (req, res) => {
   const removedIds = [];
   const seenNames = new Set();
   const candidateIdsToLink = new Set();
+  const shouldPromoteClientLinks = actionType === 'link' || actionType === 'create';
+  const targetOrgId = shouldPromoteClientLinks
+    ? await resolveTargetOrganizationId({ actionType, organizationId, resolvedValue, entries })
+    : null;
+  let promotedClientLinks = 0;
 
   for (const entry of entries) {
     const payload = {};
@@ -98,6 +127,11 @@ const resolve = async (req, res) => {
       payload.resolvedValue = resolvedValue;
     }
     payload.resolutionType = actionType;
+
+    if (targetOrgId) {
+      promotedClientLinks += await promoteClientsFromTmp(entry.id, targetOrgId);
+    }
+
     await OrganizationHistory.create(payload);
     await entry.destroy();
     removedIds.push(entry.id);
@@ -115,45 +149,28 @@ const resolve = async (req, res) => {
       filters.push({ name: { [Op.iLike]: name } });
     });
     if (filters.length) {
+      if (targetOrgId) {
+        const remainingTmps = await OrganizationTmp.findAll({
+          where: { [Op.or]: filters },
+          attributes: ['id'],
+        });
+        for (const tmp of remainingTmps) {
+          promotedClientLinks += await promoteClientsFromTmp(tmp.id, targetOrgId);
+        }
+      }
       await OrganizationTmp.destroy({ where: { [Op.or]: filters } });
     }
   }
 
-  let linkedOrganizationId = null;
+  let linkedOrganizationId = targetOrgId;
   let linkedCandidateCount = 0;
 
-  if (
-    (actionType === 'link' || actionType === 'create') &&
-    candidateIdsToLink.size > 0
-  ) {
-    let org = null;
-    if (organizationId) {
-      org = await Organization.findByPk(organizationId);
-    }
-    if (!org) {
-      const nameCandidates = [];
-      if (resolvedValue) nameCandidates.push(String(resolvedValue).trim());
-      for (const entry of entries) {
-        if (entry.name) nameCandidates.push(String(entry.name).trim());
-      }
-      for (const name of nameCandidates) {
-        if (!name) continue;
-        // eslint-disable-next-line no-await-in-loop
-        org = await Organization.findOne({
-          where: { name: { [Op.iLike]: name } },
-        });
-        if (org) break;
-      }
-    }
-    if (org?.id) {
-      linkedOrganizationId = org.id;
-      for (const candidateId of candidateIdsToLink) {
-        // eslint-disable-next-line no-await-in-loop
-        await CandidateOrganization.findOrCreate({
-          where: { candidateId, organizationId: org.id },
-        });
-        linkedCandidateCount += 1;
-      }
+  if (targetOrgId && candidateIdsToLink.size > 0) {
+    for (const candidateId of candidateIdsToLink) {
+      await CandidateOrganization.findOrCreate({
+        where: { candidateId, organizationId: targetOrgId },
+      });
+      linkedCandidateCount += 1;
     }
   }
 
@@ -162,6 +179,7 @@ const resolve = async (req, res) => {
     removed: removedIds,
     organizationId: linkedOrganizationId,
     linkedCandidates: linkedCandidateCount,
+    promotedClientLinks,
   });
 };
 

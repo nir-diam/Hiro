@@ -55,8 +55,26 @@ const requirePagePermission = (pageKey) => async (req, res, next) => {
   }
 };
 
+/** Load req.dbUser when JWT is present; never blocks unauthenticated requests. */
+const optionalAttachDbUser = async (req, res, next) => {
+  try {
+    const userId = req.user?.sub;
+    if (!userId) return next();
+    const user = await User.findByPk(userId, {
+      include: [
+        { model: Client, as: 'client', attributes: ['id', 'name', 'displayName', 'modules'], required: false },
+      ],
+    });
+    if (user) req.dbUser = user;
+    return next();
+  } catch {
+    return next();
+  }
+};
+
 module.exports = {
   authMiddleware,
   attachDbUser,
+  optionalAttachDbUser,
   requirePagePermission,
 };

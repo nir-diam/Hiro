@@ -2,6 +2,9 @@
 // Extend as needed if you rely on more Vite-specific globals.
 
 interface ImportMetaEnv {
+  readonly VITE_API_BASE?: string;
+  readonly VITE_POSTHOG_KEY?: string;
+  readonly VITE_POSTHOG_HOST?: string;
   [key: string]: string | undefined;
 }
 

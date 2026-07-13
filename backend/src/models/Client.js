@@ -60,6 +60,7 @@ const Client = sequelize.define(
     mainContactEmail: DataTypes.STRING,
     mainContactPhone: DataTypes.STRING,
     smsSource: DataTypes.STRING,
+    domain: DataTypes.STRING,
     authorizedIps: DataTypes.STRING,
     primaryColor: DataTypes.STRING,
     logoUrl: DataTypes.STRING,

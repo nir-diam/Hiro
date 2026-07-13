@@ -1,12 +1,15 @@
 
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon, PaperAirplaneIcon } from './Icons';
+import { Cog6ToothIcon, DocumentArrowDownIcon, ChevronDownIcon, ArrowUturnLeftIcon, PencilIcon, TableCellsIcon, Squares2X2Icon, CheckCircleIcon, XMarkIcon, ClockIcon, FunnelIcon, CalendarIcon, BriefcaseIcon, UserGroupIcon, MagnifyingGlassIcon, PaperAirplaneIcon, BuildingOffice2Icon } from './Icons';
+import SearchableSelect from './SearchableSelect';
 import UpdateStatusModal from './UpdateStatusModal';
 import ReReferModal, { type ReReferSendPayload } from './ReReferModal';
 import { type Job } from './JobsView';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
+import { authHeaders } from '../utils/authHeaders';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 
 type Status = 'התקבל לעבודה' | 'נדחה' | 'בהמתנה' | 'חדש' | 'בבדיקה' | 'ראיון' | 'הצעה' | 'התקבל' | 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'נשלחו קו"ח' | 'נשלחו קורות חיים';
@@ -232,7 +235,10 @@ const ReferralsView: React.FC<{
     candidateId?: string | null;
 }> = ({ onOpenNewTask, candidateId }) => {
     const { t } = useLanguage();
+    const { user } = useAuth();
     const navigate = useNavigate();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const isTenantUser = Boolean(user?.clientId) && !isPlatformAdmin;
     const [activeReferrals, setActiveReferrals] = useState<ActiveReferral[]>([]);
     const [activeReferralsLoading, setActiveReferralsLoading] = useState(false);
     const [expandedRowId, setExpandedRowId] = useState<string | null>(null);
@@ -284,6 +290,9 @@ const ReferralsView: React.FC<{
     const [endDate, setEndDate] = useState('');
     const [activePreset, setActivePreset] = useState<'today' | 'week' | 'month' | 'quarter' | 'custom'>('month');
     const [searchTerm, setSearchTerm] = useState('');
+    const [adminClientId, setAdminClientId] = useState<string | null>(null);
+    const [clientOptions, setClientOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [clientsListLoading, setClientsListLoading] = useState(false);
 
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
@@ -305,7 +314,13 @@ const ReferralsView: React.FC<{
         setJobCatalogLoading(true);
         (async () => {
             try {
-                const res = await fetch(`${apiBase}/api/jobs`);
+                const url = isTenantUser
+                    ? `${apiBase}/api/jobs/for-compose`
+                    : `${apiBase}/api/jobs`;
+                const res = await fetch(url, {
+                    headers: authHeaders(true),
+                    cache: 'no-store',
+                });
                 if (!res.ok) throw new Error('Failed to load jobs');
                 const data = await res.json();
                 if (isActive) {
@@ -318,7 +333,40 @@ const ReferralsView: React.FC<{
             }
         })();
         return () => { isActive = false; };
-    }, [apiBase]);
+    }, [apiBase, isTenantUser]);
+
+    useEffect(() => {
+        if (!apiBase || !isPlatformAdmin) {
+            setClientOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setClientsListLoading(true);
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            headers: authHeaders(true),
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : [];
+                const opts = list
+                    .map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        label: String(c.displayName || c.name || '').trim(),
+                    }))
+                    .filter((o) => o.id && o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setClientOptions(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setClientOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setClientsListLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [apiBase, isPlatformAdmin]);
 
     useEffect(() => {
         if (!apiBase) {
@@ -333,7 +381,7 @@ const ReferralsView: React.FC<{
         let isActive = true;
         setDisqualifiedLoading(true);
         fetch(`${apiBase}/api/candidates/screening-rejections`, {
-            headers: { Authorization: `Bearer ${token}` },
+            headers: authHeaders(true),
             cache: 'no-store',
         })
             .then((res) => (res.ok ? res.json() : []))
@@ -366,8 +414,14 @@ const ReferralsView: React.FC<{
         }
         let isActive = true;
         setActiveReferralsLoading(true);
-        fetch(`${apiBase}/api/email-uploads/screening-cv-referrals`, {
-            headers: { Authorization: `Bearer ${token}` },
+        const params = new URLSearchParams();
+        if (startDate) params.set('referralDate', startDate);
+        if (endDate) params.set('referralDateEnd', endDate);
+        if (scopeCandidateId) params.set('candidateId', scopeCandidateId);
+        if (isPlatformAdmin && adminClientId) params.set('clientId', adminClientId);
+        const qs = params.toString();
+        fetch(`${apiBase}/api/email-uploads/screening-cv-referrals${qs ? `?${qs}` : ''}`, {
+            headers: authHeaders(true),
             cache: 'no-store',
         })
             .then((res) => (res.ok ? res.json() : []))
@@ -390,7 +444,7 @@ const ReferralsView: React.FC<{
                 if (isActive) setActiveReferralsLoading(false);
             });
         return () => { isActive = false; };
-    }, [apiBase, scopeCandidateId]);
+    }, [apiBase, scopeCandidateId, startDate, endDate, isPlatformAdmin, adminClientId]);
     
     // Update visible columns if language changes
     useEffect(() => {
@@ -422,20 +476,12 @@ const ReferralsView: React.FC<{
 
     const sortedActiveReferrals = useMemo(() => {
         let items = activeReferrals.filter(item => {
-            const date = new Date(item.referralDate);
-            const start = startDate ? new Date(startDate) : null;
-            const end = endDate ? new Date(endDate) : null;
-            
-            // Adjust end date to include the full day
-            if (end) end.setHours(23, 59, 59, 999);
-
-            const matchesDate = (!start || date >= start) && (!end || date <= end);
             const matchesSearch = searchTerm === '' || 
                 item.candidateName.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 item.clientName.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 item.jobTitle.toLowerCase().includes(searchTerm.toLowerCase());
 
-            return matchesDate && matchesSearch;
+            return matchesSearch;
         });
 
         if (activeSortConfig !== null) {
@@ -775,6 +821,20 @@ const ReferralsView: React.FC<{
                                 className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-1 focus:ring-primary-500 h-[38px]" 
                             />
                         </div>
+
+                        {isPlatformAdmin ? (
+                            <div className="min-w-[12rem] flex-shrink-0">
+                                <SearchableSelect
+                                    options={clientOptions}
+                                    value={adminClientId}
+                                    onChange={(val) => setAdminClientId(val ? String(val) : null)}
+                                    placeholder={t('jobs.filter_client')}
+                                    className="w-full"
+                                    icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
+                                    disabled={clientsListLoading}
+                                />
+                            </div>
+                        ) : null}
                     </div>
                 </div>
 
