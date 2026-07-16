@@ -3995,6 +3995,32 @@ const getJobMatches = async (req, res) => {
   }
 };
 
+/** GET /api/candidates/:id/job-match-ignores */
+const listJobMatchIgnores = async (req, res) => {
+  try {
+    const data = await candidateJobMatchingService.listJobMatchIgnores(req.params.id);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[listJobMatchIgnores]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to list job match ignores' });
+  }
+};
+
+/** DELETE /api/candidates/:id/job-match-ignores/:jobId */
+const clearJobMatchIgnore = async (req, res) => {
+  try {
+    const data = await candidateJobMatchingService.clearJobMatchIgnore(req.params.id, req.params.jobId);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[clearJobMatchIgnore]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to clear job match ignore' });
+  }
+};
+
 /** POST /api/candidates/:id/jobs/:jobId/deep-insight */
 const getJobDeepInsight = async (req, res) => {
   try {
@@ -4129,6 +4155,8 @@ module.exports = {
   buildCandidateModelSchemaJsonForPrompt,
   ensureOrganizationsFromExperience,
   getJobMatches,
+  listJobMatchIgnores,
+  clearJobMatchIgnore,
   getJobDeepInsight,
 };
 

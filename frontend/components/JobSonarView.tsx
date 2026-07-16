@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 import {
     ArrowPathIcon,
@@ -6,6 +6,7 @@ import {
     FunnelIcon,
     GlobeAmericasIcon,
     ListBulletIcon,
+    NoSymbolIcon,
     SonarIcon,
     SparklesIcon,
     Squares2X2Icon,
@@ -14,6 +15,7 @@ import {
     XMarkIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import {
     buildJobTagMatchCategories,
     type JobTagMatchInput,
@@ -54,6 +56,14 @@ export interface JobSonarViewProps {
     job: Record<string, unknown>;
     openSummaryDrawer: (candidate: Candidate | number) => void;
 }
+
+type SonarIgnoreItem = {
+    candidateId: string;
+    fullName: string;
+    email: string | null;
+    phone: string | null;
+    ignoredAt: string | null;
+};
 
 const apiBase = () => (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
 
@@ -864,7 +874,90 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
     const [tagLoadingId, setTagLoadingId] = useState<string | null>(null);
 
     const [actingId, setActingId] = useState<string | null>(null);
-    const [resultsLayout, setResultsLayout] = useState<'cards' | 'list'>('cards');
+    const { viewMode, setViewMode } = useScreenTablePreferences('job_sonar', {
+        defaultLayoutMode: 'cards',
+        defaultVisibleColumns: [],
+    });
+    const resultsLayout: 'cards' | 'list' = viewMode === 'table' ? 'list' : 'cards';
+
+    const [ignoreOpen, setIgnoreOpen] = useState(false);
+    const [ignoreLoading, setIgnoreLoading] = useState(false);
+    const [ignoreItems, setIgnoreItems] = useState<SonarIgnoreItem[]>([]);
+    const [ignoreCount, setIgnoreCount] = useState(0);
+    const [restoringId, setRestoringId] = useState<string | null>(null);
+    const ignorePanelRef = useRef<HTMLDivElement>(null);
+
+    const jidKey = jobId != null ? String(jobId).trim() : '';
+
+    const refreshIgnoreList = useCallback(async () => {
+        const base = apiBase();
+        if (!base || !jidKey) {
+            setIgnoreItems([]);
+            setIgnoreCount(0);
+            return;
+        }
+        setIgnoreLoading(true);
+        try {
+            const res = await fetch(`${base}/api/jobs/${encodeURIComponent(jidKey)}/sonar-ignores`, {
+                headers: authHeaders(),
+            });
+            if (!res.ok) throw new Error('list');
+            const data = (await res.json()) as { count?: number; items?: SonarIgnoreItem[] };
+            const items = Array.isArray(data.items) ? data.items : [];
+            setIgnoreItems(items);
+            setIgnoreCount(typeof data.count === 'number' ? data.count : items.length);
+        } catch {
+            setIgnoreItems([]);
+            setIgnoreCount(0);
+        } finally {
+            setIgnoreLoading(false);
+        }
+    }, [jidKey]);
+
+    useEffect(() => {
+        void refreshIgnoreList();
+    }, [refreshIgnoreList]);
+
+    useEffect(() => {
+        if (!ignoreOpen) return;
+        void refreshIgnoreList();
+    }, [ignoreOpen, refreshIgnoreList]);
+
+    useEffect(() => {
+        if (!ignoreOpen) return;
+        const onClick = (e: MouseEvent) => {
+            if (ignorePanelRef.current && !ignorePanelRef.current.contains(e.target as Node)) {
+                setIgnoreOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onClick);
+        return () => document.removeEventListener('mousedown', onClick);
+    }, [ignoreOpen]);
+
+    const handleRestoreIgnore = async (candidateId: string) => {
+        const base = apiBase();
+        if (!base || !jidKey || !candidateId) return;
+        setRestoringId(candidateId);
+        setFeedback(null);
+        try {
+            const res = await fetch(
+                `${base}/api/jobs/${encodeURIComponent(jidKey)}/sonar-ignores/${encodeURIComponent(candidateId)}`,
+                { method: 'DELETE', headers: authHeaders() },
+            );
+            if (!res.ok) throw new Error('restore');
+            setIgnoreItems((prev) => {
+                const next = prev.filter((i) => i.candidateId !== candidateId);
+                if (next.length === 0) setIgnoreOpen(false);
+                return next;
+            });
+            setIgnoreCount((c) => Math.max(0, c - 1));
+            setFeedback(t('job.sonar.blacklist_restore_ok'));
+        } catch {
+            setFeedback(t('job.sonar.blacklist_restore_failed'));
+        } finally {
+            setRestoringId(null);
+        }
+    };
 
     const toggleFilter = (key: string) => {
         setActiveFilters((prev) => {
@@ -1009,6 +1102,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
             });
             if (!res.ok) throw new Error('ignore');
             removeRow(cid);
+            setIgnoreCount((c) => c + 1);
             setFeedback(t('job.sonar.ignore_ok'));
         } catch {
             setFeedback(t('job.sonar.ignore_failed'));
@@ -1050,15 +1144,102 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                     {t('job.sonar.subtitle', { batch: batchSize, threshold })}
                                 </p>
                             </div>
-                            <button
-                                type="button"
-                                onClick={() => void runSonar()}
-                                disabled={loading}
-                                className="bg-primary-600 hover:bg-primary-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-black px-12 py-4 rounded-2xl shadow-xl hover:shadow-primary-600/30 transition-all transform hover:scale-105 active:scale-95 flex items-center gap-3 mx-auto md:mr-0 md:ml-auto"
-                            >
-                                <ArrowPathIcon className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-                                {loading ? t('job.sonar.scanning') : t('job.sonar.run')}
-                            </button>
+                            <div className="flex flex-col sm:flex-row items-center gap-3 justify-center md:justify-end">
+                                <button
+                                    type="button"
+                                    onClick={() => void runSonar()}
+                                    disabled={loading}
+                                    className="bg-primary-600 hover:bg-primary-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-black px-12 py-4 rounded-2xl shadow-xl hover:shadow-primary-600/30 transition-all transform hover:scale-105 active:scale-95 flex items-center gap-3"
+                                >
+                                    <ArrowPathIcon className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+                                    {loading ? t('job.sonar.scanning') : t('job.sonar.run')}
+                                </button>
+                                <div className="relative" ref={ignorePanelRef}>
+                                    <button
+                                        type="button"
+                                        onClick={() => setIgnoreOpen((v) => !v)}
+                                        className={`font-bold px-4 py-3 rounded-2xl border transition-all flex items-center gap-2 text-sm ${
+                                            ignoreCount > 0
+                                                ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100'
+                                                : 'bg-bg-subtle border-border-default text-text-muted hover:text-text-default hover:bg-bg-surface'
+                                        }`}
+                                        aria-expanded={ignoreOpen}
+                                        title={t('job.sonar.blacklist_tooltip')}
+                                    >
+                                        <NoSymbolIcon className="w-4 h-4 shrink-0" />
+                                        {t('job.sonar.blacklist_button', { count: ignoreCount })}
+                                    </button>
+                                    {ignoreOpen && (
+                                        <div className="absolute top-full end-0 mt-2 z-30 w-80 max-h-72 overflow-y-auto bg-bg-card border border-border-default rounded-xl shadow-xl p-3 text-start">
+                                            <p className="text-xs font-bold text-text-default mb-2">
+                                                {t('job.sonar.blacklist_title')}
+                                            </p>
+                                            {ignoreLoading ? (
+                                                <p className="text-xs text-text-muted">{t('job.sonar.blacklist_loading')}</p>
+                                            ) : ignoreItems.length === 0 ? (
+                                                <p className="text-xs text-text-muted">{t('job.sonar.blacklist_empty')}</p>
+                                            ) : (
+                                                <ul className="space-y-2">
+                                                    {ignoreItems.map((entry) => (
+                                                        <li
+                                                            key={entry.candidateId}
+                                                            className="flex items-start justify-between gap-2 text-xs border-b border-border-subtle pb-2 last:border-0 last:pb-0"
+                                                        >
+                                                            <button
+                                                                type="button"
+                                                                onClick={() =>
+                                                                    openSummaryDrawer({
+                                                                        id: stableUiId(entry.candidateId),
+                                                                        backendId: entry.candidateId,
+                                                                        name: entry.fullName || entry.email || entry.phone || '—',
+                                                                        avatar: initialsForSonarAvatar(entry.fullName || ''),
+                                                                        title: '',
+                                                                        status: '',
+                                                                        lastActivity: '',
+                                                                        source: '',
+                                                                        tags: [],
+                                                                        internalTags: [],
+                                                                        matchScore: 0,
+                                                                        phone: entry.phone || '',
+                                                                        address: '',
+                                                                        professionalSummary: '',
+                                                                        email: entry.email || '',
+                                                                        location: '',
+                                                                    })
+                                                                }
+                                                                className="min-w-0 text-start hover:bg-bg-hover rounded-lg px-1 py-0.5 -mx-1 transition-colors group"
+                                                                title={t('job.sonar.blacklist_open_profile')}
+                                                            >
+                                                                <p className="font-medium text-text-default truncate group-hover:text-primary-700">
+                                                                    {entry.fullName || entry.email || entry.phone || t('job.sonar.blacklist_unnamed')}
+                                                                </p>
+                                                                {entry.email && (
+                                                                    <p className="text-text-muted truncate" dir="ltr">
+                                                                        {entry.email}
+                                                                    </p>
+                                                                )}
+                                                                {entry.phone && (
+                                                                    <p className="text-text-muted truncate" dir="ltr">
+                                                                        {entry.phone}
+                                                                    </p>
+                                                                )}
+                                                            </button>
+                                                            <button
+                                                                type="button"
+                                                                disabled={restoringId === entry.candidateId}
+                                                                onClick={() => void handleRestoreIgnore(entry.candidateId)}
+                                                                className="shrink-0 text-[10px] font-semibold text-primary-600 hover:text-primary-800 whitespace-nowrap disabled:opacity-50"
+                                                            >
+                                                                {t('job.sonar.blacklist_restore')}
+                                                            </button>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            )}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1174,7 +1355,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                     type="button"
                                     title={t('job_events.view_cards')}
                                     aria-pressed={resultsLayout === 'cards'}
-                                    onClick={() => setResultsLayout('cards')}
+                                    onClick={() => setViewMode('grid')}
                                     className={`p-1.5 rounded-lg transition-all ${
                                         resultsLayout === 'cards'
                                             ? 'bg-bg-subtle text-primary-600 shadow-sm'
@@ -1187,7 +1368,7 @@ const JobSonarView: React.FC<JobSonarViewProps> = ({ jobId, job, openSummaryDraw
                                     type="button"
                                     title={t('candidates.view_list')}
                                     aria-pressed={resultsLayout === 'list'}
-                                    onClick={() => setResultsLayout('list')}
+                                    onClick={() => setViewMode('table')}
                                     className={`p-1.5 rounded-lg transition-all ${
                                         resultsLayout === 'list'
                                             ? 'bg-bg-subtle text-primary-600 shadow-sm'

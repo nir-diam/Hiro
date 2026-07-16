@@ -116,6 +116,55 @@ export async function fetchJobMatches(candidateId: string, query: MatchQuery = {
   return Array.isArray(data.rows) ? data.rows : [];
 }
 
+export type JobMatchIgnoreItem = {
+  jobId: string;
+  title: string;
+  client: string;
+  city: string | null;
+  status: string | null;
+  ignoredAt: string | null;
+};
+
+/** Dismiss a job from candidate→job matching (blacklist for this candidate). */
+export async function ignoreJobMatch(candidateId: string, jobId: string): Promise<void> {
+  const base = apiBase();
+  const res = await fetch(`${base}/api/candidates/${encodeURIComponent(candidateId)}/screening-data`, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify({
+      jobId,
+      screeningStatus: 'rejected',
+      rejectionReason: 'job_match_ignore',
+      rejectionNotes: '',
+      screeningAnswers: [],
+      telephoneImpression: '',
+      internalOpinion: null,
+    }),
+  });
+  await handleResponse(res);
+}
+
+/** List jobs blacklisted from matching for this candidate. */
+export async function fetchJobMatchIgnores(candidateId: string): Promise<{ count: number; items: JobMatchIgnoreItem[] }> {
+  const base = apiBase();
+  const res = await fetch(`${base}/api/candidates/${encodeURIComponent(candidateId)}/job-match-ignores`, {
+    headers: authHeaders(),
+  });
+  const data = await handleResponse<{ count?: number; items?: JobMatchIgnoreItem[] }>(res);
+  const items = Array.isArray(data.items) ? data.items : [];
+  return { count: typeof data.count === 'number' ? data.count : items.length, items };
+}
+
+/** Restore a blacklisted job so it can appear in matching again. */
+export async function clearJobMatchIgnore(candidateId: string, jobId: string): Promise<void> {
+  const base = apiBase();
+  const res = await fetch(
+    `${base}/api/candidates/${encodeURIComponent(candidateId)}/job-match-ignores/${encodeURIComponent(jobId)}`,
+    { method: 'DELETE', headers: authHeaders() },
+  );
+  await handleResponse(res);
+}
+
 /** Create a real job–candidate link (שיוך למשרה). */
 export async function assignCandidateToJob(
   candidateId: string,

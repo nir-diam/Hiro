@@ -18,6 +18,7 @@ import {
     saveTagCorrectionAgentEnabled,
     type TagAiDecisionDto,
 } from '../services/tagCorrectionsApi';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
 
 const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -1219,8 +1220,8 @@ const AdminTagCorrectionsView: React.FC = () => {
                         )}
                     </div>
 
-                    <div className="overflow-x-auto flex-1 min-h-0">
-                        <table className="w-full text-right text-sm">
+                    <HorizontalScrollArea className="flex flex-col flex-1 min-h-0 min-w-0" scrollClassName="overflow-x-auto flex-1 min-h-0 min-w-0 w-full [scrollbar-width:thin]">
+                        <table className="w-full min-w-[1200px] text-right text-sm" dir="rtl">
                             <thead className="bg-bg-subtle text-text-muted font-semibold text-xs border-b border-border-subtle sticky top-0 z-10">
                                 <tr>
                                     {isMultiSelectMode && (
@@ -1487,7 +1488,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                                 )}
                             </tbody>
                         </table>
-                    </div>
+                    </HorizontalScrollArea>
 
                     {/* Pagination footer */}
                     {aiTotalFiltered > 0 && (
@@ -1611,8 +1612,8 @@ const AdminTagCorrectionsView: React.FC = () => {
                     </div>
 
                     {/* Table */}
-                    <div className="overflow-auto">
-                        <table className="w-full text-right text-sm">
+                    <HorizontalScrollArea scrollClassName="overflow-x-auto overflow-y-auto min-w-0 w-full [scrollbar-width:thin]">
+                        <table className="w-full min-w-[900px] text-right text-sm" dir="rtl">
                             <thead className="bg-bg-subtle text-text-muted text-xs border-b border-border-subtle sticky top-0">
                                 <tr>
                                     <th className="p-4 w-[22%]">מונח מקורי</th>
@@ -1748,7 +1749,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                                 })()}
                             </tbody>
                         </table>
-                    </div>
+                    </HorizontalScrollArea>
                 </div>
             </div>
         )}

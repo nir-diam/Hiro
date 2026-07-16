@@ -1,6 +1,7 @@
 const Job = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
+const Candidate = require('../models/Candidate');
 const candidateService = require('./candidateService');
 const jobService = require('./jobService');
 const { persistSonarResults } = require('./matchingCacheService');
@@ -309,9 +310,93 @@ async function runSonarScan(jobId, body = {}) {
   };
 }
 
+/**
+ * Candidates dismissed via Sonar "ignore" for this job (rejectionReason = sonar_ignore).
+ */
+async function listSonarIgnores(jobId) {
+  if (!jobId) {
+    const err = new Error('jobId is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const rows = await JobCandidateScreening.findAll({
+    where: {
+      jobId,
+      screeningStatus: 'rejected',
+      rejectionReason: 'sonar_ignore',
+    },
+    attributes: ['id', 'candidateId', 'updatedAt', 'createdAt'],
+    include: [
+      {
+        model: Candidate,
+        as: 'candidate',
+        attributes: ['id', 'fullName', 'firstName', 'email', 'phone'],
+        required: true,
+      },
+    ],
+    order: [['updatedAt', 'DESC']],
+  }).catch(() => []);
+
+  return {
+    count: rows.length,
+    items: rows.map((row) => {
+      const c = row.candidate;
+      const plain = typeof c?.toJSON === 'function' ? c.toJSON() : c;
+      return {
+        candidateId: String(row.candidateId),
+        fullName: plain?.fullName || plain?.firstName || '',
+        email: plain?.email || null,
+        phone: plain?.phone || null,
+        ignoredAt: row.updatedAt || row.createdAt || null,
+      };
+    }),
+  };
+}
+
+/**
+ * Clear a Sonar ignore so the candidate can appear in future scans.
+ * Only clears rows that were created via sonar_ignore (not screening rejections).
+ */
+async function clearSonarIgnore(jobId, candidateId) {
+  if (!jobId || !candidateId) {
+    const err = new Error('jobId and candidateId are required');
+    err.status = 400;
+    throw err;
+  }
+
+  const row = await JobCandidateScreening.findOne({
+    where: {
+      jobId,
+      candidateId,
+      screeningStatus: 'rejected',
+      rejectionReason: 'sonar_ignore',
+    },
+  });
+
+  if (!row) {
+    const err = new Error('Sonar ignore not found');
+    err.status = 404;
+    throw err;
+  }
+
+  await row.update(
+    {
+      screeningStatus: 'open',
+      rejectionReason: null,
+      rejectionNotes: null,
+    },
+    { fields: ['screeningStatus', 'rejectionReason', 'rejectionNotes'] },
+  );
+
+  return { ok: true, candidateId: String(candidateId), jobId: String(jobId) };
+}
+
 module.exports = {
   runSonarScan,
   buildJobSonarQuery,
   passesHardFilters,
   passesDistanceHardFilter,
+  listSonarIgnores,
+  clearSonarIgnore,
 };

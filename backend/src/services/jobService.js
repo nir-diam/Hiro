@@ -1,8 +1,9 @@
-const { Op, literal } = require('sequelize');
+const { Op, QueryTypes } = require('sequelize');
 const redis = require('./redisService');
 const { invalidateJobMatches, invalidateJobInAllCandidateOpportunities } = require('./matchingCacheService');
 const Job = require('../models/Job');
 const Prompt = require('../models/Prompt');
+const { sequelize } = require('../config/db');
 
 /**
  * Compute and persist the job embedding in the background (fire-and-forget).
@@ -173,6 +174,14 @@ const searchForPicker = async ({ search, limit = 30 } = {}) => {
   });
 };
 
+/** API payloads must never include embedding vectors (large JSONB). */
+const toApiJob = (job) => {
+  if (!job) return job;
+  const plain = typeof job.get === 'function' ? job.get({ plain: true }) : { ...job };
+  delete plain.embedding;
+  return plain;
+};
+
 const list = async ({ tagId = null } = {}) => {
   const tid = tagId != null && String(tagId).trim() !== '' ? String(tagId).trim() : '';
   if (tid) {
@@ -180,39 +189,98 @@ const list = async ({ tagId = null } = {}) => {
     if (!ids.length) return [];
     const rows = await Job.findAll({
       where: { id: { [Op.in]: ids } },
-      attributes: { exclude: ['events', 'skills'] },
+      attributes: { exclude: ['events', 'skills', 'embedding'] },
     });
     await hydrateJobsSkills(rows);
-    return rows;
+    const enriched = await enrichJobsWithCandidateCounts(rows);
+    return enriched.map(toApiJob);
   }
   const rows = await Job.findAll({
-    attributes: { exclude: ['events', 'skills'] },
+    attributes: { exclude: ['events', 'skills', 'embedding'] },
   });
   await hydrateJobsSkills(rows);
-  return rows;
+  const enriched = await enrichJobsWithCandidateCounts(rows);
+  return enriched.map(toApiJob);
+};
+
+/**
+ * Live candidate funnel counts from job_candidates (not stale Job.* integer columns).
+ * - associatedCandidates: all links
+ * - waitingForScreening: status is "חדש" / empty (ממתינים לסינון)
+ * - activeProcess: any other status (בתהליך)
+ */
+const enrichJobsWithCandidateCounts = async (jobs) => {
+  if (!Array.isArray(jobs) || !jobs.length) return jobs || [];
+  const ids = jobs
+    .map((j) => (j?.id != null ? String(j.id) : null))
+    .filter(Boolean);
+  if (!ids.length) return jobs;
+
+  let rows = [];
+  try {
+    rows = await sequelize.query(
+      `
+      SELECT
+        "jobId"::text AS "jobId",
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (
+          WHERE COALESCE(NULLIF(TRIM(status), ''), 'חדש') = 'חדש'
+        )::int AS waiting,
+        COUNT(*) FILTER (
+          WHERE COALESCE(NULLIF(TRIM(status), ''), 'חדש') <> 'חדש'
+        )::int AS active
+      FROM job_candidates
+      WHERE "jobId" IN (:ids)
+      GROUP BY "jobId"
+      `,
+      { replacements: { ids }, type: QueryTypes.SELECT },
+    );
+  } catch (err) {
+    console.warn('[jobService] enrichJobsWithCandidateCounts failed:', err.message || err);
+    return jobs;
+  }
+
+  const byJob = new Map(
+    (Array.isArray(rows) ? rows : []).map((r) => [
+      String(r.jobId),
+      {
+        total: Number(r.total) || 0,
+        waiting: Number(r.waiting) || 0,
+        active: Number(r.active) || 0,
+      },
+    ]),
+  );
+
+  for (const job of jobs) {
+    const id = job?.id != null ? String(job.id) : '';
+    const counts = byJob.get(id) || { total: 0, waiting: 0, active: 0 };
+    if (typeof job.setDataValue === 'function') {
+      job.setDataValue('associatedCandidates', counts.total);
+      job.setDataValue('waitingForScreening', counts.waiting);
+      job.setDataValue('activeProcess', counts.active);
+    } else {
+      job.associatedCandidates = counts.total;
+      job.waitingForScreening = counts.waiting;
+      job.activeProcess = counts.active;
+    }
+  }
+  return jobs;
 };
 
 const listForPicker = async () => {
   const rows = await Job.findAll({
     attributes: [
       'id', 'title', 'client', 'city', 'status', 'openDate', 'healthProfile',
-      // Live counts from job_candidates — not relying on stale cached columns
-      [
-        literal(`(SELECT COUNT(*) FROM job_candidates WHERE "jobId" = "Job"."id")`),
-        'associatedCandidates',
-      ],
-      [
-        literal(`(SELECT COUNT(*) FROM job_candidates WHERE "jobId" = "Job"."id" AND status != 'חדש')`),
-        'activeProcess',
-      ],
+      'associatedCandidates', 'waitingForScreening', 'activeProcess',
     ],
     order: [['title', 'ASC']],
   });
+  await enrichJobsWithCandidateCounts(rows);
   return rows.map((r) => {
     const plain = r.get({ plain: true });
     plain.associatedCandidates = Number(plain.associatedCandidates) || 0;
     plain.activeProcess = Number(plain.activeProcess) || 0;
-    plain.waitingForScreening = 0; // not computed here; health fallback handles it
+    plain.waitingForScreening = Number(plain.waitingForScreening) || 0;
     return plain;
   });
 };
@@ -221,7 +289,10 @@ const getById = async (id, { skipCache = false } = {}) => {
   if (!skipCache) {
     try {
       const cached = await redis.get(JOB_KEY(id));
-      if (cached) return cached;
+      if (cached) {
+        const [enriched] = await enrichJobsWithCandidateCounts([cached]);
+        return enriched;
+      }
     } catch (e) {
       console.warn('[jobService] redis get failed (non-fatal):', e.message);
     }
@@ -236,6 +307,7 @@ const getById = async (id, { skipCache = false } = {}) => {
     throw err;
   }
   await hydrateJobSkills(job);
+  await enrichJobsWithCandidateCounts([job]);
   await jobCacheSet(job);
   return job;
 };
@@ -442,6 +514,8 @@ module.exports = {
   analyzeRawDescription,
   hydrateJobSkills,
   hydrateJobsSkills,
+  enrichJobsWithCandidateCounts,
+  toApiJob,
   toPlainJobForMatchScore,
   mapSystemTagsToJobSkills,
   listJobTags,

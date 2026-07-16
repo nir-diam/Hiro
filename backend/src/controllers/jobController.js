@@ -211,10 +211,11 @@ const listForCompose = async (req, res) => {
 
     const rows = await Job.findAll({
       where: { [require('sequelize').Op.or]: whereOr },
-      attributes: { exclude: ['events', 'skills'] },
+      attributes: { exclude: ['events', 'skills', 'embedding'] },
     });
     await jobService.hydrateJobsSkills(rows);
-    return res.json(rows);
+    await jobService.enrichJobsWithCandidateCounts(rows);
+    return res.json(rows.map(jobService.toApiJob));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
   }
@@ -223,7 +224,7 @@ const listForCompose = async (req, res) => {
 const get = async (req, res) => {
   try {
     const job = await jobService.getById(req.params.id);
-    res.json(job);
+    res.json(jobService.toApiJob(job));
   } catch (err) {
     res.status(err.status || 404).json({ message: err.message || 'Not found' });
   }
@@ -753,6 +754,30 @@ const postJobSonarScan = async (req, res) => {
   }
 };
 
+const listSonarIgnores = async (req, res) => {
+  try {
+    const data = await jobSonarService.listSonarIgnores(req.params.id);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[jobController.listSonarIgnores]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to list Sonar ignores' });
+  }
+};
+
+const clearSonarIgnore = async (req, res) => {
+  try {
+    const data = await jobSonarService.clearSonarIgnore(req.params.id, req.params.candidateId);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    const status = err.status || 500;
+    console.error('[jobController.clearSonarIgnore]', err.message || err);
+    return res.status(status).json({ message: err.message || 'Failed to clear Sonar ignore' });
+  }
+};
+
 const listForPicker = async (req, res) => {
   try {
     const rows = await jobService.listForPicker();
@@ -760,6 +785,125 @@ const listForPicker = async (req, res) => {
     res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
+  }
+};
+
+/**
+ * GET /api/jobs/board-publications
+ * Returns one row per (job × published-source) combination for the Publications report.
+ * Filters: startDate, endDate, clientId (admin only or tenant-scoped automatically).
+ */
+const listBoardPublications = async (req, res) => {
+  try {
+    const { sequelize } = require('../config/db');
+    const { QueryTypes } = require('sequelize');
+
+    const { startDate, endDate, clientId: qClientId } = req.query;
+    const u = req.dbUser;
+
+    let scopeClientId = null;
+    if (u && u.role !== 'admin' && u.role !== 'super_admin') {
+      scopeClientId = u.clientId || null;
+    } else if (qClientId) {
+      scopeClientId = String(qClientId).trim() || null;
+    }
+
+    const conditions = [
+      `j."recruitmentSources" IS NOT NULL`,
+      `j."recruitmentSources" != '[]'::jsonb`,
+      `(src->>'status' = 'published' OR (src->>'selected')::boolean = true)`,
+    ];
+    const replacements = {};
+
+    if (startDate) {
+      conditions.push(`j."openDate" >= :startDate::date`);
+      replacements.startDate = startDate;
+    }
+    if (endDate) {
+      conditions.push(`j."openDate" <= :endDate::date`);
+      replacements.endDate = endDate;
+    }
+    if (scopeClientId) {
+      conditions.push(`j.client_id = :scopeClientId::uuid`);
+      replacements.scopeClientId = scopeClientId;
+    }
+
+    const rows = await sequelize.query(
+      `SELECT
+          j.id                                        AS "jobId",
+          j.title                                     AS "jobTitle",
+          j.client                                    AS "company",
+          j.field                                     AS "domain",
+          j.role                                      AS "role",
+          j.city                                      AS "city",
+          j.region                                    AS "region",
+          j."openDate"                                AS "publicationDate",
+          j.status                                    AS "jobStatus",
+          j.client_id                                 AS "clientId",
+          src->>'id'                                  AS "sourceId",
+          src->>'name'                                AS "sourceName",
+          COALESCE(src->>'status', 'draft')           AS "sourceStatus",
+          (src->>'alertDays')::integer                AS "alertDays",
+          COALESCE(
+            (SELECT COUNT(*)::int
+             FROM candidates c
+             WHERE c."recruitmentSourceId"::text = src->>'id'),
+            0
+          )                                           AS "candidatesCount"
+       FROM jobs j,
+            jsonb_array_elements(j."recruitmentSources") AS src
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY j."openDate" DESC NULLS LAST
+       LIMIT 500`,
+      { type: QueryTypes.SELECT, replacements },
+    );
+
+    res.set('Cache-Control', 'private, no-store');
+    return res.json({ publications: rows });
+  } catch (err) {
+    console.error('[jobController.listBoardPublications]', err.message || err);
+    return res.status(500).json({ message: err.message || 'Failed to load board publications' });
+  }
+};
+
+/**
+ * PATCH /api/jobs/:id/board-sources
+ * Quick-save just the recruitmentSources JSONB field without a full job PUT.
+ */
+const patchBoardSources = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { recruitmentSources } = req.body || {};
+    const job = await Job.findByPk(id, { attributes: ['id', 'clientId', 'recruitmentSources'] });
+    if (!job) return res.status(404).json({ message: 'Job not found' });
+
+    const u = req.dbUser;
+    if (u && u.role !== 'admin' && u.role !== 'super_admin') {
+      if (u.clientId && String(u.clientId) !== String(job.clientId)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
+    }
+
+    const sources = Array.isArray(recruitmentSources) ? recruitmentSources : [];
+    await job.update({ recruitmentSources: sources });
+
+    // Emit system event for each source status change
+    const published = sources.filter((s) => s.status === 'published');
+    if (published.length > 0) {
+      try {
+        systemEventEmitter.emit(SYSTEM_EVENTS.JOB_UPDATED, {
+          jobId: id,
+          userId: u?.id,
+          clientId: job.clientId,
+          details: `פרסום משרה ב-${published.map((s) => s.name).join(', ')}`,
+        });
+      } catch (_) { /* non-fatal */ }
+    }
+
+    return res.json({ recruitmentSources: job.recruitmentSources });
+  } catch (err) {
+    console.error('[jobController.patchBoardSources]', err.message || err);
+    return res.status(500).json({ message: err.message || 'Failed to save board sources' });
   }
 };
 
@@ -777,5 +921,9 @@ module.exports = {
   logSmartImportModalOpen,
   getScreeningPoolForJob,
   postJobSonarScan,
+  listSonarIgnores,
+  clearSonarIgnore,
+  listBoardPublications,
+  patchBoardSources,
 };
 

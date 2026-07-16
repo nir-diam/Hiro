@@ -9,7 +9,7 @@ type Tab = 'db' | 'quality';
 const AdminCompaniesTabsView: React.FC = () => {
     const [searchParams, setSearchParams] = useSearchParams();
     const tabFromUrl = searchParams.get('tab');
-    const [activeTab, setActiveTab] = useState<Tab>(tabFromUrl === 'quality' ? 'quality' : 'db');
+    const [activeTab, setActiveTab] = useState<Tab>(tabFromUrl === 'db' ? 'db' : 'quality');
 
     useEffect(() => {
         if (tabFromUrl === 'quality' || tabFromUrl === 'db') {

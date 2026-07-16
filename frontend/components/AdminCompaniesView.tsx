@@ -12,6 +12,7 @@ import {
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
 import {
     fetchPicklistValuesByKey,
@@ -542,6 +543,49 @@ const allColumnsDef = [
 ];
 
 const defaultVisibleColumns = ['logo', 'name', 'structure', 'mainField', 'businessModel', 'linkedinUrl', 'foundedYear', 'employeeCount', 'dataConfidence', 'techTags', 'location'];
+
+const COMPANY_TABLE_COLUMN_WIDTHS: Partial<Record<string, string>> = {
+    logo: 'w-16',
+    name: 'min-w-[200px] w-[200px]',
+    mainField: 'min-w-[380px] w-[380px]',
+};
+
+const getCompanyTableColumnClass = (colId: string) => COMPANY_TABLE_COLUMN_WIDTHS[colId] || '';
+
+const COMPANY_ALIASES_COLUMN_CLASS = 'min-w-[420px] w-[420px] max-w-[420px]';
+const COMPANY_CHECKBOX_STICKY_CLASS =
+    'sticky right-0 z-20 bg-bg-card border-l border-border-default shadow-[-2px_0_6px_-2px_rgba(0,0,0,0.08)]';
+const COMPANY_CHECKBOX_HEADER_STICKY_CLASS = `${COMPANY_CHECKBOX_STICKY_CLASS} bg-bg-subtle z-30`;
+
+const formatCompanyAliasesForExport = (company: Company) =>
+    (company.aliases || []).map((alias) => String(alias).trim()).filter(Boolean).join(', ');
+
+const CompanyAliasesPills: React.FC<{ company: Company }> = ({ company }) => {
+    const items = (company.aliases || []).map((alias) => String(alias).trim()).filter(Boolean);
+    if (!items.length) {
+        return <span className="text-text-muted/40 text-xs italic">אין מילים נרדפות</span>;
+    }
+
+    return (
+        <div
+            className="w-full rounded-lg border border-border-subtle/70 bg-bg-subtle/25 p-2"
+            onClick={(e) => e.stopPropagation()}
+        >
+            <div className="grid grid-cols-2 gap-1.5 w-full">
+                {items.map((phrase) => (
+                    <span
+                        key={phrase}
+                        title="כינוי"
+                        className="flex w-full min-w-0 items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border leading-tight bg-violet-50 text-violet-800 border-violet-200"
+                    >
+                        <span className="min-w-0 flex-1 break-words whitespace-normal">{phrase}</span>
+                        <span className="shrink-0 text-[9px] opacity-70 font-semibold uppercase">כינוי</span>
+                    </span>
+                ))}
+            </div>
+        </div>
+    );
+};
 
 // --- Company Users Tab Component ---
 interface CompanyUser {
@@ -2217,15 +2261,15 @@ const AdminCompaniesView: React.FC = () => {
                  );
              case 'mainField':
                  return (
-                     <>
-                        {[company.mainField, ...(company.mainField2 || [])].filter(Boolean).join(' · ')}
+                     <div className="break-words leading-snug">
+                        <div>{[company.mainField, ...(company.mainField2 || [])].filter(Boolean).join(' · ')}</div>
                         {company.subField.length > 0 && (
-                            <span className="text-text-muted text-xs block">{company.subField.join(' · ')}</span>
+                            <span className="text-text-muted text-xs block mt-1">{company.subField.join(' · ')}</span>
                         )}
                         {company.secondaryField && (
-                            <span className="text-text-subtle text-[10px] block">{company.secondaryField}</span>
+                            <span className="text-text-subtle text-[10px] block mt-0.5">{company.secondaryField}</span>
                         )}
-                     </>
+                     </div>
                  );
              case 'structure':
                  return (
@@ -2376,11 +2420,18 @@ const AdminCompaniesView: React.FC = () => {
         if (!selected.length) return;
 
         const exportColumnIds = visibleColumns.filter((id) => id !== 'logo');
-        const columns = exportColumnIds.map((id) => ({
-            key: id,
-            label: allColumnsDef.find((c) => c.id === id)?.label || id,
-            getValue: (company: Company) => getCompanyExportValue(company, id),
-        }));
+        const columns = [
+            ...exportColumnIds.map((id) => ({
+                key: id,
+                label: allColumnsDef.find((c) => c.id === id)?.label || id,
+                getValue: (company: Company) => getCompanyExportValue(company, id),
+            })),
+            {
+                key: 'aliases',
+                label: 'מילים נרדפות',
+                getValue: (company: Company) => formatCompanyAliasesForExport(company),
+            },
+        ];
 
         const stamp = new Date().toISOString().slice(0, 10);
         downloadRowsAsXlsx(selected, columns, `companies_${stamp}.xlsx`);
@@ -2388,7 +2439,7 @@ const AdminCompaniesView: React.FC = () => {
 
 
     return (
-        <div className="flex flex-col h-full bg-bg-default relative">
+        <div className="flex flex-col h-full bg-bg-default relative min-w-0">
              <style>{`.dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); } th[draggable] { user-select: none; }`}</style>
             
             {/* 1. Header (Fixed at top) */}
@@ -2447,7 +2498,7 @@ const AdminCompaniesView: React.FC = () => {
             </div>
 
             {/* 2. Scrollable Content Area */}
-            <div className="flex-1 overflow-y-auto">
+            <div className="flex-1 overflow-auto min-w-0">
                 <div className="p-6">
                     
                     {/* Filters Container */}
@@ -2694,12 +2745,13 @@ const AdminCompaniesView: React.FC = () => {
 
                     {/* Table View */}
                     {viewMode === 'table' ? (
-                        <div className="bg-bg-card border border-border-default rounded-xl overflow-hidden shadow-sm">
-                            <table className="w-full text-sm text-right min-w-[1000px]">
+                        <div className="bg-bg-card border border-border-default rounded-xl shadow-sm flex flex-col min-w-0">
+                            <HorizontalScrollArea className="flex flex-col min-w-0" scrollClassName="overflow-x-auto w-full min-w-0 [scrollbar-width:thin]">
+                            <table className="w-full min-w-[2400px] text-right text-sm" dir="rtl">
                                 {/* Sticky Header */}
                                 <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase border-b border-border-default sticky top-0 z-10 shadow-sm">
                                     <tr>
-                                        <th className="p-4 w-12 text-center bg-bg-subtle">
+                                        <th className={`p-4 w-12 text-center ${COMPANY_CHECKBOX_HEADER_STICKY_CLASS}`}>
                                             <input 
                                                 type="checkbox" 
                                                 onChange={handleSelectAll} 
@@ -2713,7 +2765,7 @@ const AdminCompaniesView: React.FC = () => {
                                             return (
                                                 <th 
                                                     key={col.id}
-                                                    className={`p-4 cursor-pointer hover:bg-bg-hover bg-bg-subtle ${draggingColumn === col.id ? 'dragging' : ''}`}
+                                                    className={`p-4 cursor-pointer hover:bg-bg-hover bg-bg-subtle ${draggingColumn === col.id ? 'dragging' : ''} ${getCompanyTableColumnClass(col.id)}`}
                                                     draggable
                                                     onDragStart={() => handleDragStart(index, col.id)} 
                                                     onDragEnter={() => handleDragEnter(index)} 
@@ -2742,13 +2794,14 @@ const AdminCompaniesView: React.FC = () => {
                                                 )}
                                             </div>
                                         </th>
+                                        <th className={`p-4 ${COMPANY_ALIASES_COLUMN_CLASS}`}>מילים נרדפות</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-border-subtle">
                                     {companiesLoading && companies.length === 0 ? (
                                         <tr>
                                             <td
-                                                colSpan={visibleColumns.length + 2}
+                                                colSpan={visibleColumns.length + 3}
                                                 className="p-12 text-center text-text-muted text-sm"
                                             >
                                                 טוען ארגונים מהשרת...
@@ -2760,7 +2813,7 @@ const AdminCompaniesView: React.FC = () => {
                                     filteredCompanies.length === 0 ? (
                                         <tr>
                                             <td
-                                                colSpan={visibleColumns.length + 2}
+                                                colSpan={visibleColumns.length + 3}
                                                 className="p-12 text-center text-text-muted text-sm"
                                             >
                                                 אין תוצאות
@@ -2772,7 +2825,7 @@ const AdminCompaniesView: React.FC = () => {
                                     filteredCompanies.length === 0 ? (
                                         <tr>
                                             <td
-                                                colSpan={visibleColumns.length + 2}
+                                                colSpan={visibleColumns.length + 3}
                                                 className="p-12 text-center text-text-muted text-sm"
                                             >
                                                 אין תוצאות התואמות לסינון / חיפוש.
@@ -2785,7 +2838,12 @@ const AdminCompaniesView: React.FC = () => {
                                             className={`hover:bg-bg-hover transition-colors group cursor-pointer ${selectedIds.has(company.id) ? 'bg-primary-50/50' : ''}`}
                                             onClick={() => handleEditCompany(company)}
                                         >
-                                            <td className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
+                                            <td
+                                                className={`p-4 text-center ${COMPANY_CHECKBOX_STICKY_CLASS} ${
+                                                    selectedIds.has(company.id) ? 'bg-primary-50/50' : ''
+                                                } group-hover:bg-bg-hover`}
+                                                onClick={(e) => e.stopPropagation()}
+                                            >
                                                 <input 
                                                     type="checkbox" 
                                                     checked={selectedIds.has(company.id)}
@@ -2793,9 +2851,8 @@ const AdminCompaniesView: React.FC = () => {
                                                     className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500 cursor-pointer"
                                                 />
                                             </td>
-                                            
                                             {visibleColumns.map(colId => (
-                                                <td key={colId} className="p-4">
+                                                <td key={colId} className={`p-4 align-top ${getCompanyTableColumnClass(colId)}`}>
                                                     {renderCell(company, colId)}
                                                 </td>
                                             ))}
@@ -2811,10 +2868,14 @@ const AdminCompaniesView: React.FC = () => {
                                                     </button>
                                                 </div>
                                             </td>
+                                            <td className={`p-4 align-top ${COMPANY_ALIASES_COLUMN_CLASS}`}>
+                                                <CompanyAliasesPills company={company} />
+                                            </td>
                                         </tr>
                                     ))}
                                 </tbody>
                             </table>
+                            </HorizontalScrollArea>
                         </div>
                     ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">

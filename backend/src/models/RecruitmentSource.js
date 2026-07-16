@@ -35,6 +35,11 @@ const RecruitmentSource = sequelize.define(
       allowNull: false,
       defaultValue: 0,
     },
+    isActive: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: true,
+    },
   },
   {
     tableName: 'recruitment_sources',

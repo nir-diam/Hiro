@@ -23,6 +23,7 @@ export type RecruitmentSourceDto = {
     name: string;
     addresses: string;
     exclusivityMonths: number;
+    isActive?: boolean;
 };
 
 export async function fetchRecruitmentSources(clientId: string): Promise<RecruitmentSourceDto[]> {
@@ -47,7 +48,7 @@ export async function fetchRecruitmentSourceOptions(): Promise<RecruitmentSource
 
 export async function createRecruitmentSource(
     clientId: string,
-    body: Pick<RecruitmentSourceDto, 'name' | 'addresses' | 'exclusivityMonths'>,
+    body: Pick<RecruitmentSourceDto, 'name' | 'addresses' | 'exclusivityMonths' | 'isActive'>,
 ): Promise<RecruitmentSourceDto> {
     const res = await fetch(`${apiBase()}/api/clients/${encodeURIComponent(clientId)}/recruitment-sources`, {
         method: 'POST',
@@ -56,6 +57,7 @@ export async function createRecruitmentSource(
             name: body.name,
             addresses: body.addresses,
             exclusivityMonths: body.exclusivityMonths,
+            isActive: body.isActive,
         }),
     });
     if (!res.ok) throw new Error(await parseErr(res));
@@ -67,7 +69,7 @@ export async function createRecruitmentSource(
 export async function updateRecruitmentSource(
     clientId: string,
     sourceId: string,
-    body: Pick<RecruitmentSourceDto, 'name' | 'addresses' | 'exclusivityMonths'>,
+    body: Pick<RecruitmentSourceDto, 'name' | 'addresses' | 'exclusivityMonths' | 'isActive'>,
 ): Promise<RecruitmentSourceDto> {
     const res = await fetch(
         `${apiBase()}/api/clients/${encodeURIComponent(clientId)}/recruitment-sources/${encodeURIComponent(sourceId)}`,
@@ -78,6 +80,7 @@ export async function updateRecruitmentSource(
                 name: body.name,
                 addresses: body.addresses,
                 exclusivityMonths: body.exclusivityMonths,
+                isActive: body.isActive,
             }),
         },
     );

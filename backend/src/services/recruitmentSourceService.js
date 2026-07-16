@@ -7,6 +7,7 @@ const toDto = (row) => ({
   name: row.name,
   addresses: row.addresses ?? '',
   exclusivityMonths: row.exclusivityMonths ?? 0,
+  isActive: row.isActive !== false,
 });
 
 const listByClientId = async (clientId) => {
@@ -65,6 +66,7 @@ const createForClient = async (clientId, body) => {
   const addresses = String(body.addresses ?? '').trim();
   const exclusivityMonths = Math.max(0, Math.round(Number(body.exclusivityMonths) || 0));
   const sortIndex = body.sortIndex != null ? Math.round(Number(body.sortIndex)) : await nextSortIndex(clientId);
+  const isActive = body.isActive !== undefined ? Boolean(body.isActive) : true;
 
   try {
     const row = await RecruitmentSource.create({
@@ -73,6 +75,7 @@ const createForClient = async (clientId, body) => {
       addresses,
       exclusivityMonths,
       sortIndex,
+      isActive,
     });
     return toDto(row);
   } catch (e) {
@@ -110,6 +113,9 @@ const updateForClient = async (clientId, sourceId, body) => {
   }
   if (body.sortIndex !== undefined) {
     patch.sortIndex = Math.round(Number(body.sortIndex));
+  }
+  if (body.isActive !== undefined) {
+    patch.isActive = Boolean(body.isActive);
   }
   try {
     await row.update(patch);

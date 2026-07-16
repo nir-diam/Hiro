@@ -376,6 +376,20 @@ const rowConfigs: Array<{
     },
 ];
 
+const tagIdentity = (tag: SmartTagData): string =>
+    `${tag.type}::${String(tag.label || '').trim().toLowerCase()}`;
+
+/** Deduplicate by type+label while preserving first occurrence order. */
+const dedupeTags = (tags: SmartTagData[]): SmartTagData[] => {
+    const seen = new Set<string>();
+    return tags.filter((tag) => {
+        const key = tagIdentity(tag);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+};
+
 const getVisibleTags = (
     tags: SmartTagData[],
     limit: number,
@@ -394,6 +408,12 @@ const getVisibleTags = (
         }
     }
     return visible;
+};
+
+/** Tags not shown in the primary row (accounts for priority-type swaps). */
+const getHiddenTags = (tags: SmartTagData[], visibleTags: SmartTagData[]): SmartTagData[] => {
+    const visibleKeys = new Set(visibleTags.map(tagIdentity));
+    return tags.filter((tag) => !visibleKeys.has(tagIdentity(tag)));
 };
 
 interface TagRowGroupProps {
@@ -427,12 +447,14 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                 };
 
                 if (isSkillsToolsRow(row)) {
-                    const skillTags = groupedSmartTags['skill'] || [];
-                    const toolTags = groupedSmartTags['tool'] || [];
+                    const skillTags = dedupeTags(groupedSmartTags['skill'] || []);
+                    const toolTags = dedupeTags(groupedSmartTags['tool'] || []);
                     const visibleSkills = getVisibleTags(skillTags, row.limit);
                     const visibleTools = getVisibleTags(toolTags, row.limit);
-                    const extraSkills = Math.max(0, skillTags.length - visibleSkills.length);
-                    const extraTools = Math.max(0, toolTags.length - visibleTools.length);
+                    const hiddenSkills = getHiddenTags(skillTags, visibleSkills);
+                    const hiddenTools = getHiddenTags(toolTags, visibleTools);
+                    const extraSkills = hiddenSkills.length;
+                    const extraTools = hiddenTools.length;
                     const skillExpandKey = `${row.id}-skill`;
                     const toolExpandKey = `${row.id}-tool`;
                     return (
@@ -461,7 +483,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                     )}
                                     {visibleSkills.map((tag) => (
                                         <SmartTagBadge
-                                            key={`${row.id}-skill-${tag.label}`}
+                                            key={`${row.id}-skill-${tagIdentity(tag)}`}
                                             {...tag}
                                             onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
                                         />
@@ -478,9 +500,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 </div>
                                 {extraSkills > 0 && expandedRows[skillExpandKey] && (
                                     <div className="flex flex-wrap gap-2">
-                                        {skillTags.slice(row.limit).map((tag) => (
+                                        {hiddenSkills.map((tag) => (
                                             <SmartTagBadge
-                                                key={`${row.id}-skill-hidden-${tag.label}`}
+                                                key={`${row.id}-skill-hidden-${tagIdentity(tag)}`}
                                                 {...tag}
                                                 onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
                                             />
@@ -493,7 +515,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 <div className="flex flex-wrap items-center gap-2">
                                     {visibleTools.map((tag) => (
                                         <SmartTagBadge
-                                            key={`${row.id}-tool-${tag.label}`}
+                                            key={`${row.id}-tool-${tagIdentity(tag)}`}
                                             {...tag}
                                             onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
                                         />
@@ -510,9 +532,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                                 </div>
                                 {extraTools > 0 && expandedRows[toolExpandKey] && (
                                     <div className="flex flex-wrap gap-2">
-                                        {toolTags.slice(row.limit).map((tag) => (
+                                        {hiddenTools.map((tag) => (
                                             <SmartTagBadge
-                                                key={`${row.id}-tool-hidden-${tag.label}`}
+                                                key={`${row.id}-tool-hidden-${tagIdentity(tag)}`}
                                                 {...tag}
                                                 onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
                                             />
@@ -524,9 +546,10 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                     );
                 }
 
-                const tags = row.types.flatMap((type) => groupedSmartTags[type] || []);
+                const tags = dedupeTags(row.types.flatMap((type) => groupedSmartTags[type] || []));
                 const visibleTags = getVisibleTags(tags, row.limit, row.priorityType);
-                const extraCount = Math.max(0, tags.length - visibleTags.length);
+                const hiddenTags = getHiddenTags(tags, visibleTags);
+                const extraCount = hiddenTags.length;
 
                 return (
                     <div key={row.id} className="space-y-2">
@@ -542,7 +565,7 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                             )}
                             {visibleTags.map((tag) => (
                                 <SmartTagBadge
-                                    key={`${row.id}-${tag.label}`}
+                                    key={`${row.id}-${tagIdentity(tag)}`}
                                     {...tag}
                                     onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
                                 />
@@ -569,9 +592,9 @@ const TagRowGroup: React.FC<TagRowGroupProps> = ({ groupedSmartTags, onQualifica
                         </div>
                         {extraCount > 0 && expandedRows[row.id] && (
                             <div className="flex flex-wrap gap-2 mt-1">
-                                {tags.slice(row.limit).map((tag) => (
+                                {hiddenTags.map((tag) => (
                                     <SmartTagBadge
-                                        key={`${row.id}-hidden-${tag.label}`}
+                                        key={`${row.id}-hidden-${tagIdentity(tag)}`}
                                         {...tag}
                                         onRemove={onTagRemove ? () => onTagRemove(tag.label) : undefined}
                                     />

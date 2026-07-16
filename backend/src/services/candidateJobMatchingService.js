@@ -7,6 +7,7 @@
 const { Op }       = require('sequelize');
 const Job          = require('../models/Job');
 const JobCandidate = require('../models/JobCandidate');
+const JobCandidateScreening = require('../models/JobCandidateScreening');
 
 const candidateService = require('./candidateService');
 const jobService = require('./jobService');
@@ -166,8 +167,26 @@ async function computeMatchesForCandidate(candidateId, opts = {}) {
     jobWhere[Op.or] = opts.jobTypes.map((jt) => ({ jobType: { [Op.contains]: [jt] } }));
   }
 
-  const allJobs = await Job.findAll({ where: jobWhere, attributes: { exclude: ['skills'] } });
-  lap(`jobs query returned (${allJobs.length} jobs)`);
+  const allJobsRaw = await Job.findAll({ where: jobWhere, attributes: { exclude: ['skills'] } });
+  lap(`jobs query returned (${allJobsRaw.length} jobs)`);
+
+  // Exclude jobs the candidate has screening-rejected (incl. job_match_ignore / sonar_ignore).
+  let ignoredJobIds = new Set();
+  try {
+    const rejRows = await JobCandidateScreening.findAll({
+      where: { candidateId, screeningStatus: 'rejected' },
+      attributes: ['jobId'],
+    });
+    ignoredJobIds = new Set(rejRows.map((r) => String(r.jobId)));
+  } catch {
+    ignoredJobIds = new Set();
+  }
+  const allJobs = ignoredJobIds.size
+    ? allJobsRaw.filter((j) => !ignoredJobIds.has(String(j.id || (j.get && j.get('id')))))
+    : allJobsRaw;
+  if (ignoredJobIds.size) {
+    lap(`excluded ${allJobsRaw.length - allJobs.length} rejected/ignored jobs`);
+  }
 
   // 5. Pre-resolve screening defaults + engine configs BEFORE parallel scoring.
   //    resolveScreeningDefaultsForJob makes 2 DB queries per unique client — deduplicate
@@ -460,4 +479,91 @@ async function enrichLinkedJobsRowsWithScores(candidateId, linkedRows, opts = {}
   return out;
 }
 
-module.exports = { computeMatchesForCandidate, enrichLinkedJobsRowsWithScores };
+/**
+ * Jobs dismissed from candidate→job matching (rejectionReason = job_match_ignore).
+ */
+async function listJobMatchIgnores(candidateId) {
+  if (!candidateId) {
+    const err = new Error('candidateId is required');
+    err.status = 400;
+    throw err;
+  }
+
+  const rows = await JobCandidateScreening.findAll({
+    where: {
+      candidateId,
+      screeningStatus: 'rejected',
+      rejectionReason: 'job_match_ignore',
+    },
+    attributes: ['id', 'jobId', 'updatedAt', 'createdAt'],
+    include: [
+      {
+        model: Job,
+        as: 'job',
+        attributes: ['id', 'title', 'client', 'city', 'status'],
+        required: true,
+      },
+    ],
+    order: [['updatedAt', 'DESC']],
+  }).catch(() => []);
+
+  return {
+    count: rows.length,
+    items: rows.map((row) => {
+      const j = row.job;
+      const plain = typeof j?.toJSON === 'function' ? j.toJSON() : j;
+      return {
+        jobId: String(row.jobId),
+        title: plain?.title || '',
+        client: plain?.client || '',
+        city: plain?.city || null,
+        status: plain?.status || null,
+        ignoredAt: row.updatedAt || row.createdAt || null,
+      };
+    }),
+  };
+}
+
+/**
+ * Clear a job-match ignore so the job can appear again for this candidate.
+ */
+async function clearJobMatchIgnore(candidateId, jobId) {
+  if (!candidateId || !jobId) {
+    const err = new Error('candidateId and jobId are required');
+    err.status = 400;
+    throw err;
+  }
+
+  const row = await JobCandidateScreening.findOne({
+    where: {
+      candidateId,
+      jobId,
+      screeningStatus: 'rejected',
+      rejectionReason: 'job_match_ignore',
+    },
+  });
+
+  if (!row) {
+    const err = new Error('Job match ignore not found');
+    err.status = 404;
+    throw err;
+  }
+
+  await row.update(
+    {
+      screeningStatus: 'open',
+      rejectionReason: null,
+      rejectionNotes: null,
+    },
+    { fields: ['screeningStatus', 'rejectionReason', 'rejectionNotes'] },
+  );
+
+  return { ok: true, candidateId: String(candidateId), jobId: String(jobId) };
+}
+
+module.exports = {
+  computeMatchesForCandidate,
+  enrichLinkedJobsRowsWithScores,
+  listJobMatchIgnores,
+  clearJobMatchIgnore,
+};

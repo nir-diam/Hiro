@@ -237,7 +237,16 @@ const list = async (options = {}) => {
 
   const where = {};
   const searchConditions = [];
-  const normalizedSearch = (searchTerm || '').trim().toLowerCase();
+  /** Match "רוקח ת" against DB values like "רוקח/ת" by ignoring / and \. */
+  const stripSlashChars = (s) => String(s || '').replace(/[/\\]/g, '');
+  const sqlStripSlashes = (expr) =>
+    sequelize.fn(
+      'REPLACE',
+      sequelize.fn('REPLACE', expr, '/', ''),
+      '\\',
+      '',
+    );
+  const normalizedSearch = stripSlashChars((searchTerm || '').trim().toLowerCase());
   if (normalizedSearch) {
     const likeTerm = `%${normalizedSearch}%`;
     const columnMap = {
@@ -248,32 +257,33 @@ const list = async (options = {}) => {
     };
     Object.values(columnMap).forEach((column) => {
       searchConditions.push(
-        sequelize.where(sequelize.fn('LOWER', sequelize.col(column)), {
-          [Op.like]: likeTerm,
-        }),
+        sequelize.where(
+          sqlStripSlashes(sequelize.fn('LOWER', sequelize.col(column))),
+          { [Op.like]: likeTerm },
+        ),
       );
     });
     // Also match tags whose synonyms (e.g. phrase "Training and Implementation") or aliases contain the search term
     searchConditions.push(
       sequelize.where(
-        sequelize.fn('LOWER', sequelize.cast(sequelize.col('synonyms'), 'text')),
+        sqlStripSlashes(sequelize.fn('LOWER', sequelize.cast(sequelize.col('synonyms'), 'text'))),
         { [Op.like]: likeTerm },
       ),
     );
     searchConditions.push(
       sequelize.where(
-        sequelize.fn('LOWER', sequelize.cast(sequelize.col('aliases'), 'text')),
+        sqlStripSlashes(sequelize.fn('LOWER', sequelize.cast(sequelize.col('aliases'), 'text'))),
         { [Op.like]: likeTerm },
       ),
     );
   }
 
-  const normalizedSynonym = (synonymSearch || '').trim().toLowerCase();
+  const normalizedSynonym = stripSlashChars((synonymSearch || '').trim().toLowerCase());
   if (normalizedSynonym) {
     const likeTerm = `%${normalizedSynonym}%`;
     searchConditions.push(
       sequelize.where(
-        sequelize.fn('LOWER', sequelize.cast(sequelize.col('synonyms'), 'text')),
+        sqlStripSlashes(sequelize.fn('LOWER', sequelize.cast(sequelize.col('synonyms'), 'text'))),
         { [Op.like]: likeTerm },
       ),
     );

@@ -19,6 +19,8 @@ export interface AppLogListParams {
   page?: number;
   pageSize?: number;
   search?: string;
+  searchInput?: string;
+  searchOutput?: string;
   level?: string;
   source?: string;
   from?: string;
@@ -78,6 +80,8 @@ const buildQuery = (params: AppLogListParams): string => {
   if (params.page) q.set('page', String(params.page));
   if (params.pageSize) q.set('pageSize', String(params.pageSize));
   if (params.search) q.set('search', params.search);
+  if (params.searchInput) q.set('searchInput', params.searchInput);
+  if (params.searchOutput) q.set('searchOutput', params.searchOutput);
   if (params.level) q.set('level', params.level);
   if (params.source) q.set('source', params.source);
   if (params.from) q.set('from', params.from);

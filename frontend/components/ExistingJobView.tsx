@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { GoogleGenAI, Chat, GenerateContentResponse, FunctionDeclaration, Type } from '@google/genai';
 import type { Candidate } from './CandidatesListView';
@@ -14,7 +14,6 @@ import JobCandidatesView from './JobCandidatesView';
 import JobSonarView from './JobSonarView';
 import JobEventsView, { getJobEventApiHeaders } from './JobEventsView';
 import PublishJobView from './PublishJobView';
-import { mockExistingJob, mockJobCandidates } from '../data/mockJobData';
 import HiroAIChat from './HiroAIChat';
 import InviteManagerModal from './InviteManagerModal';
 import { useLanguage } from '../context/LanguageContext';
@@ -23,6 +22,18 @@ interface Message {
     role: 'user' | 'model';
     text: string;
 }
+
+const EMPTY_JOB = {
+    id: '',
+    title: '',
+    client: '',
+    priority: 'רגילה',
+    status: 'טיוטה',
+    location: '',
+    openDate: new Date().toISOString(),
+    associatedCandidates: 0,
+    contacts: [] as Array<{ id?: string | number; name?: string; email?: string; role?: string }>,
+};
 
 // AI Tools Definitions
 const updateJobFieldFunctionDeclaration: FunctionDeclaration = {
@@ -80,10 +91,16 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
     const navigate = useNavigate();
 
     const [apiBase] = useState(import.meta.env.VITE_API_BASE || '');
-    const [jobDataState, setJobDataState] = useState(mockExistingJob);
+    const [jobDataState, setJobDataState] = useState<any>(EMPTY_JOB);
     const [jobLoading, setJobLoading] = useState(true);
     const [jobError, setJobError] = useState<string | null>(null);
     const [eventsRefreshKey, setEventsRefreshKey] = useState(0);
+    /** Live count from job_candidates (Job.associatedCandidates is often stale). */
+    const [liveCandidateCount, setLiveCandidateCount] = useState<number | null>(null);
+
+    const handleCandidateCountChange = useCallback((count: number) => {
+        setLiveCandidateCount(count);
+    }, []);
 
     const [chatMessages, setChatMessages] = useState<Message[]>([]);
     const [chatSession, setChatSession] = useState<Chat | null>(null);
@@ -117,6 +134,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                 const data = await res.json();
                 if (active) {
                     setJobDataState(data);
+                    setLiveCandidateCount(null);
                 }
             } catch (err: any) {
                 console.error('[ExistingJobView] failed to load job', err);
@@ -135,7 +153,14 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
     const initializeChat = () => {
         if (chatSession) return;
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const contextData = { job: jobDataState, candidatesCount: mockJobCandidates.length, eventsCount: 0 };
+        const contextData = {
+            job: jobDataState,
+            candidatesCount:
+                liveCandidateCount != null
+                    ? liveCandidateCount
+                    : Number(jobDataState?.associatedCandidates) || 0,
+            eventsCount: 0,
+        };
         const systemInstruction = `You are Hiro AI, a brilliant recruitment strategist. You are helping manage the job "${jobDataState.title}". 
         You have three primary superpowers:
         1. Update internal job details (salary, status, priority).
@@ -303,7 +328,7 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         ) : null}
                             <div className="mt-1 flex flex-nowrap items-center gap-1.5 sm:mt-1.5 sm:gap-2">
                                 <span className="text-[10px] text-primary-200 sm:text-[11px]">
-                                    {jobDataState.location.split(',')[0]}
+                                    {String(jobDataState.location || '').split(',')[0] || '—'}
                                 </span>
                                 <div className="flex items-center gap-0.5 rounded bg-amber-400 px-1 py-0.5 text-[8px] font-black text-amber-900 shadow-sm sm:gap-1 sm:px-1.5 sm:text-[9px]">
                                     <FireIcon className="h-2 w-2 shrink-0 sm:h-2.5 sm:w-2.5" /> {t(`priority.${jobDataState.priority}`)}
@@ -397,19 +422,40 @@ const ExistingJobView: React.FC<ExistingJobViewProps> = ({ onCancel, onSave, ope
                         
                         {(isSidebarExpanded || window.innerWidth >= 1024) && (
                             <div className="p-5 pt-0 space-y-5 animate-fade-in">
-                                <div className="grid grid-cols-2 lg:grid-cols-1 gap-3">
-                                    <div className="p-3 bg-bg-subtle rounded-xl border border-border-subtle">
-                                        <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">{t('nav.candidates')}</p>
-                                        <p className="text-2xl font-black text-primary-600">{mockJobCandidates.length}</p>
-                                    </div>
-                                    <div className="p-3 bg-bg-subtle rounded-xl border border-border-subtle">
-                                        <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">{t('job.days_on_air')}</p>
-                                        <p className="text-2xl font-black text-text-default">14</p>
-                                    </div>
-                                </div>
+                                {(() => {
+                                    const candidateCount =
+                                        liveCandidateCount != null
+                                            ? liveCandidateCount
+                                            : Number(jobDataState?.associatedCandidates) || 0;
+                                    const openDate = new Date(jobDataState?.openDate);
+                                    const daysOnAir = Number.isNaN(openDate.getTime())
+                                        ? 0
+                                        : Math.max(
+                                              0,
+                                              Math.ceil(
+                                                  (Date.now() - openDate.getTime()) / (1000 * 60 * 60 * 24),
+                                              ),
+                                          );
+                                    return (
+                                        <div className="grid grid-cols-2 lg:grid-cols-1 gap-3">
+                                            <div className="p-3 bg-bg-subtle rounded-xl border border-border-subtle">
+                                                <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">{t('nav.candidates')}</p>
+                                                <p className="text-2xl font-black text-primary-600">{candidateCount}</p>
+                                            </div>
+                                            <div className="p-3 bg-bg-subtle rounded-xl border border-border-subtle">
+                                                <p className="text-[10px] font-bold text-text-muted mb-0.5 uppercase">{t('job.days_on_air')}</p>
+                                                <p className="text-2xl font-black text-text-default">{daysOnAir}</p>
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
 
                                 <div className="pt-2">
-                                    <JobDetailsSidebar job={jobDataState} openSummaryDrawer={openSummaryDrawer} />
+                                    <JobDetailsSidebar
+                                        job={jobDataState}
+                                        openSummaryDrawer={openSummaryDrawer}
+                                        onCandidateCountChange={handleCandidateCountChange}
+                                    />
                                 </div>
                             </div>
                         )}

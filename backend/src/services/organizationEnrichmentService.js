@@ -89,16 +89,41 @@ const WEBSITE_EXCLUDED = [
 
 const hasHebrew = (s) => /[\u0590-\u05FF]/.test(s);
 
-const serperSearch = async (q, num = 5) => {
+const serperSearch = async (q, num = 10) => {
   const response = await axios.post(
-    'https://google.serper.dev/search',
-    { q, num },
+    "https://google.serper.dev/search",
     {
-      headers: { 'X-API-KEY': process.env.SERPDEV, 'Content-Type': 'application/json' },
-      timeout: 10000,
+      q,
+      num,
+
+      // Country
+      gl: "il",
+
+      // Interface language
+      hl: "iw",
+
+      // User location
+      location: "Israel",
+
+      // Disable SafeSearch
+      safe: "off",
+
+      // Prefer recent index
+      autocorrect: true,
+
+      // Optional: if you search news
+      // tbs: "qdr:m"
     },
+    {
+      timeout: 10000,
+      headers: {
+        "X-API-KEY": process.env.SERPDEV,
+        "Content-Type": "application/json"
+      }
+    }
   );
-  return filterSerpOrganicResults(response.data?.organic);
+
+  return filterSerpOrganicResults(response.data.organic);
 };
 
 const serperRaw = async (q, num = 5) => {
@@ -270,7 +295,7 @@ Do NOT include phone numbers, fax, hours, or any extra text.`,
 const searchWebsiteUrl = async (companyName) => {
   if (!companyName || !process.env.SERPDEV) return null;
   try {
-    const q = `${companyName} ${hasHebrew(companyName) ? 'האתר הרשמי' : 'official website'}`;
+    const q = `${companyName}  'האתר הרשמי' `;
     const results = await serperSearch(q);
     if (!results.length) return null;
     const official = results.find((r) => {
@@ -609,6 +634,9 @@ const finalizeEnrichmentItem = async (item, companyName, prefetched = {}) => {
   } catch {
     logo = '';
   }
+
+
+     //after finish all those steps. add one more step for verification. dont change any code. just add one move verification check
 
   return { ...out, logo: logo || out.logo };
 };

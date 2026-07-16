@@ -154,6 +154,8 @@ const NewCandidateViewV2: React.FC = () => {
     const [candidateId, setCandidateId] = useState<string | null>(null);
     /** When false, backend skips queueing welcome_email after create / AI create / presigned upload. */
     const [sendWelcomeEmail, setSendWelcomeEmail] = useState(true);
+    /** Prevents double auto-save after AI parse → result screen. */
+    const autoSaveAfterAiRef = useRef(false);
     useEffect(() => {
         setResumeData((prev: any) => ({
             ...prev,
@@ -353,6 +355,7 @@ const NewCandidateViewV2: React.FC = () => {
         setParseError(null);
         setPastedResumeText('');
         setSendWelcomeEmail(true);
+        autoSaveAfterAiRef.current = false;
     };
 
     const goToChoice = () => {
@@ -561,7 +564,7 @@ const NewCandidateViewV2: React.FC = () => {
         }
     }, [processFileUpload]);
 
-    const handleSave = async () => {
+    const handleSave = async (dataOverride?: Record<string, unknown> | null) => {
         if (!apiBase) {
             setParseError('חסר כתובת API (VITE_API_BASE)');
             return;
@@ -569,11 +572,16 @@ const NewCandidateViewV2: React.FC = () => {
         setIsParsing(true);
         setParseError(null);
         try {
-            const payload = { ...formData };
+            const payload: any = { ...(dataOverride || formData) };
             if (!payload.fullName) payload.fullName = 'מועמד חדש';
-            const method = aiCandidateId ? 'PUT' : 'POST';
-            const url = aiCandidateId
-                ? `${apiBase}/api/candidates/${aiCandidateId}`
+            const existingId =
+                (typeof payload.id === 'string' && payload.id) ||
+                (typeof payload.backendId === 'string' && payload.backendId) ||
+                aiCandidateId ||
+                candidateId;
+            const method = existingId ? 'PUT' : 'POST';
+            const url = existingId
+                ? `${apiBase}/api/candidates/${existingId}`
                 : `${apiBase}/api/candidates`;
             const saveBody =
                 method === 'POST' ? { ...payload, sendWelcomeEmail } : payload;
@@ -594,7 +602,7 @@ const NewCandidateViewV2: React.FC = () => {
                 throw new Error(msg);
             }
             const saved = await res.json();
-            const resolvedId = saved.id || saved.backendId || saved.candidateId || null;
+            const resolvedId = saved.id || saved.backendId || saved.candidateId || existingId || null;
             setCandidateId(resolvedId);
             setAiCandidateId(resolvedId);
             if (resolvedId) {
@@ -603,10 +611,24 @@ const NewCandidateViewV2: React.FC = () => {
             }
         } catch (err: any) {
             setParseError(err.message || 'שמירה נכשלה, נסה שוב.');
+            autoSaveAfterAiRef.current = false;
         } finally {
             setIsParsing(false);
         }
     };
+
+    // After CV upload/AI create, auto-run "שמור מועמד" and open the profile.
+    useEffect(() => {
+        if (creationMode !== 'ai_result' || !aiCandidateId) return;
+        if (autoSaveAfterAiRef.current) return;
+        autoSaveAfterAiRef.current = true;
+        void handleSave({
+            ...formData,
+            id: formData?.id || formData?.backendId || aiCandidateId,
+            backendId: formData?.backendId || formData?.id || aiCandidateId,
+        });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [creationMode, aiCandidateId, formData?.id]);
 
     // --- RENDER HELPERS ---
 
@@ -725,7 +747,13 @@ const NewCandidateViewV2: React.FC = () => {
     );
 
     const AIResultScreen = () => (
-        <div className="max-w-5xl mx-auto py-8 space-y-6 animate-fade-in">
+        <div className="max-w-5xl mx-auto py-8 space-y-6 animate-fade-in relative">
+            {isParsing ? (
+                <div className="absolute inset-0 z-40 bg-bg-card/80 backdrop-blur-sm rounded-3xl flex flex-col items-center justify-center gap-3">
+                    <div className="w-12 h-12 border-4 border-primary-100 border-t-primary-600 rounded-full animate-spin" />
+                    <p className="text-sm font-bold text-primary-700">{t('new_candidate.btn_save')}…</p>
+                </div>
+            ) : null}
             <div className="bg-green-50 border border-green-200 rounded-2xl p-6 flex items-center justify-between shadow-sm">
                 <div className="flex items-center gap-4">
                     <div className="w-12 h-12 bg-green-100 text-green-600 rounded-full flex items-center justify-center flex-shrink-0">
@@ -739,11 +767,24 @@ const NewCandidateViewV2: React.FC = () => {
                 <button onClick={startAiInput} className="text-sm font-bold text-green-800 hover:underline">{t('new_candidate.try_another')}</button>
             </div>
 
+            {parseError ? (
+                <div className="bg-red-50 border border-red-200 text-red-700 rounded-2xl p-4 text-sm flex items-center justify-between gap-3">
+                    <span>{parseError}</span>
+                    <button
+                        type="button"
+                        onClick={() => {
+                            autoSaveAfterAiRef.current = false;
+                            void handleSave();
+                        }}
+                        className="shrink-0 bg-primary-600 text-white font-bold py-2 px-4 rounded-xl hover:bg-primary-700"
+                    >
+                        {t('new_candidate.btn_save')}
+                    </button>
+                </div>
+            ) : null}
+
             <div className="bg-bg-card rounded-3xl border border-border-default shadow-sm p-4 flex items-center justify-between">
                 <h2 className="text-xl font-bold text-text-default px-4">{t('new_candidate.review_profile')}</h2>
-                <div className="flex gap-3">
-                    <button onClick={handleSave} className="bg-primary-600 text-white font-bold py-2.5 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/20">{t('new_candidate.btn_save')}</button>
-                </div>
             </div>
 
             <CandidateProfile 

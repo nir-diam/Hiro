@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
     MagnifyingGlassIcon, XMarkIcon, ArrowPathIcon, ExclamationTriangleIcon,
     InformationCircleIcon, BoltIcon, EyeIcon, ChevronLeftIcon, ChevronRightIcon,
-    ClipboardDocumentListIcon, CodeBracketIcon, TrashIcon, ArrowsPointingOutIcon, ArrowsPointingInIcon,
+    ChevronUpIcon, ChevronDownIcon,
+    ClipboardDocumentListIcon, ClipboardDocumentIcon, ClipboardDocumentCheckIcon,
+    CodeBracketIcon, TrashIcon, ArrowsPointingOutIcon, ArrowsPointingInIcon,
 } from './Icons';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import Drawer from './Drawer';
@@ -59,7 +61,204 @@ const previewJson = (value: unknown, max = 80): string => {
     return text.length <= max ? text : `${text.slice(0, max)}…`;
 };
 
-const LOG_DRAWER_WIDTHS = ['max-w-md', 'max-w-2xl', 'max-w-4xl'] as const;
+const LOG_DRAWER_WIDTHS = ['max-w-md', 'max-w-2xl', 'max-w-4xl', 'max-w-full'] as const;
+
+const findMatchRanges = (text: string, query: string): Array<{ start: number; end: number }> => {
+    const q = query.trim();
+    if (!q || !text) return [];
+    const lower = text.toLowerCase();
+    const needle = q.toLowerCase();
+    const ranges: Array<{ start: number; end: number }> = [];
+    let from = 0;
+    while (from < text.length) {
+        const idx = lower.indexOf(needle, from);
+        if (idx < 0) break;
+        ranges.push({ start: idx, end: idx + needle.length });
+        from = idx + Math.max(needle.length, 1);
+    }
+    return ranges;
+};
+
+const CopyJsonButton: React.FC<{ value: unknown; label: string }> = ({ value, label }) => {
+    const [copied, setCopied] = useState(false);
+    const text = formatJsonBlock(value);
+
+    const handleCopy = async () => {
+        if (!text || text === '—') return;
+        try {
+            await navigator.clipboard.writeText(text);
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1600);
+        } catch {
+            // ignore
+        }
+    };
+
+    return (
+        <button
+            type="button"
+            onClick={() => void handleCopy()}
+            disabled={!text || text === '—'}
+            className="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-[11px] font-bold text-text-muted hover:bg-bg-hover hover:text-primary-600 disabled:opacity-40 disabled:pointer-events-none transition-colors"
+            title={`העתק ${label}`}
+            aria-label={`העתק ${label}`}
+        >
+            {copied ? (
+                <>
+                    <ClipboardDocumentCheckIcon className="w-4 h-4 text-green-600" />
+                    <span className="text-green-700">הועתק</span>
+                </>
+            ) : (
+                <>
+                    <ClipboardDocumentIcon className="w-4 h-4" />
+                    <span>העתק</span>
+                </>
+            )}
+        </button>
+    );
+};
+
+const SearchableCodeBlock: React.FC<{
+    title: string;
+    value: unknown;
+    textClassName: string;
+    maxHeightClass: string;
+    resetKey?: string;
+}> = ({ title, value, textClassName, maxHeightClass, resetKey }) => {
+    const text = formatJsonBlock(value);
+    const [query, setQuery] = useState('');
+    const [activeIdx, setActiveIdx] = useState(0);
+    const scrollRef = useRef<HTMLPreElement>(null);
+
+    useEffect(() => {
+        setQuery('');
+        setActiveIdx(0);
+    }, [resetKey]);
+
+    const ranges = useMemo(() => findMatchRanges(text === '—' ? '' : text, query), [text, query]);
+
+    useEffect(() => {
+        setActiveIdx(0);
+    }, [query]);
+
+    useEffect(() => {
+        if (!ranges.length) return;
+        const id = window.requestAnimationFrame(() => {
+            const mark = scrollRef.current?.querySelector<HTMLElement>('[data-active-match="true"]');
+            mark?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+        });
+        return () => window.cancelAnimationFrame(id);
+    }, [activeIdx, ranges, query, text]);
+
+    const goPrev = () => {
+        if (!ranges.length) return;
+        setActiveIdx((i) => (i - 1 + ranges.length) % ranges.length);
+    };
+    const goNext = () => {
+        if (!ranges.length) return;
+        setActiveIdx((i) => (i + 1) % ranges.length);
+    };
+
+    const highlighted = useMemo(() => {
+        if (!ranges.length || text === '—') return text;
+        const nodes: React.ReactNode[] = [];
+        let cursor = 0;
+        ranges.forEach((range, i) => {
+            if (range.start > cursor) {
+                nodes.push(text.slice(cursor, range.start));
+            }
+            const isActive = i === activeIdx;
+            nodes.push(
+                <mark
+                    key={`m-${range.start}-${i}`}
+                    data-active-match={isActive ? 'true' : undefined}
+                    className={
+                        isActive
+                            ? 'bg-amber-400 text-black rounded-sm px-0.5 shadow-[0_0_0_1px_rgba(251,191,36,0.9)]'
+                            : 'bg-yellow-400/45 text-inherit rounded-sm px-0.5'
+                    }
+                >
+                    {text.slice(range.start, range.end)}
+                </mark>,
+            );
+            cursor = range.end;
+        });
+        if (cursor < text.length) nodes.push(text.slice(cursor));
+        return nodes;
+    }, [text, ranges, activeIdx]);
+
+    return (
+        <div>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <h4 className="font-bold text-sm text-text-default">{title}</h4>
+                <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                    <div className="relative">
+                        <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                            type="search"
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.preventDefault();
+                                    if (e.shiftKey) goPrev();
+                                    else goNext();
+                                }
+                            }}
+                            placeholder={`חיפוש ב-${title}...`}
+                            className="w-40 sm:w-52 bg-bg-input border border-border-default rounded-lg py-1 pl-2 pr-7 text-[11px] font-mono focus:ring-2 focus:ring-primary-500"
+                            dir="ltr"
+                        />
+                    </div>
+                    {query.trim() ? (
+                        <div className="flex items-center gap-0.5">
+                            <span className="text-[10px] font-mono text-text-muted tabular-nums px-1 min-w-[3.5rem] text-center">
+                                {ranges.length ? `${activeIdx + 1}/${ranges.length}` : '0/0'}
+                            </span>
+                            <button
+                                type="button"
+                                onClick={goPrev}
+                                disabled={!ranges.length}
+                                className="p-1 rounded-md text-text-muted hover:bg-bg-hover disabled:opacity-40"
+                                title="הקודם (Shift+Enter)"
+                                aria-label="תוצאה קודמת"
+                            >
+                                <ChevronUpIcon className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                                type="button"
+                                onClick={goNext}
+                                disabled={!ranges.length}
+                                className="p-1 rounded-md text-text-muted hover:bg-bg-hover disabled:opacity-40"
+                                title="הבא (Enter)"
+                                aria-label="תוצאה הבאה"
+                            >
+                                <ChevronDownIcon className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setQuery('')}
+                                className="p-1 rounded-md text-text-muted hover:bg-bg-hover"
+                                title="נקה חיפוש"
+                                aria-label="נקה חיפוש"
+                            >
+                                <XMarkIcon className="w-3.5 h-3.5" />
+                            </button>
+                        </div>
+                    ) : null}
+                    <CopyJsonButton value={value} label={title} />
+                </div>
+            </div>
+            <pre
+                ref={scrollRef}
+                className={`bg-[#1e1e1e] ${textClassName} text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed overflow-y-auto whitespace-pre-wrap ${maxHeightClass}`}
+                dir="ltr"
+            >
+                {highlighted}
+            </pre>
+        </div>
+    );
+};
 
 const LogDetailDrawer: React.FC<{ log: AppLogEntry | null; onClose: () => void }> = ({ log, onClose }) => {
     const [widthIdx, setWidthIdx] = useState(0);
@@ -73,7 +272,14 @@ const LogDetailDrawer: React.FC<{ log: AppLogEntry | null; onClose: () => void }
     const ctx = (log.context && typeof log.context === 'object') ? log.context as Record<string, unknown> : {};
     const input = resolveLogInput(ctx);
     const output = resolveLogOutput(ctx);
-    const isWidest = widthIdx >= LOG_DRAWER_WIDTHS.length - 1;
+    const outputDisplay = typeof ctx.error === 'string' && output == null ? { error: ctx.error } : output;
+    const isFullscreen = widthIdx >= LOG_DRAWER_WIDTHS.length - 1;
+    const expandTitle = isFullscreen
+        ? 'צמצם מגירה'
+        : widthIdx === LOG_DRAWER_WIDTHS.length - 2
+          ? 'מסך מלא'
+          : 'הרחב מגירה';
+    const blockMaxH = isFullscreen ? 'max-h-[min(70vh,48rem)]' : 'max-h-96';
 
     return (
         <Drawer
@@ -86,10 +292,12 @@ const LogDetailDrawer: React.FC<{ log: AppLogEntry | null; onClose: () => void }
                     type="button"
                     onClick={() => setWidthIdx((i) => (i + 1) % LOG_DRAWER_WIDTHS.length)}
                     className="p-2 rounded-full text-text-muted hover:bg-bg-hover hover:text-primary-600"
-                    title={isWidest ? 'צמצם מגירה' : 'הרחב מגירה'}
-                    aria-label={isWidest ? 'צמצם מגירה' : 'הרחב מגירה'}
+                    title={expandTitle}
+                    aria-label={expandTitle}
                 >
-                    {isWidest ? <ArrowsPointingInIcon className="w-5 h-5" /> : <ArrowsPointingOutIcon className="w-5 h-5" />}
+                    {isFullscreen
+                        ? <ArrowsPointingInIcon className="w-5 h-5" />
+                        : <ArrowsPointingOutIcon className="w-5 h-5" />}
                 </button>
             )}
             footer={<button onClick={onClose} className="w-full bg-bg-subtle hover:bg-bg-hover text-text-default py-2 rounded-lg font-bold">סגור</button>}
@@ -123,27 +331,30 @@ const LogDetailDrawer: React.FC<{ log: AppLogEntry | null; onClose: () => void }
                     </div>
                 </div>
 
-                <div>
-                    <h4 className="font-bold text-sm text-text-default mb-2">Input</h4>
-                    <pre className="bg-[#1e1e1e] text-blue-300 text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed max-h-96 overflow-y-auto whitespace-pre-wrap">
-                        {formatJsonBlock(input)}
-                    </pre>
-                </div>
+                <SearchableCodeBlock
+                    title="Input"
+                    value={input}
+                    textClassName="text-blue-300"
+                    maxHeightClass={blockMaxH}
+                    resetKey={log.id}
+                />
 
-                <div>
-                    <h4 className="font-bold text-sm text-text-default mb-2">Output</h4>
-                    <pre className="bg-[#1e1e1e] text-green-400 text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed max-h-96 overflow-y-auto whitespace-pre-wrap">
-                        {formatJsonBlock(typeof ctx.error === 'string' && output == null ? { error: ctx.error } : output)}
-                    </pre>
-                </div>
+                <SearchableCodeBlock
+                    title="Output"
+                    value={outputDisplay}
+                    textClassName="text-green-400"
+                    maxHeightClass={blockMaxH}
+                    resetKey={log.id}
+                />
 
                 {log.stackTrace ? (
-                    <div>
-                        <h4 className="font-bold text-sm text-text-default mb-2">Stack trace</h4>
-                        <pre className="bg-[#1e1e1e] text-red-300 text-xs p-4 rounded-xl overflow-x-auto font-mono leading-relaxed whitespace-pre-wrap">
-                            {log.stackTrace}
-                        </pre>
-                    </div>
+                    <SearchableCodeBlock
+                        title="Stack trace"
+                        value={log.stackTrace}
+                        textClassName="text-red-300"
+                        maxHeightClass={blockMaxH}
+                        resetKey={log.id}
+                    />
                 ) : null}
             </div>
         </Drawer>
@@ -162,6 +373,10 @@ const AdminLogsView: React.FC = () => {
 
     const [searchTerm, setSearchTerm] = useState('');
     const [searchDebounced, setSearchDebounced] = useState('');
+    const [searchInputTerm, setSearchInputTerm] = useState('');
+    const [searchInputDebounced, setSearchInputDebounced] = useState('');
+    const [searchOutputTerm, setSearchOutputTerm] = useState('');
+    const [searchOutputDebounced, setSearchOutputDebounced] = useState('');
     const [levelFilter, setLevelFilter] = useState('all');
     const [sourceFilter, setSourceFilter] = useState('all');
     const [dateRange, setDateRange] = useState<DateRange | null>(null);
@@ -181,18 +396,30 @@ const AdminLogsView: React.FC = () => {
     }, [searchTerm]);
 
     useEffect(() => {
+        const t = setTimeout(() => setSearchInputDebounced(searchInputTerm.trim()), 350);
+        return () => clearTimeout(t);
+    }, [searchInputTerm]);
+
+    useEffect(() => {
+        const t = setTimeout(() => setSearchOutputDebounced(searchOutputTerm.trim()), 350);
+        return () => clearTimeout(t);
+    }, [searchOutputTerm]);
+
+    useEffect(() => {
         setCurrentPage(1);
-    }, [searchDebounced, levelFilter, sourceFilter, dateRange]);
+    }, [searchDebounced, searchInputDebounced, searchOutputDebounced, levelFilter, sourceFilter, dateRange]);
 
     const queryParams = useMemo(() => ({
         page: currentPage,
         pageSize: PAGE_SIZE,
         search: searchDebounced || undefined,
+        searchInput: searchInputDebounced || undefined,
+        searchOutput: searchOutputDebounced || undefined,
         level: levelFilter,
         source: sourceFilter,
         from: dateRange?.from || undefined,
         to: dateRange?.to || undefined,
-    }), [currentPage, searchDebounced, levelFilter, sourceFilter, dateRange]);
+    }), [currentPage, searchDebounced, searchInputDebounced, searchOutputDebounced, levelFilter, sourceFilter, dateRange]);
 
     const loadLogs = useCallback(async (silent = false) => {
         if (!apiBase) {
@@ -306,40 +533,64 @@ const AdminLogsView: React.FC = () => {
                 </div>
             </div>
 
-            <div className="bg-bg-card p-3 rounded-xl border border-border-default shadow-sm flex flex-col md:flex-row gap-3 items-center">
-                <div className="relative flex-grow w-full md:w-auto">
-                    <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                    <input
-                        type="text"
-                        placeholder="חפש לפי הודעה, מקור, אימייל או ID..."
-                        value={searchTerm}
-                        onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 font-mono"
-                    />
+            <div className="bg-bg-card p-3 rounded-xl border border-border-default shadow-sm flex flex-col gap-3">
+                <div className="flex flex-col md:flex-row gap-3 items-center">
+                    <div className="relative flex-grow w-full md:w-auto">
+                        <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
+                        <input
+                            type="text"
+                            placeholder="חפש לפי הודעה, מקור, אימייל או ID..."
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 font-mono"
+                        />
+                    </div>
+                    <select
+                        value={levelFilter}
+                        onChange={(e) => setLevelFilter(e.target.value)}
+                        className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm min-w-[120px] w-full md:w-auto"
+                    >
+                        <option value="all">כל הרמות</option>
+                        <option value="debug">debug</option>
+                        <option value="info">info</option>
+                        <option value="warn">warn</option>
+                        <option value="error">error</option>
+                        <option value="fatal">fatal</option>
+                    </select>
+                    <select
+                        value={sourceFilter}
+                        onChange={(e) => setSourceFilter(e.target.value)}
+                        className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm min-w-[140px] w-full md:w-auto"
+                    >
+                        <option value="all">כל המקורות</option>
+                        {sources.map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                        ))}
+                    </select>
+                    <DateRangeSelector value={dateRange} onChange={setDateRange} />
                 </div>
-                <select
-                    value={levelFilter}
-                    onChange={(e) => setLevelFilter(e.target.value)}
-                    className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm min-w-[120px]"
-                >
-                    <option value="all">כל הרמות</option>
-                    <option value="debug">debug</option>
-                    <option value="info">info</option>
-                    <option value="warn">warn</option>
-                    <option value="error">error</option>
-                    <option value="fatal">fatal</option>
-                </select>
-                <select
-                    value={sourceFilter}
-                    onChange={(e) => setSourceFilter(e.target.value)}
-                    className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm min-w-[140px]"
-                >
-                    <option value="all">כל המקורות</option>
-                    {sources.map((s) => (
-                        <option key={s} value={s}>{s}</option>
-                    ))}
-                </select>
-                <DateRangeSelector value={dateRange} onChange={setDateRange} />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="relative">
+                        <MagnifyingGlassIcon className="w-4 h-4 text-blue-500 absolute right-3 top-1/2 -translate-y-1/2" />
+                        <input
+                            type="text"
+                            placeholder="חיפוש ב-Input..."
+                            value={searchInputTerm}
+                            onChange={(e) => setSearchInputTerm(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-2 focus:ring-blue-400 font-mono"
+                        />
+                    </div>
+                    <div className="relative">
+                        <MagnifyingGlassIcon className="w-4 h-4 text-green-600 absolute right-3 top-1/2 -translate-y-1/2" />
+                        <input
+                            type="text"
+                            placeholder="חיפוש ב-Output..."
+                            value={searchOutputTerm}
+                            onChange={(e) => setSearchOutputTerm(e.target.value)}
+                            className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm focus:ring-2 focus:ring-green-400 font-mono"
+                        />
+                    </div>
+                </div>
             </div>
 
             {listError ? (

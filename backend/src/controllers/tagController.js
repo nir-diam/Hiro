@@ -479,14 +479,22 @@ const listPending = async (req, res) => {
       parts.push({ usageCount: { [Op.gte]: minUsage } });
     }
     if (search) {
-      const like = `%${search}%`;
+      const stripped = String(search).replace(/[/\\]/g, '').toLowerCase();
+      const like = `%${stripped}%`;
+      const stripSlashesSql = (colName) =>
+        sequelize.fn(
+          'REPLACE',
+          sequelize.fn('REPLACE', sequelize.fn('LOWER', sequelize.col(colName)), '/', ''),
+          '\\',
+          '',
+        );
       parts.push({
         [Op.or]: [
-          { tagKey: { [Op.iLike]: like } },
-          { displayNameHe: { [Op.iLike]: like } },
-          { displayNameEn: { [Op.iLike]: like } },
-          { descriptionHe: { [Op.iLike]: like } },
-          { category: { [Op.iLike]: like } },
+          sequelize.where(stripSlashesSql('tag_key'), { [Op.like]: like }),
+          sequelize.where(stripSlashesSql('display_name_he'), { [Op.like]: like }),
+          sequelize.where(stripSlashesSql('display_name_en'), { [Op.like]: like }),
+          sequelize.where(stripSlashesSql('description_he'), { [Op.like]: like }),
+          sequelize.where(stripSlashesSql('category'), { [Op.like]: like }),
         ],
       });
     }

@@ -1,70 +1,40 @@
 
-import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { BriefcaseIcon, UserGroupIcon, MapPinIcon, Cog6ToothIcon, EyeIcon, ChartBarIcon, ArrowPathIcon, DocumentArrowDownIcon, MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon, ChevronDownIcon, CalendarIcon, XMarkIcon } from './Icons';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { BriefcaseIcon, UserGroupIcon, MapPinIcon, Cog6ToothIcon, EyeIcon, ChartBarIcon, ArrowPathIcon, DocumentArrowDownIcon, MagnifyingGlassIcon, TableCellsIcon, Squares2X2Icon, ChevronDownIcon, XMarkIcon } from './Icons';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
+import { fetchBoardPublications, type BoardPublicationRow } from '../services/publishingApi';
+import { useAuth } from '../context/AuthContext';
 
 // --- TYPES ---
 interface JobPublication {
-  id: number;
+  id: string; // composite key jobId+sourceId
+  jobId: string;
   company: string;
   jobTitle: string;
   domain: string;
   role: string;
-  creationDate: string;
   publicationDate: string;
   city: string;
   region: string;
-  jobType: 'מלאה' | 'חלקית' | 'פרילנס' | 'משמרות';
   candidatesCount: number;
   views: number;
-  board: string; // Added board field
+  board: string;
 }
-
-// --- HELPER FOR DYNAMIC DATES ---
-const getRelativeDate = (daysAgo: number) => {
-    const d = new Date();
-    d.setDate(d.getDate() - daysAgo);
-    return d.toISOString().split('T')[0];
-};
-
-// --- ROBUST MOCK DATA ---
-const boardsList = ['AllJobs', 'LinkedIn', 'JobMaster', 'Drushim', 'Facebook', 'Glassdoor'];
-
-const generateMockData = (): JobPublication[] => [
-  { id: 101, company: 'בזק', jobTitle: 'מנהל/ת שיווק דיגיטלי', domain: 'שיווק', role: 'מנהל שיווק', creationDate: getRelativeDate(2), publicationDate: getRelativeDate(1), city: 'תל אביב', region: 'מרכז', jobType: 'מלאה', candidatesCount: 145, views: 2300, board: 'LinkedIn' },
-  { id: 102, company: 'Wix', jobTitle: 'מפתח/ת Fullstack', domain: 'טכנולוגיה', role: 'מהנדס תוכנה', creationDate: getRelativeDate(5), publicationDate: getRelativeDate(4), city: 'תל אביב', region: 'מרכז', jobType: 'מלאה', candidatesCount: 89, views: 4120, board: 'AllJobs' },
-  { id: 103, company: 'Fiverr', jobTitle: 'מעצב/ת UX/UI', domain: 'עיצוב', role: 'מעצב', creationDate: getRelativeDate(10), publicationDate: getRelativeDate(8), city: 'חיפה', region: 'צפון', jobType: 'חלקית', candidatesCount: 42, views: 850, board: 'JobMaster' },
-  { id: 104, company: 'אלביט מערכות', jobTitle: 'מהנדס/ת QA', domain: 'טכנולוגיה', role: 'בודק תוכנה', creationDate: getRelativeDate(15), publicationDate: getRelativeDate(14), city: 'חיפה', region: 'צפון', jobType: 'מלאה', candidatesCount: 65, views: 1200, board: 'Drushim' },
-  { id: 105, company: 'תנובה', jobTitle: 'נציג/ת מכירות שטח', domain: 'מכירות', role: 'איש מכירות', creationDate: getRelativeDate(3), publicationDate: getRelativeDate(2), city: 'רחובות', region: 'מרכז', jobType: 'מלאה', candidatesCount: 33, views: 450, board: 'AllJobs' },
-  { id: 106, company: 'אל-על', jobTitle: 'ראש/ת צוות BI', domain: 'טכנולוגיה', role: 'אנליסט BI', creationDate: getRelativeDate(20), publicationDate: getRelativeDate(18), city: 'לוד', region: 'מרכז', jobType: 'מלאה', candidatesCount: 12, views: 980, board: 'LinkedIn' },
-  { id: 107, company: 'מיטב דש', jobTitle: 'אנליסט/ית פיננסי/ת', domain: 'פיננסים', role: 'אנליסט', creationDate: getRelativeDate(7), publicationDate: getRelativeDate(6), city: 'גבעתיים', region: 'מרכז', jobType: 'מלאה', candidatesCount: 55, views: 1500, board: 'JobMaster' },
-  { id: 108, company: 'Zap Group', jobTitle: 'מומחה/ית SEO', domain: 'שיווק', role: 'מומחה SEO', creationDate: getRelativeDate(12), publicationDate: getRelativeDate(10), city: 'פתח תקווה', region: 'מרכז', jobType: 'חלקית', candidatesCount: 18, views: 620, board: 'Facebook' },
-  { id: 109, company: 'Nisha', jobTitle: 'רכז/ת גיוס טכנולוגי', domain: 'משאבי אנוש', role: 'רכז גיוס', creationDate: getRelativeDate(1), publicationDate: getRelativeDate(0), city: 'באר שבע', region: 'דרום', jobType: 'מלאה', candidatesCount: 95, views: 1800, board: 'AllJobs' },
-  { id: 110, company: 'GotFriends', jobTitle: 'מנהל/ת לקוחות', domain: 'מכירות', role: 'מנהל לקוחות', creationDate: getRelativeDate(4), publicationDate: getRelativeDate(3), city: 'הרצליה', region: 'שרון', jobType: 'מלאה', candidatesCount: 27, views: 500, board: 'LinkedIn' },
-  { id: 111, company: 'בנק הפועלים', jobTitle: 'יועץ/ת השקעות', domain: 'פיננסים', role: 'יועץ השקעות', creationDate: getRelativeDate(25), publicationDate: getRelativeDate(24), city: 'ירושלים', region: 'ירושלים והסביבה', jobType: 'מלאה', candidatesCount: 105, views: 3200, board: 'Drushim' },
-  { id: 112, company: 'Matrix', jobTitle: 'מיישם/ת סייבר', domain: 'טכנולוגיה', role: 'מומחה סייבר', creationDate: getRelativeDate(6), publicationDate: getRelativeDate(5), city: 'הרצליה', region: 'שרון', jobType: 'מלאה', candidatesCount: 8, views: 900, board: 'Glassdoor' },
-  { id: 113, company: 'Strauss', jobTitle: 'טכנולוג/ית מזון', domain: 'תעשייה וייצור', role: 'מהנדס מזון', creationDate: getRelativeDate(30), publicationDate: getRelativeDate(28), city: 'אחיהוד', region: 'צפון', jobType: 'מלאה', candidatesCount: 15, views: 400, board: 'JobMaster' },
-  { id: 114, company: 'משרד החינוך', jobTitle: 'מורה למתמטיקה', domain: 'חינוך', role: 'מורה', creationDate: getRelativeDate(40), publicationDate: getRelativeDate(38), city: 'חולון', region: 'מרכז', jobType: 'חלקית', candidatesCount: 4, views: 120, board: 'AllJobs' },
-  { id: 115, company: 'Super-Pharm', jobTitle: 'רוקח/ת', domain: 'רפואה', role: 'רוקח', creationDate: getRelativeDate(2), publicationDate: getRelativeDate(2), city: 'רעננה', region: 'שרון', jobType: 'משמרות', candidatesCount: 10, views: 250, board: 'Drushim' },
-];
-
-const mockJobsData = generateMockData();
 
 const allColumns = [
   { id: 'jobTitle', header: 'שם משרה', width: '20%' },
   { id: 'company', header: 'חברה', width: '15%' },
   { id: 'domain', header: 'תחום', width: '10%' },
-  { id: 'board', header: 'לוח פרסום', width: '10%' }, // Added column def
+  { id: 'board', header: 'לוח פרסום', width: '10%' },
   { id: 'city', header: 'עיר', width: '10%' },
-  { id: 'views', header: 'חשיפות (Views)', width: '10%' },
   { id: 'candidatesCount', header: 'מועמדים', width: '10%' },
   { id: 'conversion', header: 'יחס המרה', width: '15%' },
   { id: 'publicationDate', header: 'תאריך פרסום', width: '10%' },
 ];
 
 const defaultVisibleColumns = allColumns.map(c => c.id);
-const uniqueBoards = Array.from(new Set(mockJobsData.map(j => j.board))); // Unique boards for filter
 
 // --- COMPONENTS ---
 
@@ -100,11 +70,13 @@ const ConversionBar: React.FC<{ candidates: number; views: number }> = ({ candid
 };
 
 // NEW CARD COMPONENT
-const JobPublicationCard: React.FC<{ job: JobPublication }> = ({ job }) => (
+const JobPublicationCard: React.FC<{ job: JobPublication; onNavigate: (jobId: string) => void }> = ({ job, onNavigate }) => (
     <div className="bg-bg-card border border-border-default rounded-xl p-4 shadow-sm hover:shadow-md transition-all flex flex-col gap-4">
         <div className="flex justify-between items-start">
             <div>
-                <h3 className="font-bold text-lg text-primary-700 leading-tight mb-1">{job.jobTitle}</h3>
+                <button onClick={() => onNavigate(job.jobId)} className="text-right group/cardtitle">
+                    <h3 className="font-bold text-lg text-primary-700 group-hover/cardtitle:text-primary-900 group-hover/cardtitle:underline leading-tight mb-1">{job.jobTitle}</h3>
+                </button>
                 <p className="text-sm text-text-default font-medium">{job.company}</p>
             </div>
             <span className="text-[10px] bg-bg-subtle px-2 py-0.5 rounded-full border border-border-default text-text-muted whitespace-nowrap">
@@ -146,58 +118,133 @@ const JobPublicationCard: React.FC<{ job: JobPublication }> = ({ job }) => (
     </div>
 );
 
-const DomainPerformanceChart: React.FC<{ data: JobPublication[] }> = ({ data }) => {
-    const domainStats = data.reduce((acc, job) => {
-        if (!acc[job.domain]) acc[job.domain] = { candidates: 0, views: 0, count: 0 };
-        acc[job.domain].candidates += job.candidatesCount;
-        acc[job.domain].views += job.views;
-        acc[job.domain].count += 1;
-        return acc;
-    }, {} as Record<string, { candidates: number; views: number; count: number }>);
-
-    const sortedDomains = Object.entries(domainStats)
-        .sort(([, a], [, b]) => (b as { candidates: number }).candidates - (a as { candidates: number }).candidates)
-        .slice(0, 5);
-
-    const maxVal = Math.max(...sortedDomains.map(([, stats]) => (stats as any).candidates), 1);
+const DomainJobsPopup: React.FC<{
+    domain: string;
+    jobs: JobPublication[];
+    onClose: () => void;
+    onNavigate: (jobId: string) => void;
+}> = ({ domain, jobs, onClose, onNavigate }) => {
+    const overlayRef = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const handleKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', handleKey);
+        return () => document.removeEventListener('keydown', handleKey);
+    }, [onClose]);
 
     return (
-        <div className="bg-bg-card p-6 rounded-2xl border border-border-default shadow-sm h-full flex flex-col">
-            <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
-                <ChartBarIcon className="w-5 h-5 text-primary-500" />
-                ביצועים לפי תחום (Top 5)
-            </h3>
-            <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
-                {sortedDomains.map(([domain, stats]) => {
-                    const typedStats = stats as { candidates: number; views: number; count: number };
-                    return (
-                        <div key={domain} className="group">
-                            <div className="flex justify-between text-sm mb-1.5">
-                                <span className="font-bold text-text-default">{domain}</span>
-                                <span className="text-text-muted text-xs bg-bg-subtle px-2 py-0.5 rounded-full border border-border-default">{typedStats.count} משרות</span>
+        <div
+            ref={overlayRef}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm"
+            onClick={(e) => { if (e.target === overlayRef.current) onClose(); }}
+        >
+            <div className="bg-bg-card rounded-2xl shadow-2xl border border-border-default w-full max-w-lg mx-4 max-h-[80vh] flex flex-col">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
+                    <div>
+                        <h3 className="font-bold text-text-default text-base">{domain}</h3>
+                        <p className="text-xs text-text-muted mt-0.5">{jobs.length} משרות בתחום זה</p>
+                    </div>
+                    <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-bg-hover transition-colors text-text-muted">
+                        <XMarkIcon className="w-5 h-5" />
+                    </button>
+                </div>
+                <div className="overflow-y-auto custom-scrollbar flex-1">
+                    {jobs.map((job) => (
+                        <button
+                            key={job.id}
+                            onClick={() => { onNavigate(job.jobId); onClose(); }}
+                            className="w-full text-right flex items-center justify-between px-5 py-3.5 hover:bg-bg-hover transition-colors border-b border-border-subtle last:border-0 group"
+                        >
+                            <div className="flex-1 min-w-0">
+                                <p className="font-semibold text-sm text-primary-700 group-hover:text-primary-900 truncate">{job.jobTitle}</p>
+                                <p className="text-xs text-text-muted truncate">{job.company} · {job.city}</p>
                             </div>
-                            <div className="relative h-9 bg-bg-subtle rounded-lg overflow-hidden flex items-center">
-                                <div 
-                                    className="absolute top-0 right-0 h-full bg-primary-100 group-hover:bg-primary-200 transition-colors duration-500" 
-                                    style={{ width: `${(typedStats.candidates / maxVal) * 100}%` }}
-                                ></div>
-                                <div className="relative z-10 w-full flex justify-between px-3 text-xs">
-                                    <span className="font-bold text-primary-900">{typedStats.candidates.toLocaleString()} מועמדים</span>
-                                    <span className="text-text-subtle hidden sm:inline font-medium">{typedStats.views.toLocaleString()} חשיפות</span>
-                                </div>
+                            <div className="flex items-center gap-2 mr-3 shrink-0">
+                                {job.candidatesCount > 0 && (
+                                    <span className="text-xs bg-primary-50 text-primary-700 px-2 py-0.5 rounded-full font-medium">{job.candidatesCount} מועמדים</span>
+                                )}
+                                <span className="text-xs text-text-subtle bg-bg-subtle border border-border-default px-2 py-0.5 rounded-full">{job.board}</span>
                             </div>
-                        </div>
-                    );
-                })}
-                {sortedDomains.length === 0 && <div className="text-center text-text-muted py-8">אין נתונים להצגה</div>}
+                        </button>
+                    ))}
+                </div>
             </div>
         </div>
     );
 };
 
+const DomainPerformanceChart: React.FC<{ data: JobPublication[]; onNavigate: (jobId: string) => void }> = ({ data, onNavigate }) => {
+    const [popup, setPopup] = useState<{ domain: string; jobs: JobPublication[] } | null>(null);
+
+    const domainMap = useMemo(() => {
+        return data.reduce((acc, job) => {
+            if (!acc[job.domain]) acc[job.domain] = { candidates: 0, views: 0, count: 0, jobs: [] };
+            acc[job.domain].candidates += job.candidatesCount;
+            acc[job.domain].views += job.views;
+            acc[job.domain].count += 1;
+            acc[job.domain].jobs.push(job);
+            return acc;
+        }, {} as Record<string, { candidates: number; views: number; count: number; jobs: JobPublication[] }>);
+    }, [data]);
+
+    type DomainStat = { candidates: number; views: number; count: number; jobs: JobPublication[] };
+    const sortedDomains = (Object.entries(domainMap) as [string, DomainStat][])
+        .sort(([, a], [, b]) => b.candidates - a.candidates)
+        .slice(0, 5);
+
+    const maxVal = Math.max(...sortedDomains.map(([, s]) => s.candidates), 1);
+
+    return (
+        <>
+            {popup && (
+                <DomainJobsPopup
+                    domain={popup.domain}
+                    jobs={popup.jobs}
+                    onClose={() => setPopup(null)}
+                    onNavigate={onNavigate}
+                />
+            )}
+            <div className="bg-bg-card p-6 rounded-2xl border border-border-default shadow-sm h-full flex flex-col">
+                <h3 className="text-lg font-bold text-text-default mb-6 flex items-center gap-2">
+                    <ChartBarIcon className="w-5 h-5 text-primary-500" />
+                    ביצועים לפי תחום (Top 5)
+                </h3>
+                <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar">
+                    {sortedDomains.map(([domain, stats]) => (
+                        <div key={domain} className="group">
+                            <div className="flex justify-between text-sm mb-1.5">
+                                <span className="font-bold text-text-default">{domain}</span>
+                                <button
+                                    onClick={() => setPopup({ domain, jobs: stats.jobs })}
+                                    className="text-text-muted text-xs bg-bg-subtle px-2 py-0.5 rounded-full border border-border-default hover:border-primary-400 hover:text-primary-700 hover:bg-primary-50 transition-colors cursor-pointer"
+                                >
+                                    {stats.count} משרות
+                                </button>
+                            </div>
+                            <div className="relative h-9 bg-bg-subtle rounded-lg overflow-hidden flex items-center">
+                                <div
+                                    className="absolute top-0 right-0 h-full bg-primary-100 group-hover:bg-primary-200 transition-colors duration-500"
+                                    style={{ width: `${(stats.candidates / maxVal) * 100}%` }}
+                                />
+                                <div className="relative z-10 w-full flex justify-between px-3 text-xs">
+                                    <span className="font-bold text-primary-900">{stats.candidates.toLocaleString()} מועמדים</span>
+                                    <span className="text-text-subtle hidden sm:inline font-medium">{stats.views.toLocaleString()} חשיפות</span>
+                                </div>
+                            </div>
+                        </div>
+                    ))}
+                    {sortedDomains.length === 0 && <div className="text-center text-text-muted py-8">אין נתונים להצגה</div>}
+                </div>
+            </div>
+        </>
+    );
+};
+
 const PublicationsReportView: React.FC = () => {
+    const { user } = useAuth();
+    const navigate = useNavigate();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+
     const today = new Date();
-    // Default to last 90 days to ensure data is visible initially
     const ninetyDaysAgo = new Date(new Date().setDate(today.getDate() - 90));
 
     const [filters, setFilters] = useState({
@@ -205,17 +252,20 @@ const PublicationsReportView: React.FC = () => {
         endDate: today.toISOString().split('T')[0],
         searchTerm: '',
         domain: '',
-        board: '', 
+        board: '',
         locations: [] as LocationItem[]
     });
+
+    const [allData, setAllData] = useState<JobPublication[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [loadError, setLoadError] = useState<string | null>(null);
     
-    // View Mode State: Default to 'grid' on mobile, 'table' on desktop
     const [viewMode, setViewMode] = useState<'table' | 'grid'>(() => window.innerWidth < 1024 ? 'grid' : 'table');
 
     const [activePreset, setActivePreset] = useState<'month' | 'week' | 'today' | 'quarter' | 'custom'>('quarter');
     const [columns, setColumns] = useState(allColumns);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const [sortConfig, setSortConfig] = useState<{ key: keyof JobPublication | 'conversion'; direction: 'asc' | 'desc' }>({ key: 'publicationDate', direction: 'desc' });
+    const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'publicationDate', direction: 'desc' });
     
     // New State for Mobile Toggle
     const [showMobileStats, setShowMobileStats] = useState(false);
@@ -232,6 +282,41 @@ const PublicationsReportView: React.FC = () => {
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
     }, []);
+
+    // Load real board publications from the backend
+    const loadData = useCallback(async () => {
+        setLoading(true);
+        setLoadError(null);
+        try {
+            const rows = await fetchBoardPublications({
+                startDate: filters.startDate,
+                endDate: filters.endDate,
+                clientId: isPlatformAdmin ? null : (user?.clientId ?? null),
+            });
+            const mapped: JobPublication[] = rows.map((r: BoardPublicationRow) => ({
+                id: `${r.jobId}-${r.sourceId}`,
+                jobId: r.jobId,
+                company: r.company || '',
+                jobTitle: r.jobTitle || '',
+                domain: r.domain || '',
+                role: r.role || '',
+                publicationDate: r.publicationDate ? String(r.publicationDate).split('T')[0] : '',
+                city: r.city || '',
+                region: r.region || '',
+                candidatesCount: Number(r.candidatesCount) || 0,
+                views: 0,
+                board: r.sourceName || '',
+            }));
+            setAllData(mapped);
+        } catch (e: unknown) {
+            setLoadError((e as Error).message || 'שגיאה בטעינת הדוח');
+            setAllData([]);
+        } finally {
+            setLoading(false);
+        }
+    }, [filters.startDate, filters.endDate, isPlatformAdmin, user?.clientId]);
+
+    useEffect(() => { void loadData(); }, [loadData]);
 
     const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
         setFilters(prev => ({ ...prev, [e.target.name]: e.target.value }));
@@ -284,9 +369,11 @@ const PublicationsReportView: React.FC = () => {
         }
     };
     
+    const uniqueBoards = useMemo(() => Array.from(new Set(allData.map(j => j.board))).filter(Boolean), [allData]);
+
     // Process Data (Filter & Sort)
     const processedData = useMemo(() => {
-        let data = mockJobsData.filter(job => {
+        let data = allData.filter(job => {
             const matchesSearch = !filters.searchTerm || 
                 job.jobTitle.toLowerCase().includes(filters.searchTerm.toLowerCase()) || 
                 job.company.toLowerCase().includes(filters.searchTerm.toLowerCase());
@@ -315,21 +402,19 @@ const PublicationsReportView: React.FC = () => {
 
         if (sortConfig) {
             data.sort((a, b) => {
-                let aVal: any = a[sortConfig.key as keyof JobPublication];
-                let bVal: any = b[sortConfig.key as keyof JobPublication];
-
+                let aVal: unknown = (a as Record<string, unknown>)[sortConfig.key];
+                let bVal: unknown = (b as Record<string, unknown>)[sortConfig.key];
                 if (sortConfig.key === 'conversion') {
-                    aVal = a.candidatesCount / (a.views || 1);
-                    bVal = b.candidatesCount / (b.views || 1);
+                    aVal = (a.candidatesCount || 0) / (a.views || 1);
+                    bVal = (b.candidatesCount || 0) / (b.views || 1);
                 }
-
-                if (aVal < bVal) return sortConfig.direction === 'asc' ? -1 : 1;
-                if (aVal > bVal) return sortConfig.direction === 'asc' ? 1 : -1;
+                if ((aVal ?? '') < (bVal ?? '')) return sortConfig.direction === 'asc' ? -1 : 1;
+                if ((aVal ?? '') > (bVal ?? '')) return sortConfig.direction === 'asc' ? 1 : -1;
                 return 0;
             });
         }
         return data;
-    }, [filters, sortConfig]);
+    }, [allData, filters, sortConfig]);
 
     // Stats Calculation
     const stats = useMemo(() => {
@@ -340,7 +425,7 @@ const PublicationsReportView: React.FC = () => {
         return { totalViews, totalCandidates, avgConversion, activeJobs };
     }, [processedData]);
 
-    const requestSort = (key: keyof JobPublication | 'conversion') => {
+    const requestSort = (key: string) => {
         let direction: 'asc' | 'desc' = 'asc';
         if (sortConfig.key === key && sortConfig.direction === 'asc') direction = 'desc';
         setSortConfig({ key, direction });
@@ -348,32 +433,32 @@ const PublicationsReportView: React.FC = () => {
 
     const renderCell = (job: JobPublication, columnId: string) => {
         switch (columnId) {
-            case 'creationDate':
             case 'publicationDate':
-                 // @ts-ignore
-                return new Date(job[columnId]).toLocaleDateString('he-IL');
+                return job.publicationDate ? new Date(job.publicationDate).toLocaleDateString('he-IL') : '—';
             case 'jobTitle':
                 return (
-                    <div>
-                        <span className="font-bold text-primary-700 block text-sm">{job.jobTitle}</span>
+                    <button
+                        onClick={() => navigate(`/jobs/edit/${job.jobId}`)}
+                        className="text-right group/jobtitle"
+                    >
+                        <span className="font-bold text-primary-700 group-hover/jobtitle:text-primary-900 group-hover/jobtitle:underline block text-sm">{job.jobTitle}</span>
                         <span className="text-xs text-text-muted">{job.role}</span>
-                    </div>
+                    </button>
                 );
             case 'company':
                 return <span className="font-medium text-text-default">{job.company}</span>;
             case 'domain':
-                return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800">{job.domain}</span>;
-            case 'board': 
+                return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-800">{job.domain || '—'}</span>;
+            case 'board':
                 return <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-100">{job.board}</span>;
             case 'views':
-                 return <span className="text-text-muted font-mono">{job.views.toLocaleString()}</span>;
+                return <span className="text-text-muted font-mono">{job.views.toLocaleString()}</span>;
             case 'candidatesCount':
-                return <span className="font-bold text-text-default text-base">{job.candidatesCount}</span>
+                return <span className="font-bold text-text-default text-base">{job.candidatesCount}</span>;
             case 'conversion':
-                return <ConversionBar candidates={job.candidatesCount} views={job.views} />
+                return <ConversionBar candidates={job.candidatesCount} views={job.views} />;
             default:
-                 // @ts-ignore
-                return job[columnId];
+                return String((job as unknown as Record<string, unknown>)[columnId] ?? '');
         }
     };
 
@@ -383,6 +468,13 @@ const PublicationsReportView: React.FC = () => {
                  <h1 className="text-2xl font-extrabold text-text-default">דוח פרסומים</h1>
                  <p className="text-text-muted text-sm">ניתוח ביצועי משרות, חשיפה ויחסי המרה בזמן אמת</p>
             </div>
+
+            {loadError && (
+                <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3 flex items-center justify-between">
+                    <span>{loadError}</span>
+                    <button type="button" onClick={() => void loadData()} className="underline text-xs">נסה שוב</button>
+                </div>
+            )}
 
              {/* Mobile Stats Toggle */}
             <div className="lg:hidden">
@@ -512,7 +604,7 @@ const PublicationsReportView: React.FC = () => {
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 h-[600px]">
                 {/* Visual Chart */}
                 <div className="lg:col-span-1 h-full hidden lg:block">
-                     <DomainPerformanceChart data={processedData} />
+                     <DomainPerformanceChart data={processedData} onNavigate={(jobId) => navigate(`/jobs/edit/${jobId}`)} />
                 </div>
 
                 {/* Detailed Table / Grid */}
@@ -520,7 +612,8 @@ const PublicationsReportView: React.FC = () => {
                      <div className="flex justify-between items-center p-4 border-b border-border-default bg-bg-subtle/30">
                         <div className="flex items-center gap-2">
                              <TableCellsIcon className="w-5 h-5 text-text-muted"/>
-                             <h3 className="font-bold text-text-default">פירוט משרות ({processedData.length})</h3>
+                             <h3 className="font-bold text-text-default">פירוט פרסומים ({processedData.length})</h3>
+                             {loading && <ArrowPathIcon className="w-4 h-4 text-text-muted animate-spin" />}
                         </div>
                         <div className="flex items-center gap-2">
                             {/* View Mode Toggle Buttons */}
@@ -543,6 +636,9 @@ const PublicationsReportView: React.FC = () => {
                             
                             <div className="w-px h-5 bg-border-default mx-1 hidden sm:block"></div>
 
+                            <button title="רענן" className="p-2 text-text-muted rounded-full hover:bg-bg-hover transition-colors" onClick={() => void loadData()}>
+                                <ArrowPathIcon className="w-5 h-5"/>
+                            </button>
                             <button title="ייצוא ל-CSV" className="p-2 text-text-muted rounded-full hover:bg-bg-hover transition-colors" onClick={() => alert('Exporting to Excel...')}>
                                 <DocumentArrowDownIcon className="w-5 h-5"/>
                             </button>
@@ -605,16 +701,23 @@ const PublicationsReportView: React.FC = () => {
                         ) : (
                             <div className="p-4 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
                                 {processedData.map(job => (
-                                    <JobPublicationCard key={job.id} job={job} />
+                                    <JobPublicationCard key={job.id} job={job} onNavigate={(jobId) => navigate(`/jobs/edit/${jobId}`)} />
                                 ))}
                             </div>
                         )}
                         
-                        {processedData.length === 0 && (
+                        {loading && processedData.length === 0 && (
+                            <div className="p-12 text-center text-text-muted">
+                                <ArrowPathIcon className="w-8 h-8 opacity-30 animate-spin mx-auto mb-2"/>
+                                <span>טוען נתונים…</span>
+                            </div>
+                        )}
+                        {!loading && processedData.length === 0 && (
                             <div className="p-12 text-center text-text-muted">
                                 <div className="flex flex-col items-center justify-center gap-2">
                                     <MagnifyingGlassIcon className="w-8 h-8 opacity-20"/>
-                                    <span>לא נמצאו נתונים להצגה בטווח התאריכים שנבחר.</span>
+                                    <span>אין פרסומים פעילים בטווח התאריכים שנבחר.</span>
+                                    <span className="text-xs">סמן מקור כ-"פורסם" במשרה כדי שיופיע כאן.</span>
                                 </div>
                             </div>
                         )}

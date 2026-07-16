@@ -17,6 +17,7 @@ interface Source {
     name: string;
     addresses: string;
     exclusivityMonths: number;
+    isActive: boolean;
 }
 
 function dtoToSource(d: RecruitmentSourceDto): Source {
@@ -25,6 +26,7 @@ function dtoToSource(d: RecruitmentSourceDto): Source {
         name: d.name,
         addresses: d.addresses ?? '',
         exclusivityMonths: Number(d.exclusivityMonths) || 0,
+        isActive: d.isActive !== false,
     };
 }
 
@@ -32,12 +34,21 @@ const emptyNewSource = (): Omit<Source, 'id'> => ({
     name: '',
     addresses: '',
     exclusivityMonths: 0,
+    isActive: true,
 });
 
 const RecruitmentSourcesSettingsView: React.FC = () => {
     const { t } = useLanguage();
     const { user } = useAuth();
-    const clientId = user?.clientId ?? null;
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const ownClientId = user?.clientId ?? null;
+
+    // Admin can pick a different client; regular users are locked to their own clientId
+    const [adminClientId, setAdminClientId] = useState<string | null>(null);
+    const [clientOptions, setClientOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [clientsLoading, setClientsLoading] = useState(false);
+
+    const clientId = isPlatformAdmin ? adminClientId : ownClientId;
 
     const [sources, setSources] = useState<Source[]>([]);
     const [baseline, setBaseline] = useState<Record<string, Source>>({});
@@ -46,6 +57,41 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [rowBusy, setRowBusy] = useState<Record<string, boolean>>({});
     const [adding, setAdding] = useState(false);
+
+    // Load client list for admin users
+    const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+    useEffect(() => {
+        if (!isPlatformAdmin || !apiBase) {
+            setClientOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setClientsLoading(true);
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : [];
+                const opts = list
+                    .map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        label: String((c.displayName as string) || (c.name as string) || '').trim(),
+                    }))
+                    .filter((o) => o.id && o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setClientOptions(opts);
+            })
+            .catch(() => { if (!cancelled) setClientOptions([]); })
+            .finally(() => { if (!cancelled) setClientsLoading(false); });
+        return () => { cancelled = true; };
+    }, [apiBase, isPlatformAdmin]);
 
     const load = useCallback(async () => {
         if (!clientId) return;
@@ -77,8 +123,39 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
         void load();
     }, [clientId, load]);
 
-    const handleUpdate = (id: string, field: keyof Omit<Source, 'id'>, value: string | number) => {
+    const handleUpdate = (id: string, field: keyof Omit<Source, 'id'>, value: string | number | boolean) => {
         setSources((prev) => prev.map((s) => (s.id === id ? { ...s, [field]: value } : s)));
+    };
+
+    const handleToggleActive = async (id: string, checked: boolean) => {
+        if (!clientId) return;
+        const s = sources.find((x) => x.id === id);
+        if (!s) return;
+        // Optimistically update UI
+        setSources((prev) => prev.map((x) => (x.id === id ? { ...x, isActive: checked } : x)));
+        setRowBusy((m) => ({ ...m, [id]: true }));
+        try {
+            const saved = await updateRecruitmentSource(clientId, id, {
+                name: s.name.trim(),
+                addresses: s.addresses,
+                exclusivityMonths: s.exclusivityMonths,
+                isActive: checked,
+            });
+            // If the backend doesn't yet have the is_active column (migration pending),
+            // isActive will be absent from the response — fall back to what we intended.
+            const next: Source = {
+                ...dtoToSource(saved),
+                isActive: saved.isActive !== undefined ? saved.isActive !== false : checked,
+            };
+            setSources((prev) => prev.map((x) => (x.id === id ? next : x)));
+            setBaseline((prev) => ({ ...prev, [id]: { ...next } }));
+        } catch (e: unknown) {
+            // Revert optimistic update on failure
+            setSources((prev) => prev.map((x) => (x.id === id ? { ...x, isActive: !checked } : x)));
+            window.alert(e instanceof Error ? e.message : t('sources.save_error'));
+        } finally {
+            setRowBusy((m) => ({ ...m, [id]: false }));
+        }
     };
 
     const handleCancel = (id: string) => {
@@ -101,6 +178,7 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                 name: s.name.trim(),
                 addresses: s.addresses,
                 exclusivityMonths: s.exclusivityMonths,
+                isActive: s.isActive,
             });
             const next = dtoToSource(saved);
             setSources((prev) => prev.map((x) => (x.id === id ? next : x)));
@@ -135,7 +213,7 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
         }
     };
 
-    const handleNewSourceChange = (field: keyof Omit<Source, 'id'>, value: string | number) => {
+    const handleNewSourceChange = (field: keyof Omit<Source, 'id'>, value: string | number | boolean) => {
         setNewSource((prev) => ({ ...prev, [field]: value }));
     };
 
@@ -151,6 +229,7 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                 name: newSource.name.trim(),
                 addresses: newSource.addresses,
                 exclusivityMonths: newSource.exclusivityMonths,
+                isActive: newSource.isActive,
             });
             const next = dtoToSource(created);
             setSources((prev) => [...prev, next]);
@@ -168,7 +247,7 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
         return (
             <tr
                 key={source.id}
-                className="bg-bg-card hover:bg-bg-hover"
+                className={`bg-bg-card hover:bg-bg-hover ${!source.isActive ? 'opacity-60' : ''}`}
             >
                 <td className="p-2">
                     <input
@@ -198,6 +277,16 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                             handleUpdate(source.id, 'exclusivityMonths', parseInt(e.target.value, 10) || 0)
                         }
                         className="w-24 bg-bg-input border border-border-default text-sm rounded-md p-2 text-center"
+                    />
+                </td>
+                <td className="p-2 text-center">
+                    <input
+                        type="checkbox"
+                        checked={source.isActive}
+                        disabled={busy}
+                        onChange={(e) => void handleToggleActive(source.id, e.target.checked)}
+                        className="w-4 h-4 rounded accent-primary-600 cursor-pointer disabled:opacity-50"
+                        title={t('sources.col_active')}
                     />
                 </td>
                 <td className="p-2">
@@ -266,6 +355,16 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                     className="w-24 bg-bg-input border border-border-default text-sm rounded-md p-2 text-center"
                 />
             </td>
+            <td className="p-2 text-center">
+                <input
+                    type="checkbox"
+                    checked={newSource.isActive}
+                    disabled={adding || !clientId}
+                    onChange={(e) => handleNewSourceChange('isActive', e.target.checked)}
+                    className="w-4 h-4 rounded accent-primary-600 cursor-pointer"
+                    title={t('sources.col_active')}
+                />
+            </td>
             <td className="p-2">
                 <div className="flex items-center justify-center gap-2">
                     <button
@@ -281,7 +380,7 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
         </tr>
     );
 
-    if (!clientId) {
+    if (!isPlatformAdmin && !ownClientId) {
         return (
             <div className="space-y-6">
                 <h1 className="text-2xl font-bold text-text-default">{t('sources.title')}</h1>
@@ -293,6 +392,32 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
     return (
         <div className="space-y-6">
             <h1 className="text-2xl font-bold text-text-default">{t('sources.title')}</h1>
+
+            {/* Admin client selector */}
+            {isPlatformAdmin && (
+                <div className="flex items-center gap-3">
+                    <label className="text-sm font-semibold text-text-muted whitespace-nowrap">
+                        {t('sources.admin_client_label')}:
+                    </label>
+                    <select
+                        value={adminClientId ?? ''}
+                        disabled={clientsLoading}
+                        onChange={(e) => {
+                            const val = e.target.value;
+                            setAdminClientId(val || null);
+                        }}
+                        className="bg-bg-input border border-border-default text-sm rounded-md p-2 min-w-[220px] disabled:opacity-50"
+                    >
+                        <option value="">{t('sources.admin_all_clients')}</option>
+                        {clientOptions.map((opt) => (
+                            <option key={opt.id} value={opt.id}>{opt.label}</option>
+                        ))}
+                    </select>
+                    {clientsLoading && (
+                        <span className="text-xs text-text-muted">{t('sources.loading')}</span>
+                    )}
+                </div>
+            )}
 
             {loadError && (
                 <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg p-3">{loadError}</div>
@@ -322,13 +447,14 @@ const RecruitmentSourcesSettingsView: React.FC = () => {
                             <th className="p-3 w-1/4">{t('sources.col_name')}</th>
                             <th className="p-3 w-1/2">{t('sources.col_addresses')}</th>
                             <th className="p-3">{t('sources.col_exclusivity')}</th>
+                            <th className="p-3 text-center">{t('sources.col_active')}</th>
                             <th className="p-3 text-center">{t('sources.col_actions')}</th>
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-border-subtle">
                         {loading && sources.length === 0 ? (
                             <tr>
-                                <td colSpan={4} className="p-6 text-center text-text-muted">
+                                <td colSpan={5} className="p-6 text-center text-text-muted">
                                     {t('sources.loading')}
                                 </td>
                             </tr>

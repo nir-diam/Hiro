@@ -4,7 +4,7 @@ const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const organizationService = require('../services/organizationService');
 const organizationEmbeddingService = require('../services/organizationEmbeddingService');
-const { resolveSubFieldFromPicklist, searchWebsiteUrl } = require('../services/organizationEnrichmentService');
+const { resolveSubFieldFromPicklist, searchWebsiteUrl, persistEnrichmentResults } = require('../services/organizationEnrichmentService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
@@ -708,7 +708,7 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
     const searchWebsiteUrl = async (companyName) => {
       if (!companyName || !process.env.SERPDEV) return null;
       try {
-        const q = `${companyName} ${/[\u0590-\u05FF]/.test(companyName) ? 'האתר הרשמי' : 'official website'}`;
+        const q = `${companyName}  'האתר הרשמי' `;
         const EXCLUDED = ['linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com',
                           'youtube.com', 'wikipedia.org', 'walla.co.il', 'ynet.co.il',
                           'google.com', 'glassdoor.com', 'indeed.com', 'jobmaster.co.il'];
@@ -834,7 +834,7 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
           try {
             item.website = await searchWebsiteUrl(companyName);
           } catch (err) {
-            console.warn('[organization-enrich] website search failed', err?.message || err);
+          console.warn('[organization-enrich] website search failed', err?.message || err);
           }
 
           try {
@@ -873,7 +873,7 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
                 logo = '';
               }
             
-          
+          //after finish all those steps. add one more step for verification. dont change any code. just add one move verification check
 
           const enriched = { ...item , logo : logo || item.logo };
 
@@ -893,7 +893,13 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
       return acc;
     }, {});
 
-    res.json({ suggestions, enrichmentMap });
+    const shouldPersist = Boolean(req.body?.persist);
+    let persistedIds = [];
+    if (shouldPersist && suggestions.length) {
+      persistedIds = await persistEnrichmentResults(suggestions);
+    }
+
+    res.json({ suggestions, enrichmentMap, persistedIds });
   } catch (err) {
     console.error('[organization-enrich-error]', err);
     res.status(err.status || 500).json({ message: err.message || 'AI enrichment failed' });

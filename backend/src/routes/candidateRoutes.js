@@ -24,6 +24,8 @@ router.post('/:id/generate-experience-summary', candidateController.generateExpe
 router.post('/:id/generate-internal-opinion', candidateController.generateInternalOpinion);
 router.get('/:id/relevant-jobs', candidateController.getRelevantJobs);
 router.post('/:id/job-matches', authMiddleware, candidateController.getJobMatches);
+router.get('/:id/job-match-ignores', authMiddleware, candidateController.listJobMatchIgnores);
+router.delete('/:id/job-match-ignores/:jobId', authMiddleware, candidateController.clearJobMatchIgnore);
 router.post('/:id/jobs/:jobId/deep-insight', authMiddleware, candidateController.getJobDeepInsight);
 router.get('/:id/screening-pool', authMiddleware, candidateController.getScreeningPoolForCandidate);
 router.get('/:id/screening-precheck', authMiddleware, candidateController.getScreeningPrecheck);

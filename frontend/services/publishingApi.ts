@@ -648,6 +648,58 @@ export function mapTrackingLinkFromApi(
   };
 }
 
+export type BoardPublicationRow = {
+  jobId: string;
+  jobTitle: string;
+  company: string;
+  domain: string;
+  role: string;
+  city: string;
+  region: string;
+  publicationDate: string | null;
+  jobStatus: string;
+  clientId: string | null;
+  sourceId: string;
+  sourceName: string;
+  sourceStatus: 'published' | 'draft';
+  alertDays: number | null;
+  candidatesCount: number;
+};
+
+export async function fetchBoardPublications(params?: {
+  startDate?: string;
+  endDate?: string;
+  clientId?: string | null;
+}): Promise<BoardPublicationRow[]> {
+  const qs = new URLSearchParams();
+  if (params?.startDate) qs.set('startDate', params.startDate);
+  if (params?.endDate) qs.set('endDate', params.endDate);
+  if (params?.clientId) qs.set('clientId', params.clientId);
+  const suffix = qs.toString() ? `?${qs}` : '';
+  const res = await fetch(`${apiBase()}/api/jobs/board-publications${suffix}`, {
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error('Failed to load board publications');
+  const data = await res.json() as { publications?: BoardPublicationRow[] };
+  return Array.isArray(data.publications) ? data.publications : [];
+}
+
+export async function patchJobBoardSources(
+  jobId: string,
+  recruitmentSources: Array<{ id: string; name: string; selected: boolean; status: string; alertDays: number | null }>,
+): Promise<void> {
+  const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/board-sources`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    body: JSON.stringify({ recruitmentSources }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({})) as { message?: string };
+    throw new Error(err.message || 'Failed to save board sources');
+  }
+}
+
 export async function fetchJobPublicationCandidates(jobId: string) {
   const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/publication/candidates`, {
     headers: getAuthHeaders(),

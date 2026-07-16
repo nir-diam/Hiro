@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { 
     BriefcaseIcon, UserGroupIcon, Cog6ToothIcon, PlusIcon, ChevronDownIcon, 
     PencilIcon, SparklesIcon, GenderMaleIcon, GenderFemaleIcon, MapPinIcon, TrashIcon, XMarkIcon,
@@ -19,6 +19,8 @@ import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 import { logJobSmartImportModalOpen } from '../services/jobsApi';
+import { saveJobPublication, patchJobBoardSources } from '../services/publishingApi';
+import type { DuplicatePublicationSeed } from '../utils/duplicateJob';
 import type { PicklistValueRow } from '../services/picklistValuesApi';
 import {
     AVAILABILITY_FALLBACK,
@@ -442,14 +444,9 @@ const mockAccountManagers = [
     { id: 'm3', name: 'גילעד בן חיים' },
 ];
 
-const availableSources: RecruitmentSource[] = [
-    { id: 'alljobs', name: 'AllJobs', selected: false, status: 'draft', alertDays: null },
-    { id: 'linkedin', name: 'LinkedIn', selected: false, status: 'draft', alertDays: null },
-    { id: 'jobmaster', name: 'JobMaster', selected: false, status: 'draft', alertDays: null },
-    { id: 'drushim', name: 'Drushim', selected: false, status: 'draft', alertDays: null },
-    { id: 'facebook', name: 'Facebook', selected: false, status: 'draft', alertDays: null },
-    { id: 'friend', name: 'חבר מביא חבר', selected: true, status: 'published', alertDays: 3 },
-];
+// Recruitment sources are loaded dynamically per-client from the API (active only).
+// See the useEffect that reacts to resolvedClientId inside NewJobView.
+const availableSources: RecruitmentSource[] = [];
 
 // --- COMPONENTS ---
 
@@ -1767,12 +1764,36 @@ const initialJobState = {
 
 const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = false, jobData, isEmbedded = false }) => {
     const navigate = useNavigate();
+    const location = useLocation();
     const { jobId } = useParams<{ jobId: string }>();
     const { t } = useLanguage();
     const { user } = useAuth();
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const isTenantUser = Boolean(user?.clientId) && !isPlatformAdmin;
     const apiBase = import.meta.env.VITE_API_BASE || '';
+
+    // Capture duplicate navigation state once (Strict Mode / replace must not wipe the seed mid-hydrate).
+    const duplicateBootstrapRef = useRef<{
+        job?: Record<string, unknown>;
+        publication?: DuplicatePublicationSeed | null;
+        consumed: boolean;
+    } | null>(null);
+    if (duplicateBootstrapRef.current === null && !isEditing) {
+        const navState = (location.state || {}) as {
+            duplicateJob?: Record<string, unknown>;
+            duplicatePublication?: DuplicatePublicationSeed | null;
+        };
+        duplicateBootstrapRef.current = {
+            job: navState.duplicateJob,
+            publication: navState.duplicatePublication || null,
+            consumed: false,
+        };
+    }
+    const duplicateJobSeed = !isEditing ? duplicateBootstrapRef.current?.job : undefined;
+    const isDuplicating = Boolean(duplicateJobSeed);
+    const duplicatePublicationRef = useRef<DuplicatePublicationSeed | null>(
+        duplicateBootstrapRef.current?.publication || null,
+    );
 
     const [formData, setFormData] = useState(initialJobState);
     const [jobScopeOptions, setJobScopeOptions] = useState<{ id: string; name: string }[]>(() =>
@@ -1813,6 +1834,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [isSaving, setIsSaving] = useState(false);
     const [saveMessage, setSaveMessage] = useState<string | null>(null);
     const [jobFieldError, setJobFieldError] = useState(false);
+    const [publishingSourcesLoading, setPublishingSourcesLoading] = useState(false);
 
     const navRef = useRef<HTMLDivElement>(null);
     const formDataRef = useRef(formData);
@@ -1839,11 +1861,16 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     }, [formData.jobField]);
 
     useEffect(() => {
-        if (isEditing && jobData) {
-             const candidateLocations = deriveLocationsFromJob(jobData);
-             const contactsFromJob = jobContactsToKeys(jobData.contacts);
-            const hydratedSkills: JobSkill[] = Array.isArray(jobData.skills)
-                ? jobData.skills.map((s: any, i: number) => ({
+        const sourceJob = (isEditing ? jobData : duplicateJobSeed) as any;
+        if (!sourceJob) return;
+        if (!isEditing && duplicateBootstrapRef.current?.consumed) return;
+        if (!isEditing && duplicateBootstrapRef.current) {
+            duplicateBootstrapRef.current.consumed = true;
+        }
+             const candidateLocations = deriveLocationsFromJob(sourceJob);
+             const contactsFromJob = jobContactsToKeys(sourceJob.contacts);
+            const hydratedSkills: JobSkill[] = Array.isArray(sourceJob.skills)
+                ? sourceJob.skills.map((s: any, i: number) => ({
                       id: String(s.id ?? `loaded-${i}`),
                       name: String(s.name ?? ''),
                       key: s.key,
@@ -1869,103 +1896,121 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                   }))
                 : [];
 
-            const loadedField = jobData.field != null ? String(jobData.field).trim() : '';
-            const loadedRole = jobData.role != null ? String(jobData.role).trim() : '';
+            const loadedField = sourceJob.field != null ? String(sourceJob.field).trim() : '';
+            const loadedRole = sourceJob.role != null ? String(sourceJob.role).trim() : '';
             const loadedJobField = jobFieldFromCategoryRole(loadedField, loadedRole);
+            const freshPostingCode = String(Math.floor(1 + Math.random() * 999999));
 
             setFormData(prev => ({
                 ...prev,
-                clientName: jobData.client || prev.clientName,
+                clientName: sourceJob.client || prev.clientName,
                 aiField: loadedField || prev.aiField,
                 aiRole: loadedRole || prev.aiRole,
                 jobField: loadedJobField ?? prev.jobField,
-                publicJobTitle: jobData.publicJobTitle || prev.publicJobTitle,
-                publicDescription: jobData.PublicDescription
-                    ? normalizeValueForEditor(String(jobData.PublicDescription))
-                    : jobData.publicDescription
-                      ? normalizeValueForEditor(String(jobData.publicDescription))
+                publicJobTitle: sourceJob.publicJobTitle || prev.publicJobTitle,
+                publicDescription: sourceJob.PublicDescription
+                    ? normalizeValueForEditor(String(sourceJob.PublicDescription))
+                    : sourceJob.publicDescription
+                      ? normalizeValueForEditor(String(sourceJob.publicDescription))
                       : prev.publicDescription,
-                regionLabel: jobData.region || prev.regionLabel,
-                clientTypeLabel: jobData.clientType || prev.clientTypeLabel,
-                openPositions: typeof jobData.openPositions === 'number' ? jobData.openPositions : prev.openPositions,
-                rating: typeof jobData.rating === 'number' ? jobData.rating : prev.rating,
-                jobTitle: jobData.title || prev.jobTitle,
-                jobDescription: jobData.description || prev.jobDescription,
-                requirements: Array.isArray(jobData.requirements)
-                    ? jobData.requirements.map((r: string) => String(r).trim()).join('\n')
-                    : jobData.requirements ?? prev.requirements,
+                regionLabel: sourceJob.region || prev.regionLabel,
+                clientTypeLabel: sourceJob.clientType || prev.clientTypeLabel,
+                openPositions: typeof sourceJob.openPositions === 'number' ? sourceJob.openPositions : prev.openPositions,
+                rating: typeof sourceJob.rating === 'number' ? sourceJob.rating : prev.rating,
+                jobTitle: sourceJob.title || prev.jobTitle,
+                jobDescription: sourceJob.description || prev.jobDescription,
+                requirements: Array.isArray(sourceJob.requirements)
+                    ? sourceJob.requirements.map((r: string) => String(r).trim()).join('\n')
+                    : sourceJob.requirements ?? prev.requirements,
                 ...((() => {
-                    const notesRaw = jobData.internalNotes != null ? String(jobData.internalNotes) : '';
+                    const notesRaw = sourceJob.internalNotes != null ? String(sourceJob.internalNotes) : '';
                     const { cleaned, hours } = extractWorkingHoursFromNotes(notesRaw);
                     return { internalNotes: cleaned, preferredWorkingHours: hours };
                 })()),
-                salaryMin: jobData.salaryMin || prev.salaryMin,
-                salaryMax: jobData.salaryMax || prev.salaryMax,
+                salaryMin: sourceJob.salaryMin || prev.salaryMin,
+                salaryMax: sourceJob.salaryMax || prev.salaryMax,
                 ageMin: (() => {
-                    const n = Number(jobData.ageMin);
+                    const n = Number(sourceJob.ageMin);
                     return Number.isFinite(n) ? Math.round(Math.min(70, Math.max(18, n))) : prev.ageMin;
                 })(),
                 ageMax: (() => {
-                    const n = Number(jobData.ageMax);
+                    const n = Number(sourceJob.ageMax);
                     return Number.isFinite(n) ? Math.round(Math.min(70, Math.max(18, n))) : prev.ageMax;
                 })(),
                 status:
-                    jobData.status != null && String(jobData.status).trim() !== ''
-                        ? jobStatusApiToForm(String(jobData.status))
+                    sourceJob.status != null && String(sourceJob.status).trim() !== ''
+                        ? jobStatusApiToForm(String(sourceJob.status))
                         : prev.status,
-                openDateIso: jobData.openDate
-                    ? new Date(jobData.openDate).toISOString()
-                    : prev.openDateIso,
-                priority: jobData.priority || prev.priority,
-                healthProfile: jobData.healthProfile || 'standard',
-                availabilityOptions: availabilityOptionsFromJob(jobData),
-                jobType: Array.isArray(jobData.jobType)
-                    ? jobData.jobType
-                    : jobData.jobType
-                      ? [jobData.jobType]
+                openDateIso: isDuplicating
+                    ? new Date().toISOString()
+                    : sourceJob.openDate
+                      ? new Date(String(sourceJob.openDate)).toISOString()
+                      : prev.openDateIso,
+                priority: sourceJob.priority || prev.priority,
+                healthProfile: sourceJob.healthProfile || 'standard',
+                availabilityOptions: availabilityOptionsFromJob(sourceJob),
+                jobType: Array.isArray(sourceJob.jobType)
+                    ? sourceJob.jobType
+                    : sourceJob.jobType
+                      ? [sourceJob.jobType]
                       : ['מלאה'],
                 
                 // Hydrate questions if they exist in jobData, otherwise fallback to defaults
                 // Ensure defaults for new properties if missing
-                telephoneQuestions: (jobData.telephoneQuestions || []).map((q: any) => ({...q, type: q.type || 'text'})), 
-                digitalQuestions: (jobData.digitalQuestions || []).map((q: any) => ({
+                telephoneQuestions: (sourceJob.telephoneQuestions || []).map((q: any) => ({...q, type: q.type || 'text'})), 
+                digitalQuestions: (sourceJob.digitalQuestions || []).map((q: any) => ({
                     ...q, 
                     type: q.type || 'text',
                     options: q.options || (q.type === 'multiple_choice' ? [{id:'1', text:'', isCorrect:false}] : undefined),
                     isMandatory: q.isMandatory ?? true,
                     disqualifyIfWrong: q.disqualifyIfWrong ?? false
                 })),
-                enableDigitalScreening: jobData.enableDigitalScreening ?? true,
-                enableManualScreening: jobData.enableManualScreening ?? true,
+                enableDigitalScreening: sourceJob.enableDigitalScreening ?? true,
+                enableManualScreening: sourceJob.enableManualScreening ?? true,
                 
-                languages: jobData.languages || [],
+                languages: sourceJob.languages || [],
                 skills: hydratedSkills.length ? hydratedSkills : prev.skills,
                 locations: candidateLocations.length ? candidateLocations : prev.locations,
-                gender: mapJobGenderSelection(jobData.gender),
-                mobility: jobMobilityBooleanToFormValue(jobData.mobility, mobilityPicklistRef.current),
-                drivingLicenses: licenseTypesFromJob(jobData, drivingLicensePicklistRef.current),
-                jobId: jobData.id || prev.jobId,
-                postingCode: jobData.postingCode || prev.postingCode,
-                uniqueEmail: jobData.postingCode ? `humand+${jobData.postingCode}@app.hiro.co.il` : (jobData.uniqueEmail || prev.uniqueEmail),
-                creationDate: jobData.openDate ? new Date(jobData.openDate).toLocaleDateString('he-IL') : prev.creationDate,
+                gender: mapJobGenderSelection(sourceJob.gender),
+                mobility: jobMobilityBooleanToFormValue(sourceJob.mobility, mobilityPicklistRef.current),
+                drivingLicenses: licenseTypesFromJob(sourceJob, drivingLicensePicklistRef.current),
+                jobId: isDuplicating ? freshPostingCode : (sourceJob.id || prev.jobId),
+                postingCode: isDuplicating
+                    ? freshPostingCode
+                    : sourceJob.postingCode || prev.postingCode,
+                uniqueEmail: isDuplicating
+                    ? `humand+${freshPostingCode}@app.hiro.co.il`
+                    : sourceJob.postingCode
+                      ? `humand+${sourceJob.postingCode}@app.hiro.co.il`
+                      : (sourceJob.uniqueEmail || prev.uniqueEmail),
+                creationDate: isDuplicating
+                    ? new Date().toLocaleDateString('he-IL')
+                    : sourceJob.openDate
+                      ? new Date(String(sourceJob.openDate)).toLocaleDateString('he-IL')
+                      : prev.creationDate,
                 validityDays:
-                    typeof jobData.validityDays === 'number' && Number.isFinite(jobData.validityDays)
-                        ? jobData.validityDays
+                    typeof sourceJob.validityDays === 'number' && Number.isFinite(sourceJob.validityDays)
+                        ? sourceJob.validityDays
                         : prev.validityDays,
                 reScreeningCooldownMonths:
-                    typeof jobData.reScreeningCooldownMonths === 'number' && Number.isFinite(jobData.reScreeningCooldownMonths)
-                        ? jobData.reScreeningCooldownMonths
+                    typeof sourceJob.reScreeningCooldownMonths === 'number' && Number.isFinite(sourceJob.reScreeningCooldownMonths)
+                        ? sourceJob.reScreeningCooldownMonths
                         : prev.reScreeningCooldownMonths,
                 requireOriginalCv:
-                    typeof jobData.requireOriginalCv === 'boolean' ? jobData.requireOriginalCv : prev.requireOriginalCv,
+                    typeof sourceJob.requireOriginalCv === 'boolean' ? sourceJob.requireOriginalCv : prev.requireOriginalCv,
+                recruitmentSources: Array.isArray(sourceJob.recruitmentSources)
+                    ? sourceJob.recruitmentSources
+                    : prev.recruitmentSources,
                 ...(contactsFromJob !== null ? { contacts: contactsFromJob } : {}),
              }));
-             if (jobData.aiRawDescription) {
-                 setPastedJobText(jobData.aiRawDescription);
+             if (sourceJob.aiRawDescription) {
+                 setPastedJobText(String(sourceJob.aiRawDescription));
              }
-             if (jobData.client) setIsClientConfirmed(true);
-        }
-    }, [isEditing, jobData]);
+             if (sourceJob.client) setIsClientConfirmed(true);
+             if (isDuplicating && location.state) {
+                 navigate(location.pathname, { replace: true, state: {} });
+             }
+    }, [isEditing, jobData, duplicateJobSeed, isDuplicating, location.pathname, location.state, navigate]);
 
     useEffect(() => {
         let cancelled = false;
@@ -2148,6 +2193,59 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             cancelled = true;
         };
     }, [resolvedClientId]);
+
+    // Load active recruitment sources for the selected client
+    useEffect(() => {
+        if (!resolvedClientId || !apiBase) {
+            setFormData(prev => ({ ...prev, recruitmentSources: [] }));
+            return;
+        }
+        let cancelled = false;
+        setPublishingSourcesLoading(true);
+        const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+        fetch(`${apiBase}/api/clients/${encodeURIComponent(resolvedClientId)}/recruitment-sources`, {
+            headers: {
+                Accept: 'application/json',
+                ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : { sources: [] }))
+            .then(({ sources }: { sources: Array<{ id: string; name: string; isActive?: boolean }> }) => {
+                if (cancelled) return;
+                const active = (Array.isArray(sources) ? sources : []).filter(
+                    (s) => s.isActive !== false,
+                );
+                setFormData((prev) => {
+                    // Preserve saved selection/status/alertDays for sources the job already has
+                    const existing: Record<string, RecruitmentSource> = {};
+                    for (const s of prev.recruitmentSources) existing[s.id] = s;
+                    const merged: RecruitmentSource[] = active.map((s) => {
+                        const saved = existing[s.id];
+                        const savedStatus = (saved?.status ?? 'draft') as PublicationStatus;
+                        // Derive selected: explicit boolean if present, else true when status is published
+                        const savedSelected = saved
+                            ? (saved.selected !== undefined ? Boolean(saved.selected) : savedStatus === 'published')
+                            : false;
+                        return {
+                            id: s.id,
+                            name: s.name,
+                            selected: savedSelected,
+                            status: savedStatus,
+                            alertDays: saved?.alertDays ?? null,
+                        };
+                    });
+                    return { ...prev, recruitmentSources: merged };
+                });
+            })
+            .catch(() => {
+                if (!cancelled) setFormData((prev) => ({ ...prev, recruitmentSources: [] }));
+            })
+            .finally(() => {
+                if (!cancelled) setPublishingSourcesLoading(false);
+            });
+        return () => { cancelled = true; };
+    }, [resolvedClientId, apiBase]);
 
     const distributionListBlockedReason = useMemo(() => {
         if (!apiBase) return 'אין כתובת API (VITE_API_BASE) — לא ניתן לטעון לקוחות.';
@@ -2896,25 +2994,44 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         }));
     };
 
+    // Persist board sources to the backend immediately (only when editing an existing job)
+    const persistBoardSources = (updatedSources: RecruitmentSource[]) => {
+        if (!isEditing || !formData.jobId) return;
+        void patchJobBoardSources(formData.jobId, updatedSources).catch((e) => {
+            console.warn('[board-sources] auto-save failed:', e?.message);
+        });
+    };
+
     const toggleSourceSelection = (sourceId: string) => {
-        setFormData(prev => ({
-            ...prev,
-            recruitmentSources: prev.recruitmentSources.map(s => s.id === sourceId ? { ...s, selected: !s.selected } : s)
-        }));
+        setFormData(prev => {
+            const next = prev.recruitmentSources.map(s =>
+                s.id === sourceId
+                    ? { ...s, selected: !s.selected, status: !s.selected ? ('published' as PublicationStatus) : ('draft' as PublicationStatus) }
+                    : s,
+            );
+            persistBoardSources(next);
+            return { ...prev, recruitmentSources: next };
+        });
     };
 
     const handleSourceStatusChange = (sourceId: string, newStatus: PublicationStatus) => {
-        setFormData(prev => ({
-            ...prev,
-            recruitmentSources: prev.recruitmentSources.map(s => s.id === sourceId ? { ...s, status: newStatus } : s)
-        }));
+        setFormData(prev => {
+            const next = prev.recruitmentSources.map(s =>
+                s.id === sourceId ? { ...s, status: newStatus } : s,
+            );
+            persistBoardSources(next);
+            return { ...prev, recruitmentSources: next };
+        });
     };
 
     const handleSourceAlertChange = (sourceId: string, days: number | null) => {
-        setFormData(prev => ({
-            ...prev,
-            recruitmentSources: prev.recruitmentSources.map(s => s.id === sourceId ? { ...s, alertDays: days } : s)
-        }));
+        setFormData(prev => {
+            const next = prev.recruitmentSources.map(s =>
+                s.id === sourceId ? { ...s, alertDays: days } : s,
+            );
+            persistBoardSources(next);
+            return { ...prev, recruitmentSources: next };
+        });
     };
     
     const handleLocationsChange = (newLocations: LocationItem[]) => {
@@ -3025,9 +3142,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             /** Server strips this; triggers audit_logs after Job.create with real job id */
             aiPasteAnalyzeUsed: aiPasteAnalyzeUsedRef.current === true,
             contacts: contactObjects,
-            recruitmentSources: (data.recruitmentSources || []).map((source: { id: string; name: string; status: string; alertDays: number | null }) => ({
+            recruitmentSources: (data.recruitmentSources || []).map((source: RecruitmentSource) => ({
                 id: source.id,
                 name: source.name,
+                selected: source.selected,
                 status: source.status,
                 alertDays: source.alertDays,
             })),
@@ -3066,6 +3184,28 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 throw new Error(errorBody?.message || 'Failed to create job');
             }
             const createdJob = await res.json();
+            const pubSeed = duplicatePublicationRef.current;
+            if (pubSeed && createdJob?.id) {
+                try {
+                    await saveJobPublication(String(createdJob.id), {
+                        publicJobTitle: pubSeed.publicJobTitle ?? null,
+                        publicJobDescription: pubSeed.publicJobDescription ?? null,
+                        publicJobRequirements: pubSeed.publicJobRequirements ?? null,
+                        landingPageFields: pubSeed.landingPageFields,
+                        screeningQuestions: pubSeed.screeningQuestions,
+                        publishToGeneralBoard: pubSeed.publishToGeneralBoard,
+                        heroImageUrl: pubSeed.heroImageUrl ?? null,
+                        videoUrl: pubSeed.videoUrl ?? null,
+                        landingLayout: pubSeed.landingLayout,
+                        landingLayouts: pubSeed.landingLayouts,
+                        trackingLinks: pubSeed.trackingLinks || [],
+                    });
+                } catch (pubErr) {
+                    console.warn('[NewJobView] failed to copy publication settings', pubErr);
+                } finally {
+                    duplicatePublicationRef.current = null;
+                }
+            }
             setSaveMessage('המשרה נוצרה בהצלחה');
             aiPasteAnalyzeUsedRef.current = false;
             onSave(createdJob);
@@ -3778,15 +3918,23 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                          <div>
                              <h4 className="font-bold text-text-default mb-3">{t('new_job.publishing')}</h4>
                              <div className="space-y-2 max-h-60 overflow-y-auto border border-border-default rounded-lg p-2 bg-bg-subtle/30">
-                                 {formData.recruitmentSources.map(source => (
-                                     <SourceRow 
-                                        key={source.id} 
-                                        source={source} 
-                                        onToggleSelect={() => toggleSourceSelection(source.id)}
-                                        onStatusChange={(status) => handleSourceStatusChange(source.id, status)}
-                                        onAlertChange={(days) => handleSourceAlertChange(source.id, days)}
-                                     />
-                                 ))}
+                                 {publishingSourcesLoading ? (
+                                     <p className="text-sm text-text-muted p-4 text-center">{t('sources.loading')}</p>
+                                 ) : !resolvedClientId ? (
+                                     <p className="text-sm text-text-muted p-4 text-center">{t('new_job.publishing_choose_client')}</p>
+                                 ) : formData.recruitmentSources.length === 0 ? (
+                                     <p className="text-sm text-text-muted p-4 text-center">{t('new_job.publishing_no_active_sources')}</p>
+                                 ) : (
+                                     formData.recruitmentSources.map(source => (
+                                         <SourceRow
+                                             key={source.id}
+                                             source={source}
+                                             onToggleSelect={() => toggleSourceSelection(source.id)}
+                                             onStatusChange={(status) => handleSourceStatusChange(source.id, status)}
+                                             onAlertChange={(days) => handleSourceAlertChange(source.id, days)}
+                                         />
+                                     ))
+                                 )}
                              </div>
                          </div>
                      </div>

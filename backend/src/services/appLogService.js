@@ -1,4 +1,4 @@
-const { Op, fn, col, where, cast } = require('sequelize');
+const { Op, fn, col, where, cast, literal } = require('sequelize');
 const AppLog = require('../models/AppLog');
 
 const MAX_PAGE_SIZE = 200;
@@ -11,8 +11,26 @@ const sanitizeLevel = (val) => {
 
 const toPlain = (row) => row.get({ plain: true });
 
+/** Escape for SQL string literal used in ILIKE patterns. */
+const escapeLikeLiteral = (raw) =>
+  String(raw)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "''")
+    .replace(/%/g, '\\%')
+    .replace(/_/g, '\\_');
+
+/** Search JSONB context paths (object or string) via ::text ILIKE. */
+const contextPathsILike = (paths, term) => {
+  const like = `%${escapeLikeLiteral(term)}%`;
+  const clauses = paths.map(
+    (p) => `(context->'${p}')::text ILIKE '${like}' ESCAPE '\\'`,
+  );
+  return literal(`(${clauses.join(' OR ')})`);
+};
+
 const buildWhereFromQuery = (query = {}) => {
   const where_ = {};
+  const and = [];
 
   if (query.level && query.level !== 'all' && AppLog.LEVELS.includes(query.level)) {
     where_.level = query.level;
@@ -42,14 +60,30 @@ const buildWhereFromQuery = (query = {}) => {
   const search = String(query.search || '').trim();
   if (search) {
     const like = `%${search}%`;
-    where_[Op.or] = [
-      { message: { [Op.iLike]: like } },
-      { source: { [Op.iLike]: like } },
-      { userEmail: { [Op.iLike]: like } },
-      { requestId: { [Op.iLike]: like } },
-      { stackTrace: { [Op.iLike]: like } },
-      where(cast(col('id'), 'TEXT'), { [Op.iLike]: like }),
-    ];
+    and.push({
+      [Op.or]: [
+        { message: { [Op.iLike]: like } },
+        { source: { [Op.iLike]: like } },
+        { userEmail: { [Op.iLike]: like } },
+        { requestId: { [Op.iLike]: like } },
+        { stackTrace: { [Op.iLike]: like } },
+        where(cast(col('id'), 'TEXT'), { [Op.iLike]: like }),
+      ],
+    });
+  }
+
+  const searchInput = String(query.searchInput || query.search_input || '').trim();
+  if (searchInput) {
+    and.push(contextPathsILike(['input', 'inputJson'], searchInput));
+  }
+
+  const searchOutput = String(query.searchOutput || query.search_output || '').trim();
+  if (searchOutput) {
+    and.push(contextPathsILike(['output', 'outputJson', 'outputRaw', 'error'], searchOutput));
+  }
+
+  if (and.length) {
+    where_[Op.and] = and;
   }
 
   return where_;

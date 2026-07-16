@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react'
 import {
   MagnifyingGlassIcon, ChevronDownIcon, TargetIcon, PlusIcon,
   CheckCircleIcon, Squares2X2Icon, TableCellsIcon, SparklesIcon,
-  XMarkIcon, ArrowPathIcon, FlagIcon,
+  XMarkIcon, ArrowPathIcon, FlagIcon, NoSymbolIcon,
 } from './Icons';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import AIFeedbackModal from './AIFeedbackModal';
@@ -11,7 +11,8 @@ import JobMatchDeepInsightModal from './JobMatchDeepInsightModal';
 import { vectorLayerPctFromBreakdown } from '../utils/sonarMatchBreakdown';
 import {
   fetchJobMatches, assignCandidateToJob, fetchCandidate, fetchClientOptions, fetchCityOptions,
-  type JobMatchResult,
+  ignoreJobMatch, fetchJobMatchIgnores, clearJobMatchIgnore,
+  type JobMatchResult, type JobMatchIgnoreItem,
 } from '../utils/candidateJobMatchingApi';
 import { buildJobTagMatchCategories, type JobTagMatchInput } from '../utils/jobTagMatchCategories';
 
@@ -97,6 +98,16 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
   const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
   const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
 
+  // ── blacklist (job_match_ignore) ──
+  const [ignoreOpen, setIgnoreOpen] = useState(false);
+  const [ignoreLoading, setIgnoreLoading] = useState(false);
+  const [ignoreItems, setIgnoreItems] = useState<JobMatchIgnoreItem[]>([]);
+  const [ignoreCount, setIgnoreCount] = useState(0);
+  const [ignoringId, setIgnoringId] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+  const ignorePanelRef = useRef<HTMLDivElement>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+
   // ── filters ──
   const [advancedFilters, setAdvancedFilters] = useState({
     score: 0,
@@ -142,6 +153,45 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
 
   useEffect(() => { loadJobs(); }, [loadJobs]);
 
+  const refreshIgnoreList = useCallback(async () => {
+    if (!candidateId) {
+      setIgnoreItems([]);
+      setIgnoreCount(0);
+      return;
+    }
+    setIgnoreLoading(true);
+    try {
+      const data = await fetchJobMatchIgnores(candidateId);
+      setIgnoreItems(data.items);
+      setIgnoreCount(data.count);
+    } catch {
+      setIgnoreItems([]);
+      setIgnoreCount(0);
+    } finally {
+      setIgnoreLoading(false);
+    }
+  }, [candidateId]);
+
+  useEffect(() => {
+    void refreshIgnoreList();
+  }, [refreshIgnoreList]);
+
+  useEffect(() => {
+    if (!ignoreOpen) return;
+    void refreshIgnoreList();
+  }, [ignoreOpen, refreshIgnoreList]);
+
+  useEffect(() => {
+    if (!ignoreOpen) return;
+    const onClick = (e: MouseEvent) => {
+      if (ignorePanelRef.current && !ignorePanelRef.current.contains(e.target as Node)) {
+        setIgnoreOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [ignoreOpen]);
+
   useEffect(() => {
     Promise.all([fetchClientOptions(), fetchCityOptions()]).then(([clients, cities]) => {
       setClientOptions(clients);
@@ -177,6 +227,48 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     } catch (e) {
       setAssignError((e as Error).message || 'שגיאה בשיוך למשרה');
       setTimeout(() => setAssignError(null), 4000);
+    }
+  };
+
+  const handleIgnoreJob = async (e: React.MouseEvent, jobId: string) => {
+    e.stopPropagation();
+    if (!candidateId || !jobId) return;
+    setIgnoringId(jobId);
+    setFeedback(null);
+    setAssignError(null);
+    try {
+      await ignoreJobMatch(candidateId, jobId);
+      setJobs((prev) => prev.filter((j) => j.id !== jobId));
+      setIgnoreCount((c) => c + 1);
+      setFeedback('המשרה הוסרה לרשימה השחורה.');
+      setTimeout(() => setFeedback(null), 3000);
+    } catch (err) {
+      setAssignError((err as Error).message || 'לא הצלחנו להסיר את המשרה');
+      setTimeout(() => setAssignError(null), 4000);
+    } finally {
+      setIgnoringId(null);
+    }
+  };
+
+  const handleRestoreIgnore = async (jobId: string) => {
+    if (!candidateId || !jobId) return;
+    setRestoringId(jobId);
+    setFeedback(null);
+    try {
+      await clearJobMatchIgnore(candidateId, jobId);
+      setIgnoreItems((prev) => {
+        const next = prev.filter((i) => i.jobId !== jobId);
+        if (next.length === 0) setIgnoreOpen(false);
+        return next;
+      });
+      setIgnoreCount((c) => Math.max(0, c - 1));
+      setFeedback('המשרה הוחזרה מהרשימה השחורה. לחץ רענן כדי לראות אותה בתוצאות.');
+      setTimeout(() => setFeedback(null), 4000);
+    } catch (err) {
+      setAssignError((err as Error).message || 'לא הצלחנו להחזיר מהרשימה השחורה');
+      setTimeout(() => setAssignError(null), 4000);
+    } finally {
+      setRestoringId(null);
     }
   };
 
@@ -407,6 +499,23 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
     );
   };
 
+  const IgnoreButton: React.FC<{ job: JobMatchResult; size?: 'sm' | 'md' }> = ({ job, size = 'md' }) => {
+    const busy = ignoringId === job.id;
+    const px = size === 'sm' ? 'py-1 px-3 text-xs' : 'py-2 px-4 text-sm';
+    return (
+      <button
+        type="button"
+        onClick={(e) => void handleIgnoreJob(e, job.id)}
+        disabled={busy}
+        className={`border border-border-default bg-bg-card text-text-muted hover:text-red-600 hover:border-red-200 hover:bg-red-50 font-semibold ${px} rounded-lg transition flex items-center gap-1.5 disabled:opacity-50`}
+        title="הסר מתוצאות ההתאמה"
+      >
+        <XMarkIcon className="w-4 h-4" />
+        {busy ? 'מסיר…' : 'הסר'}
+      </button>
+    );
+  };
+
   // ─── match summary line ──────────────────────────────────────────────────
 
   const MatchSummaryLine: React.FC<{ job: JobMatchResult }> = ({ job }) => {
@@ -542,6 +651,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               <span>{isExpanded ? 'הסתר' : 'פרטים'}</span>
               <ChevronDownIcon className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
             </button>
+            <IgnoreButton job={job} />
             <AssignButton job={job} />
           </div>
         </div>
@@ -607,6 +717,7 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
                 <span>פרטים</span>
                 <ChevronDownIcon className={`w-4 h-4 transition-transform ${isExpanded ? 'rotate-180' : ''}`} />
               </button>
+              <IgnoreButton job={job} size="sm" />
               <AssignButton job={job} size="sm" />
             </div>
           </td>
@@ -644,6 +755,11 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
           {assignError}
         </div>
       )}
+      {feedback && (
+        <div className="mb-2 rounded-lg border border-accent-200 bg-accent-50 text-accent-900 px-4 py-2 text-sm font-semibold">
+          {feedback}
+        </div>
+      )}
 
       <main className="flex-1 overflow-y-auto space-y-4">
         {/* Controls bar */}
@@ -664,6 +780,55 @@ const JobMatchingView: React.FC<JobMatchingViewProps> = ({ onBack, candidateName
               <ArrowPathIcon className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
               <span>רענן</span>
             </button>
+            <div className="relative" ref={ignorePanelRef}>
+              <button
+                type="button"
+                onClick={() => setIgnoreOpen((v) => !v)}
+                className={`flex items-center gap-2 font-semibold py-2 px-4 rounded-lg border transition ${
+                  ignoreCount > 0
+                    ? 'bg-rose-50 border-rose-200 text-rose-700 hover:bg-rose-100'
+                    : 'bg-bg-subtle border-border-default text-text-muted hover:text-text-default'
+                }`}
+                aria-expanded={ignoreOpen}
+                title="משרות שהוסרו מהתאמות למועמד זה"
+              >
+                <NoSymbolIcon className="w-4 h-4" />
+                <span>רשימה שחורה ({ignoreCount})</span>
+              </button>
+              {ignoreOpen && (
+                <div className="absolute top-full start-0 mt-2 z-30 w-80 max-h-72 overflow-y-auto bg-bg-card border border-border-default rounded-xl shadow-xl p-3 text-start">
+                  <p className="text-xs font-bold text-text-default mb-2">משרות ברשימה השחורה</p>
+                  {ignoreLoading ? (
+                    <p className="text-xs text-text-muted">טוען…</p>
+                  ) : ignoreItems.length === 0 ? (
+                    <p className="text-xs text-text-muted">אין משרות ברשימה</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {ignoreItems.map((entry) => (
+                        <li
+                          key={entry.jobId}
+                          className="flex items-start justify-between gap-2 text-xs border-b border-border-subtle pb-2 last:border-0 last:pb-0"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-medium text-text-default truncate">{entry.title || 'משרה'}</p>
+                            {entry.client && <p className="text-text-muted truncate">{entry.client}</p>}
+                            {entry.city && <p className="text-text-muted truncate">{entry.city}</p>}
+                          </div>
+                          <button
+                            type="button"
+                            disabled={restoringId === entry.jobId}
+                            onClick={() => void handleRestoreIgnore(entry.jobId)}
+                            className="shrink-0 text-[10px] font-semibold text-primary-600 hover:text-primary-800 whitespace-nowrap disabled:opacity-50"
+                          >
+                            החזר לתוצאות
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
           <div className="relative">
             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />

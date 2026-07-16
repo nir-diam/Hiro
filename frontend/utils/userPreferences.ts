@@ -13,7 +13,8 @@ export type ScreenPreferenceKey =
     | 'candidate_events'
     | 'admin_global_companies'
     | 'admin_candidates'
-    | 'admin_jobs';
+    | 'admin_jobs'
+    | 'job_sonar';
 
 export type GlobalUiPreferences = {
     theme: Theme;

@@ -37,6 +37,7 @@ const { clientRouter: messageTemplateClientRoutes, adminRouter: messageTemplateA
 const matchingEngineRoutes = require('./routes/matchingEngineRoutes');
 const recruitmentSourceRoutes = require('./routes/recruitmentSourceRoutes');
 const savedSearchRoutes = require('./routes/savedSearchRoutes');
+const reportRoutes = require('./routes/reportRoutes');
 const { publicRouter, publishingRouter, jobPublicationRouter } = require('./routes/jobPublicationRoutes');
 
 const app = express();
@@ -86,6 +87,7 @@ app.use('/api/admin/logs', appLogRoutes);
 app.use('/api/messaging', messagingRoutes);
 app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/recruitment-sources', recruitmentSourceRoutes);
+app.use('/api/reports', reportRoutes);
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
 app.use('/api/admin/matching-engine', matchingEngineRoutes);

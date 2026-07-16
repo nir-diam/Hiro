@@ -717,11 +717,21 @@ const mapCandidateWithTags = (candidate, options = {}) => {
   if (!candidate) return null;
   const payload = candidate.toJSON ? candidate.toJSON() : { ...candidate };
   const candidateTags = payload.candidateTags || [];
-  const tags = candidateTags
+  const seenTagKeys = new Set();
+  const uniqueCandidateTags = [];
+  for (const ct of candidateTags) {
+    const key = String(ct.tag?.tagKey || ct.tag?.displayNameHe || ct.tagId || ct.id || '')
+      .trim()
+      .toLowerCase();
+    if (!key || seenTagKeys.has(key)) continue;
+    seenTagKeys.add(key);
+    uniqueCandidateTags.push(ct);
+  }
+  const tags = uniqueCandidateTags
     .map((ct) => ct.tag?.tagKey || ct.tag?.displayNameHe)
     .filter(Boolean);
   payload.tags = tags;
-  payload.tagDetails = candidateTags.map((ct) => ({
+  payload.tagDetails = uniqueCandidateTags.map((ct) => ({
     id: ct.id,
     tagId: ct.tagId,
     tagKey: ct.tag?.tagKey,

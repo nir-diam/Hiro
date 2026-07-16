@@ -62,6 +62,7 @@ interface AiDecision {
     hesitationQuote: string;
     similarEntities: { name: string; similarity: number; kind?: string }[];
     reviewStatus: 'pending_review' | 'approved' | 'changed' | 'manual';
+    reviewerAction: string | null;
     needsManual: boolean;
     isAutoHandled: boolean;
     source: string;
@@ -168,6 +169,7 @@ const mapApiEntry = (entry: OrgAiDecisionDto): AiDecision => {
         hesitationQuote: entry.dilemmaReasoning || entry.aiReasoning || '',
         similarEntities: entry.similarEntities || [],
         reviewStatus: entry.reviewStatus,
+        reviewerAction: entry.reviewerAction,
         needsManual: entry.reviewStatus === 'manual' || pct >= 60,
         isAutoHandled: entry.reviewStatus === 'approved' || pct < 30,
         source: 'קורות חיים',
@@ -677,8 +679,20 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const loadDecisions = useCallback(async () => {
         setLoadingDecisions(true);
         try {
-            const result = await fetchOrgAiDecisions({ limit: 200, sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc' });
-            setDecisions(result.data.map(mapApiEntry));
+            const result = await fetchOrgAiDecisions({ limit: 500, sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc' });
+            const mapped = result.data.map(mapApiEntry);
+            setDecisions(mapped);
+            // Restore blacklist from persisted reviewerAction
+            const bl: BlacklistEntry[] = result.data
+                .filter(d => d.reviewerAction === 'blacklist')
+                .map(d => ({
+                    id: d.id,
+                    term: d.originalTerm,
+                    addedAt: d.resolvedAt || d.actionDate,
+                    source: 'קורות חיים',
+                    candidateName: d.candidateName || undefined,
+                }));
+            setBlacklist(bl);
         } catch (err) {
             console.error('[AdminCompanyCorrectionsView] load error:', err);
         } finally {
@@ -788,33 +802,76 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     };
 
     const createOrganizationWithEnrichment = async (term: string) => {
+        const name = String(term || '').trim();
+        if (!name) throw new Error('שם החברה נדרש');
+
+        const headers: HeadersInit = { 'Content-Type': 'application/json', ...orgApiHeaders() };
+        let orgId: string | null = null;
+        let displayName = name;
+        let created = false;
+
         const createRes = await fetch(`${apiBase}/api/organizations`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ name: term }),
+            credentials: 'include',
+            headers,
+            body: JSON.stringify({ name }),
         });
-        if (!createRes.ok) throw new Error(await createRes.text().catch(() => '') || 'יצירת החברה נכשלה');
-        const created = await createRes.json();
-        const orgId: string = created?.id;
+
+        if (createRes.ok) {
+            const createdBody = await createRes.json() as { id?: string; name?: string };
+            orgId = typeof createdBody?.id === 'string' ? createdBody.id : null;
+            displayName = String(createdBody?.name || name);
+            created = true;
+        } else if (createRes.status === 409) {
+            const errBody = await createRes.json().catch(() => ({})) as {
+                existing?: { id?: string; name?: string };
+            };
+            orgId = typeof errBody?.existing?.id === 'string' ? errBody.existing.id : null;
+            displayName = String(errBody?.existing?.name || name);
+            created = false;
+        } else {
+            const errText = await createRes.text().catch(() => '');
+            let msg = errText;
+            try {
+                const j = JSON.parse(errText) as { message?: string };
+                if (j?.message) msg = j.message;
+            } catch { /* use raw */ }
+            throw new Error(msg || 'יצירת החברה נכשלה');
+        }
+
         if (!orgId) throw new Error('לא התקבל מזהה חברה מהשרת');
 
-        notify(`החברה "${term}" נוצרה — מעשיר ושומר נתונים...`, 'info');
+        notify(
+            created
+                ? `החברה "${displayName}" נוצרה — מעשיר ושומר נתונים...`
+                : `החברה "${displayName}" כבר קיימת — מעשיר ושומר נתונים...`,
+            'info',
+        );
+
         const enrichRes = await fetch(`${apiBase}/api/organizations/enrich`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
+            headers,
             body: JSON.stringify({ companyIds: [orgId], persist: true }),
         });
         if (!enrichRes.ok) {
-            throw new Error(await enrichRes.text().catch(() => '') || 'העשרה נכשלה');
+            const errText = await enrichRes.text().catch(() => '');
+            let msg = errText;
+            try {
+                const j = JSON.parse(errText) as { message?: string };
+                if (j?.message) msg = j.message;
+            } catch { /* use raw */ }
+            throw new Error(msg || 'העשרה נכשלה');
         }
         const enrichData = await enrichRes.json() as { persistedIds?: string[] };
         const persisted = Array.isArray(enrichData?.persistedIds) && enrichData.persistedIds.includes(orgId);
         notify(
             persisted
-                ? `העשרת "${term}" נשמרה בפרופיל החברה`
-                : `העשרת "${term}" הושלמה (לא נמצאו שדות לשמירה)`,
+                ? `העשרת "${displayName}" נשמרה בפרופיל החברה`
+                : `העשרת "${displayName}" הושלמה (לא נמצאו שדות לשמירה)`,
         );
-        return orgId;
+        await loadOrganizationsData();
+        return { orgId, created, name: displayName };
     };
 
     const handleAddToBlacklist = async (decision: AiDecision) => {
@@ -873,14 +930,25 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             const term = dec?.originalTerm ?? '';
             if (!term) { notify('לא נמצא שם חברה', 'error'); return; }
             try {
-                await createOrganizationWithEnrichment(term);
+                const result = await createOrganizationWithEnrichment(term);
                 await resolveOrgAiDecision(decisionId, {
                     aiDecision: 'create_company',
                     reviewerAction: 'changed',
                     reviewStatus: 'changed',
                 });
-                updateDecision(decisionId, { decisionType: 'create_company', decisionTarget: undefined });
-            } catch (err: any) { notify(err.message || 'שגיאה ביצירת החברה', 'error'); }
+                updateDecision(decisionId, {
+                    decisionType: 'create_company',
+                    decisionTarget: result.name,
+                    reviewStatus: 'changed',
+                    isAutoHandled: true,
+                    needsManual: false,
+                });
+                notify(
+                    result.created
+                        ? `נוצרה והועשרה: "${result.name}"`
+                        : `הועשרה חברה קיימת: "${result.name}"`,
+                );
+            } catch (err: any) { notify(err.message || 'שגיאה ביצירת/העשרת החברה', 'error'); }
             return;
         }
         // merge_company and map_generic open a target-selection modal
@@ -944,32 +1012,24 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         // dashboard tab manages its own data via AdminCompanyAgentDashboard
     }, [activeTab, loadDecisions, loadUnmatched, loadHistory, loadOrganizationsData]);
 
-    // Load org list when merge / generic modal opens (and server-search while typing for merge)
+    // Load org list when the modal first opens (one-time per open)
     useEffect(() => {
         if (!mergeModal) return;
-
         if (mergeModal.mode === 'map_generic') {
             void loadGenericBucketOrgs();
-            return;
-        }
-
-        const q = mergeOrgSearch.trim();
-        const timer = setTimeout(() => {
+        } else {
+            // Initial load for merge_company with no search term
             void (async () => {
                 setMergeOrgsLoading(true);
                 try {
-                    const list = await fetchOrganizationsPage(apiBase, {
-                        search: q || undefined,
-                        limit: 200,
-                    });
+                    const list = await fetchOrganizationsPage(apiBase, { limit: 200 });
                     setOrganizations(list.filter((o) => !isGenericBucketOrgName(o.name)));
                 } catch { /* swallow */ }
                 finally { setMergeOrgsLoading(false); }
             })();
-        }, q ? 300 : 0);
-
-        return () => clearTimeout(timer);
-    }, [mergeModal, mergeOrgSearch, apiBase, loadGenericBucketOrgs]);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [mergeModal?.id, mergeModal?.mode]);
 
     const mergeModalOrgs = useMemo(() => {
         if (!mergeModal) return [];
@@ -1761,7 +1821,19 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             {/* ══════════════ BLACKLIST TAB ══════════════ */}
             {activeTab === 'blacklist' && (
                 <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden flex-1 flex flex-col min-h-[400px]">
-                    {blacklist.length === 0 ? (
+                    {loadingDecisions ? (
+                        <div className="flex-1 flex flex-col gap-3 p-6">
+                            {[...Array(6)].map((_, i) => (
+                                <div key={i} className="flex items-center gap-4 animate-pulse">
+                                    <div className="w-5 h-5 rounded-full bg-gray-200 flex-shrink-0" />
+                                    <div className="flex-1 h-4 bg-gray-200 rounded" style={{ width: `${60 + (i % 3) * 15}%` }} />
+                                    <div className="w-20 h-4 bg-gray-200 rounded" />
+                                    <div className="w-24 h-4 bg-gray-200 rounded" />
+                                    <div className="w-16 h-4 bg-gray-200 rounded" />
+                                </div>
+                            ))}
+                        </div>
+                    ) : blacklist.length === 0 ? (
                         <div className="flex-1 flex flex-col items-center justify-center p-12 text-center text-text-muted">
                             <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mb-4">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-8 h-8 text-gray-400">
@@ -1894,20 +1966,38 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 {mergeOrgsLoading ? (
                                     <p className="text-sm text-text-muted mb-5">טוען סלי כללי...</p>
                                 ) : (
-                                <select
-                                    value={mergeTargetId}
-                                    onChange={e => {
-                                        setMergeTargetId(e.target.value);
-                                        const org = mergeModalOrgs.find(o => o.id === e.target.value);
-                                        setMergeTarget(org?.name ?? '');
-                                    }}
-                                    className="w-full border border-slate-300 rounded-xl px-4 py-3 text-sm font-medium text-slate-700 focus:ring-2 focus:ring-orange-500 focus:border-orange-500 mb-5 bg-slate-50"
-                                >
-                                    <option value="">-- בחר סל כללי --</option>
-                                    {mergeModalOrgs.map(o => (
-                                        <option key={o.id} value={o.id}>{o.name}</option>
-                                    ))}
-                                </select>
+                                <div className="mb-5">
+                                    <div className="relative mb-2">
+                                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none">
+                                            <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                                        </svg>
+                                        <input
+                                            type="text"
+                                            placeholder="חפש סל כללי..."
+                                            value={mergeOrgSearch}
+                                            onChange={e => setMergeOrgSearch(e.target.value)}
+                                            className="w-full border border-slate-300 rounded-xl pr-9 pl-4 py-2.5 text-sm text-slate-700 focus:ring-2 focus:ring-orange-500 focus:border-orange-500 bg-slate-50 outline-none"
+                                        />
+                                    </div>
+                                    <div className="max-h-44 overflow-y-auto border border-slate-200 rounded-xl bg-white divide-y divide-slate-100">
+                                        {mergeModalOrgs
+                                            .filter(o => !mergeOrgSearch || o.name.toLowerCase().includes(mergeOrgSearch.toLowerCase()))
+                                            .map(o => (
+                                                <button
+                                                    key={o.id}
+                                                    type="button"
+                                                    onClick={() => { setMergeTargetId(o.id); setMergeTarget(o.name); }}
+                                                    className={`w-full text-right px-4 py-2.5 text-sm transition-colors ${mergeTargetId === o.id ? 'bg-orange-50 text-orange-700 font-bold' : 'text-slate-700 hover:bg-slate-50'}`}
+                                                >
+                                                    {o.name}
+                                                </button>
+                                            ))
+                                        }
+                                        {mergeModalOrgs.filter(o => !mergeOrgSearch || o.name.toLowerCase().includes(mergeOrgSearch.toLowerCase())).length === 0 && (
+                                            <p className="text-center text-xs text-slate-400 py-4">לא נמצאו תוצאות</p>
+                                        )}
+                                    </div>
+                                </div>
                                 )}
                                 {!mergeOrgsLoading && mergeModalOrgs.length === 0 && (
                                     <p className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2 mb-4">

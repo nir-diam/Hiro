@@ -17,6 +17,7 @@ import {
     fetchPicklistCategoryValues,
     TAG_DOMAIN_PICKLIST_CATEGORY_ID,
 } from '../services/picklistValuesApi';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
 
 const normalizePicklistOptions = (rows: { label?: string; value?: string }[]) =>
     rows
@@ -42,10 +43,11 @@ const DomainPicklistField: React.FC<{
         [selected, optionValues],
     );
     const filtered = useMemo(() => {
-        const q = search.trim();
+        const q = search.trim().replace(/[/\\]/g, '').toLowerCase();
         if (!q) return options;
+        const norm = (s: string) => String(s || '').replace(/[/\\]/g, '').toLowerCase();
         return options.filter(
-            (o) => o.label.includes(q) || o.value.includes(q),
+            (o) => norm(o.label).includes(q) || norm(o.value).includes(q),
         );
     }, [options, search]);
 
@@ -292,37 +294,31 @@ const formatTagSynonymsForExport = (tag: Tag) =>
         .map((item) => item.phrase)
         .join(', ');
 
-const TagSynonymsPills: React.FC<{ tag: Tag; maxVisible?: number }> = ({ tag, maxVisible = 8 }) => {
+const TagSynonymsPills: React.FC<{ tag: Tag }> = ({ tag }) => {
     const items = buildTagSynonymDisplayItems(tag);
     if (!items.length) {
         return <span className="text-text-muted/40 text-xs italic">אין מילים נרדפות</span>;
     }
 
-    const visible = items.slice(0, maxVisible);
-    const hiddenCount = items.length - visible.length;
-
     return (
-        <div className="flex flex-wrap gap-1.5 items-center">
-            {visible.map((item) => (
-                <span
-                    key={`${item.kind}-${item.phrase}`}
-                    title={`${SYNONYM_KIND_LABELS[item.kind] || item.kind}${item.language && item.language !== '-' ? ` · ${item.language}` : ''}`}
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border leading-tight ${SYNONYM_KIND_STYLES[item.kind] || SYNONYM_KIND_STYLES.synonym}`}
-                >
-                    <span className="truncate max-w-[140px]">{item.phrase}</span>
-                    <span className="text-[9px] opacity-70 font-semibold uppercase">
-                        {SYNONYM_KIND_LABELS[item.kind] || item.kind}
+        <div
+            className="w-full rounded-lg border border-border-subtle/70 bg-bg-subtle/25 p-2"
+            onClick={(e) => e.stopPropagation()}
+        >
+            <div className="grid grid-cols-2 gap-1.5 w-full">
+                {items.map((item) => (
+                    <span
+                        key={`${item.kind}-${item.phrase}`}
+                        title={`${SYNONYM_KIND_LABELS[item.kind] || item.kind}${item.language && item.language !== '-' ? ` · ${item.language}` : ''}`}
+                        className={`flex w-full min-w-0 items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border leading-tight ${SYNONYM_KIND_STYLES[item.kind] || SYNONYM_KIND_STYLES.synonym}`}
+                    >
+                        <span className="min-w-0 flex-1 break-words whitespace-normal">{item.phrase}</span>
+                        <span className="shrink-0 text-[9px] opacity-70 font-semibold uppercase">
+                            {SYNONYM_KIND_LABELS[item.kind] || item.kind}
+                        </span>
                     </span>
-                </span>
-            ))}
-            {hiddenCount > 0 && (
-                <span
-                    className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-bg-subtle text-text-muted border border-border-subtle"
-                    title={items.slice(maxVisible).map((item) => item.phrase).join(', ')}
-                >
-                    +{hiddenCount}
-                </span>
-            )}
+                ))}
+            </div>
         </div>
     );
 };
@@ -339,6 +335,14 @@ const SOURCE_FILTER_OPTIONS: { value: SourceFilterValue; label: string }[] = [
 
 type SortKey = 'tagKey' | 'displayNameHe' | 'displayNameEn' | 'type' | 'category' | 'synonyms' | 'status' | 'updatedAt' | 'source' | 'usageCount' | 'jobUsageCount';
 type SortConfig = { key: SortKey | null; direction: 'asc' | 'desc' };
+
+const TAG_TABLE_COLUMN_WIDTHS: Partial<Record<SortKey, string>> = {
+    status: 'min-w-[220px] w-[220px]',
+    updatedAt: 'min-w-[240px] w-[240px]',
+    synonyms: 'min-w-[420px] w-[420px] max-w-[420px]',
+};
+
+const getTagTableColumnClass = (key: SortKey) => TAG_TABLE_COLUMN_WIDTHS[key] || '';
 
 const getRelativeTimeLabel = (date?: Date | string) => {
     if (!date) return '';
@@ -621,9 +625,10 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({
     }, [apiBase, isOpen, tag?.id]);
 
     const filteredTagNameOptions = useMemo(() => {
-        const query = (formData.displayNameHe || '').trim().toLowerCase();
+        const query = (formData.displayNameHe || '').trim().toLowerCase().replace(/[/\\]/g, '');
+        const norm = (s: string) => String(s || '').toLowerCase().replace(/[/\\]/g, '');
         return tagNameOptions
-            .filter(opt => !query || opt.toLowerCase().includes(query))
+            .filter(opt => !query || norm(opt).includes(query))
             .slice(0, 30);
     }, [formData.displayNameHe, tagNameOptions]);
 
@@ -794,9 +799,11 @@ const TagEditorModal: React.FC<TagEditorModalProps> = ({
         source: s.source || 'synonym'
     }));
 
-    const filteredSynonyms = [...aliasRows, ...synonymRows].filter(s =>
-        (s?.phrase || '').toLowerCase().includes((synonymSearch || '').toLowerCase())
-    );
+    const filteredSynonyms = [...aliasRows, ...synonymRows].filter(s => {
+        const q = (synonymSearch || '').toLowerCase().replace(/[/\\]/g, '');
+        if (!q) return true;
+        return (s?.phrase || '').toLowerCase().replace(/[/\\]/g, '').includes(q);
+    });
 
     return (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
@@ -1378,13 +1385,13 @@ const AdminTagsView: React.FC = () => {
                 );
             case 'synonyms':
                 return (
-                    <td className="p-4 align-top min-w-[220px] max-w-[320px]">
+                    <td className={`p-4 align-top ${getTagTableColumnClass('synonyms')}`}>
                         <TagSynonymsPills tag={tag} />
                     </td>
                 );
             case 'status':
                 return (
-                    <td className="p-4 space-y-2">
+                    <td className={`p-4 align-top space-y-2 ${getTagTableColumnClass('status')}`}>
                         <select
                             value={tag.status}
                             onChange={(e) => { e.stopPropagation(); handleInlineUpdate(tag.id, { status: e.target.value as TagStatus }); }}
@@ -1414,10 +1421,10 @@ const AdminTagsView: React.FC = () => {
                 );
             case 'updatedAt':
                 return (
-                    <td className="p-4 text-xs text-text-muted">
-                        <div>{formatDateTime(tag.updatedAt || tag.updated_at)}</div>
+                    <td className={`p-4 align-top text-xs text-text-muted ${getTagTableColumnClass('updatedAt')}`}>
+                        <div className="whitespace-nowrap">{formatDateTime(tag.updatedAt || tag.updated_at)}</div>
                         {(tag.createdAt || tag.created_at) && (
-                            <div className="text-[10px] text-text-muted/70">
+                            <div className="text-[10px] text-text-muted/70 whitespace-nowrap">
                                 נוצר: {formatDateTime(tag.createdAt || tag.created_at)}
                             </div>
                         )}
@@ -2759,7 +2766,7 @@ const AdminTagsView: React.FC = () => {
             )}
 
             {/* Table */}
-            <div className="bg-bg-card border border-border-default rounded-2xl shadow-sm overflow-hidden flex-1 flex flex-col">
+            <div className="bg-bg-card border border-border-default rounded-2xl shadow-sm flex-1 flex flex-col min-w-0">
                 <div className="px-3 py-3 border-b border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                         {effectiveTotal
@@ -2802,8 +2809,8 @@ const AdminTagsView: React.FC = () => {
                         </button>
                     </div>
                 </div>
-                <div className="overflow-x-auto flex-1">
-                    <table className="w-full text-right text-sm table-fixed">
+                <HorizontalScrollArea className="flex flex-col flex-1 min-w-0" scrollClassName="overflow-x-auto flex-1 min-w-0 w-full [scrollbar-width:thin]">
+                    <table className="w-full min-w-[1760px] text-right text-sm" dir="rtl">
                         <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-10 border-b border-border-default">
                             <tr>
                                 <th className="p-4 w-12 text-center">
@@ -2817,7 +2824,7 @@ const AdminTagsView: React.FC = () => {
                                 {columnOrder.map(key => (
                                     <th
                                         key={key}
-                                        className="p-4 cursor-pointer select-none"
+                                        className={`p-4 cursor-pointer select-none ${getTagTableColumnClass(key)}`}
                                         draggable
                                         onDragStart={(e) => handleColumnDragStart(e, key)}
                                         onDragOver={(e) => e.preventDefault()}
@@ -2833,7 +2840,7 @@ const AdminTagsView: React.FC = () => {
                                 ))}
                                 <th className="p-4 w-[8%]"></th>
                                 <th
-                                    className="p-4 cursor-pointer select-none min-w-[220px]"
+                                    className={`p-4 cursor-pointer select-none ${getTagTableColumnClass('synonyms')}`}
                                     onClick={() => toggleSort('synonyms')}
                                 >
                                     <div className="flex items-center justify-between gap-1">
@@ -2877,7 +2884,7 @@ const AdminTagsView: React.FC = () => {
                             ))}
                         </tbody>
                     </table>
-                </div>
+                </HorizontalScrollArea>
                 <div className="px-3 py-3 border-t border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
                         {effectiveTotal
