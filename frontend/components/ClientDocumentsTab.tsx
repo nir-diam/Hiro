@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { PlusIcon, MagnifyingGlassIcon, ChevronDownIcon, EllipsisVerticalIcon, Squares2X2Icon, TableCellsIcon, TrashIcon, PencilIcon, ArrowDownTrayIcon, FolderIcon, DocumentIcon, PhotoIcon, ArchiveBoxIcon } from './Icons';
 import DocumentFormModal, { Document, DocumentType } from './DocumentFormModal';
+import { authHeaders } from '../utils/authHeaders';
 
 interface ClientDocumentsTabProps {
   clientId: string;
@@ -82,7 +83,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
         if (window.confirm('האם אתה בטוח שברצונך למחוק את המסמך?')) {
             setDocuments(documents.filter(d => d.id !== docId));
             if (apiBase && clientId) {
-                await fetch(`${apiBase}/api/clients/${clientId}/documents/${docId}`, { method: 'DELETE' }).catch(() => null);
+                await fetch(`${apiBase}/api/clients/${clientId}/documents/${docId}`, { method: 'DELETE', headers: authHeaders(true) }).catch(() => null);
             }
         }
         setOpenMenuId(null);
@@ -121,7 +122,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
         // 1) get upload URL
         const uploadRes = await fetch(`${apiBase}/api/clients/${clientId}/documents/upload-url`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders(true),
             body: JSON.stringify({ fileName: file.name, contentType: file.type || 'application/octet-stream' }),
         });
         if (!uploadRes.ok) {
@@ -141,7 +142,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
         const fileSizeKb = Math.max(1, Math.round(file.size / 1024));
         const attachRes = await fetch(`${apiBase}/api/clients/${clientId}/documents/attach`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders(true),
             body: JSON.stringify({
                 name: docData.name,
                 type: docData.type,
@@ -176,7 +177,7 @@ const ClientDocumentsTab: React.FC<ClientDocumentsTabProps> = ({ clientId, clien
         let active = true;
         setIsLoading(true);
         setError(null);
-        fetch(`${apiBase}/api/clients/${clientId}/documents`)
+        fetch(`${apiBase}/api/clients/${clientId}/documents`, { headers: authHeaders(true) })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load documents');
                 return r.json();

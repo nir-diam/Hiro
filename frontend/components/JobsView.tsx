@@ -519,6 +519,7 @@ const JobsView: React.FC = () => {
         loadJobs();
     }, [loadJobs, authReady]);
 
+
     const persistJobUpdate = useCallback(async (id: number, updates: Partial<Job>) => {
         const res = await fetch(`${apiBase}/api/jobs/${id}`, {
             method: 'PUT',
@@ -1123,7 +1124,7 @@ const JobsView: React.FC = () => {
                             <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                             <input type="text" placeholder={t('jobs.search_placeholder')} name="searchTerm" value={filters.searchTerm} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-lg py-2.5 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition shadow-sm" />
                         </div>
-                        {isPlatformAdmin ? (
+                        {(isPlatformAdmin || clientFilterOptions.length > 1) ? (
                             <SearchableSelect
                                 options={clientFilterOptions}
                                 value={filters.client || null}

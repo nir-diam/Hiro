@@ -3,6 +3,7 @@ const path = require('path');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const Job = require('../models/Job');
 const JobPublication = require('../models/JobPublication');
+const JobImage = require('../models/JobImage');
 const Client = require('../models/Client');
 const ClientOrganizationLink = require('../models/ClientOrganizationLink');
 const Organization = require('../models/Organization');
@@ -1791,7 +1792,11 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
     await addHeroGalleryImage(client, { url, label: title });
   }
 
-  await publication.update({ heroImageUrl: url });
+  await Promise.all([
+    publication.update({ heroImageUrl: url }),
+    JobImage.create({ jobId: job.id, url, label: title }),
+  ]);
+
   return { url, heroImageUrl: url };
 };
 
@@ -1949,4 +1954,36 @@ module.exports = {
   generateHeroImageForJob,
   listCompanyCreatedImages,
   listCompanyCreatedImagesForJob,
+  listJobImages,
+  deleteJobImage,
 };
+
+// ---------------------------------------------------------------------------
+// Job-scoped image gallery (job_images table)
+// ---------------------------------------------------------------------------
+
+async function listJobImages(jobId) {
+  const rows = await JobImage.findAll({
+    where: { jobId },
+    order: [['created_at', 'DESC']],
+  });
+  return rows.map((r) => ({
+    id: r.id,
+    url: r.url,
+    label: r.label || '',
+    jobId: r.jobId,
+    createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
+    canDelete: true,
+    source: 'job',
+  }));
+}
+
+async function deleteJobImage(imageId) {
+  const row = await JobImage.findByPk(imageId);
+  if (!row) {
+    const err = new Error('Image not found');
+    err.status = 404;
+    throw err;
+  }
+  await row.destroy();
+}

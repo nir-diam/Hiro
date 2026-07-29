@@ -255,6 +255,8 @@ const AppContent: React.FC = () => {
                         candidatePhone={messageModalConfig.candidatePhone}
                         candidateEmail={messageModalConfig.candidateEmail}
                         candidateId={messageModalConfig.candidateId}
+                        recipientOptions={messageModalConfig.recipientOptions}
+                        initialRecipientIds={messageModalConfig.initialRecipientIds}
                     />
                 )}
             </div>
@@ -337,6 +339,8 @@ const AppContent: React.FC = () => {
                         candidatePhone={messageModalConfig.candidatePhone}
                         candidateEmail={messageModalConfig.candidateEmail}
                         candidateId={messageModalConfig.candidateId}
+                        recipientOptions={messageModalConfig.recipientOptions}
+                        initialRecipientIds={messageModalConfig.initialRecipientIds}
                     />
                 )}
                 <CreateJobAlertModal 

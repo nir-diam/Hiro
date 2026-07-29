@@ -1808,7 +1808,25 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const [isClientConfirmed, setIsClientConfirmed] = useState(false);
     const [activeClients, setActiveClients] = useState<Array<{ id: string; label: string }>>([]);
     const [activeClientsLoading, setActiveClientsLoading] = useState(false);
-    
+    const [orgOptions, setOrgOptions] = useState<Array<{ id: string; label: string; clientId: string | null }>>([]);
+    const [orgOptionsLoading, setOrgOptionsLoading] = useState(false);
+    const [selectedOrg, setSelectedOrg] = useState<{ orgId: string | null; clientId: string | null }>({ orgId: null, clientId: null });
+
+    // filteredOrgOptions: self-name is already excluded at fetch time; alias for clarity.
+    const filteredOrgOptions = orgOptions;
+
+    // When org options load and we already have a selectedOrg.orgId (from an existing job),
+    // sync formData.clientName to the org's actual name from the options list.
+    useEffect(() => {
+        if (!selectedOrg.orgId || orgOptionsLoading || filteredOrgOptions.length === 0) return;
+        const match = filteredOrgOptions.find((o) => o.id === selectedOrg.orgId);
+        if (!match) return;
+        setFormData((prev) => {
+            if (prev.clientName === match.label) return prev;
+            return { ...prev, clientName: match.label };
+        });
+    }, [selectedOrg.orgId, filteredOrgOptions, orgOptionsLoading]);
+
     const [aiFilledFields, setAiFilledFields] = useState<Set<string>>(new Set());
     const [showParseSummary, setShowParseSummary] = useState(false);
     const [parseSummaryData, setParseSummaryData] = useState<{ filled: string[], missing: string[] }>({ filled: [], missing: [] });
@@ -2007,6 +2025,13 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                  setPastedJobText(String(sourceJob.aiRawDescription));
              }
              if (sourceJob.client) setIsClientConfirmed(true);
+             // Restore organizationId link when editing an existing job
+             if (sourceJob.organizationId) {
+                 setSelectedOrg({
+                     orgId: String(sourceJob.organizationId),
+                     clientId: sourceJob.clientId ? String(sourceJob.clientId) : null,
+                 });
+             }
              if (isDuplicating && location.state) {
                  navigate(location.pathname, { replace: true, state: {} });
              }
@@ -2150,6 +2175,59 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         setIsClientConfirmed(true);
     }, [isTenantUser, user?.clientId, activeClients, isEditing]);
 
+    // Load organization options:
+    //   - Admins: all organizations from /api/organizations
+    //   - Tenant users: only orgs linked to their client via ClientOrganizationLink
+    useEffect(() => {
+        if (!apiBase) return;
+        let cancelled = false;
+        setOrgOptionsLoading(true);
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        const headers: Record<string, string> = {
+            Accept: 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        };
+
+        const fetchPromise: Promise<Array<{ id: string; label: string; clientId: string | null }>> =
+            isTenantUser && user?.clientId
+                // Tenant users: orgs linked to their client via ClientOrganizationLink
+                ? fetch(`${apiBase}/api/clients/${encodeURIComponent(user.clientId)}/linked-organizations`, { credentials: 'include', headers })
+                    .then((r) => r.ok ? r.json() : Promise.reject(new Error('load linked orgs')))
+                    .then((rows: unknown) => {
+                        const list = Array.isArray(rows) ? rows : [];
+                        return (list as Record<string, unknown>[])
+                            .map((row) => {
+                                const org = (row.organization ?? row.organizationTmp) as Record<string, unknown> | undefined;
+                                if (!org) return null;
+                                const label = String(org.name || '').trim();
+                                const id = String(org.id ?? '');
+                                return { id, label, clientId: String(user.clientId || '') };
+                            })
+                            .filter((o): o is { id: string; label: string; clientId: string } => !!o && !!o.label)
+                            .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                    })
+                : fetch(`${apiBase}/api/organizations?limit=500`, { credentials: 'include', headers })
+                    .then((r) => r.ok ? r.json() : Promise.reject(new Error('load orgs')))
+                    .then((data: unknown) => {
+                        const list = Array.isArray(data)
+                            ? data
+                            : Array.isArray((data as Record<string, unknown>)?.data)
+                                ? (data as Record<string, unknown[]>).data
+                                : [];
+                        return (list as Record<string, unknown>[])
+                            .map((o) => ({ id: String(o.id ?? ''), label: String(o.name || '').trim(), clientId: null as string | null }))
+                            .filter((o) => o.label)
+                            .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                    });
+
+        fetchPromise
+            .then((opts) => { if (!cancelled) setOrgOptions(opts); })
+            .catch(() => { if (!cancelled) setOrgOptions([]); })
+            .finally(() => { if (!cancelled) setOrgOptionsLoading(false); });
+
+        return () => { cancelled = true; };
+    }, [apiBase, isTenantUser, user?.clientId]);
+
     const clientSelectOptions = useMemo(() => {
         const pool = isTenantUser && user?.clientId
             ? activeClients.filter((c) => c.id === user.clientId)
@@ -2160,16 +2238,25 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         return [{ id: `legacy:${current}`, label: current }, ...pool];
     }, [activeClients, formData.clientName, isTenantUser, user?.clientId]);
 
-    const isClientLocked = isClientConfirmed || (isTenantUser && Boolean(formData.clientName.trim()));
+    const isClientLocked = isClientConfirmed;
 
-    /** UUID of Client row — whenever שם הלקוח matches a client from /api/clients (no need to click "אשר"). */
+    /**
+     * UUID of the Client row to scope per-client API calls (recruitment sources, contacts, staff).
+     * Priority:
+     *  1. selectedOrg.clientId — resolved when the user picks an org from the org dropdown.
+     *  2. user.clientId         — fallback for tenant users (always their own client).
+     *  3. Legacy fallback       — match clientName against the old activeClients list.
+     */
     const resolvedClientId = useMemo(() => {
+        if (selectedOrg.clientId) return selectedOrg.clientId;
+        if (isTenantUser && user?.clientId) return user.clientId;
+        // Legacy path: admin had previously selected a client label (before org-picker migration)
         const name = formData.clientName.trim();
         if (!name) return null;
         const match = activeClients.find((c) => c.label === name);
         if (!match || match.id.startsWith('legacy:')) return null;
         return match.id;
-    }, [formData.clientName, activeClients]);
+    }, [selectedOrg.clientId, isTenantUser, user?.clientId, formData.clientName, activeClients]);
 
     useEffect(() => {
         if (!resolvedClientId) {
@@ -2747,6 +2834,50 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         setFormData(prev => ({ ...prev, [name]: processedValue }));
     };
 
+    // Dedicated handler for the organization dropdown — also resolves orgId + clientId.
+    const handleOrgChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+        const orgLabel = e.target.value;
+        setFormData(prev => ({ ...prev, clientName: orgLabel }));
+
+        if (!orgLabel) {
+            setSelectedOrg({ orgId: null, clientId: null });
+            return;
+        }
+
+        const match = orgOptions.find((o) => o.label === orgLabel);
+        if (match) {
+            // Tenant users always belong to their own client — no lookup needed.
+            if (isTenantUser && user?.clientId) {
+                setSelectedOrg({ orgId: match.id, clientId: user.clientId });
+                return;
+            }
+
+            setSelectedOrg({ orgId: match.id, clientId: match.clientId });
+
+            // For admin users, fetch the primary linked client for the org.
+            if (apiBase) {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+                fetch(`${apiBase}/api/organizations/${encodeURIComponent(match.id)}/primary-client`, {
+                    credentials: 'include',
+                    headers: {
+                        Accept: 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                })
+                    .then((r) => r.ok ? r.json() : null)
+                    .then((data: { clientId: string | null; clientName: string | null } | null) => {
+                        if (data?.clientId) {
+                            setSelectedOrg({ orgId: match.id, clientId: data.clientId });
+                        }
+                    })
+                    .catch(() => { /* silent — clientId stays null */ });
+            }
+        } else {
+            // Free-text / legacy value not in the options list
+            setSelectedOrg({ orgId: null, clientId: null });
+        }
+    };
+
     const handleSliderChange = (name: string, value: number) => {
         setFormData(prev => ({ ...prev, [name]: value }));
     };
@@ -3141,6 +3272,19 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             uniqueEmail: data.uniqueEmail,
             /** Server strips this; triggers audit_logs after Job.create with real job id */
             aiPasteAnalyzeUsed: aiPasteAnalyzeUsedRef.current === true,
+            // Always send clientId (resolved from org selection, tenant account, or legacy match).
+            clientId: resolvedClientId || undefined,
+            // Resolve organizationId: explicit selection → existing job value → match by company name in options list.
+            organizationId: (() => {
+                if (selectedOrg.orgId) return selectedOrg.orgId;
+                if (isEditing && jobData) {
+                    const existingOrgId = (jobData as Record<string, unknown>).organizationId;
+                    if (existingOrgId) return String(existingOrgId);
+                }
+                // Auto-resolve: find the org in the loaded options whose label matches the current company name
+                const nameMatch = filteredOrgOptions.find((o) => o.label === data.clientName);
+                return nameMatch?.id || undefined;
+            })(),
             contacts: contactObjects,
             recruitmentSources: (data.recruitmentSources || []).map((source: RecruitmentSource) => ({
                 id: source.id,
@@ -3412,39 +3556,50 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 <SectionCard id="general-info" title={t('new_job.section_general')} icon={<BriefcaseIcon className="w-5 h-5"/>} className="z-10 relative">
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         <div className="lg:col-span-1">
-                           <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('new_job.client_name')}</label>
+                           <label className="block text-sm font-semibold text-text-muted mb-1.5">שם החברה</label>
                             {isClientLocked ? (
                                 <div className="flex items-center gap-2">
                                     <div className="w-full bg-primary-50 border border-primary-200 text-primary-900 font-bold text-sm rounded-lg p-2.5 flex items-center justify-between">
                                         <span>{formData.clientName}</span>
                                         <CheckCircleIcon className="w-4 h-4 text-primary-600" />
                                     </div>
-                                    {!isTenantUser ? (
-                                        <button type="button" onClick={() => setIsClientConfirmed(false)} className="text-sm font-semibold text-text-muted hover:text-primary-600 underline flex-shrink-0">{t('new_job.replace')}</button>
-                                    ) : null}
+                                    {/* Always allow changing — shown for all users */}
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsClientConfirmed(false)}
+                                        className="text-sm font-semibold text-text-muted hover:text-primary-600 underline flex-shrink-0"
+                                    >
+                                        {t('new_job.replace')}
+                                    </button>
                                 </div>
                             ) : (
                                 <div className="flex items-center gap-2">
                                     <div className="relative flex-grow">
-                                        <select 
-                                            name="clientName" 
-                                            value={formData.clientName} 
-                                            onChange={handleChange}
-                                            disabled={activeClientsLoading}
+                                        <select
+                                            name="clientName"
+                                            value={formData.clientName}
+                                            onChange={handleOrgChange}
+                                            disabled={orgOptionsLoading}
                                             className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm disabled:opacity-60"
                                         >
                                             <option value="">
-                                                {activeClientsLoading ? `${t('new_job.choose_client')}…` : t('new_job.choose_client')}
+                                                {orgOptionsLoading ? 'טוען חברות...' : 'בחר חברה...'}
                                             </option>
-                                            {clientSelectOptions.map((c) => (
-                                                <option key={c.id} value={c.label}>
-                                                    {c.label}
-                                                </option>
+                                            {filteredOrgOptions.map((o) => (
+                                                <option key={o.id} value={o.label}>{o.label}</option>
                                             ))}
                                         </select>
+                                        {orgOptionsLoading && (
+                                            <div className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 border-2 border-primary-500 border-t-transparent rounded-full animate-spin pointer-events-none" />
+                                        )}
                                     </div>
-                                    <button type="button" onClick={() => setIsClientConfirmed(true)} disabled={!formData.clientName} className="bg-primary-600 text-white font-bold p-2.5 rounded-lg hover:bg-primary-700 disabled:opacity-50">
-                                        <CheckCircleIcon className="w-5 h-5"/>
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsClientConfirmed(true)}
+                                        disabled={!formData.clientName}
+                                        className="bg-primary-600 text-white font-bold p-2.5 rounded-lg hover:bg-primary-700 disabled:opacity-50"
+                                    >
+                                        <CheckCircleIcon className="w-5 h-5" />
                                     </button>
                                 </div>
                             )}

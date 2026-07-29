@@ -1,17 +1,23 @@
-
-import React, { useState, useRef, useEffect } from 'react';
-import { 
-    PlusIcon, PencilIcon, TrashIcon, XMarkIcon, CheckCircleIcon, 
-    ChevronUpIcon, ChevronDownIcon, Bars3Icon, ClockIcon, BriefcaseIcon, UserGroupIcon
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import {
+    PlusIcon, XMarkIcon, CheckCircleIcon,
+    Bars3Icon, ClockIcon, BriefcaseIcon, UserGroupIcon, TrashIcon,
 } from './Icons';
+import { useAuth } from '../context/AuthContext';
+import {
+    fetchPipelines,
+    syncPipelines,
+    createPipeline,
+    type PipelineDto,
+    type PipelineStageDto,
+} from '../services/pipelinesApi';
 
-// --- TYPES ---
 interface Stage {
     id: string;
     name: string;
-    color: string; // Tailwind class
+    color: string;
     order: number;
-    slaLimit: number; // Days allowed in this stage before alert
+    slaLimit: number;
 }
 
 interface Pipeline {
@@ -20,34 +26,6 @@ interface Pipeline {
     description: string;
     stages: Stage[];
 }
-
-// --- MOCK DATA ---
-const initialPipelines: Pipeline[] = [
-    {
-        id: 'sales',
-        name: 'מכירות (Sales)',
-        description: 'תהליך מכירה סטנדרטי מליד ועד סגירה.',
-        stages: [
-            { id: 'lead', name: 'ליד חדש', color: 'bg-blue-100 text-blue-700', order: 1, slaLimit: 2 },
-            { id: 'meeting', name: 'פגישה', color: 'bg-purple-100 text-purple-700', order: 2, slaLimit: 5 },
-            { id: 'proposal', name: 'הצעת מחיר', color: 'bg-yellow-100 text-yellow-700', order: 3, slaLimit: 3 },
-            { id: 'negotiation', name: 'משא ומתן', color: 'bg-orange-100 text-orange-700', order: 4, slaLimit: 7 },
-            { id: 'won', name: 'סגירה (זכייה)', color: 'bg-green-100 text-green-700', order: 5, slaLimit: 0 },
-            { id: 'lost', name: 'אבוד', color: 'bg-gray-100 text-gray-700', order: 6, slaLimit: 0 },
-        ]
-    },
-    {
-        id: 'retention',
-        name: 'שימור לקוחות (Retention)',
-        description: 'תהליך ליווי לקוח קיים ומניעת נטישה.',
-        stages: [
-            { id: 'onboarding', name: 'קליטה (Onboarding)', color: 'bg-indigo-100 text-indigo-700', order: 1, slaLimit: 14 },
-            { id: 'active', name: 'לקוח פעיל', color: 'bg-green-100 text-green-700', order: 2, slaLimit: 90 },
-            { id: 'risk', name: 'בסיכון (At Risk)', color: 'bg-red-100 text-red-700', order: 3, slaLimit: 3 },
-            { id: 'renewal', name: 'חידוש חוזה', color: 'bg-cyan-100 text-cyan-700', order: 4, slaLimit: 30 },
-        ]
-    }
-];
 
 const availableColors = [
     { label: 'כחול', value: 'bg-blue-100 text-blue-700' },
@@ -60,14 +38,30 @@ const availableColors = [
     { label: 'טורקיז', value: 'bg-teal-100 text-teal-700' },
     { label: 'ורוד', value: 'bg-pink-100 text-pink-700' },
     { label: 'אינדיגו', value: 'bg-indigo-100 text-indigo-700' },
+    { label: 'ציאן', value: 'bg-cyan-100 text-cyan-700' },
 ];
 
-// --- ADD PIPELINE MODAL ---
+function dtoToPipeline(d: PipelineDto): Pipeline {
+    return {
+        id: d.id,
+        name: d.name,
+        description: d.description || '',
+        stages: (d.stages || []).map((s: PipelineStageDto) => ({
+            id: s.id,
+            name: s.name,
+            color: s.color,
+            order: s.order,
+            slaLimit: s.slaLimit,
+        })),
+    };
+}
+
 const AddPipelineModal: React.FC<{
     isOpen: boolean;
     onClose: () => void;
     onSave: (name: string, description: string) => void;
-}> = ({ isOpen, onClose, onSave }) => {
+    saving?: boolean;
+}> = ({ isOpen, onClose, onSave, saving }) => {
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
 
@@ -78,7 +72,6 @@ const AddPipelineModal: React.FC<{
         onSave(name, description);
         setName('');
         setDescription('');
-        onClose();
     };
 
     return (
@@ -86,15 +79,15 @@ const AddPipelineModal: React.FC<{
             <div className="bg-bg-card w-full max-w-md rounded-2xl shadow-xl border border-border-default overflow-hidden animate-fade-in" onClick={e => e.stopPropagation()}>
                 <div className="p-4 border-b border-border-default flex justify-between items-center">
                     <h3 className="font-bold text-lg text-text-default">יצירת תהליך חדש</h3>
-                    <button onClick={onClose}><XMarkIcon className="w-5 h-5 text-text-muted hover:text-text-default"/></button>
+                    <button type="button" onClick={onClose}><XMarkIcon className="w-5 h-5 text-text-muted hover:text-text-default"/></button>
                 </div>
                 <form onSubmit={handleSubmit} className="p-6 space-y-4">
                     <div>
                         <label className="block text-sm font-semibold text-text-muted mb-1.5">שם התהליך</label>
-                        <input 
-                            type="text" 
-                            value={name} 
-                            onChange={e => setName(e.target.value)} 
+                        <input
+                            type="text"
+                            value={name}
+                            onChange={e => setName(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
                             placeholder="למשל: גיוס בכירים"
                             required
@@ -103,9 +96,9 @@ const AddPipelineModal: React.FC<{
                     </div>
                     <div>
                         <label className="block text-sm font-semibold text-text-muted mb-1.5">תיאור</label>
-                        <textarea 
-                            value={description} 
-                            onChange={e => setDescription(e.target.value)} 
+                        <textarea
+                            value={description}
+                            onChange={e => setDescription(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500 outline-none resize-none"
                             placeholder="תיאור קצר של התהליך..."
                             rows={3}
@@ -113,7 +106,9 @@ const AddPipelineModal: React.FC<{
                     </div>
                     <div className="flex justify-end gap-2 pt-2">
                         <button type="button" onClick={onClose} className="px-4 py-2 rounded-lg text-sm font-semibold text-text-muted hover:bg-bg-subtle">ביטול</button>
-                        <button type="submit" className="px-4 py-2 rounded-lg text-sm font-bold bg-primary-600 text-white hover:bg-primary-700 shadow-sm">צור תהליך</button>
+                        <button type="submit" disabled={saving} className="px-4 py-2 rounded-lg text-sm font-bold bg-primary-600 text-white hover:bg-primary-700 shadow-sm disabled:opacity-60">
+                            {saving ? 'שומר…' : 'צור תהליך'}
+                        </button>
                     </div>
                 </form>
             </div>
@@ -122,49 +117,118 @@ const AddPipelineModal: React.FC<{
 };
 
 const PipelineSettingsView: React.FC = () => {
-    const [pipelines, setPipelines] = useState<Pipeline[]>(initialPipelines);
-    const [activePipelineId, setActivePipelineId] = useState<string>(initialPipelines[0].id);
+    const { user } = useAuth();
+    const clientId = user?.clientId ? String(user.clientId) : null;
+
+    const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+    const [activePipelineId, setActivePipelineId] = useState<string>('');
     const [isAddModalOpen, setIsAddModalOpen] = useState(false);
-    
-    // Drag & Drop State
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [loadError, setLoadError] = useState<string | null>(null);
+    const [saveError, setSaveError] = useState<string | null>(null);
+
     const dragItem = useRef<number | null>(null);
     const dragOverItem = useRef<number | null>(null);
     const stagesContainerRef = useRef<HTMLDivElement>(null);
+    const persistEnabled = useRef(false);
+    const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const activePipeline = pipelines.find(p => p.id === activePipelineId);
 
-    // --- Actions ---
+    const schedulePersist = useCallback((snapshot: Pipeline[]) => {
+        if (!clientId || !persistEnabled.current) return;
+        setSaveError(null);
+        if (persistTimer.current) clearTimeout(persistTimer.current);
+        persistTimer.current = setTimeout(async () => {
+            persistTimer.current = null;
+            try {
+                setSaving(true);
+                const saved = await syncPipelines(clientId, snapshot);
+                setPipelines(saved.map(dtoToPipeline));
+                setActivePipelineId((prev) => {
+                    if (saved.some((p) => p.id === prev)) return prev;
+                    return saved[0]?.id || '';
+                });
+            } catch (e: unknown) {
+                setSaveError(e instanceof Error ? e.message : 'שמירה נכשלה');
+            } finally {
+                setSaving(false);
+            }
+        }, 700);
+    }, [clientId]);
 
-    const handleAddPipeline = (name: string, description: string) => {
-        const newPipeline: Pipeline = {
-            id: Date.now().toString(),
-            name,
-            description,
-            stages: []
+    useEffect(() => {
+        persistEnabled.current = false;
+        if (!clientId) {
+            setPipelines([]);
+            setActivePipelineId('');
+            setLoadError(null);
+            return;
+        }
+        let cancelled = false;
+        setLoading(true);
+        setLoadError(null);
+        void fetchPipelines(clientId)
+            .then((rows) => {
+                if (cancelled) return;
+                const mapped = rows.map(dtoToPipeline);
+                setPipelines(mapped);
+                setActivePipelineId(mapped[0]?.id || '');
+                queueMicrotask(() => {
+                    persistEnabled.current = true;
+                });
+            })
+            .catch((e: unknown) => {
+                if (cancelled) return;
+                setLoadError(e instanceof Error ? e.message : 'טעינה נכשלה');
+                setPipelines([]);
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+            if (persistTimer.current) clearTimeout(persistTimer.current);
         };
-        setPipelines([...pipelines, newPipeline]);
-        setActivePipelineId(newPipeline.id);
+    }, [clientId]);
+
+    const updatePipelines = (next: Pipeline[]) => {
+        setPipelines(next);
+        schedulePersist(next);
+    };
+
+    const handleAddPipeline = async (name: string, description: string) => {
+        if (!clientId) return;
+        try {
+            setSaving(true);
+            setSaveError(null);
+            const created = await createPipeline(clientId, { name, description });
+            const mapped = dtoToPipeline(created);
+            setPipelines((prev) => [...prev, mapped]);
+            setActivePipelineId(mapped.id);
+            setIsAddModalOpen(false);
+        } catch (e: unknown) {
+            setSaveError(e instanceof Error ? e.message : 'יצירה נכשלה');
+        } finally {
+            setSaving(false);
+        }
     };
 
     const handleAddStage = () => {
         if (!activePipeline) return;
-        
         const newStage: Stage = {
-            id: Date.now().toString(),
+            id: `tmp-${Date.now()}`,
             name: 'שלב חדש',
             color: 'bg-gray-100 text-gray-700',
             order: activePipeline.stages.length + 1,
-            slaLimit: 3
+            slaLimit: 3,
         };
-
         const updatedPipeline = {
             ...activePipeline,
-            stages: [...activePipeline.stages, newStage]
+            stages: [...activePipeline.stages, newStage],
         };
-
-        setPipelines(prev => prev.map(p => p.id === activePipelineId ? updatedPipeline : p));
-
-        // Scroll to bottom to show new stage
+        updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
         setTimeout(() => {
             if (stagesContainerRef.current) {
                 stagesContainerRef.current.scrollTop = stagesContainerRef.current.scrollHeight;
@@ -172,27 +236,34 @@ const PipelineSettingsView: React.FC = () => {
         }, 100);
     };
 
-    const handleUpdateStage = (stageId: string, field: keyof Stage, value: any) => {
+    const handleUpdateStage = (stageId: string, field: keyof Stage, value: unknown) => {
         if (!activePipeline) return;
         const updatedPipeline = {
             ...activePipeline,
-            stages: activePipeline.stages.map(s => s.id === stageId ? { ...s, [field]: value } : s)
+            stages: activePipeline.stages.map(s => s.id === stageId ? { ...s, [field]: value } : s),
         };
-        setPipelines(prev => prev.map(p => p.id === activePipelineId ? updatedPipeline : p));
+        updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
     };
 
     const handleDeleteStage = (stageId: string) => {
         if (!activePipeline) return;
-        if (window.confirm('האם למחוק שלב זה? מועמדים בשלב זה יועברו לארכיון.')) {
-            const updatedPipeline = {
-                ...activePipeline,
-                stages: activePipeline.stages.filter(s => s.id !== stageId)
-            };
-            setPipelines(prev => prev.map(p => p.id === activePipelineId ? updatedPipeline : p));
-        }
+        if (!window.confirm('האם למחוק שלב זה?')) return;
+        const updatedPipeline = {
+            ...activePipeline,
+            stages: activePipeline.stages
+                .filter(s => s.id !== stageId)
+                .map((s, i) => ({ ...s, order: i + 1 })),
+        };
+        updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
     };
 
-    // --- Drag & Drop Logic ---
+    const handleDeletePipeline = () => {
+        if (!activePipeline) return;
+        if (!window.confirm(`למחוק את התהליך "${activePipeline.name}" ואת כל שלביו?`)) return;
+        const next = pipelines.filter(p => p.id !== activePipelineId);
+        setActivePipelineId(next[0]?.id || '');
+        updatePipelines(next);
+    };
 
     const handleDragStart = (e: React.DragEvent, position: number) => {
         dragItem.current = position;
@@ -201,7 +272,7 @@ const PipelineSettingsView: React.FC = () => {
 
     const handleDragEnter = (e: React.DragEvent, position: number) => {
         dragOverItem.current = position;
-        e.preventDefault(); // Necessary to allow dropping
+        e.preventDefault();
     };
 
     const handleDragEnd = () => {
@@ -210,50 +281,56 @@ const PipelineSettingsView: React.FC = () => {
             dragOverItem.current = null;
             return;
         }
-
         const newStages = [...activePipeline.stages];
         const draggedItemContent = newStages[dragItem.current];
-        
         newStages.splice(dragItem.current, 1);
         newStages.splice(dragOverItem.current, 0, draggedItemContent);
-
-        // Reassign orders
         const reorderedStages = newStages.map((s, i) => ({ ...s, order: i + 1 }));
-
-        const updatedPipeline = {
-            ...activePipeline,
-            stages: reorderedStages
-        };
-
-        setPipelines(prev => prev.map(p => p.id === activePipelineId ? updatedPipeline : p));
-        
+        const updatedPipeline = { ...activePipeline, stages: reorderedStages };
+        updatePipelines(pipelines.map(p => p.id === activePipelineId ? updatedPipeline : p));
         dragItem.current = null;
         dragOverItem.current = null;
     };
 
+    if (!clientId) {
+        return (
+            <div className="p-8 text-center text-text-muted">
+                יש להתחבר כמשתמש לקוח כדי לנהל תהליכים.
+            </div>
+        );
+    }
+
+    if (loading) {
+        return <div className="p-8 text-center text-text-muted">טוען תהליכים…</div>;
+    }
+
+    if (loadError) {
+        return <div className="p-8 text-center text-red-600">{loadError}</div>;
+    }
 
     return (
         <div className="h-full flex flex-col md:flex-row gap-6 animate-fade-in pb-10">
-             <style>{`.ghost { opacity: 0.5; background: #f3f4f6; }`}</style>
-            
-            {/* Left Sidebar: Pipelines List */}
+            <style>{`.ghost { opacity: 0.5; background: #f3f4f6; }`}</style>
+
             <div className="w-full md:w-1/4 flex flex-col gap-4">
-                 <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm h-full">
+                <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm h-full">
                     <div className="flex justify-between items-center mb-4 px-1">
                         <h2 className="text-lg font-bold text-text-default">תהליכים</h2>
-                        <button 
+                        <button
+                            type="button"
                             onClick={() => setIsAddModalOpen(true)}
-                            className="text-primary-600 hover:bg-primary-50 p-1.5 rounded-lg transition-colors" 
+                            className="text-primary-600 hover:bg-primary-50 p-1.5 rounded-lg transition-colors"
                             title="הוסף תהליך חדש"
                         >
                             <PlusIcon className="w-5 h-5"/>
                         </button>
                     </div>
-                    
+
                     <div className="space-y-2">
-                        {pipelines.map(pipeline => (
+                        {pipelines.map((pipeline, idx) => (
                             <button
                                 key={pipeline.id}
+                                type="button"
                                 onClick={() => setActivePipelineId(pipeline.id)}
                                 className={`w-full text-right p-4 rounded-xl border transition-all flex items-center justify-between group ${
                                     activePipelineId === pipeline.id
@@ -263,7 +340,7 @@ const PipelineSettingsView: React.FC = () => {
                             >
                                 <div className="flex items-center gap-3">
                                     <div className={`p-2 rounded-lg ${activePipelineId === pipeline.id ? 'bg-white text-primary-600' : 'bg-bg-subtle text-text-muted'}`}>
-                                        {pipeline.id === 'sales' ? <BriefcaseIcon className="w-5 h-5"/> : <UserGroupIcon className="w-5 h-5"/>}
+                                        {idx === 0 ? <BriefcaseIcon className="w-5 h-5"/> : <UserGroupIcon className="w-5 h-5"/>}
                                     </div>
                                     <div>
                                         <span className={`font-bold block ${activePipelineId === pipeline.id ? 'text-primary-900' : 'text-text-default'}`}>
@@ -274,31 +351,48 @@ const PipelineSettingsView: React.FC = () => {
                                 </div>
                             </button>
                         ))}
+                        {!pipelines.length && (
+                            <p className="text-sm text-text-muted px-1">אין תהליכים עדיין.</p>
+                        )}
                     </div>
+                    {(saving || saveError) && (
+                        <p className={`text-xs mt-3 px-1 ${saveError ? 'text-red-600' : 'text-text-muted'}`}>
+                            {saveError || 'שומר…'}
+                        </p>
+                    )}
                 </div>
             </div>
 
-            {/* Right Content: Stage Editor */}
             <div className="w-full md:w-3/4 flex flex-col gap-4">
                 <div className="bg-bg-card rounded-2xl border border-border-default p-6 shadow-sm flex flex-col h-full">
                 {activePipeline ? (
                     <>
-                        <header className="mb-6 flex justify-between items-end border-b border-border-default pb-4">
+                        <header className="mb-6 flex justify-between items-end border-b border-border-default pb-4 gap-3">
                             <div>
                                 <h2 className="text-2xl font-black text-text-default">{activePipeline.name}</h2>
                                 <p className="text-sm text-text-muted mt-1">{activePipeline.description}</p>
                             </div>
-                            <button 
-                                onClick={handleAddStage}
-                                className="flex items-center gap-2 bg-primary-600 text-white font-bold py-2 px-5 rounded-xl hover:bg-primary-700 transition shadow-md"
-                            >
-                                <PlusIcon className="w-5 h-5" />
-                                <span>הוסף שלב</span>
-                            </button>
+                            <div className="flex items-center gap-2">
+                                <button
+                                    type="button"
+                                    onClick={handleDeletePipeline}
+                                    className="p-2 text-text-subtle hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors"
+                                    title="מחק תהליך"
+                                >
+                                    <TrashIcon className="w-5 h-5" />
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={handleAddStage}
+                                    className="flex items-center gap-2 bg-primary-600 text-white font-bold py-2 px-5 rounded-xl hover:bg-primary-700 transition shadow-md"
+                                >
+                                    <PlusIcon className="w-5 h-5" />
+                                    <span>הוסף שלב</span>
+                                </button>
+                            </div>
                         </header>
 
                         <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar" ref={stagesContainerRef}>
-                             {/* Header Row */}
                              <div className="grid grid-cols-[40px_2fr_2fr_1fr_40px] gap-4 px-4 py-2 text-xs font-bold text-text-muted uppercase tracking-wider mb-2">
                                  <div></div>
                                  <div>שם השלב (תצוגה)</div>
@@ -309,8 +403,8 @@ const PipelineSettingsView: React.FC = () => {
 
                             <div className="space-y-3">
                                 {activePipeline.stages.map((stage, index) => (
-                                    <div 
-                                        key={stage.id} 
+                                    <div
+                                        key={stage.id}
                                         draggable
                                         onDragStart={(e) => handleDragStart(e, index)}
                                         onDragEnter={(e) => handleDragEnter(e, index)}
@@ -318,57 +412,54 @@ const PipelineSettingsView: React.FC = () => {
                                         onDragOver={(e) => e.preventDefault()}
                                         className="grid grid-cols-[40px_2fr_2fr_1fr_40px] gap-4 items-center p-3 bg-white border border-border-default rounded-xl group hover:shadow-md transition-all cursor-default"
                                     >
-                                        {/* Drag Handle */}
                                         <div className="flex items-center justify-center cursor-grab active:cursor-grabbing text-text-subtle hover:text-primary-600">
                                             <Bars3Icon className="w-5 h-5"/>
                                         </div>
-                                        
-                                        {/* Name Input & Preview */}
+
                                         <div>
-                                            <input 
-                                                type="text" 
+                                            <input
+                                                type="text"
                                                 value={stage.name}
                                                 onChange={(e) => handleUpdateStage(stage.id, 'name', e.target.value)}
-                                                className={`w-full text-sm font-bold bg-transparent border-b-2 border-transparent focus:border-primary-500 outline-none px-1 py-0.5 rounded transition-colors ${stage.color.split(' ')[1]}`} // Use text color from class
+                                                className={`w-full text-sm font-bold bg-transparent border-b-2 border-transparent focus:border-primary-500 outline-none px-1 py-0.5 rounded transition-colors ${stage.color.split(' ')[1] || ''}`}
                                                 placeholder="שם השלב"
                                             />
                                         </div>
 
-                                        {/* Color Palette */}
                                         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
                                             {availableColors.map(c => {
-                                                const bgClass = c.value.split(' ')[0]; // Extract bg class
+                                                const bgClass = c.value.split(' ')[0];
                                                 const isSelected = stage.color === c.value;
                                                 return (
                                                     <button
                                                         key={c.label}
+                                                        type="button"
                                                         onClick={() => handleUpdateStage(stage.id, 'color', c.value)}
                                                         className={`w-6 h-6 rounded-full flex-shrink-0 transition-all border-2 ${bgClass} ${isSelected ? 'border-primary-600 scale-110 ring-1 ring-offset-1 ring-primary-300' : 'border-transparent hover:scale-105'}`}
                                                         title={c.label}
                                                     >
                                                         {isSelected && <CheckCircleIcon className="w-full h-full text-primary-700 p-0.5"/>}
                                                     </button>
-                                                )
+                                                );
                                             })}
                                         </div>
 
-                                        {/* SLA Input */}
                                         <div className="flex items-center gap-2 bg-bg-subtle/50 px-2 py-1 rounded-lg border border-border-default max-w-[100px]">
                                             <ClockIcon className="w-4 h-4 text-text-subtle" />
-                                            <input 
-                                                type="number" 
+                                            <input
+                                                type="number"
                                                 min="0"
                                                 value={stage.slaLimit}
-                                                onChange={(e) => handleUpdateStage(stage.id, 'slaLimit', parseInt(e.target.value) || 0)}
+                                                onChange={(e) => handleUpdateStage(stage.id, 'slaLimit', parseInt(e.target.value, 10) || 0)}
                                                 className="w-full bg-transparent text-sm font-semibold text-center outline-none"
                                                 title="התראה לאחר X ימים ללא שינוי"
                                             />
                                         </div>
 
-                                        {/* Delete Action */}
                                         <div className="flex items-center justify-center">
-                                            <button 
-                                                onClick={() => handleDeleteStage(stage.id)} 
+                                            <button
+                                                type="button"
+                                                onClick={() => handleDeleteStage(stage.id)}
                                                 className="p-2 text-text-subtle hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
                                                 title="מחק שלב"
                                             >
@@ -384,7 +475,7 @@ const PipelineSettingsView: React.FC = () => {
                              <div className="bg-blue-100 p-1.5 rounded-full h-fit"><CheckCircleIcon className="w-5 h-5 text-blue-600"/></div>
                              <div>
                                  <strong>טיפ:</strong> סדר השלבים משפיע על תצוגת הלוח (Kanban). גרור את השלבים כדי לשנות את הסדר.
-                                 הגדרת "SLA" תצבע מועמדים בלוח בצבע אדום כאשר הם חורגים מהזמן המוגדר.
+                                 הגדרת "SLA" תצבע פריטים בלוח באדום כאשר הם חורגים מהזמן המוגדר.
                              </div>
                         </div>
                     </>
@@ -396,10 +487,11 @@ const PipelineSettingsView: React.FC = () => {
                 </div>
             </div>
 
-            <AddPipelineModal 
-                isOpen={isAddModalOpen} 
-                onClose={() => setIsAddModalOpen(false)} 
-                onSave={handleAddPipeline} 
+            <AddPipelineModal
+                isOpen={isAddModalOpen}
+                onClose={() => setIsAddModalOpen(false)}
+                onSave={handleAddPipeline}
+                saving={saving}
             />
         </div>
     );

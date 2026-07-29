@@ -18,6 +18,7 @@ import { sendNotificationEmail } from '../services/emailSendApi';
 import { logWhatsappComposeOpen } from '../services/messagingApi';
 import { applyMessageTemplatePlaceholders, loadMessagingPlaceholderValues } from '../services/messageTemplatePlaceholders';
 import { useAuth } from '../context/AuthContext';
+import type { MessageRecipientOption } from '../hooks/useUIState';
 
 type MessageMode = 'whatsapp' | 'sms' | 'email';
 
@@ -52,6 +53,25 @@ function collectRecipientEmailsFromBulkField(candidateEmail?: string | null, can
     }
     const one = resolveRecipientEmail(null, candidatePhone);
     return one ? [one] : [];
+}
+
+function optionHasChannel(opt: MessageRecipientOption, mode: MessageMode): boolean {
+    if (mode === 'email') return Boolean(resolveRecipientEmail(opt.email, opt.phone));
+    return Boolean(String(opt.phone || '').replace(/\D/g, '').length >= 9);
+}
+
+function defaultSelectedRecipientIds(
+    options: MessageRecipientOption[],
+    mode: MessageMode,
+    initialIds?: string[],
+): string[] {
+    if (initialIds && initialIds.length) {
+        const allowed = new Set(options.map((o) => o.id));
+        return initialIds.filter((id) => allowed.has(id));
+    }
+    const withChannel = options.filter((o) => optionHasChannel(o, mode)).map((o) => o.id);
+    if (withChannel.length) return withChannel.slice(0, 1);
+    return options.length ? [options[0].id] : [];
 }
 
 function escapeHtml(s: string) {
@@ -112,6 +132,8 @@ interface SendMessageModalProps {
   candidatePhone: string;
   candidateEmail?: string | null;
   candidateId?: string | null;
+  recipientOptions?: MessageRecipientOption[];
+  initialRecipientIds?: string[];
 }
 
 const modalConfig = {
@@ -152,6 +174,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     candidatePhone,
     candidateEmail,
     candidateId,
+    recipientOptions,
+    initialRecipientIds,
 }) => {
     const [content, setContent] = useState('');
     const [subject, setSubject] = useState('');
@@ -170,12 +194,46 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const [jobPickerOpen, setJobPickerOpen] = useState(false);
     const [jobSearchQuery, setJobSearchQuery] = useState('');
     const jobPickerRef = useRef<HTMLDivElement>(null);
+    const [recipientPickerOpen, setRecipientPickerOpen] = useState(false);
+    const [recipientSearchQuery, setRecipientSearchQuery] = useState('');
+    const [selectedRecipientIds, setSelectedRecipientIds] = useState<string[]>([]);
+    const recipientPickerRef = useRef<HTMLDivElement>(null);
     const baseTemplateRef = useRef<{ subject: string; content: string } | null>(null);
     const [placeholderValues, setPlaceholderValues] = useState<Record<string, string>>({});
 
     const titleId = useId();
     const config = modalConfig[mode];
     const { user } = useAuth();
+
+    const hasRecipientPicker = Array.isArray(recipientOptions) && recipientOptions.length > 0;
+
+    const selectedRecipients = useMemo(() => {
+        if (!hasRecipientPicker || !recipientOptions) return [];
+        const byId = new Map(recipientOptions.map((o) => [o.id, o]));
+        return selectedRecipientIds.map((id) => byId.get(id)).filter(Boolean) as MessageRecipientOption[];
+    }, [hasRecipientPicker, recipientOptions, selectedRecipientIds]);
+
+    const effectiveName = useMemo(() => {
+        if (!hasRecipientPicker || selectedRecipients.length === 0) return candidateName;
+        if (selectedRecipients.length === 1) return selectedRecipients[0].name;
+        return `${selectedRecipients[0].name} (+${selectedRecipients.length - 1})`;
+    }, [hasRecipientPicker, selectedRecipients, candidateName]);
+
+    const effectivePhone = useMemo(() => {
+        if (!hasRecipientPicker) return candidatePhone;
+        return selectedRecipients
+            .map((r) => String(r.phone || '').trim())
+            .filter(Boolean)
+            .join('; ');
+    }, [hasRecipientPicker, selectedRecipients, candidatePhone]);
+
+    const effectiveEmail = useMemo(() => {
+        if (!hasRecipientPicker) return candidateEmail;
+        return selectedRecipients
+            .map((r) => String(r.email || '').trim())
+            .filter(Boolean)
+            .join(', ');
+    }, [hasRecipientPicker, selectedRecipients, candidateEmail]);
 
     /** Prefer prop from opener; fall back to URL e.g. #/candidates/:candidateId when modal is global. */
     const candidateRouteMatch = useMatch({ path: '/candidates/:candidateId', end: false });
@@ -199,11 +257,21 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     }, [templates, config.channel]);
 
     const recipientSummary = useMemo(() => {
-        const parts = [candidateName].filter(Boolean);
-        if (candidatePhone) parts.push(candidatePhone);
-        if (candidateEmail) parts.push(candidateEmail);
+        const parts = [effectiveName].filter(Boolean);
+        if (effectivePhone) parts.push(effectivePhone);
+        if (effectiveEmail) parts.push(effectiveEmail);
         return parts.join(' · ');
-    }, [candidateName, candidatePhone, candidateEmail]);
+    }, [effectiveName, effectivePhone, effectiveEmail]);
+
+    const filteredRecipientOptions = useMemo(() => {
+        if (!recipientOptions) return [];
+        const q = recipientSearchQuery.trim().toLowerCase();
+        if (!q) return recipientOptions;
+        return recipientOptions.filter((o) => {
+            const hay = `${o.name} ${o.subtitle || ''} ${o.email || ''} ${o.phone || ''}`.toLowerCase();
+            return hay.includes(q);
+        });
+    }, [recipientOptions, recipientSearchQuery]);
 
     const filteredJobsForPicker = useMemo(() => {
         const q = jobSearchQuery.trim().toLowerCase();
@@ -225,6 +293,16 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     }, [jobPickerOpen]);
 
     useEffect(() => {
+        if (!recipientPickerOpen) return;
+        const onDoc = (e: MouseEvent) => {
+            const el = recipientPickerRef.current;
+            if (el && !el.contains(e.target as Node)) setRecipientPickerOpen(false);
+        };
+        document.addEventListener('mousedown', onDoc);
+        return () => document.removeEventListener('mousedown', onDoc);
+    }, [recipientPickerOpen]);
+
+    useEffect(() => {
         if (!isOpen) return;
         setContent('');
         setSubject('');
@@ -233,6 +311,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setSelectedJobId('');
         setJobPickerOpen(false);
         setJobSearchQuery('');
+        setRecipientPickerOpen(false);
+        setRecipientSearchQuery('');
+        setSelectedRecipientIds(
+            hasRecipientPicker && recipientOptions
+                ? defaultSelectedRecipientIds(recipientOptions, mode, initialRecipientIds)
+                : [],
+        );
         setTemplatesError(null);
         setJobsError(null);
         setSubmitError(null);
@@ -276,7 +361,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [isOpen, mode]);
+    }, [isOpen, mode, hasRecipientPicker, recipientOptions, initialRecipientIds]);
 
     const selectedJobRow = useMemo(
         () => (selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined),
@@ -289,9 +374,9 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         void loadMessagingPlaceholderValues({
             candidateId: resolvedCandidateId,
             jobId: selectedJobId || null,
-            fallbackCandidateName: candidateName,
-            fallbackCandidatePhone: candidatePhone,
-            fallbackCandidateEmail: candidateEmail,
+            fallbackCandidateName: effectiveName,
+            fallbackCandidatePhone: effectivePhone,
+            fallbackCandidateEmail: effectiveEmail,
             jobComposeRow: selectedJobRow,
             recruiter: user,
         }).then((vals) => {
@@ -304,9 +389,9 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         isOpen,
         resolvedCandidateId,
         selectedJobId,
-        candidateName,
-        candidatePhone,
-        candidateEmail,
+        effectiveName,
+        effectivePhone,
+        effectiveEmail,
         selectedJobRow,
         user,
     ]);
@@ -343,6 +428,11 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
 
+        if (hasRecipientPicker && selectedRecipients.length === 0) {
+            setSubmitError('בחרו לפחות איש קשר אחד לשליחה');
+            return;
+        }
+
         const trimmedContent = content.trim();
         const selectedTpl = selectedTemplateId
             ? templates.find((t) => t.id === selectedTemplateId)
@@ -366,11 +456,10 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         if (selectedJob) {
             footerPlainParts.push(`משרה מקושרת:\n${jobValuePlain}`);
         }
-        const footerPlain = footerPlainParts.length ? `\n\n—\n${footerPlainParts.join('\n\n')}` : '';
         const textOut = `${trimmedContent}`;
 
         if (mode === 'whatsapp') {
-            const waPhone = toWhatsAppPhoneDigits(candidatePhone);
+            const waPhone = toWhatsAppPhoneDigits(effectivePhone);
             if (!waPhone) {
                 setSubmitError('אין מספר טלפון תקין ל־WhatsApp (נדרש מספר עם קידומת או 0)');
                 return;
@@ -379,8 +468,8 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             try {
                 await logWhatsappComposeOpen({
                     candidateId: resolvedCandidateId,
-                    candidateName,
-                    phone: candidatePhone,
+                    candidateName: effectiveName,
+                    phone: effectivePhone,
                     messagePreview: textOut,
                     templateId: selectedTemplateId || null,
                     jobId: selectedJobId || null,
@@ -397,7 +486,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         }
 
         if (mode === 'sms') {
-            const phones = String(candidatePhone || '')
+            const phones = String(effectivePhone || '')
                 .split(/[;,\n]+/)
                 .map((s) => s.trim())
                 .filter(Boolean);
@@ -427,9 +516,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
 
-        const toEmails = collectRecipientEmailsFromBulkField(candidateEmail, candidatePhone);
+        const toEmails = collectRecipientEmailsFromBulkField(effectiveEmail, effectivePhone);
         if (!toEmails.length) {
-            setSubmitError('אין כתובת מייל לנמען. עדכנו מייל במועמד או באיש הקשר.');
+            setSubmitError(
+                hasRecipientPicker
+                    ? 'לאנשי הקשר שנבחרו אין כתובת מייל. בחרו איש קשר עם מייל או עדכנו פרטים.'
+                    : 'אין כתובת מייל לנמען. עדכנו מייל במועמד או באיש הקשר.',
+            );
             return;
         }
         if (!subject.trim()) {
@@ -479,7 +572,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                     taskPayload: {
                         source: 'SendMessageModal',
                         candidateId: resolvedCandidateId,
-                        candidateName,
+                        candidateName: effectiveName,
                         bulkRecipientCount: toEmails.length,
                         templateId: selectedTemplateId || null,
                         jobId: selectedJobId || null,
@@ -495,6 +588,13 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         } finally {
             setIsSubmitting(false);
         }
+    };
+
+    const toggleRecipientId = (id: string) => {
+        setSelectedRecipientIds((prev) => {
+            if (prev.includes(id)) return prev.filter((x) => x !== id);
+            return [...prev, id];
+        });
     };
 
     const handleAttachmentChange = (index: number, value: string) => {
@@ -535,7 +635,92 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
                                 <label className="block text-sm font-semibold text-text-muted mb-1.5">נמען:</label>
-                                <input type="text" value={recipientSummary} disabled className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5" />
+                                {hasRecipientPicker ? (
+                                    <div className="relative" ref={recipientPickerRef}>
+                                        <button
+                                            type="button"
+                                            onClick={() => setRecipientPickerOpen((o) => !o)}
+                                            className="w-full flex items-center justify-between gap-2 bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 text-right"
+                                            aria-haspopup="listbox"
+                                            aria-expanded={recipientPickerOpen}
+                                        >
+                                            <span className="truncate flex-1">
+                                                {selectedRecipients.length === 0
+                                                    ? 'בחרו איש קשר...'
+                                                    : selectedRecipients.length === 1
+                                                      ? `${selectedRecipients[0].name}${selectedRecipients[0].email ? ` · ${selectedRecipients[0].email}` : ''}`
+                                                      : `${selectedRecipients.length} אנשי קשר נבחרו`}
+                                            </span>
+                                            <ChevronDownIcon className={`w-4 h-4 flex-shrink-0 transition-transform ${recipientPickerOpen ? 'rotate-180' : ''}`} />
+                                        </button>
+                                        {recipientPickerOpen && (
+                                            <div
+                                                className="absolute z-50 mt-1 w-full rounded-lg border border-border-default bg-bg-card shadow-lg flex flex-col max-h-72 overflow-hidden"
+                                                role="listbox"
+                                                aria-multiselectable="true"
+                                            >
+                                                <div className="p-2 border-b border-border-default flex items-center gap-2 bg-bg-subtle/40">
+                                                    <MagnifyingGlassIcon className="w-4 h-4 text-text-muted flex-shrink-0" />
+                                                    <input
+                                                        type="search"
+                                                        value={recipientSearchQuery}
+                                                        onChange={(e) => setRecipientSearchQuery(e.target.value)}
+                                                        placeholder="חיפוש איש קשר..."
+                                                        className="flex-1 min-w-0 bg-bg-input border border-border-default text-text-default text-sm rounded-md px-2 py-1.5"
+                                                        autoComplete="off"
+                                                        aria-label="חיפוש איש קשר"
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                    />
+                                                </div>
+                                                <ul className="overflow-y-auto py-1 text-sm">
+                                                    {filteredRecipientOptions.map((opt) => {
+                                                        const checked = selectedRecipientIds.includes(opt.id);
+                                                        const hasEmail = Boolean(resolveRecipientEmail(opt.email, opt.phone));
+                                                        const hasPhone = Boolean(String(opt.phone || '').replace(/\D/g, '').length >= 9);
+                                                        const channelOk = mode === 'email' ? hasEmail : hasPhone;
+                                                        return (
+                                                            <li key={opt.id}>
+                                                                <label
+                                                                    className={`w-full flex items-start gap-2 px-3 py-2 hover:bg-bg-hover cursor-pointer ${
+                                                                        checked ? 'bg-primary-50' : ''
+                                                                    } ${!channelOk ? 'opacity-70' : ''}`}
+                                                                >
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        className="mt-1 w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                                                                        checked={checked}
+                                                                        onChange={() => toggleRecipientId(opt.id)}
+                                                                    />
+                                                                    <span className="min-w-0 flex-1 text-right">
+                                                                        <span className="block font-medium text-text-default truncate">{opt.name}</span>
+                                                                        {opt.subtitle ? (
+                                                                            <span className="block text-xs text-text-muted truncate">{opt.subtitle}</span>
+                                                                        ) : null}
+                                                                        <span className="block text-xs text-text-subtle truncate">
+                                                                            {mode === 'email'
+                                                                                ? (opt.email || 'אין מייל')
+                                                                                : (opt.phone || 'אין טלפון')}
+                                                                        </span>
+                                                                    </span>
+                                                                </label>
+                                                            </li>
+                                                        );
+                                                    })}
+                                                </ul>
+                                                {filteredRecipientOptions.length === 0 && (
+                                                    <div className="px-3 py-4 text-center text-text-subtle text-xs">
+                                                        לא נמצאו אנשי קשר
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {selectedRecipients.length > 0 && (
+                                            <p className="text-xs text-text-subtle mt-1 truncate">{recipientSummary}</p>
+                                        )}
+                                    </div>
+                                ) : (
+                                    <input type="text" value={recipientSummary} disabled className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5" />
+                                )}
                             </div>
                             <div>
                                 <label className="block text-sm font-semibold text-text-muted mb-1.5">תבנית שמורה :</label>

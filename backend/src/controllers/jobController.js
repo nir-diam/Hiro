@@ -7,6 +7,9 @@ const Job = require('../models/Job');
 const Tag = require('../models/Tag');
 const Client = require('../models/Client');
 const ClientContact = require('../models/ClientContact');
+const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+const Organization = require('../models/Organization');
+const OrganizationTmp = require('../models/OrganizationTmp');
 const Candidate = require('../models/Candidate');
 const JobCandidate = require('../models/JobCandidate');
 const systemEventEmitter = require('../utils/systemEventEmitter');
@@ -23,6 +26,34 @@ const {
 const { resolveEngineConfigForJob } = require('../services/matchingEngineService');
 
 const isMissingValue = (v) => v === undefined || v === null || v === '';
+
+/**
+ * Merges publication timestamps into a new recruitmentSources array.
+ * - Sets publishedAt when a source first becomes 'published'.
+ * - Sets unpublishedAt when a published source becomes 'draft'.
+ * - Clears unpublishedAt when a source is re-published.
+ * - Preserves existing timestamps when status hasn't changed.
+ */
+const applySourceTimestamps = (newSources, existingSources) => {
+  const now = new Date().toISOString();
+  const existingMap = Object.fromEntries(
+    (Array.isArray(existingSources) ? existingSources : []).map((s) => [String(s.id), s]),
+  );
+  return newSources.map((src) => {
+    const prev = existingMap[String(src.id)] || {};
+    const wasPublished = prev.status === 'published';
+    const isPublished = src.status === 'published';
+
+    let publishedAt = src.publishedAt || prev.publishedAt || null;
+    let unpublishedAt = src.unpublishedAt || prev.unpublishedAt || null;
+
+    if (!wasPublished && isPublished && !publishedAt) publishedAt = now;   // first publish
+    if (wasPublished && !isPublished && !unpublishedAt) unpublishedAt = now; // first un-publish
+    if (isPublished) unpublishedAt = null;                                  // reset on re-publish
+
+    return { ...src, publishedAt, unpublishedAt };
+  });
+};
 
 const valuesDiffer = (a, b) => {
   if (isMissingValue(a) && isMissingValue(b)) return false;
@@ -201,21 +232,51 @@ const listForCompose = async (req, res) => {
       return res.json([]);
     }
 
-    const scopedJobs = await jobPublicationService.jobsForClientScope(client);
-    const legacyIds = scopedJobs.map((j) => j.id).filter(Boolean);
+    // All jobs for this client account.
+    const rows = await Job.findAll({
+      where: { clientId: effectiveClientId },
+      attributes: { exclude: ['events', 'skills', 'embedding'] },
+      order: [['openDate', 'DESC']],
+    });
 
-    const whereOr = [{ clientId: effectiveClientId }];
-    if (legacyIds.length) {
-      whereOr.push({ id: { [require('sequelize').Op.in]: legacyIds } });
+    // Scope to linked organizations if any are configured.
+    // This prevents a tenant managing multiple companies from seeing every company's jobs.
+    const linkedOrgs = await ClientOrganizationLink.findAll({
+      where: { clientId: effectiveClientId },
+      include: [
+        { model: Organization, as: 'organization', required: false, attributes: ['id', 'name'] },
+        { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
+      ],
+    });
+
+    let scopedRows = rows;
+    if (linkedOrgs.length > 0) {
+      const linkedOrgIds = new Set();
+      const linkedOrgNames = new Set();
+      for (const link of linkedOrgs) {
+        const org = link.organization || link.organizationTmp;
+        if (!org) continue;
+        linkedOrgIds.add(String(org.id));
+        const nm = (org.name || '').toLowerCase().trim();
+        if (nm) linkedOrgNames.add(nm);
+      }
+
+      const filtered = rows.filter((job) => {
+        const plain = job.toJSON ? job.toJSON() : job;
+        if (plain.organizationId && linkedOrgIds.has(String(plain.organizationId))) return true;
+        const clientName = String(plain.client || '').toLowerCase().trim();
+        return clientName && linkedOrgNames.has(clientName);
+      });
+
+      // Only apply the org-scope filter if it yields results; otherwise fall back to all jobs.
+      if (filtered.length > 0) scopedRows = filtered;
     }
 
-    const rows = await Job.findAll({
-      where: { [require('sequelize').Op.or]: whereOr },
-      attributes: { exclude: ['events', 'skills', 'embedding'] },
-    });
-    await jobService.hydrateJobsSkills(rows);
-    await jobService.enrichJobsWithCandidateCounts(rows);
-    return res.json(rows.map(jobService.toApiJob));
+    await jobService.hydrateJobsSkills(scopedRows);
+    await jobService.enrichJobsWithCandidateCounts(scopedRows);
+    const { enrichJobsWithOrganizationIds } = require('../services/jobOrganizationResolveService');
+    await enrichJobsWithOrganizationIds(scopedRows);
+    return res.json(scopedRows.map(jobService.toApiJob));
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
   }
@@ -436,6 +497,23 @@ const update = async (req, res) => {
       const toAdd = languageSkills.filter(Boolean);
       if (toAdd.length) {
         payload.skills = [...existingSkills, ...toAdd];
+      }
+    }
+
+    // Stamp publish/unpublish timestamps whenever recruitmentSources changes
+    if (Array.isArray(payload.recruitmentSources) && previous) {
+      const prevSources = Array.isArray(previous.recruitmentSources) ? previous.recruitmentSources : [];
+      payload.recruitmentSources = applySourceTimestamps(payload.recruitmentSources, prevSources);
+    }
+
+    // For tenant users, always preserve the correct clientId — never let the payload override it
+    // with null/undefined and accidentally disconnect the job from the tenant account.
+    const user = req.dbUser;
+    const isPlatformAdminUser = user?.role === 'admin' || user?.role === 'super_admin';
+    if (!isPlatformAdminUser && user?.clientId) {
+      const tenantClient = await Client.findByPk(user.clientId, { attributes: ['id'] });
+      if (tenantClient) {
+        payload.clientId = tenantClient.id;
       }
     }
 
@@ -844,6 +922,8 @@ const listBoardPublications = async (req, res) => {
           src->>'name'                                AS "sourceName",
           COALESCE(src->>'status', 'draft')           AS "sourceStatus",
           (src->>'alertDays')::integer                AS "alertDays",
+          src->>'publishedAt'                         AS "publishedAt",
+          src->>'unpublishedAt'                       AS "unpublishedAt",
           COALESCE(
             (SELECT COUNT(*)::int
              FROM candidates c
@@ -884,7 +964,9 @@ const patchBoardSources = async (req, res) => {
       }
     }
 
-    const sources = Array.isArray(recruitmentSources) ? recruitmentSources : [];
+    const rawSources = Array.isArray(recruitmentSources) ? recruitmentSources : [];
+    const existing = Array.isArray(job.recruitmentSources) ? job.recruitmentSources : [];
+    const sources = applySourceTimestamps(rawSources, existing);
     await job.update({ recruitmentSources: sources });
 
     // Emit system event for each source status change

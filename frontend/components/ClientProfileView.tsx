@@ -25,6 +25,7 @@ import AccordionSection from './AccordionSection';
 import DocumentViewerModal from './DocumentViewerModal';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
+import { authHeaders } from '../utils/authHeaders';
 
 type Tab = 'details' | 'tasks' | 'contacts' | 'jobs' | 'events' | 'documents' | 'finance' | 'history'; 
 
@@ -47,39 +48,86 @@ const InfoItem: React.FC<{ label: string, children: React.ReactNode }> = ({ labe
     </div>
 );
 
-const ClientInsightsDashboard: React.FC = () => {
+type ClientInsights = {
+    openJobs: number | null;
+    frozenJobs: number | null;
+    closedJobs: number | null;
+    referrals: { week: number | null; month: number | null; year: number | null };
+    hiredCount: number | null;
+};
+
+export const ClientInsightsDashboard: React.FC<{
+    clientId?: string;
+    /** When set, loads org-scoped insights (jobs/referrals for this org under the client). */
+    organizationId?: string;
+    creationDate?: string;
+}> = ({ clientId, organizationId, creationDate }) => {
     const { t } = useLanguage();
-    const insights = {
-        openJobs: null,
-        frozenJobs: null,
-        closedJobs: null,
-        avgJobLifespan: null,
-        submissions: { week: null, month: null, year: null },
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [insights, setInsights] = useState<ClientInsights>({
+        openJobs: null, frozenJobs: null, closedJobs: null,
+        referrals: { week: null, month: null, year: null },
         hiredCount: null,
-        daysSinceStart: null,
-    };
+    });
+    const [relationshipStartedAt, setRelationshipStartedAt] = useState<string | null>(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        if (!apiBase) return;
+        if (!organizationId && !clientId) return;
+        setLoading(true);
+        const url = organizationId
+            ? `${apiBase}/api/organizations/${encodeURIComponent(organizationId)}/insights${
+                clientId ? `?clientId=${encodeURIComponent(clientId)}` : ''
+              }`
+            : `${apiBase}/api/clients/${encodeURIComponent(clientId!)}/insights`;
+        fetch(url, { headers: authHeaders(true) })
+            .then((r) => r.ok ? r.json() : Promise.reject(r))
+            .then((data) => {
+                setInsights({
+                    openJobs: data.openJobs ?? 0,
+                    frozenJobs: data.frozenJobs ?? 0,
+                    closedJobs: data.closedJobs ?? 0,
+                    referrals: {
+                        week: data.referrals?.week ?? 0,
+                        month: data.referrals?.month ?? 0,
+                        year: data.referrals?.year ?? 0,
+                    },
+                    hiredCount: data.hiredCount ?? 0,
+                });
+                setRelationshipStartedAt(data.relationshipStartedAt || null);
+            })
+            .catch(() => {})
+            .finally(() => setLoading(false));
+    }, [clientId, organizationId, apiBase]);
+
+    const fmt = (v: number | null) => loading ? '…' : (v == null ? '—' : String(v));
+
+    const startDate = relationshipStartedAt || creationDate;
+    const daysSinceStart = startDate
+        ? Math.floor((Date.now() - new Date(startDate).getTime()) / 86400000)
+        : null;
 
     return (
         <div className="space-y-6">
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
-                <StatCard title={t('client_profile.stat_open_jobs')} value={insights.openJobs == null ? '—' : String(insights.openJobs)} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
-                <StatCard title={t('client_profile.stat_frozen_jobs')} value={insights.frozenJobs == null ? '—' : String(insights.frozenJobs)} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
-                <StatCard title={t('client_profile.stat_closed_jobs')} value={insights.closedJobs == null ? '—' : String(insights.closedJobs)} icon={<CheckBadgeIcon />} colorClass={{ bg: 'bg-green-100', text: 'text-green-600' }} />
-                <StatCard title={t('client_profile.stat_lifespan')} value={insights.avgJobLifespan == null ? '—' : String(insights.avgJobLifespan)} icon={<ClockIcon />} colorClass={{ bg: 'bg-secondary-100', text: 'text-secondary-600' }} />
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+                <StatCard title={t('client_profile.stat_open_jobs')} value={fmt(insights.openJobs)} icon={<BriefcaseIcon />} colorClass={{ bg: 'bg-primary-100', text: 'text-primary-600' }} />
+                <StatCard title={t('client_profile.stat_frozen_jobs')} value={fmt(insights.frozenJobs)} icon={<ArchiveBoxIcon />} colorClass={{ bg: 'bg-yellow-100', text: 'text-yellow-600' }} />
+                <StatCard title={t('client_profile.stat_closed_jobs')} value={fmt(insights.closedJobs)} icon={<CheckBadgeIcon />} colorClass={{ bg: 'bg-green-100', text: 'text-green-600' }} />
             </div>
 
             <AccordionSection title={t('client_profile.section_insights')} icon={<UserGroupIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
-                    <InfoItem label={t('client_profile.insight_submissions_week')}>{insights.submissions.week ?? '—'}</InfoItem>
-                    <InfoItem label={t('client_profile.insight_submissions_month')}>{insights.submissions.month ?? '—'}</InfoItem>
-                    <InfoItem label={t('client_profile.insight_submissions_year')}>{insights.submissions.year ?? '—'}</InfoItem>
-                    <InfoItem label={t('client_profile.insight_hired')}>{insights.hiredCount ?? '—'}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_week')}>{fmt(insights.referrals.week)}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_month')}>{fmt(insights.referrals.month)}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_submissions_year')}>{fmt(insights.referrals.year)}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_hired')}>{fmt(insights.hiredCount)}</InfoItem>
                 </dl>
             </AccordionSection>
 
             <AccordionSection title={t('client_profile.section_relationship')} icon={<CalendarDaysIcon className="w-5 h-5"/>} defaultOpen>
                 <dl className="text-sm">
-                    <InfoItem label={t('client_profile.insight_days_start')}>{insights.daysSinceStart ?? '—'}</InfoItem>
+                    <InfoItem label={t('client_profile.insight_days_start')}>{daysSinceStart != null ? String(daysSinceStart) : '—'}</InfoItem>
                 </dl>
             </AccordionSection>
         </div>
@@ -149,7 +197,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                 return (
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
                         <div className="lg:col-span-2 space-y-6">
-                            <ClientInsightsDashboard />
+                            <ClientInsightsDashboard clientId={clientId!} creationDate={client?.creationDate || client?.createdAt} />
                         </div>
                         <div className="lg:col-span-1 space-y-6">
                             <ClientDetailsTab client={client} onClientUpdated={setClient} />
@@ -158,7 +206,7 @@ const ClientProfileView: React.FC<ClientProfileViewProps> = ({ openMessageModal 
                 );
             case 'tasks': return <ClientTasksTab clientId={clientId!} />; 
             case 'contacts': return <ClientContactsTab clientId={clientId!} onOpenMessageModal={openMessageModal} />;
-            case 'jobs': return <ClientJobsTab />;
+            case 'jobs': return <ClientJobsTab clientId={clientId!} allLinkedOrganizations />;
             case 'events': return <ClientEventsTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'documents': return <ClientDocumentsTab clientId={clientId!} clientName={client.displayName || client.name} />;
             case 'finance': return <ClientFinanceTab clientId={clientId!} clientName={client.displayName || client.name} />;

@@ -21,7 +21,13 @@ const normalizeEventRow = (event) => {
 
 const list = async (req, res) => {
   const client = await clientService.getById(req.params.id);
-  const rows = Array.isArray(client.events) ? client.events : [];
+  const organizationId = req.query?.organizationId
+    ? String(req.query.organizationId).trim()
+    : null;
+  let rows = Array.isArray(client.events) ? client.events : [];
+  if (organizationId) {
+    rows = rows.filter((e) => String(e?.organizationId || '') === organizationId);
+  }
   res.json(rows.map(normalizeEventRow));
 };
 
@@ -30,6 +36,9 @@ const create = async (req, res) => {
     const client = await clientService.getById(req.params.id);
     const prev = Array.isArray(client.events) ? client.events : [];
     const payload = req.body || {};
+    const organizationId = payload.organizationId != null
+      ? (String(payload.organizationId).trim() || null)
+      : null;
     const event = {
       id: payload.id || uuidv4(),
       type: normalizeTypes(payload.type),
@@ -40,6 +49,7 @@ const create = async (req, res) => {
       linkedTo: payload.linkedTo ?? null,
       description: payload.description || '',
       history: Array.isArray(payload.history) ? payload.history : [],
+      organizationId,
     };
     const next = [event, ...prev];
     await clientService.update(req.params.id, { events: next });

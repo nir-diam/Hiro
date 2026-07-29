@@ -1,5 +1,19 @@
 const { Op, fn, col, QueryTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
+
+/**
+ * Run async tasks in bounded batches to avoid saturating the DB connection pool.
+ * @param {Array<() => Promise<any>>} tasks - Array of zero-arg async factory functions.
+ * @param {number} [concurrency=4]
+ */
+async function runInBatches(tasks, concurrency = 4) {
+  const results = [];
+  for (let i = 0; i < tasks.length; i += concurrency) {
+    const batch = tasks.slice(i, i + concurrency).map((t) => t());
+    results.push(...await Promise.all(batch));
+  }
+  return results;
+}
 const SystemTag = require('../models/SystemTag');
 const {
   SYSTEM_TAG_TYPE_CANDIDATE,
@@ -913,8 +927,9 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
   }
 
   // Resolve each payload to a tag (find existing or create pending). Deduplicate by tag.id.
-  const resolved = await Promise.all(
-    payloads.map(async (payload) => {
+  // Batch to avoid exhausting the DB connection pool when there are many tags.
+  const resolved = await runInBatches(
+    payloads.map((payload) => async () => {
       const resolvedType = resolveIncomingTagType(payload);
       const { tag, created } = await ensureTagRecord(payload.tagKey, {
         displayNameHe: payload.name,
@@ -924,6 +939,7 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
       });
       return tag ? { tag, created, payload, resolvedType } : null;
     }),
+    4, // max 4 concurrent tag lookups / creates
   );
   const byTagId = new Map();
   resolved.filter(Boolean).forEach((r) => {
@@ -933,8 +949,9 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
   const uniqueResolved = Array.from(byTagId.values());
 
   // Insert every tag: is_active mirrors catalog status (see systemTagIsActiveForCatalogTag).
-  await Promise.all(
-    uniqueResolved.map(async ({ tag, created, payload, resolvedType }) => {
+  // Batch to avoid saturating the connection pool.
+  await runInBatches(
+    uniqueResolved.map(({ tag, created, payload, resolvedType }) => async () => {
       const score = tagScoringEngine.scoreTag(payload);
       const isActive = systemTagIsActiveForCatalogTag(tag, { created });
       await SystemTag.create({
@@ -956,6 +973,7 @@ const syncTagsForCandidate = async (candidateId, entries = [], uploadedByUserId 
       });
       await recordTagUsage(tag);
     }),
+    4, // max 4 concurrent SystemTag inserts
   );
 
   return SystemTag.findAll({

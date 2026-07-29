@@ -111,6 +111,27 @@ interface AppliedAdvancedSearchPayload {
     };
 }
 
+type CompanyFiltersState = {
+    sizes: string[];
+    sectors: string[];
+    industries: string[];
+    fields: string[];
+    roles: string[];
+};
+
+const sameStringArray = (a: string[] = [], b: string[] = []) =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
+
+const sameCompanyFilters = (a: CompanyFiltersState, b: CompanyFiltersState) =>
+    sameStringArray(a.industries, b.industries) &&
+    sameStringArray(a.fields, b.fields) &&
+    sameStringArray(a.roles, b.roles) &&
+    sameStringArray(a.sizes, b.sizes) &&
+    sameStringArray(a.sectors, b.sectors);
+
+const companyFiltersAreActive = (cf: CompanyFiltersState) =>
+    !!(cf.industries?.length || cf.fields?.length || cf.roles?.length || cf.sizes?.length || cf.sectors?.length);
+
 export interface Candidate {
   id: number; // local numeric id for UI
   backendId?: string; // actual id from backend
@@ -1693,6 +1714,9 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const initialFetchFiredRef = useRef(false);
     /** After hydrating from session, skip the first page/dependency-driven fetch so restored rows stay visible. */
     const skipListFetchAfterHydrateRef = useRef(listViewSnapshot !== null);
+    /** Deduplicate identical candidate-list GETs (Apply + effect / StrictMode races). */
+    const listFetchInFlightKeyRef = useRef<string | null>(null);
+    const listFetchLastKeyRef = useRef<{ key: string; at: number } | null>(null);
 
     const [selectionMode, setSelectionMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -1801,14 +1825,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         const splitParam = (p: string) => p
             ? (p.includes(SEP) ? p.split(SEP) : p.split(',')).map(s => s.trim()).filter(Boolean)
             : [];
-        setCompanyFilters((prev) => ({
-            ...prev,
+        const next = {
             industries: splitParam(industriesParam),
             fields:     splitParam(fieldsParam),
             roles:      splitParam(rolesParam),
             sizes:      splitParam(sizesParam),
             sectors:    splitParam(sectorsParam),
-        }));
+        };
+        setCompanyFilters((prev) => {
+            const same =
+                sameStringArray(prev.industries, next.industries) &&
+                sameStringArray(prev.fields, next.fields) &&
+                sameStringArray(prev.roles, next.roles) &&
+                sameStringArray(prev.sizes, next.sizes) &&
+                sameStringArray(prev.sectors, next.sectors);
+            return same ? prev : { ...prev, ...next };
+        });
     }, [searchParamsFromUrl]);
 
     // Persist basic search/filter state into URL so it survives navigation back from profile.
@@ -2004,6 +2036,25 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             savedSearchId?: string | number | null;
         }) => {
             if (!apiBase) return;
+            const fetchKey = JSON.stringify({
+                page: opts.page,
+                limit: opts.limit,
+                search: String(opts.search || ''),
+                advanced: opts.advanced,
+                dataIncomplete: !!opts.dataIncomplete,
+                jobId: String(opts.jobId || '').trim(),
+                savedSearchId: opts.savedSearchId ?? null,
+            });
+            const now = Date.now();
+            // Drop identical in-flight / back-to-back duplicate list GETs (Apply + effect race).
+            if (listFetchInFlightKeyRef.current === fetchKey) return;
+            if (
+                listFetchLastKeyRef.current?.key === fetchKey &&
+                now - listFetchLastKeyRef.current.at < 400
+            ) {
+                return;
+            }
+            listFetchInFlightKeyRef.current = fetchKey;
             setIsRemoteLoading(true);
             try {
                 const res = await fetchCandidatesListResponse(
@@ -2039,11 +2090,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         listMatchHydrationInFlightRef.current,
                     ).then((patches) => applyListMatchPatches(patches));
                 }
+                listFetchLastKeyRef.current = { key: fetchKey, at: Date.now() };
             } catch (e) {
                 setSemanticBaselineCandidates(null);
                 setCandidates([]);
                 setTotalCandidates(0);
             } finally {
+                if (listFetchInFlightKeyRef.current === fetchKey) {
+                    listFetchInFlightKeyRef.current = null;
+                }
                 setIsRemoteLoading(false);
                 setHasInitiallyLoaded(true);
                 setLoadingSearchId(null);
@@ -2063,33 +2118,29 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const loadedSearchRef = useRef(loadedSearch);
     loadedSearchRef.current = loadedSearch;
 
-    const hasActiveCompanyFilters = !!(
-        companyFilters.industries?.length ||
-        companyFilters.fields?.length ||
-        companyFilters.roles?.length ||
-        companyFilters.sizes?.length ||
-        companyFilters.sectors?.length
-    );
+    const hasActiveCompanyFilters = companyFiltersAreActive(companyFilters);
     // Stable ref so the callback below can read the latest value without depending on it
     const hasActiveCompanyFiltersRef = useRef(hasActiveCompanyFilters);
     hasActiveCompanyFiltersRef.current = hasActiveCompanyFilters;
 
-    const resolveAdvancedPayloadForFetch = useCallback(
-        (rules: ComplexFilterRule[]) => {
-            // Read companyFilters from ref — does NOT appear in deps so this callback is
-            // stable across filter changes and won't cascade into other useEffects.
-            const cf = companyFiltersRef.current;
-            const hasActiveCF = hasActiveCompanyFiltersRef.current;
+    /** Skip the companyFilters→fetch effect once after Apply (Apply already fetched). */
+    const skipNextCompanyFiltersFetchRef = useRef(false);
+    /** Tracks last seen company filters for external-change detection (URL hydrate, etc.). */
+    const prevCompanyFiltersRef = useRef(companyFilters);
+
+    const buildAdvancedWithCompanyFilters = useCallback(
+        (rules: ComplexFilterRule[], cf: CompanyFiltersState) => {
+            const hasActiveCF = companyFiltersAreActive(cf);
             const hasPanel = appliedAdvancedFilters != null || complexRulesHaveValue(rules);
             if (hasPanel) {
                 const base = buildAdvancedPayloadFromPanel(searchParams, languageFilters, rules);
                 if (hasActiveCF) {
                     base.companyFilters = {
                         industries: cf.industries,
-                        fields:     cf.fields,
-                        roles:      cf.roles,
-                        sizes:      cf.sizes,
-                        sectors:    cf.sectors,
+                        fields: cf.fields,
+                        roles: cf.roles,
+                        sizes: cf.sizes,
+                        sectors: cf.sectors,
                     };
                 }
                 return base;
@@ -2098,17 +2149,21 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 return {
                     companyFilters: {
                         industries: cf.industries,
-                        fields:     cf.fields,
-                        roles:      cf.roles,
-                        sizes:      cf.sizes,
-                        sectors:    cf.sectors,
+                        fields: cf.fields,
+                        roles: cf.roles,
+                        sizes: cf.sizes,
+                        sectors: cf.sectors,
                     },
                 } as AppliedAdvancedSearchPayload;
             }
             return null;
         },
-        // companyFilters intentionally omitted — read via ref to keep callback stable
         [appliedAdvancedFilters, searchParams, languageFilters],
+    );
+
+    const resolveAdvancedPayloadForFetch = useCallback(
+        (rules: ComplexFilterRule[]) => buildAdvancedWithCompanyFilters(rules, companyFiltersRef.current),
+        [buildAdvancedWithCompanyFilters],
     );
 
     const fetchCandidates = useCallback(() => {
@@ -2131,12 +2186,45 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         selectedJobId,
     ]);
 
-    // Refetch when company filters change (triggered by CompanyFilterPopover "Apply")
-    const prevCompanyFiltersRef = useRef(companyFilters);
+    /** Single fetch on Apply — avoids stale onApply + effect + URL-hydrate duplicates. */
+    const handleCompanyFiltersApply = useCallback(
+        (draft: CompanyFiltersState) => {
+            companyFiltersRef.current = draft;
+            hasActiveCompanyFiltersRef.current = companyFiltersAreActive(draft);
+            // Preempt the companyFilters effect so it treats this update as already handled.
+            prevCompanyFiltersRef.current = draft;
+            skipNextCompanyFiltersFetchRef.current = true;
+            suppressNextListFetchEffectRef.current = true;
+            setPage(1);
+            void fetchCandidatesList({
+                page: 1,
+                limit: pageSize,
+                search: debouncedSearchTerm,
+                advanced: buildAdvancedWithCompanyFilters(debouncedComplexRulesRef.current, draft),
+                dataIncomplete: showIncompleteOnly,
+                jobId: selectedJobId.trim(),
+                savedSearchId: loadedSearchRef.current?.id ?? null,
+            });
+        },
+        [
+            fetchCandidatesList,
+            pageSize,
+            debouncedSearchTerm,
+            buildAdvancedWithCompanyFilters,
+            showIncompleteOnly,
+            selectedJobId,
+        ],
+    );
+
+    // Refetch when company filters change externally (e.g. URL hydrate) — not after Apply.
     useEffect(() => {
         if (!hasInitiallyLoaded || suspendListPolling) return;
-        if (prevCompanyFiltersRef.current === companyFilters) return;
+        if (sameCompanyFilters(prevCompanyFiltersRef.current, companyFilters)) return;
         prevCompanyFiltersRef.current = companyFilters;
+        if (skipNextCompanyFiltersFetchRef.current) {
+            skipNextCompanyFiltersFetchRef.current = false;
+            return;
+        }
         // Skip — this change was caused by loading a saved search, not by user interaction.
         if (loadedSearchRef.current) return;
         // Suppress the page useEffect from also firing a fetch when setPage(1) is called below
@@ -3970,7 +4058,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     onClose={() => setIsCompanyFilterOpen(false)}
                                     filters={companyFilters}
                                     setFilters={setCompanyFilters}
-                                    onApply={fetchCandidates}
+                                    onApply={handleCompanyFiltersApply}
                                 />
                             )}
                         </div>

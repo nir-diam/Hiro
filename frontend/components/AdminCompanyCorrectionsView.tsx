@@ -6,14 +6,17 @@ import {
     MagnifyingGlassIcon, LinkIcon, PlusIcon, TrashIcon, UserIcon,
     ArrowTopRightOnSquareIcon, CheckCircleIcon, ExclamationTriangleIcon,
     SparklesIcon, XMarkIcon, Squares2X2Icon, AdjustmentsHorizontalIcon,
+    ArrowDownTrayIcon,
 } from './Icons';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
 import AdminCompanyAgentDashboard from './AdminCompanyAgentDashboard';
 import {
     fetchOrgAiDecisions,
     resolveOrgAiDecision,
+    approveOrgAiDecision,
     type OrgAiDecisionDto,
 } from '../services/organizationCorrectionsApi';
+import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 
 // ─── Shared Types ─────────────────────────────────────────────────────────────
 
@@ -66,6 +69,7 @@ interface AiDecision {
     needsManual: boolean;
     isAutoHandled: boolean;
     source: string;
+    manualApprovalStatus: 'pending' | 'approved';
 }
 
 interface BlacklistEntry {
@@ -96,6 +100,75 @@ const GENERIC_BUCKETS = [
 const isGenericBucketOrgName = (name?: string) => {
     const n = String(name || '');
     return n.includes('(כללי)') || n.includes('(גנרי)');
+};
+
+const PAGE_SIZE_OPTIONS = [10, 50, 100, 200, 500] as const;
+
+/** Matches AdminTagsView pagination chrome (top + bottom of tables). */
+const PaginationBar: React.FC<{
+    page: number;
+    totalPages: number;
+    total: number;
+    onPageChange: (page: number) => void;
+    pageSize: number;
+    onPageSizeChange: (size: number) => void;
+    label?: string;
+    variant?: 'top' | 'bottom';
+}> = ({
+    page,
+    totalPages,
+    total,
+    onPageChange,
+    pageSize,
+    onPageSizeChange,
+    label = 'רשומות',
+    variant = 'bottom',
+}) => {
+    const startIndex = total === 0 ? 0 : (page - 1) * pageSize + 1;
+    const endIndex = Math.min(page * pageSize, total);
+    const borderClass = variant === 'top' ? 'border-b' : 'border-t';
+    return (
+        <div className={`px-3 py-3 ${borderClass} border-border-default bg-bg-subtle/10 text-xs text-text-muted flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between flex-shrink-0`}>
+            <div>
+                {total > 0
+                    ? `מראה ${startIndex}–${endIndex} מתוך ${total.toLocaleString()} ${label}`
+                    : `לא נמצאו ${label} להצגה`}
+            </div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <label className="flex items-center gap-1 whitespace-nowrap">
+                    <span>דפים</span>
+                    <select
+                        value={pageSize}
+                        onChange={(e) => onPageSizeChange(Number(e.target.value))}
+                        className="bg-white border border-border-default rounded px-2 py-1 text-xs"
+                    >
+                        {PAGE_SIZE_OPTIONS.map((n) => (
+                            <option key={n} value={n}>{n}</option>
+                        ))}
+                    </select>
+                </label>
+                <button
+                    type="button"
+                    onClick={() => onPageChange(Math.max(1, page - 1))}
+                    disabled={page <= 1 || total <= 0}
+                    className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                    קודם
+                </button>
+                <span className="text-xs text-text-default">
+                    {total > 0 ? `${page} / ${totalPages}` : '0 / 0'}
+                </span>
+                <button
+                    type="button"
+                    onClick={() => onPageChange(Math.min(totalPages, page + 1))}
+                    disabled={page >= totalPages || total <= 0}
+                    className="px-3 py-1 rounded-full border border-border-default text-xs text-text-muted bg-white disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                    הבא
+                </button>
+            </div>
+        </div>
+    );
 };
 
 type OrgPick = { id: string; name: string };
@@ -173,6 +246,7 @@ const mapApiEntry = (entry: OrgAiDecisionDto): AiDecision => {
         needsManual: entry.reviewStatus === 'manual' || pct >= 60,
         isAutoHandled: entry.reviewStatus === 'approved' || pct < 30,
         source: 'קורות חיים',
+        manualApprovalStatus: entry.manualApprovalStatus ?? 'pending',
     };
 };
 
@@ -376,7 +450,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     }, [navigate]);
 
     // ── Shared state ──
-    const [activeTab, setActiveTab] = useState<TabType>('dashboard');
+    const [activeTab, setActiveTab] = useState<TabType>('ai_decisions');
     const [expandedEntities, setExpandedEntities] = useState<Set<string>>(new Set());
     const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
     const [drawerCandidate, setDrawerCandidate] = useState<any | null>(null);
@@ -403,6 +477,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [mergeOrgsLoading, setMergeOrgsLoading] = useState(false);
     const [sortBy, setSortBy] = useState<'confidence' | 'occurrences' | 'name'>('confidence');
     const [minConfidence] = useState(0);
+    const [manualPage, setManualPage] = useState(1);
+    const [manualPageSize, setManualPageSize] = useState(100);
 
     const companyFlagClass = (isCompany?: boolean) => isCompany ? 'bg-green-500' : 'bg-red-500';
 
@@ -486,9 +562,23 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         });
     }, [unmatched, manualSearchTerm, minConfidence, sortBy]);
 
+    const manualTotalPages = Math.max(1, Math.ceil(filteredUnmatched.length / manualPageSize));
+    const safeManualPage = Math.min(manualPage, manualTotalPages);
+    const paginatedUnmatched = useMemo(
+        () => filteredUnmatched.slice((safeManualPage - 1) * manualPageSize, safeManualPage * manualPageSize),
+        [filteredUnmatched, safeManualPage, manualPageSize],
+    );
+
     const filteredHistory = useMemo(() =>
         historyEntries.filter(h => h.name.toLowerCase().includes(manualSearchTerm.toLowerCase())),
         [historyEntries, manualSearchTerm],
+    );
+
+    const historyTotalPages = Math.max(1, Math.ceil(filteredHistory.length / manualPageSize));
+    const safeHistoryPage = Math.min(manualPage, historyTotalPages);
+    const paginatedHistory = useMemo(
+        () => filteredHistory.slice((safeHistoryPage - 1) * manualPageSize, safeHistoryPage * manualPageSize),
+        [filteredHistory, safeHistoryPage, manualPageSize],
     );
 
     const filteredExisting = useMemo(() =>
@@ -656,13 +746,23 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [decisions, setDecisions] = useState<AiDecision[]>([]);
     const [loadingDecisions, setLoadingDecisions] = useState(false);
     const [blacklist, setBlacklist] = useState<BlacklistEntry[]>([]);
+    const [blacklistLoading, setBlacklistLoading] = useState(false);
     const [aiSearchTerm, setAiSearchTerm] = useState('');
+    const [aiDebouncedSearch, setAiDebouncedSearch] = useState('');
     const [filterDate, setFilterDate] = useState('');
     const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
     const [decisionTypeFilter, setDecisionTypeFilter] = useState<'all' | DecisionType>('all');
     const [showManual, setShowManual] = useState(true);
     const [showAutoHandled, setShowAutoHandled] = useState(true);
+    const [approvalFilter, setApprovalFilter] = useState<'all' | 'pending' | 'approved'>('pending');
+    const [localOrgApprovalStatus, setLocalOrgApprovalStatus] = useState<Map<string, 'pending' | 'approved'>>(new Map());
     const [isMultiSelect, setIsMultiSelect] = useState(false);
+    const [aiPage, setAiPage] = useState(1);
+    const [aiPageSize, setAiPageSize] = useState(100);
+    const [aiTotal, setAiTotal] = useState(0);
+    const [aiTotalPages, setAiTotalPages] = useState(1);
+    const [blacklistPage, setBlacklistPage] = useState(1);
+    const [blacklistPageSize, setBlacklistPageSize] = useState(100);
 
     // ── Merge / Generic modal state ──
     const [mergeModal, setMergeModal] = useState<{ id: string; mode: 'merge_company' | 'map_generic'; term: string } | null>(null);
@@ -675,51 +775,172 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [dropdownRect, setDropdownRect] = useState<DOMRect | null>(null);
     const [aiCreateModalName, setAiCreateModalName] = useState('');
     const [aiCreateDecisionId, setAiCreateDecisionId] = useState<string | null>(null);
+    const [exportingExcel, setExportingExcel] = useState(false);
 
     const loadDecisions = useCallback(async () => {
         setLoadingDecisions(true);
         try {
-            const result = await fetchOrgAiDecisions({ limit: 500, sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc' });
-            const mapped = result.data.map(mapApiEntry);
-            setDecisions(mapped);
-            // Restore blacklist from persisted reviewerAction
-            const bl: BlacklistEntry[] = result.data
-                .filter(d => d.reviewerAction === 'blacklist')
-                .map(d => ({
+            const result = await fetchOrgAiDecisions({
+                page: aiPage,
+                limit: aiPageSize,
+                sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc',
+                decision: decisionTypeFilter === 'all' ? undefined : decisionTypeFilter,
+                date: filterDate || undefined,
+                approvalStatus: approvalFilter,
+                search: aiDebouncedSearch || undefined,
+                showManual,
+                showAuto: showAutoHandled,
+            });
+            setDecisions(result.data.map(mapApiEntry));
+            setAiTotal(result.total || 0);
+            setAiTotalPages(Math.max(1, result.totalPages || 1));
+        } catch (err) {
+            console.error('[AdminCompanyCorrectionsView] load error:', err);
+            setDecisions([]);
+            setAiTotal(0);
+            setAiTotalPages(1);
+        } finally {
+            setLoadingDecisions(false);
+        }
+    }, [aiPage, aiPageSize, sortOrder, decisionTypeFilter, filterDate, approvalFilter, aiDebouncedSearch, showManual, showAutoHandled]);
+
+    const loadBlacklist = useCallback(async () => {
+        setBlacklistLoading(true);
+        try {
+            const result = await fetchOrgAiDecisions({
+                page: 1,
+                limit: 200,
+                reviewerAction: 'blacklist',
+                sortOrder: 'desc',
+            });
+            setBlacklist(
+                result.data.map((d) => ({
                     id: d.id,
                     term: d.originalTerm,
                     addedAt: d.resolvedAt || d.actionDate,
                     source: 'קורות חיים',
                     candidateName: d.candidateName || undefined,
-                }));
-            setBlacklist(bl);
-        } catch (err) {
-            console.error('[AdminCompanyCorrectionsView] load error:', err);
-        } finally {
-            setLoadingDecisions(false);
-        }
-    }, [sortOrder]);
-
-    const filteredDecisions = useMemo(() => {
-        let items = decisions;
-        if (!showManual || !showAutoHandled) {
-            items = items.filter(d => (d.needsManual && showManual) || (d.isAutoHandled && showAutoHandled));
-        }
-        if (aiSearchTerm.trim()) {
-            const q = aiSearchTerm.toLowerCase();
-            items = items.filter(d =>
-                d.originalTerm.toLowerCase().includes(q) ||
-                d.candidateName.toLowerCase().includes(q) ||
-                (d.decisionTarget ?? '').toLowerCase().includes(q),
+                })),
             );
+            setBlacklistPage(1);
+        } catch (err) {
+            console.error('[AdminCompanyCorrectionsView] blacklist load error:', err);
+            setBlacklist([]);
+        } finally {
+            setBlacklistLoading(false);
         }
-        if (filterDate) items = items.filter(d => d.actionDate.startsWith(filterDate));
-        if (decisionTypeFilter !== 'all') items = items.filter(d => d.decisionType === decisionTypeFilter);
-        return [...items].sort((a, b) => {
-            const cmp = new Date(b.actionDate).getTime() - new Date(a.actionDate).getTime();
-            return sortOrder === 'newest' ? cmp : -cmp;
-        });
-    }, [decisions, showManual, showAutoHandled, aiSearchTerm, filterDate, decisionTypeFilter, sortOrder]);
+    }, []);
+
+    // Free search hits the API only after 3+ characters (debounce).
+    useEffect(() => {
+        const t = setTimeout(() => {
+            const q = aiSearchTerm.trim();
+            setAiDebouncedSearch(q.length > 2 ? q : '');
+        }, 350);
+        return () => clearTimeout(t);
+    }, [aiSearchTerm]);
+
+    useEffect(() => {
+        setAiPage(1);
+    }, [aiDebouncedSearch, filterDate, sortOrder, decisionTypeFilter, approvalFilter, aiPageSize, showManual, showAutoHandled]);
+
+    useEffect(() => {
+        setManualPage(1);
+    }, [manualSearchTerm, sortBy, viewMode, manualPageSize]);
+
+    useEffect(() => {
+        setBlacklistPage(1);
+    }, [blacklistPageSize]);
+
+    // Search / decision-type / date / approval / handling buckets are applied on the server.
+    const filteredDecisions = decisions;
+
+    const handleExportExcel = useCallback(async () => {
+        if (exportingExcel) return;
+        setExportingExcel(true);
+        try {
+            const pageLimit = 500;
+            let page = 1;
+            let totalPages = 1;
+            const all: OrgAiDecisionDto[] = [];
+            do {
+                const result = await fetchOrgAiDecisions({
+                    page,
+                    limit: pageLimit,
+                    sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc',
+                    decision: decisionTypeFilter === 'all' ? undefined : decisionTypeFilter,
+                    date: filterDate || undefined,
+                    approvalStatus: approvalFilter,
+                    search: aiDebouncedSearch || undefined,
+                    showManual,
+                    showAuto: showAutoHandled,
+                });
+                all.push(...result.data);
+                totalPages = Math.max(1, result.totalPages || 1);
+                page += 1;
+            } while (page <= totalPages);
+
+            if (!all.length) {
+                notify('אין תוצאות להורדה', 'info');
+                return;
+            }
+
+            const decisionLabel: Record<string, string> = {
+                create_company: 'יצירת חברה חדשה',
+                merge_company: 'מיזוג לחברה קיימת',
+                map_generic: 'שיוך לסל כללי',
+            };
+            const reviewLabel: Record<string, string> = {
+                pending_review: 'ממתין לביקורת',
+                approved: 'אושר',
+                changed: 'שונה',
+                manual: 'ידני',
+            };
+
+            const stamp = new Date().toISOString().slice(0, 10);
+            downloadRowsAsXlsx(
+                all,
+                [
+                    { key: 'originalTerm', label: 'מונח מקורי' },
+                    { key: 'candidateName', label: 'מועמד', getValue: (r) => r.candidateName || '' },
+                    { key: 'aiDecision', label: 'החלטת AI', getValue: (r) => decisionLabel[r.aiDecision] || r.aiDecision },
+                    { key: 'aiSuggestedTarget', label: 'יעד מוצע', getValue: (r) => r.aiSuggestedTarget || '' },
+                    { key: 'hesitationLevel', label: 'התלבטות', getValue: (r) => r.hesitationLevel ?? '' },
+                    { key: 'reviewStatus', label: 'סטטוס ביקורת', getValue: (r) => reviewLabel[r.reviewStatus] || r.reviewStatus },
+                    { key: 'manualApprovalStatus', label: 'אישור ידני', getValue: (r) => (r.manualApprovalStatus === 'approved' ? 'אושר' : 'ממתין') },
+                    { key: 'actionDate', label: 'תאריך', getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : '') },
+                    { key: 'aiReasoning', label: 'נימוק AI', getValue: (r) => r.aiReasoning || '' },
+                    { key: 'dilemmaReasoning', label: 'נימוק התלבטות', getValue: (r) => r.dilemmaReasoning || '' },
+                ],
+                `company_ai_decisions_${stamp}.xlsx`,
+            );
+            notify(`הורדו ${all.length} שורות לאקסל`);
+        } catch (err: any) {
+            console.error('[AdminCompanyCorrectionsView] excel export failed', err);
+            notify(err?.message || 'שגיאה בהורדה לאקסל', 'error');
+        } finally {
+            setExportingExcel(false);
+        }
+    }, [
+        exportingExcel,
+        sortOrder,
+        decisionTypeFilter,
+        filterDate,
+        approvalFilter,
+        aiDebouncedSearch,
+        showManual,
+        showAutoHandled,
+    ]);
+
+    const paginatedBlacklist = useMemo(() => {
+        const totalPages = Math.max(1, Math.ceil(blacklist.length / blacklistPageSize));
+        const page = Math.min(blacklistPage, totalPages);
+        return {
+            page,
+            totalPages,
+            rows: blacklist.slice((page - 1) * blacklistPageSize, page * blacklistPageSize),
+        };
+    }, [blacklist, blacklistPage, blacklistPageSize]);
 
     const toggleAiCheck = (id: string) => {
         setAiCheckedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -892,6 +1113,19 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         }
     };
 
+    const handleOrgManualApprove = async (id: string, currentStatus: 'pending' | 'approved') => {
+        const newStatus = currentStatus === 'approved' ? 'pending' : 'approved';
+        setLocalOrgApprovalStatus(prev => new Map(prev).set(id, newStatus));
+        try {
+            await approveOrgAiDecision(id, newStatus);
+            // Refresh from server so approval filter / totals stay accurate across pages.
+            void loadDecisions();
+        } catch (err: any) {
+            setLocalOrgApprovalStatus(prev => new Map(prev).set(id, currentStatus));
+            notify(err.message || 'שגיאה בעדכון אישור', 'error');
+        }
+    };
+
     const handleAiApprove = async (id: string) => {
         setOpenDropdownId(null);
         const dec = decisions.find(d => d.id === id);
@@ -998,7 +1232,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         finally { setIsMerging(false); }
     };
 
-    // ── Data loading — refresh whenever the active tab changes ──
+    // ── Data loading — refresh whenever the active tab / page filters change ──
     useEffect(() => {
         void loadOrganizationsData(); // always needed (merge modal, etc.)
         if (activeTab === 'ai_decisions') {
@@ -1007,10 +1241,10 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             void loadUnmatched();
             void loadHistory();
         } else if (activeTab === 'blacklist') {
-            // blacklist is managed locally; no server reload needed
+            void loadBlacklist();
         }
         // dashboard tab manages its own data via AdminCompanyAgentDashboard
-    }, [activeTab, loadDecisions, loadUnmatched, loadHistory, loadOrganizationsData]);
+    }, [activeTab, loadDecisions, loadUnmatched, loadHistory, loadOrganizationsData, loadBlacklist]);
 
     // Load org list when the modal first opens (one-time per open)
     useEffect(() => {
@@ -1178,8 +1412,24 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             document.body
         ) : null;
 
+        const approvalStatus = localOrgApprovalStatus.get(d.id) ?? d.manualApprovalStatus ?? 'pending';
+        const isManuallyApproved = approvalStatus === 'approved';
+
         return (
-            <div className="relative text-left">
+            <div className="relative text-left flex flex-col gap-1.5">
+                {/* Quick manual approval button */}
+                <button
+                    type="button"
+                    onClick={() => void handleOrgManualApprove(d.id, approvalStatus as 'pending' | 'approved')}
+                    className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border shadow-sm cursor-pointer w-full ${
+                        isManuallyApproved
+                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                            : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                    }`}
+                    title={isManuallyApproved ? 'לחץ לביטול אישור' : 'לחץ לאשר ידנית'}
+                >
+                    {isManuallyApproved ? '✅ אושר ידנית' : '⏳ ממתין לאישור'}
+                </button>
                 <button
                     onClick={(e) => {
                         e.stopPropagation();
@@ -1191,7 +1441,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             setOpenDropdownId(d.id);
                         }
                     }}
-                    className="bg-white border border-border-default rounded-lg px-3 py-1.5 text-xs font-semibold text-text-default shadow-sm hover:border-text-subtle flex items-center gap-2 justify-between w-32 focus:ring-2 focus:ring-orange-500 mr-auto transition-colors"
+                    className="bg-white border border-border-default rounded-lg px-3 py-1.5 text-xs font-semibold text-text-default shadow-sm hover:border-text-subtle flex items-center gap-2 justify-between w-full focus:ring-2 focus:ring-orange-500 mr-auto transition-colors"
                 >
                     <span>שנה החלטה</span>
                     <IconChevronDown />
@@ -1337,104 +1587,149 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 )}
                             </div>
 
-                            {/* List */}
-                            <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
-                                {viewMode === 'pending' ? (
-                                    filteredUnmatched.length > 0 ? filteredUnmatched.map(item => {
-                                        const displayIsCompany = companyFlags[item.id] ?? item.isCompany;
-                                        return (
-                                            <div
-                                                key={item.id}
-                                                onClick={() => setSelected(item)}
-                                                className={`p-3 rounded-xl cursor-pointer border transition-all relative group flex items-start gap-3 ${
-                                                    selected?.id === item.id && checkedIds.size === 0
-                                                        ? 'bg-orange-50 border-orange-200 shadow-sm ring-1 ring-orange-100'
-                                                        : checkedIds.has(item.id)
-                                                        ? 'bg-purple-50 border-purple-200 shadow-sm'
-                                                        : 'bg-white border-transparent hover:bg-bg-subtle hover:border-border-default'
-                                                }`}
-                                            >
-                                                <div className="pt-1">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={checkedIds.has(item.id)}
-                                                        onClick={e => handleToggleCheck(e, item.id)}
-                                                        onChange={() => {}}
-                                                        className="w-4 h-4 text-orange-600 rounded border-gray-300 focus:ring-orange-500 cursor-pointer"
-                                                    />
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex justify-between items-start mb-1">
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={`w-2.5 h-2.5 rounded-full ${companyFlagClass(displayIsCompany)}`} />
-                                                            <h4 className="font-bold text-text-default text-base truncate" title={item.name}>{item.name}</h4>
-                                                        </div>
-                                                        {item.occurrences > 1 && (
-                                                            <span className="text-[10px] font-bold bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full flex-shrink-0">x{item.occurrences}</span>
-                                                        )}
+                            {viewMode === 'pending' ? (
+                                <>
+                                    <PaginationBar
+                                        variant="top"
+                                        page={safeManualPage}
+                                        totalPages={manualTotalPages}
+                                        total={filteredUnmatched.length}
+                                        onPageChange={setManualPage}
+                                        pageSize={manualPageSize}
+                                        onPageSizeChange={(size) => { setManualPageSize(size); setManualPage(1); }}
+                                        label="פריטים"
+                                    />
+                                    <div className="flex-1 overflow-y-auto p-2 space-y-2 custom-scrollbar">
+                                        {paginatedUnmatched.length > 0 ? paginatedUnmatched.map(item => {
+                                            const displayIsCompany = companyFlags[item.id] ?? item.isCompany;
+                                            return (
+                                                <div
+                                                    key={item.id}
+                                                    onClick={() => setSelected(item)}
+                                                    className={`p-3 rounded-xl cursor-pointer border transition-all relative group flex items-start gap-3 ${
+                                                        selected?.id === item.id && checkedIds.size === 0
+                                                            ? 'bg-orange-50 border-orange-200 shadow-sm ring-1 ring-orange-100'
+                                                            : checkedIds.has(item.id)
+                                                            ? 'bg-purple-50 border-purple-200 shadow-sm'
+                                                            : 'bg-white border-transparent hover:bg-bg-subtle hover:border-border-default'
+                                                    }`}
+                                                >
+                                                    <div className="pt-1">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={checkedIds.has(item.id)}
+                                                            onClick={e => handleToggleCheck(e, item.id)}
+                                                            onChange={() => {}}
+                                                            className="w-4 h-4 text-orange-600 rounded border-gray-300 focus:ring-orange-500 cursor-pointer"
+                                                        />
                                                     </div>
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="text-xs text-text-muted flex items-center gap-1 max-w-[110px]">
-                                                            <UserIcon className="w-3 h-3" />
-                                                            <span className="truncate">{item.candidateName}</span>
-                                                        </div>
-                                                        <div className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 flex-shrink-0 ${item.confidence > 90 ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'}`}>
-                                                            {item.confidence > 90 && <SparklesIcon className="w-3 h-3" />}
-                                                            {item.confidence}%
-                                                        </div>
-                                                    </div>
-                                                    <div className="flex gap-2 mt-2 flex-wrap text-[10px]">
-                                                        <button
-                                                            onClick={e => { e.stopPropagation(); setCompanyFlags(prev => ({ ...prev, [item.id]: true })); }}
-                                                            className={`px-2 py-1 rounded-full border ${displayIsCompany ? 'bg-green-100 border-green-200 text-green-700' : 'border-gray-200 text-text-muted hover:border-border-default hover:bg-bg-subtle'}`}
-                                                        >
-                                                            חברה
-                                                        </button>
-                                                        <button
-                                                            onClick={e => { e.stopPropagation(); setCompanyFlags(prev => ({ ...prev, [item.id]: false })); }}
-                                                            className={`px-2 py-1 rounded-full border ${displayIsCompany ? 'border-gray-200 text-text-muted hover:border-border-default hover:bg-bg-subtle' : 'bg-red-100 border-red-200 text-red-700'}`}
-                                                        >
-                                                            לא חברה
-                                                        </button>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        );
-                                    }) : (
-                                        <div className="text-center p-8 text-text-muted text-sm">אין פריטים לטיפול!</div>
-                                    )
-                                ) : (
-                                    <div className="space-y-0 divide-y divide-border-default">
-                                        {filteredHistory.map(entry => (
-                                            <div key={entry.id} className="p-4 hover:bg-bg-subtle/50 transition-colors">
-                                                <div className="flex items-center justify-between">
-                                                    <div>
-                                                        <div className="flex items-center gap-2">
-                                                            <span className={`w-2.5 h-2.5 rounded-full ${companyFlagClass(entry.isCompany)}`} />
-                                                            {entry.resolvedValue ? (
-                                                                <>
-                                                                    <span className="font-bold text-text-default line-through opacity-60">{entry.name}</span>
-                                                                    <ArrowTopRightOnSquareIcon className="w-3 h-3 text-text-subtle" />
-                                                                    <span className="font-bold text-green-700">{entry.resolvedValue}</span>
-                                                                </>
-                                                            ) : (
-                                                                <span className="font-bold text-text-default">{entry.name}</span>
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className="flex justify-between items-start mb-1">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className={`w-2.5 h-2.5 rounded-full ${companyFlagClass(displayIsCompany)}`} />
+                                                                <h4 className="font-bold text-text-default text-base truncate" title={item.name}>{item.name}</h4>
+                                                            </div>
+                                                            {item.occurrences > 1 && (
+                                                                <span className="text-[10px] font-bold bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full flex-shrink-0">x{item.occurrences}</span>
                                                             )}
                                                         </div>
-                                                        <div className="text-[10px] text-text-muted mt-1 flex items-center gap-2">
-                                                            <span className="capitalize bg-bg-subtle px-1.5 rounded">{entry.resolutionType || 'הוסר'}</span>
-                                                            <span>•</span>
-                                                            <span>{new Date(entry.createdAt).toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' })}</span>
+                                                        <div className="flex items-center justify-between">
+                                                            <div className="text-xs text-text-muted flex items-center gap-1 max-w-[110px]">
+                                                                <UserIcon className="w-3 h-3" />
+                                                                <span className="truncate">{item.candidateName}</span>
+                                                            </div>
+                                                            <div className={`text-[10px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 flex-shrink-0 ${item.confidence > 90 ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'}`}>
+                                                                {item.confidence > 90 && <SparklesIcon className="w-3 h-3" />}
+                                                                {item.confidence}%
+                                                            </div>
+                                                        </div>
+                                                        <div className="flex gap-2 mt-2 flex-wrap text-[10px]">
+                                                            <button
+                                                                onClick={e => { e.stopPropagation(); setCompanyFlags(prev => ({ ...prev, [item.id]: true })); }}
+                                                                className={`px-2 py-1 rounded-full border ${displayIsCompany ? 'bg-green-100 border-green-200 text-green-700' : 'border-gray-200 text-text-muted hover:border-border-default hover:bg-bg-subtle'}`}
+                                                            >
+                                                                חברה
+                                                            </button>
+                                                            <button
+                                                                onClick={e => { e.stopPropagation(); setCompanyFlags(prev => ({ ...prev, [item.id]: false })); }}
+                                                                className={`px-2 py-1 rounded-full border ${displayIsCompany ? 'border-gray-200 text-text-muted hover:border-border-default hover:bg-bg-subtle' : 'bg-red-100 border-red-200 text-red-700'}`}
+                                                            >
+                                                                לא חברה
+                                                            </button>
                                                         </div>
                                                     </div>
-                                                    <div className="text-[10px] text-text-muted">{new Date(entry.createdAt).toLocaleDateString('he-IL')}</div>
                                                 </div>
-                                            </div>
-                                        ))}
-                                        {filteredHistory.length === 0 && <div className="text-center p-10 text-text-muted">אין היסטוריה להצגה</div>}
+                                            );
+                                        }) : (
+                                            <div className="text-center p-8 text-text-muted text-sm">אין פריטים לטיפול!</div>
+                                        )}
                                     </div>
-                                )}
-                            </div>
+                                    <PaginationBar
+                                        variant="bottom"
+                                        page={safeManualPage}
+                                        totalPages={manualTotalPages}
+                                        total={filteredUnmatched.length}
+                                        onPageChange={setManualPage}
+                                        pageSize={manualPageSize}
+                                        onPageSizeChange={(size) => { setManualPageSize(size); setManualPage(1); }}
+                                        label="פריטים"
+                                    />
+                                </>
+                            ) : (
+                                <>
+                                    <PaginationBar
+                                        variant="top"
+                                        page={safeHistoryPage}
+                                        totalPages={historyTotalPages}
+                                        total={filteredHistory.length}
+                                        onPageChange={setManualPage}
+                                        pageSize={manualPageSize}
+                                        onPageSizeChange={(size) => { setManualPageSize(size); setManualPage(1); }}
+                                        label="רשומות"
+                                    />
+                                    <div className="flex-1 overflow-y-auto custom-scrollbar">
+                                        <div className="space-y-0 divide-y divide-border-default">
+                                            {paginatedHistory.map(entry => (
+                                                <div key={entry.id} className="p-4 hover:bg-bg-subtle/50 transition-colors">
+                                                    <div className="flex items-center justify-between">
+                                                        <div>
+                                                            <div className="flex items-center gap-2">
+                                                                <span className={`w-2.5 h-2.5 rounded-full ${companyFlagClass(entry.isCompany)}`} />
+                                                                {entry.resolvedValue ? (
+                                                                    <>
+                                                                        <span className="font-bold text-text-default line-through opacity-60">{entry.name}</span>
+                                                                        <ArrowTopRightOnSquareIcon className="w-3 h-3 text-text-subtle" />
+                                                                        <span className="font-bold text-green-700">{entry.resolvedValue}</span>
+                                                                    </>
+                                                                ) : (
+                                                                    <span className="font-bold text-text-default">{entry.name}</span>
+                                                                )}
+                                                            </div>
+                                                            <div className="text-[10px] text-text-muted mt-1 flex items-center gap-2">
+                                                                <span className="capitalize bg-bg-subtle px-1.5 rounded">{entry.resolutionType || 'הוסר'}</span>
+                                                                <span>•</span>
+                                                                <span>{new Date(entry.createdAt).toLocaleString('he-IL', { hour: '2-digit', minute: '2-digit' })}</span>
+                                                            </div>
+                                                        </div>
+                                                        <div className="text-[10px] text-text-muted">{new Date(entry.createdAt).toLocaleDateString('he-IL')}</div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                            {filteredHistory.length === 0 && <div className="text-center p-10 text-text-muted">אין היסטוריה להצגה</div>}
+                                        </div>
+                                    </div>
+                                    <PaginationBar
+                                        variant="bottom"
+                                        page={safeHistoryPage}
+                                        totalPages={historyTotalPages}
+                                        total={filteredHistory.length}
+                                        onPageChange={setManualPage}
+                                        pageSize={manualPageSize}
+                                        onPageSizeChange={(size) => { setManualPageSize(size); setManualPage(1); }}
+                                        label="רשומות"
+                                    />
+                                </>
+                            )}
                         </div>
 
                         {/* RIGHT: action workspace */}
@@ -1717,11 +2012,40 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 <option value="merge_company">מיזוג לחברה קיימת</option>
                                 <option value="map_generic">שיוך לסל כללי</option>
                             </select>
+                            <select
+                                value={approvalFilter}
+                                onChange={e => setApprovalFilter(e.target.value as 'all' | 'pending' | 'approved')}
+                                className="bg-bg-subtle border border-border-default rounded-xl px-4 py-2 text-sm font-semibold text-text-default hover:bg-bg-hover cursor-pointer focus:ring-2 focus:ring-orange-500"
+                            >
+                                <option value="all">הכל (אישור ידני)</option>
+                                <option value="pending">⏳ ממתין לאישור</option>
+                                <option value="approved">✅ אושר ידנית</option>
+                            </select>
+                            <button
+                                type="button"
+                                onClick={() => void handleExportExcel()}
+                                disabled={exportingExcel || aiTotal === 0}
+                                className="ms-auto flex items-center gap-2 bg-white border border-border-default text-text-default font-bold py-2 px-4 rounded-xl text-sm shadow-sm hover:bg-bg-hover transition disabled:opacity-50"
+                                title="הורדת כל תוצאות החיפוש/הסינון לאקסל"
+                            >
+                                <ArrowDownTrayIcon className="w-4 h-4" />
+                                <span>{exportingExcel ? 'מוריד...' : 'הורדה לאקסל'}</span>
+                            </button>
                         </div>
                     </div>
 
                     {/* Table */}
                     <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden flex-1 flex flex-col min-h-[400px]">
+                        <PaginationBar
+                            variant="top"
+                            page={aiPage}
+                            totalPages={aiTotalPages}
+                            total={aiTotal}
+                            onPageChange={setAiPage}
+                            pageSize={aiPageSize}
+                            onPageSizeChange={(size) => { setAiPageSize(size); setAiPage(1); }}
+                            label="החלטות"
+                        />
                         <div className="overflow-auto flex-1 custom-scrollbar">
                             <table className="w-full text-right border-collapse">
                                 <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
@@ -1814,6 +2138,16 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 </tbody>
                             </table>
                         </div>
+                        <PaginationBar
+                            variant="bottom"
+                            page={aiPage}
+                            totalPages={aiTotalPages}
+                            total={aiTotal}
+                            onPageChange={setAiPage}
+                            pageSize={aiPageSize}
+                            onPageSizeChange={(size) => { setAiPageSize(size); setAiPage(1); }}
+                            label="החלטות"
+                        />
                     </div>
                 </>
             )}
@@ -1821,7 +2155,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             {/* ══════════════ BLACKLIST TAB ══════════════ */}
             {activeTab === 'blacklist' && (
                 <div className="bg-white rounded-2xl border border-border-default shadow-sm overflow-hidden flex-1 flex flex-col min-h-[400px]">
-                    {loadingDecisions ? (
+                    {blacklistLoading ? (
                         <div className="flex-1 flex flex-col gap-3 p-6">
                             {[...Array(6)].map((_, i) => (
                                 <div key={i} className="flex items-center gap-4 animate-pulse">
@@ -1844,52 +2178,74 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             <p className="text-sm max-w-xs">מונחים שיוספו לרשימה השחורה לא יעובדו מחדש ע"י הסוכן</p>
                         </div>
                     ) : (
-                        <div className="overflow-auto flex-1 custom-scrollbar">
-                            <table className="w-full text-right border-collapse">
-                                <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
-                                    <tr>
-                                        {['מונח', 'מקור', 'מועמד', 'תאריך הוספה', 'פעולה'].map(col => (
-                                            <th key={col} className={`p-4 text-xs font-bold text-text-muted uppercase whitespace-nowrap ${col === 'מונח' ? 'text-right' : 'text-center'}`}>{col}</th>
-                                        ))}
-                                    </tr>
-                                </thead>
-                                <tbody className="divide-y divide-border-default">
-                                    {blacklist.map(entry => (
-                                        <tr key={entry.id} className="hover:bg-[#f8fafc] transition-colors">
-                                            <td className="p-4 align-middle">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-rose-500 flex-shrink-0">
-                                                        <IconXCircle className="w-4 h-4 rounded-full border border-rose-400 p-0.5" />
-                                                    </span>
-                                                    <span className="font-bold text-text-default">{entry.term}</span>
-                                                </div>
-                                            </td>
-                                            <td className="p-4 align-middle text-center">
-                                                {entry.source && (
-                                                    <span className="text-[10px] font-black text-indigo-600 bg-indigo-100/50 border border-indigo-200/60 rounded px-1.5 py-0.5">{entry.source}</span>
-                                                )}
-                                            </td>
-                                            <td className="p-4 align-middle text-center text-xs text-text-muted">
-                                                {entry.candidateName && (
-                                                    <div className="flex justify-center items-center gap-1">
-                                                        <IconUser />
-                                                        {entry.candidateName}
-                                                    </div>
-                                                )}
-                                            </td>
-                                            <td className="p-4 align-middle text-center text-[11px] text-text-muted">{formatDate(entry.addedAt)}</td>
-                                            <td className="p-4 align-middle text-center">
-                                                <button onClick={() => setBlacklist(prev => prev.filter(e => e.id !== entry.id))}
-                                                    className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-200">
-                                                    <IconTrash />
-                                                    הסר
-                                                </button>
-                                            </td>
+                        <>
+                            <PaginationBar
+                                variant="top"
+                                page={paginatedBlacklist.page}
+                                totalPages={paginatedBlacklist.totalPages}
+                                total={blacklist.length}
+                                onPageChange={setBlacklistPage}
+                                pageSize={blacklistPageSize}
+                                onPageSizeChange={(size) => { setBlacklistPageSize(size); setBlacklistPage(1); }}
+                                label="מונחים"
+                            />
+                            <div className="overflow-auto flex-1 custom-scrollbar">
+                                <table className="w-full text-right border-collapse">
+                                    <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
+                                        <tr>
+                                            {['מונח', 'מקור', 'מועמד', 'תאריך הוספה', 'פעולה'].map(col => (
+                                                <th key={col} className={`p-4 text-xs font-bold text-text-muted uppercase whitespace-nowrap ${col === 'מונח' ? 'text-right' : 'text-center'}`}>{col}</th>
+                                            ))}
                                         </tr>
-                                    ))}
-                                </tbody>
-                            </table>
-                        </div>
+                                    </thead>
+                                    <tbody className="divide-y divide-border-default">
+                                        {paginatedBlacklist.rows.map(entry => (
+                                            <tr key={entry.id} className="hover:bg-[#f8fafc] transition-colors">
+                                                <td className="p-4 align-middle">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className="text-rose-500 flex-shrink-0">
+                                                            <IconXCircle className="w-4 h-4 rounded-full border border-rose-400 p-0.5" />
+                                                        </span>
+                                                        <span className="font-bold text-text-default">{entry.term}</span>
+                                                    </div>
+                                                </td>
+                                                <td className="p-4 align-middle text-center">
+                                                    {entry.source && (
+                                                        <span className="text-[10px] font-black text-indigo-600 bg-indigo-100/50 border border-indigo-200/60 rounded px-1.5 py-0.5">{entry.source}</span>
+                                                    )}
+                                                </td>
+                                                <td className="p-4 align-middle text-center text-xs text-text-muted">
+                                                    {entry.candidateName && (
+                                                        <div className="flex justify-center items-center gap-1">
+                                                            <IconUser />
+                                                            {entry.candidateName}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td className="p-4 align-middle text-center text-[11px] text-text-muted">{formatDate(entry.addedAt)}</td>
+                                                <td className="p-4 align-middle text-center">
+                                                    <button onClick={() => setBlacklist(prev => prev.filter(e => e.id !== entry.id))}
+                                                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-rose-600 hover:bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-200">
+                                                        <IconTrash />
+                                                        הסר
+                                                    </button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <PaginationBar
+                                variant="bottom"
+                                page={paginatedBlacklist.page}
+                                totalPages={paginatedBlacklist.totalPages}
+                                total={blacklist.length}
+                                onPageChange={setBlacklistPage}
+                                pageSize={blacklistPageSize}
+                                onPageSizeChange={(size) => { setBlacklistPageSize(size); setBlacklistPage(1); }}
+                                label="מונחים"
+                            />
+                        </>
                     )}
                 </div>
             )}

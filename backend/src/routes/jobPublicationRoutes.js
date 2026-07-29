@@ -36,6 +36,8 @@ jobPublicationRouter.put('/:id/publication', jobPublicationController.updatePubl
 jobPublicationRouter.post('/:id/publication/generate-hero-image', jobPublicationController.generateHeroImage);
 jobPublicationRouter.get('/:id/publication/company-images', jobPublicationController.listJobCompanyImages);
 jobPublicationRouter.get('/:id/publication/candidates', jobPublicationController.listJobCandidates);
+jobPublicationRouter.get('/:id/images', jobPublicationController.listJobImages);
+jobPublicationRouter.delete('/:id/images/:imageId', jobPublicationController.deleteJobImage);
 
 module.exports = {
   publicRouter,

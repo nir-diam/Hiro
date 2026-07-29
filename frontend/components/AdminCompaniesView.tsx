@@ -24,6 +24,8 @@ import {
 import BusinessFieldHierarchyFields, { mainFieldsFromApi, mainFieldsToApi } from './BusinessFieldHierarchyFields';
 import { FormMultiSelect } from './FormMultiSelect';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
+import LocationSelector, { type LocationItem } from './LocationSelector';
+import { fetchAllCityGroups, type LocationGroup } from '../utils/citySearchApi';
 import AuditHistoryRow from './AuditHistoryRow';
 import { authHeaders } from '../utils/authHeaders';
 import { resolveEntryTimestamp } from '../utils/auditHistoryFormat';
@@ -33,17 +35,24 @@ import { formatCompanyHistoryActionType, formatCompanyHistoryDescription, type C
 type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'משולב' | 'לא ידוע';
 type ProductType = 'מוצר (Product)' | 'שירותים (Services)' | 'פלטפורמה' | 'פרויקטים' | 'לא ידוע';
 type GrowthIndicator = 'Growing' | 'Stable' | 'Shrinking' | 'Unknown';
-type DataConfidence = 'High' | 'Medium' | 'Low' | 'Pending Review';
-type CompanyQualityMode = 'needs_review' | 'verified';
+type DataConfidence = 'High' | 'Medium' | 'Low' | 'Pending Review' | 'Missing';
+type CompanyQualityMode = 'needs_review' | 'verified' | 'missing';
 
 const qualityModeFromConfidence = (dc: DataConfidence): CompanyQualityMode =>
-    dc === 'High' ? 'verified' : 'needs_review';
+    dc === 'High' ? 'verified' : dc === 'Missing' ? 'missing' : 'needs_review';
 
 const confidenceFromQualityMode = (mode: CompanyQualityMode): DataConfidence =>
-    mode === 'verified' ? 'High' : 'Pending Review';
+    mode === 'verified' ? 'High' : mode === 'missing' ? 'Missing' : 'Pending Review';
 type CorporateStructure = 'חברה עצמאית (ללא שיוך)' | 'חברת אם (Parent/Holding)' | 'חברת בת (Subsidiary)';
 
 type CompanyId = string | number;
+
+type CompanyAdditionalLocation = {
+    id?: string;
+    description: string;
+    location: string;
+    address?: string;
+};
 
 interface Company {
     id: CompanyId;
@@ -51,6 +60,7 @@ interface Company {
     name: string; // Hebrew / Common
     nameEn: string;
     legalName: string;
+    registrationNumber: string; // ח.פ
     aliases: string[]; 
     
     // Links
@@ -62,10 +72,12 @@ interface Company {
     
     // Hard Facts
     foundedYear: string;
-    location: string; // HQ City
+    location: string; // Primary HQ city — כתובת ראשית (הנהלה)
     hqCountry: string;
-    address?: string;  // Physical address
-    activityStatus?: 'פעילה' | 'לא פעילה' | 'בפירוק' | 'לא ידוע';
+    address?: string;  // Primary physical street address
+    /** Extra sites (סניף / מרלוג / …) beyond primary HQ */
+    additionalLocations?: CompanyAdditionalLocation[];
+    activityStatus?: 'פעילה' | 'לא פעילה' | 'בפירוק' | 'לא ידוע' | 'merged';
     
     // Scale
     employeeCount: string;
@@ -130,7 +142,7 @@ const BM: BusinessModel[] = ['B2B', 'B2C', 'B2G', 'משולב', 'לא ידוע']
 const PT: ProductType[] = ['מוצר (Product)', 'שירותים (Services)', 'פלטפורמה', 'פרויקטים', 'לא ידוע'];
 const GI: GrowthIndicator[] = ['Growing', 'Stable', 'Shrinking', 'Unknown'];
 const CS: CorporateStructure[] = ['חברה עצמאית (ללא שיוך)', 'חברת אם (Parent/Holding)', 'חברת בת (Subsidiary)'];
-const DC: DataConfidence[] = ['High', 'Medium', 'Low', 'Pending Review'];
+const DC: DataConfidence[] = ['High', 'Medium', 'Low', 'Pending Review', 'Missing'];
 
 function normalizeBusinessModel(s: string): BusinessModel {
     if (BM.includes(s as BusinessModel)) return s as BusinessModel;
@@ -295,6 +307,7 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         name: String(o.name ?? ''),
         nameEn: String(o.nameEn ?? ''),
         legalName: String(o.legalName ?? ''),
+        registrationNumber: String(o.registrationNumber ?? ''),
         aliases: Array.isArray(aliases) ? aliases.map(String) : [],
         website: String(o.website ?? ''),
         logo: typeof o.logo === 'string' && o.logo.trim() ? o.logo.trim() : undefined,
@@ -329,6 +342,14 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         lastVerified: String(o.lastVerified ?? ''),
         activityStatus: (o.activityStatus as Company['activityStatus']) || 'לא ידוע',
         address: o.address != null && o.address !== '' ? String(o.address) : '',
+        additionalLocations: Array.isArray(o.additionalLocations)
+            ? (o.additionalLocations as Record<string, unknown>[]).map((loc) => ({
+                id: loc.id != null ? String(loc.id) : undefined,
+                description: String(loc.description ?? ''),
+                location: String(loc.location ?? ''),
+                address: loc.address != null && loc.address !== '' ? String(loc.address) : '',
+            }))
+            : [],
         candidateCount: typeof o.candidateCount === 'number' && Number.isFinite(o.candidateCount)
             ? o.candidateCount
             : Number(o.candidateCount) || 0,
@@ -340,6 +361,7 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         name: c.name,
         nameEn: c.nameEn || null,
         legalName: c.legalName || null,
+        registrationNumber: c.registrationNumber || null,
         aliases: c.aliases?.length ? c.aliases : [],
         description: c.description || null,
         mainField: c.mainField || null,
@@ -369,6 +391,14 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         techTags: c.techTags?.length ? c.techTags : [],
         activityStatus: c.activityStatus || null,
         address: c.address || null,
+        additionalLocations: Array.isArray(c.additionalLocations)
+            ? c.additionalLocations.map((loc, index) => ({
+                description: loc.description || '',
+                location: loc.location || '',
+                address: loc.address || null,
+                sortIndex: index,
+            }))
+            : [],
     };
 }
 
@@ -473,6 +503,7 @@ function mergeEnrichmentRawIntoCompany(c: Company, raw: Record<string, unknown>)
         linkedinUrl: (typeof raw.linkedinUrl === 'string' && raw.linkedinUrl) ? raw.linkedinUrl : c.linkedinUrl,
         email: (typeof raw.email === 'string' && raw.email && !String(c.email || '').trim()) ? raw.email : (c.email || ''),
         phone: (typeof raw.phone === 'string' && raw.phone && !String(c.phone || '').trim()) ? raw.phone : (c.phone || ''),
+        registrationNumber: (typeof raw.registrationNumber === 'string' && raw.registrationNumber) ? raw.registrationNumber : (c.registrationNumber || ''),
         foundedYear: (typeof raw.foundedYear === 'string' && raw.foundedYear) ? raw.foundedYear : c.foundedYear,
         location: (typeof raw.location === 'string' && raw.location) ? raw.location : c.location,
         hqCountry: (typeof raw.hqCountry === 'string' && raw.hqCountry) || c.hqCountry,
@@ -890,14 +921,14 @@ const CompanyModal: React.FC<{
     const [activeTab, setActiveTab] = useState<'details' | 'users' | 'history'>('details');
     const [formData, setFormData] = useState<Company>({
         id: 0,
-        name: '', nameEn: '', legalName: '', aliases: [],
+        name: '', nameEn: '', legalName: '', registrationNumber: '', aliases: [],
         description: '',
         mainField: '', subField: [], secondaryField: '',
         mainField2: [],
         employeeCount: '',
         website: '', linkedinUrl: '', email: '', phone: '', logo: '',
         foundedYear: '', location: '', hqCountry: 'Israel',
-        address: '', activityStatus: 'לא ידוע',
+        address: '', additionalLocations: [], activityStatus: 'לא ידוע',
         type: 'הייטק', classification: 'פרטית',
         businessModel: [], productType: [],
         growthIndicator: 'Unknown',
@@ -956,6 +987,9 @@ const CompanyModal: React.FC<{
             if (company) {
                 setFormData({
                     ...company,
+                    additionalLocations: Array.isArray(company.additionalLocations)
+                        ? company.additionalLocations
+                        : [],
                     dataConfidence: confidenceFromQualityMode(qualityModeFromConfidence(company.dataConfidence)),
                 });
                 setTagsInput(company.tags.join(', '));
@@ -965,14 +999,14 @@ const CompanyModal: React.FC<{
             } else {
                 setFormData({
                     id: '',
-                    name: '', nameEn: '', legalName: '', aliases: [],
+                    name: '', nameEn: '', legalName: '', registrationNumber: '', aliases: [],
                     description: '',
                     mainField: '', subField: [], secondaryField: '',
         mainField2: [],
                     employeeCount: '',
                     website: '', linkedinUrl: '', email: '', phone: '', logo: '',
                     foundedYear: '', location: '', hqCountry: 'Israel',
-                    address: '', activityStatus: 'לא ידוע',
+                    address: '', additionalLocations: [], activityStatus: 'לא ידוע',
                     type: 'הייטק', classification: 'פרטית',
                     businessModel: [], productType: [],
                     growthIndicator: 'Unknown',
@@ -1150,6 +1184,10 @@ const CompanyModal: React.FC<{
                             <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">שם משפטי מלא</label>
                                 <input type="text" name="legalName" value={formData.legalName} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500 text-text-muted" placeholder="Ltd / Inc..." dir="ltr" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-text-muted mb-1">ח.פ / ע.מ</label>
+                                <input type="text" name="registrationNumber" value={formData.registrationNumber} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500 font-mono" placeholder="51-234567-8" dir="ltr" />
                             </div>
                             
                             <div className="md:col-span-3">
@@ -1401,8 +1439,14 @@ const CompanyModal: React.FC<{
                                 <input type="text" name="foundedYear" value={formData.foundedYear} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="YYYY" />
                             </div>
                              <div>
-                                <label className="block text-xs font-semibold text-text-muted mb-1">מטה (עיר)</label>
-                                <input type="text" name="location" value={formData.location} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="תל אביב" />
+                                <label className="block text-xs font-semibold text-text-muted mb-1">כתובת ראשית (הנהלה) — עיר</label>
+                                <LocationSelector
+                                    selectedLocations={formData.location ? [{ type: 'city', value: formData.location }] : []}
+                                    onChange={(locs) => setFormData(prev => ({ ...prev, location: locs[0]?.value || '' }))}
+                                    placeholder="בחר עיר..."
+                                    className="w-full"
+                                    summarizeAsCityNames
+                                />
                             </div>
                              <div>
                                 <label className="block text-xs font-semibold text-text-muted mb-1">סטטוס פעילות</label>
@@ -1414,8 +1458,145 @@ const CompanyModal: React.FC<{
                                 </select>
                             </div>
                             <div className="md:col-span-4">
-                                <label className="block text-xs font-semibold text-text-muted mb-1">כתובת פיזית</label>
-                                <input type="text" name="address" value={formData.address || ''} onChange={handleChange} className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="רחוב, מספר, עיר, מיקוד" />
+                                <label className="block text-xs font-semibold text-text-muted mb-1">
+                                    כתובת ראשית (הנהלה) — רחוב
+                                    {(formData.address || formData.location) && (
+                                        <span className="mr-2 font-normal text-text-default/70">
+                                            {[formData.address, formData.location].filter(Boolean).join(', ')}
+                                        </span>
+                                    )}
+                                </label>
+                                <div className="flex items-center gap-1.5">
+                                    <input type="text" name="address" value={formData.address || ''} onChange={handleChange} className="flex-1 bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500" placeholder="רחוב ומספר (העיר נלקחת אוטומטית מהכתובת הראשית)" />
+                                    {(formData.address || formData.location) && (
+                                        <a
+                                            href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([formData.address, formData.location].filter(Boolean).join(', '))}`}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            title={`פתח ב-Google Maps: ${[formData.address, formData.location].filter(Boolean).join(', ')}`}
+                                            className="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-lg border border-border-default bg-bg-subtle hover:bg-blue-50 hover:border-blue-300 text-text-muted hover:text-blue-600 transition-colors"
+                                        >
+                                            <MapPinIcon className="w-4 h-4" />
+                                        </a>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="md:col-span-4 space-y-3">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h4 className="text-xs font-semibold text-text-muted">כתובות נוספות</h4>
+                                        <p className="text-[11px] text-text-subtle mt-0.5">סניף, מרלוג, אתר ייצור וכו׳ — תיאור חופשי לכל מיקום</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() =>
+                                            setFormData((prev) => ({
+                                                ...prev,
+                                                additionalLocations: [
+                                                    ...(prev.additionalLocations || []),
+                                                    { description: '', location: '', address: '' },
+                                                ],
+                                            }))
+                                        }
+                                        className="inline-flex items-center gap-1.5 text-xs font-bold text-primary-700 bg-primary-50 hover:bg-primary-100 border border-primary-200 px-3 py-1.5 rounded-lg transition-colors"
+                                    >
+                                        <PlusIcon className="w-3.5 h-3.5" />
+                                        הוסף מיקום
+                                    </button>
+                                </div>
+                                {(formData.additionalLocations || []).length === 0 ? (
+                                    <p className="text-xs text-text-subtle bg-bg-subtle/40 border border-dashed border-border-subtle rounded-lg px-3 py-2.5">
+                                        אין כתובות נוספות. לחצו על &quot;הוסף מיקום&quot; להוספת סניף או אתר נוסף.
+                                    </p>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {(formData.additionalLocations || []).map((loc, index) => (
+                                            <div
+                                                key={loc.id || `extra-loc-${index}`}
+                                                className="rounded-xl border border-border-default bg-bg-subtle/20 p-3 space-y-2"
+                                            >
+                                                <div className="flex items-start gap-2">
+                                                    <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-2">
+                                                        <div>
+                                                            <label className="block text-[11px] font-semibold text-text-muted mb-1">תיאור המיקום</label>
+                                                            <input
+                                                                type="text"
+                                                                value={loc.description}
+                                                                onChange={(e) =>
+                                                                    setFormData((prev) => {
+                                                                        const next = [...(prev.additionalLocations || [])];
+                                                                        next[index] = { ...next[index], description: e.target.value };
+                                                                        return { ...prev, additionalLocations: next };
+                                                                    })
+                                                                }
+                                                                className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-2 focus:ring-primary-500"
+                                                                placeholder="סניף / מרלוג / …"
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-[11px] font-semibold text-text-muted mb-1">עיר</label>
+                                                            <LocationSelector
+                                                                selectedLocations={loc.location ? [{ type: 'city', value: loc.location }] : []}
+                                                                onChange={(locs) =>
+                                                                    setFormData((prev) => {
+                                                                        const next = [...(prev.additionalLocations || [])];
+                                                                        next[index] = { ...next[index], location: locs[0]?.value || '' };
+                                                                        return { ...prev, additionalLocations: next };
+                                                                    })
+                                                                }
+                                                                placeholder="בחר עיר..."
+                                                                className="w-full"
+                                                                summarizeAsCityNames
+                                                            />
+                                                        </div>
+                                                        <div>
+                                                            <label className="block text-[11px] font-semibold text-text-muted mb-1">כתובת</label>
+                                                            <div className="flex items-center gap-1.5">
+                                                                <input
+                                                                    type="text"
+                                                                    value={loc.address || ''}
+                                                                    onChange={(e) =>
+                                                                        setFormData((prev) => {
+                                                                            const next = [...(prev.additionalLocations || [])];
+                                                                            next[index] = { ...next[index], address: e.target.value };
+                                                                            return { ...prev, additionalLocations: next };
+                                                                        })
+                                                                    }
+                                                                    className="flex-1 bg-bg-input border border-border-default rounded-lg p-2 text-sm focus:ring-2 focus:ring-primary-500"
+                                                                    placeholder="רחוב ומספר"
+                                                                />
+                                                                {(loc.address || loc.location) && (
+                                                                    <a
+                                                                        href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent([loc.address, loc.location].filter(Boolean).join(', '))}`}
+                                                                        target="_blank"
+                                                                        rel="noopener noreferrer"
+                                                                        title="פתח ב-Google Maps"
+                                                                        className="flex-shrink-0 flex items-center justify-center w-9 h-9 rounded-lg border border-border-default bg-bg-card hover:bg-blue-50 hover:border-blue-300 text-text-muted hover:text-blue-600 transition-colors"
+                                                                    >
+                                                                        <MapPinIcon className="w-4 h-4" />
+                                                                    </a>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        title="מחק מיקום"
+                                                        onClick={() =>
+                                                            setFormData((prev) => ({
+                                                                ...prev,
+                                                                additionalLocations: (prev.additionalLocations || []).filter((_, i) => i !== index),
+                                                            }))
+                                                        }
+                                                        className="mt-5 p-2 text-text-subtle hover:text-red-500 hover:bg-red-50 rounded-full transition-colors"
+                                                    >
+                                                        <TrashIcon className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </div>
                          </div>
                     </section>
@@ -1519,6 +1700,22 @@ const CompanyModal: React.FC<{
                                 onClick={() =>
                                     setFormData((prev) => ({
                                         ...prev,
+                                        dataConfidence: confidenceFromQualityMode('missing'),
+                                    }))
+                                }
+                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                    qualityModeFromConfidence(formData.dataConfidence) === 'missing'
+                                        ? 'bg-gray-100 text-gray-600 border border-gray-300 shadow-sm'
+                                        : 'text-text-muted hover:text-text-default'
+                                }`}
+                            >
+                                חסר נתונים
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() =>
+                                    setFormData((prev) => ({
+                                        ...prev,
                                         dataConfidence: confidenceFromQualityMode('verified'),
                                     }))
                                 }
@@ -1591,6 +1788,8 @@ const CompanyPaginationBar: React.FC<CompanyPaginationBarProps> = ({
 };
 
 
+type CityLocation = LocationItem;
+
 const AdminCompaniesView: React.FC = () => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [searchParams] = useSearchParams();
@@ -1609,12 +1808,16 @@ const AdminCompaniesView: React.FC = () => {
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [filters, setFilters] = useState({
         location: '',
+        locations: [] as LocationItem[],
+        searchAdditionalLocations: false,
         type: '',
         size: '',
         field: '',
         mainField: [] as string[],
         showPendingOnly: false,
         showMerged: false,
+        activityStatus: '' as '' | 'פעילה' | 'לא פעילה' | 'בפירוק' | 'לא ידוע' | 'merged',
+        dataConfidence: '' as '' | 'High' | 'Medium' | 'Low' | 'Pending Review',
         // Advanced Fields
         name: '',
         nameEn: '',
@@ -1657,6 +1860,9 @@ const AdminCompaniesView: React.FC = () => {
     
     const settingsRef = useRef<HTMLDivElement>(null);
     const dragItemIndex = useRef<number | null>(null);
+    /** City-group hierarchy — loaded once for region→city expansion. */
+    const cityGroupsRef = useRef<LocationGroup[]>([]);
+    useEffect(() => { fetchAllCityGroups().then(g => { cityGroupsRef.current = g; }); }, []);
 
     // Modal State
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -1694,6 +1900,28 @@ const AdminCompaniesView: React.FC = () => {
             const to = opts?.activityTo ?? activityTo;
             if (from) params.set('activityFrom', from);
             if (to) params.set('activityTo', to);
+            // Location filter — expand region items into their constituent cities so the
+            // backend ILIKE query matches individual city names stored in the DB.
+            const expandedCities = new Set<string>();
+            for (const item of filters.locations) {
+                if (item.type === 'region') {
+                    const group = cityGroupsRef.current.find(g => g.region === item.value);
+                    if (group) {
+                        group.cities.forEach(c => expandedCities.add(c));
+                    } else {
+                        // Fallback: send region name as-is (e.g. groups not yet loaded)
+                        expandedCities.add(item.value);
+                    }
+                } else {
+                    expandedCities.add(item.value);
+                }
+            }
+            if (expandedCities.size > 0) params.set('location', [...expandedCities].join(','));
+            if (filters.searchAdditionalLocations) params.set('includeAdditionalLocations', 'true');
+            const mainFieldArr = Array.isArray(filters.mainField)
+                ? filters.mainField
+                : filters.mainField ? [String(filters.mainField)] : [];
+            if (mainFieldArr.length > 0) params.set('mainField', mainFieldArr.join(','));
             const res = await fetch(`${apiBase}/api/organizations?${params.toString()}`, {
                 cache: 'no-store',
                 credentials: 'include',
@@ -1720,7 +1948,7 @@ const AdminCompaniesView: React.FC = () => {
         } finally {
             setCompaniesLoading(false);
         }
-    }, [apiBase, debouncedSearchTerm, activityFrom, activityTo, filters.showMerged]);
+    }, [apiBase, debouncedSearchTerm, activityFrom, activityTo, filters.showMerged, filters.locations, filters.searchAdditionalLocations, filters.mainField]);
 
     const listQueryKey = useMemo(
         () => JSON.stringify({
@@ -1728,9 +1956,12 @@ const AdminCompaniesView: React.FC = () => {
             activityFrom,
             activityTo,
             includeMerged: filters.showMerged,
+            locations: filters.locations.map(l => l.value),
+            searchAdditionalLocations: filters.searchAdditionalLocations,
+            mainField: Array.isArray(filters.mainField) ? filters.mainField : filters.mainField ? [filters.mainField] : [],
             pageSize: PAGE_SIZE,
         }),
-        [debouncedSearchTerm, activityFrom, activityTo, filters.showMerged],
+        [debouncedSearchTerm, activityFrom, activityTo, filters.showMerged, filters.locations, filters.searchAdditionalLocations, filters.mainField],
     );
     const prevListQueryKeyRef = useRef(listQueryKey);
 
@@ -1782,7 +2013,31 @@ const AdminCompaniesView: React.FC = () => {
     const filteredCompanies = useMemo(() => 
         companies.filter(c => {
             // Quick Filters
-            const matchesLocation = !filters.location || c.location.includes(filters.location);
+            const matchesLocation = (() => {
+                const cityMatches = (cityName: string, filterItem: LocationItem) => {
+                    const loc = (cityName || '').toLowerCase();
+                    if (!loc) return false;
+                    if (filterItem.type === 'region') {
+                        const group = cityGroupsRef.current.find(g => g.region === filterItem.value);
+                        if (group) return group.cities.some(city => loc.includes(city.toLowerCase()));
+                    }
+                    return loc.includes(filterItem.value.toLowerCase());
+                };
+                if (filters.locations.length > 0) {
+                    return filters.locations.some((l) => {
+                        if (cityMatches(c.location || '', l)) return true;
+                        if (!filters.searchAdditionalLocations) return false;
+                        return (c.additionalLocations || []).some((extra) => cityMatches(extra.location || '', l));
+                    });
+                }
+                if (!filters.location) return true;
+                const needle = filters.location.toLowerCase();
+                if ((c.location || '').toLowerCase().includes(needle)) return true;
+                if (!filters.searchAdditionalLocations) return false;
+                return (c.additionalLocations || []).some((extra) =>
+                    (extra.location || '').toLowerCase().includes(needle),
+                );
+            })();
             const matchesType = !filters.type || c.type === filters.type;
             const matchesSize = !filters.size || c.employeeCount === filters.size;
             const mainFieldFilters = Array.isArray(filters.mainField)
@@ -1800,6 +2055,8 @@ const AdminCompaniesView: React.FC = () => {
                 });
             const matchesPending = !filters.showPendingOnly || c.dataConfidence === 'Pending Review';
             const matchesMerged = filters.showMerged || c.activityStatus !== 'merged';
+            const matchesActivityStatus = !filters.activityStatus || c.activityStatus === filters.activityStatus;
+            const matchesDataConfidence = !filters.dataConfidence || c.dataConfidence === filters.dataConfidence;
 
             // Advanced Filters
             const matchesName = !filters.name || c.name.includes(filters.name);
@@ -1830,6 +2087,7 @@ const AdminCompaniesView: React.FC = () => {
             const matchesTech = !filters.tech || c.techTags.some(t => t.toLowerCase().includes(filters.tech.toLowerCase()));
 
             return matchesLocation && matchesType && matchesSize && matchesField && matchesPending && matchesMerged &&
+                   matchesActivityStatus && matchesDataConfidence &&
                    matchesName && matchesNameEn && matchesLegal && matchesWeb && matchesLinked &&
                    matchesSub && matchesSecondary && matchesBiz && matchesProd && matchesClass &&
                    matchesStruct && matchesParent && matchesFounded && matchesTags && matchesTech;
@@ -2005,10 +2263,32 @@ const AdminCompaniesView: React.FC = () => {
     
     const handleClearFilters = () => {
         setFilters({
-            location: '', type: '', size: '', field: '', mainField: [] as string[], showPendingOnly: false, showMerged: false,
-            name: '', nameEn: '', legalName: '', website: '', linkedin: '',
-            subField: [] as string[], secondaryField: '', businessModel: [] as BusinessModel[], productType: [] as ProductType[], classification: '',
-            structure: '', parent: '', founded: '', tags: '', tech: ''
+            location: '',
+            locations: [],
+            searchAdditionalLocations: false,
+            type: '',
+            size: '',
+            field: '',
+            mainField: [] as string[],
+            showPendingOnly: false,
+            showMerged: false,
+            activityStatus: '',
+            dataConfidence: '',
+            name: '',
+            nameEn: '',
+            legalName: '',
+            website: '',
+            linkedin: '',
+            subField: [] as string[],
+            secondaryField: '',
+            businessModel: [] as BusinessModel[],
+            productType: [] as ProductType[],
+            classification: '',
+            structure: '',
+            parent: '',
+            founded: '',
+            tags: '',
+            tech: '',
         });
         setSearchTerm('');
         setDebouncedSearchTerm('');
@@ -2252,13 +2532,39 @@ const AdminCompaniesView: React.FC = () => {
          switch (columnId) {
              case 'logo':
                  return <CompanyLogoMark company={company} size={48} />;
-             case 'name':
-                 return (
-                     <>
+             case 'name': {
+                const activityBadge = (() => {
+                    switch (company.activityStatus) {
+                        case 'פעילה':    return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">🟢 פעילה</span>;
+                        case 'לא פעילה': return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-red-50 text-red-700 border border-red-200">🔴 לא פעילה</span>;
+                        case 'בפירוק':   return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200">⚠️ בפירוק</span>;
+                        case 'merged':   return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-500 border border-slate-200">🔄 מוזגה</span>;
+                        default:         return null;
+                    }
+                })();
+                const qualityBadge = (() => {
+                    switch (company.dataConfidence) {
+                        case 'High':          return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">🛡️ מאומת</span>;
+                        case 'Medium':        return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">🔍 בינוני</span>;
+                        case 'Low':           return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600 border border-rose-200">⚠️ נמוך</span>;
+                        case 'Pending Review': return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-600 border border-purple-200">🔔 לביקורת</span>;
+                        case 'Missing':       return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-gray-50 text-gray-500 border border-gray-200">📭 חסר נתונים</span>;
+                        default:              return null;
+                    }
+                })();
+                return (
+                    <>
                         <div className="font-bold text-text-default text-base">{company.name}</div>
-                        <div className="text-xs text-text-muted truncate max-w-[200px]" title={company.description}>{company.description}</div>
-                     </>
-                 );
+                        {(activityBadge || qualityBadge) && (
+                            <div className="flex flex-wrap gap-1 mt-1">
+                                {activityBadge}
+                                {qualityBadge}
+                            </div>
+                        )}
+                        <div className="text-xs text-text-muted truncate max-w-[200px] mt-0.5" title={company.description}>{company.description}</div>
+                    </>
+                );
+             }
              case 'mainField':
                  return (
                      <div className="break-words leading-snug">
@@ -2419,22 +2725,57 @@ const AdminCompaniesView: React.FC = () => {
         const selected = filteredCompanies.filter((c) => selectedIds.has(c.id));
         if (!selected.length) return;
 
-        const exportColumnIds = visibleColumns.filter((id) => id !== 'logo');
-        const columns = [
-            ...exportColumnIds.map((id) => ({
-                key: id,
-                label: allColumnsDef.find((c) => c.id === id)?.label || id,
-                getValue: (company: Company) => getCompanyExportValue(company, id),
-            })),
+        // Export every Company field — regardless of what columns are visible on screen.
+        const allExportColumns: { key: string; label: string; getValue: (c: Company) => string }[] = [
+            { key: 'id',              label: 'מזהה (ID)',            getValue: (c) => String(c.id) },
+            { key: 'name',            label: 'שם החברה',             getValue: (c) => c.name },
+            { key: 'nameEn',          label: 'שם באנגלית',           getValue: (c) => c.nameEn || '' },
+            { key: 'legalName',           label: 'שם חוקי',              getValue: (c) => c.legalName || '' },
+            { key: 'registrationNumber', label: 'ח.פ / ע.מ',           getValue: (c) => c.registrationNumber || '' },
+            { key: 'aliases',            label: 'מילים נרדפות',         getValue: (c) => formatCompanyAliasesForExport(c) },
+            { key: 'website',         label: 'אתר אינטרנט',          getValue: (c) => c.website || '' },
+            { key: 'linkedinUrl',     label: 'לינקדאין',             getValue: (c) => c.linkedinUrl || '' },
+            { key: 'email',           label: 'אימייל',               getValue: (c) => c.email || '' },
+            { key: 'phone',           label: 'טלפון',                getValue: (c) => c.phone || '' },
+            { key: 'foundedYear',     label: 'שנת הקמה',             getValue: (c) => c.foundedYear || '' },
+            { key: 'location',        label: 'כתובת ראשית (הנהלה) — עיר', getValue: (c) => c.location || '' },
+            { key: 'hqCountry',       label: 'מדינה',                getValue: (c) => c.hqCountry || '' },
+            { key: 'address',         label: 'כתובת ראשית (הנהלה) — רחוב', getValue: (c) => c.address || '' },
             {
-                key: 'aliases',
-                label: 'מילים נרדפות',
-                getValue: (company: Company) => formatCompanyAliasesForExport(company),
+                key: 'additionalLocations',
+                label: 'כתובות נוספות',
+                getValue: (c) =>
+                    (c.additionalLocations || [])
+                        .map((loc) =>
+                            [loc.description, loc.location, loc.address].filter(Boolean).join(' · '),
+                        )
+                        .filter(Boolean)
+                        .join(' | '),
             },
+            { key: 'activityStatus',  label: 'סטטוס פעילות',         getValue: (c) => c.activityStatus || '' },
+            { key: 'employeeCount',   label: 'גודל (עובדים)',         getValue: (c) => c.employeeCount || '' },
+            { key: 'mainField',       label: 'תחום ראשי',            getValue: (c) => c.mainField || '' },
+            { key: 'mainField2',      label: 'תחומים ראשיים נוספים', getValue: (c) => (c.mainField2 || []).join(', ') },
+            { key: 'subField',        label: 'תת-תחום',              getValue: (c) => (c.subField || []).join(', ') },
+            { key: 'secondaryField',  label: 'תחום עיסוק משני',      getValue: (c) => c.secondaryField || '' },
+            { key: 'businessModel',   label: 'מודל עסקי',            getValue: (c) => c.businessModel.filter((m) => m !== 'לא ידוע').join(', ') },
+            { key: 'productType',     label: 'סוג מוצר/שירות',       getValue: (c) => (c.productType || []).filter((p) => p !== 'לא ידוע').join(', ') },
+            { key: 'type',            label: 'סוג ארגון',             getValue: (c) => c.type || '' },
+            { key: 'classification',  label: 'סיווג (ציבורי/פרטי)',  getValue: (c) => c.classification || '' },
+            { key: 'structure',       label: 'מבנה ארגוני',          getValue: (c) => c.structure || '' },
+            { key: 'parentCompany',   label: 'חברת אם',              getValue: (c) => c.parentCompany || '' },
+            { key: 'subsidiaries',    label: 'חברות בנות',           getValue: (c) => (c.subsidiaries || []).join(', ') },
+            { key: 'growthIndicator', label: 'אינדיקטור צמיחה',      getValue: (c) => c.growthIndicator || '' },
+            { key: 'description',     label: 'תיאור',                getValue: (c) => c.description || '' },
+            { key: 'tags',            label: 'תגיות כלליות',         getValue: (c) => (c.tags || []).join(', ') },
+            { key: 'techTags',        label: 'טכנולוגיות',           getValue: (c) => (c.techTags || []).join(', ') },
+            { key: 'dataConfidence',  label: 'אמינות נתונים',        getValue: (c) => c.dataConfidence || '' },
+            { key: 'candidateCount',  label: 'מועמדים מקושרים',      getValue: (c) => String(c.candidateCount ?? 0) },
+            { key: 'lastVerified',    label: 'עודכן לאחרונה',        getValue: (c) => c.lastVerified || '' },
         ];
 
         const stamp = new Date().toISOString().slice(0, 10);
-        downloadRowsAsXlsx(selected, columns, `companies_${stamp}.xlsx`);
+        downloadRowsAsXlsx(selected, allExportColumns, `companies_${stamp}.xlsx`);
     };
 
 
@@ -2563,8 +2904,18 @@ const AdminCompaniesView: React.FC = () => {
                                         }
                                     />
                                 </div>
-                                 <div className="flex-1 min-w-[150px]">
-                                     <input type="text" name="location" placeholder="מיקום" value={filters.location} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none" />
+                                <div className="flex-1 min-w-[160px]">
+                                    <LocationSelector
+                                        selectedLocations={filters.locations}
+                                        onChange={(locs) => setFilters(prev => ({ ...prev, locations: locs, location: '' }))}
+                                        placeholder="מיקום"
+                                        className="w-full"
+                                        showSearchAdditionalOption
+                                        searchAdditionalLocations={filters.searchAdditionalLocations}
+                                        onSearchAdditionalLocationsChange={(value) =>
+                                            setFilters((prev) => ({ ...prev, searchAdditionalLocations: value }))
+                                        }
+                                    />
                                 </div>
                                  <div className="flex-1 min-w-[150px]">
                                      <select name="type" value={filters.type} onChange={handleFilterChange} className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none">
@@ -2586,6 +2937,36 @@ const AdminCompaniesView: React.FC = () => {
                                          <option value="1000+">1000+</option>
                                          <option value="10000+">10000+</option>
                                      </select>
+                                </div>
+                                <div className="flex-1 min-w-[160px]">
+                                    <select
+                                        name="activityStatus"
+                                        value={filters.activityStatus}
+                                        onChange={handleFilterChange}
+                                        className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                                    >
+                                        <option value="">סטטוס פעילות (הכל)</option>
+                                        <option value="פעילה">🟢 פעילה</option>
+                                        <option value="לא פעילה">🔴 לא פעילה</option>
+                                        <option value="בפירוק">⚠️ בפירוק</option>
+                                        <option value="merged">🔄 מוזגה</option>
+                                        <option value="לא ידוע">⚪ לא ידוע</option>
+                                    </select>
+                                </div>
+                                <div className="flex-1 min-w-[160px]">
+                                    <select
+                                        name="dataConfidence"
+                                        value={filters.dataConfidence}
+                                        onChange={handleFilterChange}
+                                        className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
+                                    >
+                                        <option value="">מצב איכות (הכל)</option>
+                                        <option value="High">🛡️ מאומת</option>
+                                        <option value="Medium">🔍 בינוני</option>
+                                        <option value="Low">⚠️ נמוך</option>
+                                        <option value="Pending Review">🔔 לביקורת</option>
+                                        <option value="Missing">📭 חסר נתונים</option>
+                                    </select>
                                 </div>
                                 <div className="flex gap-3 min-w-[280px]">
                                     <div className="flex flex-col gap-1 flex-1">
@@ -2615,86 +2996,164 @@ const AdminCompaniesView: React.FC = () => {
                             </div>
                         )}
 
-                        {/* Advanced Filters Grid */}
+                        {/* Advanced Filters Drawer */}
                         {isAdvancedSearchOpen && (
-                            <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 pt-2 border-t border-border-default animate-fade-in">
-                                {/* Identity */}
-                                <input type="text" name="name" placeholder="שם חברה (עברית)" value={filters.name} onChange={handleFilterChange} className="input-field" />
-                                <input type="text" name="nameEn" placeholder="שם באנגלית" value={filters.nameEn} onChange={handleFilterChange} className="input-field" dir="ltr" />
-                                <input type="text" name="legalName" placeholder="שם משפטי" value={filters.legalName} onChange={handleFilterChange} className="input-field" />
-                                
-                                {/* Digital */}
-                                <input type="text" name="website" placeholder="אתר אינטרנט" value={filters.website} onChange={handleFilterChange} className="input-field" dir="ltr" />
-                                <input type="text" name="linkedin" placeholder="לינקדאין" value={filters.linkedin} onChange={handleFilterChange} className="input-field" dir="ltr" />
-                                
-                                {/* Business — hierarchical picklists */}
-                                <div className="md:col-span-2 lg:col-span-3">
-                                    <BusinessFieldHierarchyFields
-                                        apiBase={apiBase}
-                                        values={{
-                                            mainField: Array.isArray(filters.mainField)
-                                                ? filters.mainField
-                                                : filters.mainField
-                                                  ? [filters.mainField]
-                                                  : filters.field
-                                                    ? [filters.field]
-                                                    : [],
-                                            subField: filters.subField,
-                                            secondaryField: filters.secondaryField,
-                                        }}
-                                        onChange={(next) =>
-                                            setFilters((prev) => ({
-                                                ...prev,
-                                                mainField: next.mainField,
-                                                field: next.mainField[0] || '',
-                                                subField: next.subField,
-                                                secondaryField: next.secondaryField ?? '',
-                                            }))
-                                        }
-                                    />
+                            <div className="flex flex-col border-t border-border-default animate-fade-in rounded-b-2xl overflow-hidden">
+                                {/* Scrollable body */}
+                                <div className="overflow-y-auto max-h-[420px] p-4 space-y-3 custom-scrollbar bg-bg-subtle/40">
+
+                                    {/* ── זהות ──────────────────────────────── */}
+                                    <section className="bg-bg-card border border-border-default rounded-xl p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary-500 mb-3 flex items-center gap-1.5">
+                                            <span className="inline-block w-3 h-0.5 bg-primary-400 rounded-full" />
+                                            זהות
+                                        </p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">שם (עברית)</label>
+                                                <input type="text" name="name" value={filters.name} onChange={handleFilterChange} className="input-field w-full" placeholder="חיפוש..." />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">שם (אנגלית)</label>
+                                                <input type="text" name="nameEn" value={filters.nameEn} onChange={handleFilterChange} className="input-field w-full" placeholder="Search…" dir="ltr" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">שם משפטי</label>
+                                                <input type="text" name="legalName" value={filters.legalName} onChange={handleFilterChange} className="input-field w-full" placeholder="חיפוש..." />
+                                            </div>
+                                        </div>
+                                    </section>
+
+                                    {/* ── דיגיטל ──────────────────────────── */}
+                                    <section className="bg-bg-card border border-border-default rounded-xl p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary-500 mb-3 flex items-center gap-1.5">
+                                            <span className="inline-block w-3 h-0.5 bg-primary-400 rounded-full" />
+                                            דיגיטל
+                                        </p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">אתר אינטרנט</label>
+                                                <input type="text" name="website" value={filters.website} onChange={handleFilterChange} className="input-field w-full" placeholder="example.com" dir="ltr" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">לינקדאין</label>
+                                                <input type="text" name="linkedin" value={filters.linkedin} onChange={handleFilterChange} className="input-field w-full" placeholder="linkedin.com/company/…" dir="ltr" />
+                                            </div>
+                                        </div>
+                                    </section>
+
+                                    {/* ── תחום עיסוק ──────────────────────── */}
+                                    <section className="bg-bg-card border border-border-default rounded-xl p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary-500 mb-3 flex items-center gap-1.5">
+                                            <span className="inline-block w-3 h-0.5 bg-primary-400 rounded-full" />
+                                            תחום עיסוק
+                                        </p>
+                                        <BusinessFieldHierarchyFields
+                                            apiBase={apiBase}
+                                            values={{
+                                                mainField: Array.isArray(filters.mainField)
+                                                    ? filters.mainField
+                                                    : filters.mainField
+                                                      ? [filters.mainField]
+                                                      : filters.field
+                                                        ? [filters.field]
+                                                        : [],
+                                                subField: filters.subField,
+                                                secondaryField: filters.secondaryField,
+                                            }}
+                                            onChange={(next) =>
+                                                setFilters((prev) => ({
+                                                    ...prev,
+                                                    mainField: next.mainField,
+                                                    field: next.mainField[0] || '',
+                                                    subField: next.subField,
+                                                    secondaryField: next.secondaryField ?? '',
+                                                }))
+                                            }
+                                        />
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3 pt-3 border-t border-border-subtle">
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">מודל עסקי</label>
+                                                <FormMultiSelect
+                                                    compact
+                                                    options={BM.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
+                                                    value={filters.businessModel}
+                                                    onChange={(businessModel) => setFilters((prev) => ({ ...prev, businessModel: businessModel as BusinessModel[] }))}
+                                                    placeholder="הכל"
+                                                />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">סוג מוצר / שירות</label>
+                                                <FormMultiSelect
+                                                    compact
+                                                    options={PT.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
+                                                    value={filters.productType}
+                                                    onChange={(productType) => setFilters((prev) => ({ ...prev, productType: productType as ProductType[] }))}
+                                                    placeholder="הכל"
+                                                />
+                                            </div>
+                                        </div>
+                                    </section>
+
+                                    {/* ── מבנה ──────────────────────────────── */}
+                                    <section className="bg-bg-card border border-border-default rounded-xl p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary-500 mb-3 flex items-center gap-1.5">
+                                            <span className="inline-block w-3 h-0.5 bg-primary-400 rounded-full" />
+                                            מבנה
+                                        </p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">סיווג משפטי</label>
+                                                <select name="classification" value={filters.classification} onChange={handleFilterChange} className="input-field w-full">
+                                                    <option value="">הכל</option>
+                                                    <option value="פרטית">פרטית</option>
+                                                    <option value="ציבורית (בורסאית)">ציבורית</option>
+                                                    <option value="ממשלתית">ממשלתית</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">מבנה ארגוני</label>
+                                                <select name="structure" value={filters.structure} onChange={handleFilterChange} className="input-field w-full">
+                                                    <option value="">הכל</option>
+                                                    <option value="חברה עצמאית (ללא שיוך)">עצמאית</option>
+                                                    <option value="חברת אם (Parent/Holding)">חברת אם</option>
+                                                    <option value="חברת בת (Subsidiary)">חברת בת</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">חברת אם</label>
+                                                <input type="text" name="parent" value={filters.parent} onChange={handleFilterChange} className="input-field w-full" placeholder="חיפוש..." />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">שנת הקמה</label>
+                                                <input type="text" name="founded" value={filters.founded} onChange={handleFilterChange} className="input-field w-full" placeholder="למשל 2010" />
+                                            </div>
+                                        </div>
+                                    </section>
+
+                                    {/* ── תגיות ──────────────────────────────── */}
+                                    <section className="bg-bg-card border border-border-default rounded-xl p-4">
+                                        <p className="text-[10px] font-bold uppercase tracking-widest text-primary-500 mb-3 flex items-center gap-1.5">
+                                            <span className="inline-block w-3 h-0.5 bg-primary-400 rounded-full" />
+                                            תגיות
+                                        </p>
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">תגיות כלליות</label>
+                                                <input type="text" name="tags" value={filters.tags} onChange={handleFilterChange} className="input-field w-full" placeholder="חיפוש..." />
+                                            </div>
+                                            <div>
+                                                <label className="block text-xs font-semibold text-text-muted mb-1">Tech Stack</label>
+                                                <input type="text" name="tech" value={filters.tech} onChange={handleFilterChange} className="input-field w-full" placeholder="React, Python…" dir="ltr" />
+                                            </div>
+                                        </div>
+                                    </section>
                                 </div>
-                                <FormMultiSelect
-                                    compact
-                                    options={BM.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
-                                    value={filters.businessModel}
-                                    onChange={(businessModel) =>
-                                        setFilters((prev) => ({ ...prev, businessModel: businessModel as BusinessModel[] }))
-                                    }
-                                    placeholder="מודל עסקי (הכל)"
-                                />
-                                <FormMultiSelect
-                                    compact
-                                    options={PT.filter((v) => v !== 'לא ידוע').map((v) => ({ value: v, label: v }))}
-                                    value={filters.productType}
-                                    onChange={(productType) =>
-                                        setFilters((prev) => ({ ...prev, productType: productType as ProductType[] }))
-                                    }
-                                    placeholder="סוג מוצר (הכל)"
-                                />
 
-                                {/* Structure */}
-                                <select name="classification" value={filters.classification} onChange={handleFilterChange} className="input-field">
-                                    <option value="">סיווג משפטי (הכל)</option>
-                                    <option value="פרטית">פרטית</option>
-                                    <option value="ציבורית (בורסאית)">ציבורית</option>
-                                    <option value="ממשלתית">ממשלתית</option>
-                                </select>
-                                <select name="structure" value={filters.structure} onChange={handleFilterChange} className="input-field">
-                                    <option value="">מבנה ארגוני (הכל)</option>
-                                    <option value="חברה עצמאית (ללא שיוך)">עצמאית</option>
-                                    <option value="חברת אם (Parent/Holding)">חברת אם</option>
-                                    <option value="חברת בת (Subsidiary)">חברת בת</option>
-                                </select>
-                                <input type="text" name="parent" placeholder="חברת אם" value={filters.parent} onChange={handleFilterChange} className="input-field" />
-                                <input type="text" name="founded" placeholder="שנת הקמה" value={filters.founded} onChange={handleFilterChange} className="input-field" />
-                                
-                                {/* Tech & Tags */}
-                                <input type="text" name="tags" placeholder="תגיות כלליות" value={filters.tags} onChange={handleFilterChange} className="input-field" />
-                                <input type="text" name="tech" placeholder="Tech Stack" value={filters.tech} onChange={handleFilterChange} className="input-field" dir="ltr" />
-
-                                <div className="col-span-full flex justify-end gap-2 mt-2">
-                                     <button onClick={handleClearFilters} className="text-text-muted hover:text-red-500 font-bold text-sm px-4 py-2">נקה הכל</button>
-                                     <button onClick={() => setIsAdvancedSearchOpen(false)} className="bg-bg-subtle text-text-default font-bold text-sm px-4 py-2 rounded-lg hover:bg-bg-hover">סגור</button>
+                                {/* Sticky footer */}
+                                <div className="flex-shrink-0 flex items-center justify-end gap-2 px-4 py-3 border-t border-border-default bg-bg-card/90 backdrop-blur-sm">
+                                    <button onClick={handleClearFilters} className="text-text-muted hover:text-red-500 font-bold text-sm px-4 py-2 rounded-lg hover:bg-red-50 transition-colors">נקה הכל</button>
+                                    <button onClick={() => setIsAdvancedSearchOpen(false)} className="bg-bg-subtle text-text-default font-bold text-sm px-5 py-2 rounded-lg border border-border-default hover:bg-bg-hover transition-colors">סגור</button>
                                 </div>
                             </div>
                         )}

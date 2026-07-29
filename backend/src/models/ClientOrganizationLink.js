@@ -39,6 +39,18 @@ const ClientOrganizationLink = sequelize.define(
       defaultValue: false,
       field: 'is_primary',
     },
+    /** CRM pipeline this linked org is currently in (tenant kanban). */
+    pipelineId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'pipeline_id',
+    },
+    /** Current stage within that pipeline. */
+    pipelineStage: {
+      type: DataTypes.STRING,
+      allowNull: true,
+      field: 'pipeline_stage',
+    },
   },
   {
     tableName: 'client_organization_links',

@@ -35,6 +35,10 @@ const {
   listJobIdsByTag,
 } = require('./candidateTagService');
 const { enrichJobAnalyzeResult } = require('../utils/jobAiAnalyzeNormalize');
+const {
+  enrichJobsWithOrganizationIds,
+  resolveOrganizationIdForJob,
+} = require('./jobOrganizationResolveService');
 
 /** Normalize LLM output → UI/db-safe daily hours (matches candidate WorkingHoursInput). */
 const coercePreferredWorkingHoursFromJobAi = (raw) => {
@@ -193,6 +197,7 @@ const list = async ({ tagId = null } = {}) => {
     });
     await hydrateJobsSkills(rows);
     const enriched = await enrichJobsWithCandidateCounts(rows);
+    await enrichJobsWithOrganizationIds(enriched);
     return enriched.map(toApiJob);
   }
   const rows = await Job.findAll({
@@ -200,6 +205,7 @@ const list = async ({ tagId = null } = {}) => {
   });
   await hydrateJobsSkills(rows);
   const enriched = await enrichJobsWithCandidateCounts(rows);
+  await enrichJobsWithOrganizationIds(enriched);
   return enriched.map(toApiJob);
 };
 
@@ -314,6 +320,14 @@ const getById = async (id, { skipCache = false } = {}) => {
 
 const create = async (payload) => {
   const { data, skills } = stripSkillsFromPayload(payload);
+  if (!data.organizationId) {
+    const resolved = await resolveOrganizationIdForJob({
+      organizationId: data.organizationId,
+      client: data.client,
+      clientId: data.clientId,
+    });
+    if (resolved) data.organizationId = resolved;
+  }
   const job = await Job.create(data);
   if (Array.isArray(skills)) {
     await syncTagsForJob(job.id, skills);
@@ -333,6 +347,16 @@ const update = async (id, payload) => {
     throw err;
   }
   const { data, skills, hasSkills } = stripSkillsFromPayload(payload);
+  const nextClient = data.client !== undefined ? data.client : existing.client;
+  const nextClientId = data.clientId !== undefined ? data.clientId : existing.clientId;
+  if (data.organizationId === undefined || data.organizationId == null) {
+    const resolved = await resolveOrganizationIdForJob({
+      organizationId: data.organizationId || existing.organizationId,
+      client: nextClient,
+      clientId: nextClientId,
+    });
+    if (resolved) data.organizationId = resolved;
+  }
   await existing.update(data);
   if (hasSkills) {
     await syncTagsForJob(existing.id, skills || []);

@@ -20,10 +20,14 @@ router.get('/ai-decisions/stats', organizationAiDecisionController.stats);
 router.get('/ai-decisions', organizationAiDecisionController.list);
 router.put('/ai-decisions/bulk-resolve', organizationAiDecisionController.bulkResolve);
 router.put('/ai-decisions/:id/resolve', organizationAiDecisionController.resolve);
+router.patch('/ai-decisions/:id/approve', organizationAiDecisionController.approve);
 
 router.get('/:id/history', organizationController.getHistory);
+router.get('/:id/primary-client', organizationController.getPrimaryClient);
+router.get('/:id/insights', organizationController.getInsights);
 router.get('/:id', organizationController.get);
 router.get('/:id/candidates', organizationController.listCandidates);
+router.get('/:id/jobs', organizationController.listJobs);
 router.post('/:id/rebuild-embedding', organizationController.rebuildEmbedding);
 router.post('/', ...orgWrite, organizationController.create);
 router.put('/:id', ...orgWrite, organizationController.update);

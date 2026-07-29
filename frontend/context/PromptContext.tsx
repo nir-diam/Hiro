@@ -28,7 +28,7 @@ const PromptContext = createContext<PromptContextType | undefined>(undefined);
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
 const fetchPrompts = async () => {
-    const res = await fetch(`${apiBase}/api/prompts`);
+    const res = await fetch(`${apiBase}/api/prompts`, { cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to load prompts');
     return res.json();
 };

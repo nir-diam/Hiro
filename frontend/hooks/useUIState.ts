@@ -4,6 +4,16 @@ import { JobAlertModalConfig } from '../components/CreateJobAlertModal';
 
 export type MessageMode = 'whatsapp' | 'sms' | 'email';
 
+/** Optional picker entries (e.g. client contacts) so the user can choose who to send to. */
+export interface MessageRecipientOption {
+    id: string;
+    name: string;
+    email?: string | null;
+    phone?: string | null;
+    /** e.g. company / org name shown under the contact */
+    subtitle?: string | null;
+}
+
 export interface MessageModalConfig {
     mode: MessageMode;
     candidateName: string;
@@ -12,6 +22,10 @@ export interface MessageModalConfig {
     candidateEmail?: string | null;
     /** Backend candidate UUID when known (audit / system events) */
     candidateId?: string | null;
+    /** When set, modal shows a contacts dropdown to pick recipient(s). */
+    recipientOptions?: MessageRecipientOption[];
+    /** Pre-selected option ids (defaults to options that already have email/phone for the mode). */
+    initialRecipientIds?: string[];
 }
 
 export const useUIState = () => {

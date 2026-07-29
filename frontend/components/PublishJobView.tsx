@@ -19,8 +19,8 @@ import {
   mapTrackingLinkFromApi,
   type TrackingLinkRow,
   fetchJobPublicationCandidates,
-  fetchCompanyCreatedImages,
-  fetchJobCompanyImagesWithFallback,
+  fetchJobImages,
+  deleteJobImage,
   generateHeroImage,
   type LandingLayout,
   type LayoutVariantContent,
@@ -538,33 +538,14 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
 
     useEffect(() => {
         let active = true;
+        if (!targetJobId) return;
+
         setHeroGalleryLoading(true);
 
-        const loadGallery = async () => {
-            try {
-                const images = await fetchCompanyCreatedImages();
-                if (active) setHeroGallery(images || []);
-                return;
-            } catch {
-                // fall through to job-scoped merge
-            }
-
-            if (!targetJobId) {
-                if (active) setHeroGallery([]);
-                return;
-            }
-
-            try {
-                const images = await fetchJobCompanyImagesWithFallback(targetJobId);
-                if (active) setHeroGallery(images || []);
-            } catch {
-                if (active) setHeroGallery([]);
-            }
-        };
-
-        void loadGallery().finally(() => {
-            if (active) setHeroGalleryLoading(false);
-        });
+        fetchJobImages(targetJobId)
+            .then((images) => { if (active) setHeroGallery(images || []); })
+            .catch(() => { if (active) setHeroGallery([]); })
+            .finally(() => { if (active) setHeroGalleryLoading(false); });
 
         return () => { active = false; };
     }, [targetJobId, saveFeedback]);
@@ -617,9 +598,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             });
             setHeroImageUrl(result.heroImageUrl || result.url);
             setHeroFeedback('המודעה נוצרה ב-Nano Banana ונשמרה');
-            const refreshed = await fetchCompanyCreatedImages().catch(() =>
-                fetchJobCompanyImagesWithFallback(publishJobId),
-            );
+            const refreshed = await fetchJobImages(publishJobId).catch(() => []);
             setHeroGallery(refreshed || []);
         } catch (err: any) {
             setHeroFeedback(err?.message || 'יצירת התמונה נכשלה');
@@ -1137,26 +1116,46 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                             </span>
                         </button>
                         <div className="flex flex-col p-4 border border-border-default rounded-xl max-h-64 overflow-y-auto">
-                            <span className="font-semibold text-sm text-text-default mb-2">תמונות הלקוח</span>
+                            <span className="font-semibold text-sm text-text-default mb-2">תמונות המשרה</span>
                             {heroGalleryLoading ? (
                                 <span className="text-xs text-text-muted text-center py-4">טוען תמונות...</span>
                             ) : heroGallery.length === 0 ? (
                                 <>
-                                    <span className="font-semibold text-sm text-text-muted mb-1 opacity-50">אין תמונות ללקוח זה</span>
-                                    <span className="text-xs text-text-subtle text-center">צור תמונה עם Nano Banana או הוסף בהגדרות → תמונות שנוצרו</span>
+                                    <span className="font-semibold text-sm text-text-muted mb-1 opacity-50">אין תמונות למשרה זו</span>
+                                    <span className="text-xs text-text-subtle text-center">צור תמונה עם Nano Banana כדי להתחיל</span>
                                 </>
                             ) : (
                                 <div className="grid grid-cols-2 gap-2 w-full">
                                     {heroGallery.map((img) => (
-                                        <button
+                                        <div
                                             key={img.id}
-                                            type="button"
-                                            onClick={() => setHeroImageUrl(img.url)}
-                                            className={`relative aspect-video rounded-lg overflow-hidden border-2 transition ${heroImageUrl === img.url ? 'border-primary-500 ring-2 ring-primary-200' : 'border-border-default hover:border-primary-300'}`}
-                                            title={img.label || 'בחר תמונה'}
+                                            className={`relative aspect-video rounded-lg overflow-hidden border-2 transition group ${heroImageUrl === img.url ? 'border-primary-500 ring-2 ring-primary-200' : 'border-border-default hover:border-primary-300'}`}
                                         >
-                                            <img src={img.url} alt={img.label || ''} className="w-full h-full object-cover" />
-                                        </button>
+                                            <button
+                                                type="button"
+                                                onClick={() => setHeroImageUrl(img.url)}
+                                                className="w-full h-full"
+                                                title={img.label || 'בחר תמונה'}
+                                            >
+                                                <img src={img.url} alt={img.label || ''} className="w-full h-full object-cover" />
+                                            </button>
+                                            <button
+                                                type="button"
+                                                title="מחק תמונה"
+                                                onClick={async () => {
+                                                    const publishJobId = resolvePublishJobId(jobId, job as { id?: unknown });
+                                                    if (!publishJobId) return;
+                                                    try {
+                                                        await deleteJobImage(publishJobId, img.id);
+                                                        setHeroGallery((prev) => prev.filter((i) => i.id !== img.id));
+                                                        if (heroImageUrl === img.url) setHeroImageUrl('');
+                                                    } catch { /* ignore */ }
+                                                }}
+                                                className="absolute top-1 left-1 p-1 bg-black/60 hover:bg-red-600 text-white rounded-md opacity-0 group-hover:opacity-100 transition"
+                                            >
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12"/></svg>
+                                            </button>
+                                        </div>
                                     ))}
                                 </div>
                             )}

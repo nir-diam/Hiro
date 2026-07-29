@@ -34,6 +34,7 @@ export type OrgAiDecisionDto = {
     reviewerAction: string | null;
     resolvedAt: string | null;
     organizationTmpId: string | null;
+    manualApprovalStatus: 'pending' | 'approved';
 };
 
 export async function fetchOrgAiDecisions(params: {
@@ -43,6 +44,13 @@ export async function fetchOrgAiDecisions(params: {
     date?: string;
     sortOrder?: 'asc' | 'desc';
     reviewStatus?: string;
+    approvalStatus?: 'all' | 'pending' | 'approved';
+    search?: string;
+    reviewerAction?: string;
+    /** When false, exclude “נדרש ידנית” rows (manual status or high hesitation). */
+    showManual?: boolean;
+    /** When false, exclude “טופל אוטומטית” rows (approved status or low hesitation). */
+    showAuto?: boolean;
 }): Promise<{
     data: OrgAiDecisionDto[];
     total: number;
@@ -56,10 +64,27 @@ export async function fetchOrgAiDecisions(params: {
     if (params.date) q.set('date', params.date);
     if (params.reviewStatus) q.set('reviewStatus', params.reviewStatus);
     if (params.sortOrder) q.set('sortOrder', params.sortOrder);
+    if (params.approvalStatus && params.approvalStatus !== 'all') q.set('approvalStatus', params.approvalStatus);
+    if (params.search?.trim()) q.set('search', params.search.trim());
+    if (params.reviewerAction?.trim()) q.set('reviewerAction', params.reviewerAction.trim());
+    if (params.showManual === false) q.set('showManual', '0');
+    else if (params.showManual === true) q.set('showManual', '1');
+    if (params.showAuto === false) q.set('showAuto', '0');
+    else if (params.showAuto === true) q.set('showAuto', '1');
 
     const res = await fetch(`${apiBase()}/api/organizations/ai-decisions?${q.toString()}`, {
         headers: authHeaders(),
         cache: 'no-store',
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
+export async function approveOrgAiDecision(id: string, status: 'approved' | 'pending' = 'approved'): Promise<{ id: string; manualApprovalStatus: string }> {
+    const res = await fetch(`${apiBase()}/api/organizations/ai-decisions/${encodeURIComponent(id)}/approve`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status }),
     });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();

@@ -99,13 +99,6 @@ const start = async () => {
     await connectRedis().catch((err) => {
       console.warn('[server] Redis connection failed (non-fatal):', err.message);
     });
-    try {
-      const promptService = require('./services/promptService');
-      await promptService.ensureById('tag_correction_agent');
-      await promptService.ensureById('job_taxonomy_mapping');
-    } catch (promptErr) {
-      console.warn('[server] tag_correction_agent prompt seed failed', promptErr?.message || promptErr);
-    }
     app.listen(port, () => {
       console.log(`API listening on port ${port}`);
     });

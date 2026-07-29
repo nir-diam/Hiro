@@ -292,22 +292,67 @@ Do NOT include phone numbers, fax, hours, or any extra text.`,
   }
 };
 
-const searchWebsiteUrl = async (companyName) => {
-  if (!companyName || !process.env.SERPDEV) return null;
+/**
+ * Run two Serper queries in parallel (website + general info) and return:
+ *   - websiteCandidates: up to 5 deduplicated origin strings
+ *   - contextText: formatted snippet block to inject into the Gemini prompt
+ *
+ * Using Serper ourselves avoids giving Gemini the googleSearch tool, which
+ * causes TOO_MANY_TOOL_CALLS when the model tries to verify every field.
+ */
+const fetchSearchContext = async (companyName) => {
+  if (!companyName || !process.env.SERPDEV) return { websiteCandidates: [], contextText: '' };
   try {
-    const q = `${companyName}  'האתר הרשמי' `;
-    const results = await serperSearch(q);
-    if (!results.length) return null;
-    const official = results.find((r) => {
-      if (!r.link) return false;
-      const domain = r.link.toLowerCase();
-      return !WEBSITE_EXCLUDED.some((ex) => domain.includes(ex));
-    });
-    return official?.link ? new URL(official.link).origin : null;
+    const isHeb = hasHebrew(companyName);
+    const queries = [
+      isHeb ? `${companyName} אתר רשמי` : `${companyName} official website`,
+      isHeb ? `${companyName} חברה מידע כתובת טלפון` : `${companyName} company address phone info`,
+    ];
+    // Run both queries in parallel
+    const [websiteResults, infoResults] = await Promise.all(
+      queries.map((q) => serperSearch(q, 5).catch(() => [])),
+    );
+    const allResults = [...websiteResults, ...infoResults];
+
+    // Deduplicated website candidates (exclude social/directory sites)
+    const seen = new Set();
+    const websiteCandidates = [];
+    for (const r of websiteResults) {
+      if (!r.link || WEBSITE_EXCLUDED.some((ex) => r.link.toLowerCase().includes(ex))) continue;
+      try {
+        const origin = new URL(r.link).origin;
+        if (!seen.has(origin)) { seen.add(origin); websiteCandidates.push(origin); }
+      } catch { /* skip malformed URLs */ }
+      if (websiteCandidates.length >= 5) break;
+    }
+
+    // Build a compact context block from snippets for the Gemini prompt
+    const contextLines = allResults
+      .filter((r) => r.snippet || r.title)
+      .slice(0, 10)
+      .map((r, i) => `[${i + 1}] ${r.title || ''}\n    URL: ${r.link || ''}\n    ${r.snippet || ''}`)
+      .join('\n\n');
+
+    return { websiteCandidates, contextText: contextLines };
   } catch (err) {
-    console.warn('[orgEnrich] website search failed:', err?.message || err);
-    return null;
+    console.warn('[orgEnrich] search context fetch failed:', err?.message || err);
+    return { websiteCandidates: [], contextText: '' };
   }
+};
+
+// Kept for backward compat and as a direct Serper-only fallback
+const getWebsiteCandidates = async (companyName) => {
+  const { websiteCandidates } = await fetchSearchContext(companyName);
+  return websiteCandidates;
+};
+
+/**
+ * Serper-only fallback: return the first valid candidate (used when Gemini
+ * already ran but didn't return a website).
+ */
+const searchWebsiteUrl = async (companyName) => {
+  const candidates = await getWebsiteCandidates(companyName);
+  return candidates[0] ?? null;
 };
 
 const searchLinkedinUrl = async (companyName) => {
@@ -377,6 +422,24 @@ const searchEmail = async (companyName) => {
   const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
   const emails = texts.match(new RegExp(EMAIL_RE.source, 'g')) || [];
   return pickBestEmail(emails);
+};
+
+const REGISTRATION_NUMBER_RE = /\b(\d{8,9})\b/g;
+
+const searchRegistrationNumber = async (companyName) => {
+  if (!companyName || !process.env.SERPDEV) return null;
+  try {
+    const q = hasHebrew(companyName)
+      ? `${companyName} מספר חברה ח.פ רשם החברות`
+      : `${companyName} Israeli company registration number`;
+    const results = await serperSearch(q, 5);
+    const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
+    const candidates = [...texts.matchAll(REGISTRATION_NUMBER_RE)].map((m) => m[1]);
+    return candidates.length ? candidates[0] : null;
+  } catch (err) {
+    console.warn('[orgEnrich] registration number search failed:', err?.message || err);
+    return null;
+  }
 };
 
 const searchPhoneAndEmail = async (companyName) => {
@@ -567,6 +630,80 @@ const applyContactPreserveOnUpdates = (updates, existingOrg) => {
   return updates;
 };
 
+// ── Gemini extraction from pre-fetched Serper context ───────────────────────
+/**
+ * Call Gemini once with injected Serper search snippets as context.
+ * We deliberately do NOT pass the googleSearch tool here — letting Gemini
+ * call Google Search autonomously leads to TOO_MANY_TOOL_CALLS (50+ queries).
+ * Instead, we supply the search results ourselves and ask Gemini to extract.
+ *
+ * @param {string} name
+ * @param {string[]} [websiteCandidates=[]] - Origin URLs from Serper website search
+ * @param {string} [contextText='']         - Formatted Serper snippets (title + URL + snippet)
+ */
+const searchAllFieldsWithGemini = async (name, websiteCandidates = [], contextText = '') => {
+  const apiKey = resolveGeminiApiKey();
+  if (!apiKey) return {};
+  const model = 'gemini-2.5-flash';
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const isHebrew = /[\u0590-\u05FF]/.test(name);
+  const lang = isHebrew ? 'Hebrew' : 'English';
+
+  const candidatesSection = websiteCandidates.length
+    ? `\nWEBSITE CANDIDATES found via Google search (most likely the official site is one of these):
+${websiteCandidates.map((c, i) => `  ${i + 1}. ${c}`).join('\n')}
+Pick the most relevant one as the official website, or return null if none match.\n`
+    : '';
+
+  const contextSection = contextText
+    ? `\nGOOGLE SEARCH RESULTS for "${name}" (use these as your primary source of truth):\n${contextText}\n`
+    : '';
+
+  const prompt = `You are a precise company data extraction assistant tasked with filling a structured profile for the Israeli company "${name}".
+${contextSection}${candidatesSection}
+CRITICAL RULES — YOU MUST FOLLOW THESE EXACTLY:
+1. Extract data ONLY from the search results provided above. If a field is not present in the results, return null.
+2. NEVER guess, infer, or hallucinate. Do NOT confuse "${name}" with a similarly-named company.
+3. For website: prefer one of the WEBSITE CANDIDATES above (if correct). Return the origin only (e.g. https://example.com). Never return LinkedIn, Facebook, Google, news, or directory sites.
+4. For phone: Israeli format only (e.g. 0521234567). Return null if not clearly stated in the results.
+5. For address/location: must be in Hebrew and must be in Israel. Return null if uncertain.
+6. For registrationNumber: Israeli ח.פ is exactly 9 digits — return null if not clearly found.
+
+Return ONLY a valid JSON object (no markdown fences, no extra text) with exactly these keys:
+{
+  "linkedinUrl": "full LinkedIn /company/ URL or null",
+  "foundedYear": "4-digit year string or null",
+  "address": "street + number in Hebrew or null",
+  "location": "city name in Hebrew or null and must be in Israel",
+  "website": "https://official-domain.com (origin only) or null",
+  "snippet": "1-2 sentence description of the company in ${lang} or null",
+  "phone": "digits only e.g. 0521234567 or null",
+  "email": "official contact email or null",
+  "registrationNumber": "9-digit ח.פ string or null"
+}`;
+
+  try {
+    const res = await axios.post(
+      url,
+      {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        // No googleSearch tool — we provide the search context ourselves to
+        // avoid TOO_MANY_TOOL_CALLS from Gemini's autonomous search agent.
+        generationConfig: { temperature: 0.0, candidateCount: 1 },
+      },
+      { headers: { 'Content-Type': 'application/json' } },
+    );
+    const parts = res.data?.candidates?.[0]?.content?.parts || [];
+    const raw = parts.map((p) => (p?.text || '')).join('').trim();
+    if (!raw) return {};
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    return JSON.parse(cleaned) || {};
+  } catch (err) {
+    console.warn('[geminiSearch] request or parse failed:', err?.message || err);
+    return {};
+  }
+};
+
 const finalizeEnrichmentItem = async (item, companyName, prefetched = {}) => {
   const out = { ...item };
 
@@ -575,52 +712,66 @@ const finalizeEnrichmentItem = async (item, companyName, prefetched = {}) => {
 
   await resolveSubFieldFromPicklist(out, companyName);
 
+  // ── 1. Serper: fetch website candidates + snippet context in one shot ────
+  let websiteCandidates = [];
+  let contextText = '';
   try {
-    out.linkedinUrl = await searchLinkedinUrl(companyName);
+    ({ websiteCandidates, contextText } = await fetchSearchContext(companyName));
+    if (websiteCandidates.length) {
+      console.log(`[geminiSearch] "${companyName}" website candidates →`, websiteCandidates.join(', '));
+    }
+  } catch { /* non-fatal */ }
+
+  // ── 2. Gemini extraction from injected context (no autonomous search tool) ─
+  let g = {};
+  try {
+    g = await searchAllFieldsWithGemini(companyName, websiteCandidates, contextText);
+    console.log(`[geminiSearch] "${companyName}" →`, JSON.stringify(g));
+    if (g.linkedinUrl)         out.linkedinUrl         = g.linkedinUrl;
+    if (g.foundedYear)         out.foundedYear          = String(g.foundedYear);
+    if (g.address)             out.address              = g.address;
+    if (g.location)            out.location             = g.location;
+    if (g.website)             out.website              = g.website;
+    if (g.snippet)             out.snippet              = g.snippet;
+    if (g.registrationNumber)  out.registrationNumber   = String(g.registrationNumber);
+    if (g.phone  && !String(out.phone  || '').trim()) out.phone = g.phone;
+    if (g.email  && !String(out.email  || '').trim()) out.email = g.email;
   } catch (err) {
-    console.warn('[organization-enrich] linkedin search failed', err?.message || err);
+    console.warn('[organization-enrich] Gemini web search failed:', err?.message || err);
   }
 
-  try {
-    out.foundedYear = await searchFoundedYear(companyName);
-  } catch (err) {
-    console.warn('[organization-enrich] founded year search failed', err?.message || err);
+  // ── 2. Serper fallbacks for any field Gemini did not return ────────────
+  if (!g.linkedinUrl) {
+    try { out.linkedinUrl = await searchLinkedinUrl(companyName); } catch (err) { console.warn('[organization-enrich] linkedin search failed', err?.message || err); }
   }
-
-  try {
-    const { address, location } = await searchAddress(companyName);
-    out.address = address;
-    out.location = location;
-  } catch (err) {
-    console.warn('[organization-enrich] address search failed', err?.message || err);
+  if (!g.foundedYear) {
+    try { out.foundedYear = await searchFoundedYear(companyName); } catch (err) { console.warn('[organization-enrich] founded year search failed', err?.message || err); }
   }
-
-  try {
-    out.website = await searchWebsiteUrl(companyName);
-  } catch (err) {
-    console.warn('[organization-enrich] website search failed', err?.message || err);
-  }
-
-  try {
-    out.snippet = await searchSnippet(companyName);
-  } catch (err) {
-    console.warn('[organization-enrich] snippet search failed', err?.message || err);
-  }
-
-  if (!String(out.phone || '').trim()) {
+  if (!g.address || !g.location) {
     try {
-      out.phone = await searchPhone(companyName);
-    } catch (err) {
-      console.warn('[organization-enrich] phone search failed', err?.message || err);
+      const { address, location } = await searchAddress(companyName);
+      if (!g.address)   out.address  = address;
+      if (!g.location)  out.location = location;
+    } catch (err) { console.warn('[organization-enrich] address search failed', err?.message || err); }
+  }
+  if (!g.website) {
+    // Candidates already fetched — use the first one as a direct fallback
+    if (websiteCandidates.length) out.website = websiteCandidates[0];
+    else {
+      try { out.website = await searchWebsiteUrl(companyName); } catch (err) { console.warn('[organization-enrich] website search failed', err?.message || err); }
     }
   }
-
-  if (!String(out.email || '').trim()) {
-    try {
-      out.email = await searchEmail(companyName);
-    } catch (err) {
-      console.warn('[organization-enrich] email search failed', err?.message || err);
-    }
+  if (!g.snippet) {
+    try { out.snippet = await searchSnippet(companyName); } catch (err) { console.warn('[organization-enrich] snippet search failed', err?.message || err); }
+  }
+  if (!g.phone && !String(out.phone || '').trim()) {
+    try { out.phone = await searchPhone(companyName); } catch (err) { console.warn('[organization-enrich] phone search failed', err?.message || err); }
+  }
+  if (!g.email && !String(out.email || '').trim()) {
+    try { out.email = await searchEmail(companyName); } catch (err) { console.warn('[organization-enrich] email search failed', err?.message || err); }
+  }
+  if (!g.registrationNumber && !String(out.registrationNumber || '').trim()) {
+    try { out.registrationNumber = await searchRegistrationNumber(companyName); } catch (err) { console.warn('[organization-enrich] registration number search failed', err?.message || err); }
   }
 
   const bucket = normalizeEmployeeCount(out.employeeCount);
@@ -671,6 +822,7 @@ const buildOrganizationUpdates = (item) => {
   setStr('relation', str(item.relation));
   setStr('email', str(item.email));
   setStr('phone', str(item.phone));
+  setStr('registrationNumber', str(item.registrationNumber));
 
   if (item.foundedYear != null && String(item.foundedYear).trim()) {
     updates.foundedYear = String(item.foundedYear).trim();
@@ -786,6 +938,30 @@ const enrichOrganizationById = async (orgId) => {
     return null;
   }
 
+  // ── Gemini website verification (post-enrichment gate) ───────────────────
+  const detectedWebsite = enriched.website || updates.website || website || null;
+  if (detectedWebsite) {
+    const verification = await verifyOrganizationWebsite({
+      companyNameCv: companyName,
+      extractedUrl: detectedWebsite,
+    });
+    console.log(`[orgVerify] "${companyName}" → is_match=${verification.isMatch} | ${verification.reason}`);
+
+    if (!verification.isMatch) {
+      // Nullify contact/web fields to prevent data pollution
+      updates.website    = null;
+      updates.linkedinUrl = null;
+      updates.phone      = null;
+      updates.email      = null;
+      updates.dataConfidence = 'אין התאמה';
+      console.warn(`[orgVerify] "${companyName}" – mismatch detected. Nullified web/contact fields, dataConfidence=אין התאמה`);
+    } else {
+      updates.dataConfidence = 'לביקורת';
+      console.log(`[orgVerify] "${companyName}" – match confirmed. dataConfidence=לביקורת`);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
+
   await Organization.update(updates, { where: { id: orgId } });
   console.log(`[orgEnrich] enriched "${companyName}" (${orgId}) →`, Object.keys(updates).join(', '));
 
@@ -870,6 +1046,64 @@ const scheduleOrganizationEnrichmentIfNeeded = (org) => {
   scheduleOrganizationEnrichment(org);
 };
 
+// ── Website verification via Gemini ──────────────────────────────────────────
+
+/**
+ * Verifies that `extractedUrl` actually belongs to the given company using Gemini.
+ *
+ * @param {object} params
+ * @param {string} params.companyNameCv   - Company name as it appears on the CV / in the DB
+ * @param {string} [params.candidateContext] - Optional sentence describing candidate's role/activity there
+ * @param {string} params.extractedUrl    - URL found by the enrichment step
+ * @returns {Promise<{ isMatch: boolean, reason: string }>}
+ */
+const verifyOrganizationWebsite = async ({ companyNameCv, candidateContext = '', extractedUrl }) => {
+  const NO_MATCH = { isMatch: false, reason: 'verification skipped – missing inputs' };
+
+  if (!companyNameCv || !extractedUrl) return NO_MATCH;
+
+  const contextLine = candidateContext
+    ? `\nהקשר פעילות המועמד: "${candidateContext}"`
+    : '';
+
+  const prompt = `
+אתה סוכן בקרת איכות של מאגר חברות.
+עליך לקבוע האם כתובת האתר שנמצאה אכן שייכת לחברה המוזכרת, בהתאם לשם החברה והקשר הפעילות.
+
+שם החברה (מקורות החיים): "${companyNameCv}"${contextLine}
+כתובת האתר שנמצאה: ${extractedUrl}
+
+ענה אך ורק ב-JSON תקני בפורמט הבא (ללא הסבר נוסף):
+{ "is_match": true/false, "reason": "הסבר קצר" }
+
+כללים:
+- is_match = true רק אם יש התאמה לוגית ומקצועית ברורה בין שם החברה לבין מטרת האתר.
+- is_match = false אם האתר שייך לחברה אחרת, לפלטפורמת דרושים, לוויקיפדיה, לחדשות, וכדומה.
+- is_match = false אם לא ניתן לאמת התאמה בביטחון סביר.
+`.trim();
+
+  try {
+    const raw = await sendChat({
+      apiKey: resolveGeminiApiKey(),
+      systemPrompt: 'You are a JSON-only response agent. Always reply with valid JSON only.',
+      history: [],
+      message: prompt,
+      responseMimeType: 'application/json',
+    });
+
+    const parsed = parseJsonResponse(raw);
+    if (!parsed || typeof parsed.is_match !== 'boolean') {
+      console.warn('[orgVerify] unexpected Gemini response:', String(raw).substring(0, 200));
+      return NO_MATCH;
+    }
+
+    return { isMatch: parsed.is_match, reason: String(parsed.reason || '') };
+  } catch (err) {
+    console.warn('[orgVerify] Gemini call failed:', err?.message || err);
+    return NO_MATCH;
+  }
+};
+
 module.exports = {
   enrichOrganizationById,
   organizationNeedsEnrichment,
@@ -879,6 +1113,18 @@ module.exports = {
   finalizeEnrichmentItem,
   resolveSubFieldFromPicklist,
   persistEnrichmentResults,
-  searchWebsiteUrl,
   hasStoredContact,
+  verifyOrganizationWebsite,
+  // ── Search helpers (single source of truth) ──────────────────────────────
+  searchAllFieldsWithGemini,
+  fetchSearchContext,
+  getWebsiteCandidates,
+  searchWebsiteUrl,
+  searchLinkedinUrl,
+  searchFoundedYear,
+  searchAddress,
+  searchPhone,
+  searchEmail,
+  searchSnippet,
+  searchRegistrationNumber,
 };

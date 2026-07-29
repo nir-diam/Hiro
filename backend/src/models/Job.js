@@ -20,6 +20,14 @@ const Job = sequelize.define(
       onDelete: 'SET NULL',
       onUpdate: 'CASCADE',
     },
+    organizationId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      field: 'organization_id',
+      references: { model: 'organizations', key: 'id' },
+      onDelete: 'SET NULL',
+      onUpdate: 'CASCADE',
+    },
     field: DataTypes.STRING,
     role: DataTypes.STRING,
     priority: {

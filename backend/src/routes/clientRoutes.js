@@ -10,6 +10,9 @@ const clientTaskController = require('../controllers/clientTaskController');
 const clientEventController = require('../controllers/clientEventController');
 const clientDocumentController = require('../controllers/clientDocumentController');
 const clientFinanceController = require('../controllers/clientFinanceController');
+const clientPipelineController = require('../controllers/clientPipelineController');
+const clientHealthRuleController = require('../controllers/clientHealthRuleController');
+const jobHealthRuleController = require('../controllers/jobHealthRuleController');
 const recruitmentStatusController = require('../controllers/recruitmentStatusController');
 const recruitmentSourceController = require('../controllers/recruitmentSourceController');
 
@@ -19,18 +22,20 @@ router.get('/', optionalAuth, optionalAttachDbUser, clientController.list);
 router.get('/all-contacts', authMiddleware, attachDbUser, clientContactController.listAll);
 router.get('/all-tasks', clientTaskController.listAll);
 router.get('/:id/contacts', authMiddleware, attachDbUser, clientContactController.list);
-router.post('/:id/contacts', clientContactController.create);
-router.put('/:id/contacts/:contactId', clientContactController.update);
-router.delete('/:id/contacts/:contactId', clientContactController.remove);
+router.post('/:id/contacts', authMiddleware, attachDbUser, clientContactController.create);
+router.put('/:id/contacts/:contactId', authMiddleware, attachDbUser, clientContactController.update);
+router.delete('/:id/contacts/:contactId', authMiddleware, attachDbUser, clientContactController.remove);
 
-router.get('/:id/contact-groups', clientContactController.listGroups);
-router.post('/:id/contact-groups', clientContactController.createGroup);
-router.delete('/:id/contact-groups/:groupId', clientContactController.deleteGroup);
+router.get('/:id/contact-groups', authMiddleware, attachDbUser, clientContactController.listGroups);
+router.post('/:id/contact-groups', authMiddleware, attachDbUser, clientContactController.createGroup);
+router.delete('/:id/contact-groups/:groupId', authMiddleware, attachDbUser, clientContactController.deleteGroup);
 
 router.get('/:id/tasks', clientTaskController.list);
 router.post('/:id/tasks', clientTaskController.create);
 router.put('/:id/tasks/:taskId', clientTaskController.update);
 router.delete('/:id/tasks/:taskId', clientTaskController.remove);
+
+router.get('/:id/linked-jobs', authMiddleware, attachDbUser, clientController.listLinkedJobs);
 
 router.get('/:id/events', clientEventController.list);
 router.post('/:id/events', clientEventController.create);
@@ -55,6 +60,13 @@ router.get(
   clientController.listLinkedOrganizations,
 );
 
+router.get(
+  '/:id/job-companies',
+  authMiddleware,
+  attachDbUser,
+  clientController.listJobCompanies,
+);
+
 router.post(
   '/:id/organization-link',
   authMiddleware,
@@ -67,6 +79,13 @@ router.delete(
   authMiddleware,
   attachDbUser,
   clientController.unlinkOrganization,
+);
+
+router.patch(
+  '/:id/organization-link/:linkId',
+  authMiddleware,
+  attachDbUser,
+  clientController.updateOrganizationLink,
 );
 
 router.get(
@@ -103,6 +122,63 @@ router.put(
 );
 
 router.get(
+  '/:id/pipelines',
+  authMiddleware,
+  attachDbUser,
+  clientPipelineController.list,
+);
+router.put(
+  '/:id/pipelines',
+  authMiddleware,
+  attachDbUser,
+  clientPipelineController.sync,
+);
+router.post(
+  '/:id/pipelines',
+  authMiddleware,
+  attachDbUser,
+  clientPipelineController.create,
+);
+
+router.get(
+  '/:id/health-rules',
+  authMiddleware,
+  attachDbUser,
+  clientHealthRuleController.list,
+);
+router.put(
+  '/:id/health-rules',
+  authMiddleware,
+  attachDbUser,
+  clientHealthRuleController.sync,
+);
+router.get(
+  '/:id/health-pulse',
+  authMiddleware,
+  attachDbUser,
+  clientHealthRuleController.pulse,
+);
+
+router.get(
+  '/:id/job-health-rules',
+  authMiddleware,
+  attachDbUser,
+  jobHealthRuleController.list,
+);
+router.put(
+  '/:id/job-health-rules',
+  authMiddleware,
+  attachDbUser,
+  jobHealthRuleController.sync,
+);
+router.get(
+  '/:id/job-health-pulse',
+  authMiddleware,
+  attachDbUser,
+  jobHealthRuleController.pulse,
+);
+
+router.get(
   '/:id/recruitment-sources',
   authMiddleware,
   attachDbUser,
@@ -127,6 +203,7 @@ router.delete(
   recruitmentSourceController.remove,
 );
 
+router.get('/:id/insights', authMiddleware, attachDbUser, clientController.getInsights);
 router.get('/:id', clientController.get);
 router.post('/', optionalAuth, optionalAttachDbUser, clientController.create);
 router.put('/:id', optionalAuth, optionalAttachDbUser, clientController.update);

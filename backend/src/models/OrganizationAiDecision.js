@@ -86,6 +86,12 @@ const OrganizationAiDecision = sequelize.define(
       allowNull: true,
       defaultValue: 'resume',
     },
+    manualApprovalStatus: {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      defaultValue: 'pending',
+      field: 'manual_approval_status',
+    },
   },
   {
     tableName: 'organization_ai_decisions',

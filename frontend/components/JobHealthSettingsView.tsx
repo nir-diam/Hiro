@@ -1,48 +1,42 @@
-
-import React, { useState } from 'react';
-import { 
-    ExclamationTriangleIcon, CheckCircleIcon, ClockIcon, UserGroupIcon, 
-    PlusIcon, TrashIcon, SparklesIcon, ArrowPathIcon, FunnelIcon, ChatBubbleBottomCenterTextIcon,
-    BriefcaseIcon, UserIcon, FireIcon
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import {
+    ExclamationTriangleIcon, CheckCircleIcon, ClockIcon, UserGroupIcon,
+    PlusIcon, TrashIcon, SparklesIcon, FunnelIcon, ChatBubbleBottomCenterTextIcon,
+    BriefcaseIcon, UserIcon, FireIcon, BuildingOffice2Icon, Bars3Icon,
 } from './Icons';
-import DevAnnotation from './DevAnnotation';
+import { useAuth } from '../context/AuthContext';
+import { authHeaders } from '../utils/authHeaders';
+import {
+    fetchJobHealthRules,
+    syncJobHealthRules,
+    type JobHealthRuleDto,
+    type JobHealthProfileId,
+    type JobHealthColor,
+    type JobHealthCondition,
+    type JobHealthOperator,
+    type JobHealthProfilesDto,
+} from '../services/jobHealthRulesApi';
 
-type HealthColor = 'green' | 'yellow' | 'red' | 'blue' | 'purple' | 'orange' | 'gray';
+type HealthRule = JobHealthRuleDto;
+type ProfileId = JobHealthProfileId;
 
-// Expanded condition types to reflect the "Recruiter Reality"
-type ConditionType = 
-    | 'candidates_total'        // כמות כללית (פחות קריטי)
-    | 'candidates_at_stage'     // כמות בסטטוס X (קריטי לאיכות)
-    | 'time_in_stage'           // זמן תקיעות בסטטוס X (צוואר בקבוק)
-    | 'days_since_contact'      // ימים ללא קשר עם לקוח (קריטי לקשר)
-    | 'disqualification_rate'   // אחוז פסילה (דיוק פרופיל)
-    | 'days_open';              // ותק משרה
-
-type Operator = 'gt' | 'lt' | 'between' | 'eq';
-type ProfileId = 'standard' | 'high_volume' | 'executive';
-
-interface HealthRule {
-    id: string;
-    color: HealthColor;
-    condition: ConditionType;
-    operator: Operator;
-    value: number;
-    maxValue?: number;
-    stage?: string; // For stage-specific rules
-    enabled: boolean;
-}
-
-const colorConfig: Record<HealthColor, { label: string; bg: string; text: string; ring: string }> = {
-    red: { label: 'אדום (קריטי)', bg: 'bg-red-100', text: 'text-red-800', ring: 'ring-red-500' },
-    orange: { label: 'כתום (דחיפות גבוהה)', bg: 'bg-orange-100', text: 'text-orange-800', ring: 'ring-orange-500' },
-    yellow: { label: 'צהוב (אזהרה)', bg: 'bg-yellow-100', text: 'text-yellow-800', ring: 'ring-yellow-500' },
-    green: { label: 'ירוק (תקין)', bg: 'bg-green-100', text: 'text-green-800', ring: 'ring-green-500' },
-    blue: { label: 'כחול (אינפורמטיבי)', bg: 'bg-blue-100', text: 'text-blue-800', ring: 'ring-blue-500' },
-    purple: { label: 'סגול (חריג זמן)', bg: 'bg-purple-100', text: 'text-purple-800', ring: 'ring-purple-500' },
-    gray: { label: 'אפור', bg: 'bg-gray-100', text: 'text-gray-800', ring: 'ring-gray-500' },
+const colorConfig: Record<JobHealthColor, { label: string; bg: string; text: string }> = {
+    red: { label: 'אדום (קריטי)', bg: 'bg-red-100', text: 'text-red-800' },
+    orange: { label: 'כתום (דחיפות גבוהה)', bg: 'bg-orange-100', text: 'text-orange-800' },
+    yellow: { label: 'צהוב (אזהרה)', bg: 'bg-yellow-100', text: 'text-yellow-800' },
+    green: { label: 'ירוק (תקין)', bg: 'bg-green-100', text: 'text-green-800' },
+    blue: { label: 'כחול (אינפורמטיבי)', bg: 'bg-blue-100', text: 'text-blue-800' },
+    purple: { label: 'סגול (חריג זמן)', bg: 'bg-purple-100', text: 'text-purple-800' },
+    gray: { label: 'אפור', bg: 'bg-gray-100', text: 'text-gray-800' },
 };
 
-const conditionOptions: { value: ConditionType; label: string; unit: string; icon: React.ReactNode; requiresStage?: boolean }[] = [
+const conditionOptions: {
+    value: JobHealthCondition;
+    label: string;
+    unit: string;
+    icon: React.ReactNode;
+    requiresStage?: boolean;
+}[] = [
     { value: 'candidates_at_stage', label: 'כמות מועמדים בסטטוס...', unit: 'מועמדים', icon: <FunnelIcon className="w-4 h-4"/>, requiresStage: true },
     { value: 'time_in_stage', label: 'זמן שהייה (תקיעות) בסטטוס...', unit: 'ימים', icon: <ClockIcon className="w-4 h-4"/>, requiresStage: true },
     { value: 'days_since_contact', label: 'ימים ללא תקשורת עם לקוח', unit: 'ימים', icon: <ChatBubbleBottomCenterTextIcon className="w-4 h-4"/> },
@@ -52,211 +46,427 @@ const conditionOptions: { value: ConditionType; label: string; unit: string; ico
 ];
 
 const profileMetadata: Record<ProfileId, { label: string; icon: React.ReactNode; description: string }> = {
-    standard: { 
-        label: 'רגיל (Standard)', 
+    standard: {
+        label: 'רגיל (Standard)',
         icon: <BriefcaseIcon className="w-5 h-5"/>,
-        description: 'פרופיל ברירת המחדל. מאוזן בין מהירות לאיכות, מתאים לרוב המשרות במערכת.'
+        description: 'פרופיל ברירת המחדל. מאוזן בין מהירות לאיכות, מתאים לרוב המשרות במערכת.',
     },
-    high_volume: { 
-        label: 'מסת גיוס (High Volume)', 
+    high_volume: {
+        label: 'מסת גיוס (High Volume)',
         icon: <FireIcon className="w-5 h-5"/>,
-        description: 'מיועד למשרות עם תחלופה גבוהה (מוקד, תפעול). מתריע בעיקר על צווארי בקבוק בכמויות ודורש טיפול מהיר.'
+        description: 'מיועד למשרות עם תחלופה גבוהה (מוקד, תפעול). מתריע בעיקר על צווארי בקבוק בכמויות ודורש טיפול מהיר.',
     },
-    executive: { 
-        label: 'בכירים (Executive)', 
+    executive: {
+        label: 'בכירים (Executive)',
         icon: <UserIcon className="w-5 h-5"/>,
-        description: 'מיועד למשרות בכירות/הד-האנטינג. סובלני יותר לזמנים ארוכים, אך רגיש לניתוק קשר עם הלקוח.'
-    }
+        description: 'מיועד למשרות בכירות/הד-האנטינג. סובלני יותר לזמנים ארוכים, אך רגיש לניתוק קשר עם הלקוח.',
+    },
 };
 
-// Mock stages from the system
-const systemStages = ['חדש', 'סינון טלפוני', 'ראיון HR', 'הועבר למנהל', 'ראיון מקצועי', 'הצעת שכר', 'בדיקת ממליצים'];
+const emptyProfiles = (): JobHealthProfilesDto => ({
+    standard: [],
+    high_volume: [],
+    executive: [],
+});
 
-const initialRules: Record<ProfileId, HealthRule[]> = {
-    standard: [
-        { id: 's1', color: 'red', condition: 'time_in_stage', stage: 'הועבר למנהל', operator: 'gt', value: 4, enabled: true },
-        { id: 's2', color: 'orange', condition: 'days_since_contact', operator: 'gt', value: 7, enabled: true },
-        { id: 's3', color: 'yellow', condition: 'candidates_total', operator: 'lt', value: 5, enabled: true },
-    ],
-    high_volume: [
-        { id: 'hv1', color: 'red', condition: 'candidates_at_stage', stage: 'חדש', operator: 'gt', value: 50, enabled: true },
-        { id: 'hv2', color: 'red', condition: 'time_in_stage', stage: 'חדש', operator: 'gt', value: 2, enabled: true },
-        { id: 'hv3', color: 'orange', condition: 'candidates_total', operator: 'lt', value: 20, enabled: true },
-    ],
-    executive: [
-        { id: 'ex1', color: 'red', condition: 'days_since_contact', operator: 'gt', value: 3, enabled: true },
-        { id: 'ex2', color: 'orange', condition: 'days_open', operator: 'gt', value: 60, enabled: true },
-    ]
-};
+type ScopeOption = { id: string; name: string };
 
-const RuleRow: React.FC<{ 
-    rule: HealthRule; 
-    onChange: (id: string, updates: Partial<HealthRule>) => void; 
-    onDelete: (id: string) => void; 
-}> = ({ rule, onChange, onDelete }) => {
-    const currentCondition = conditionOptions.find(c => c.value === rule.condition);
-
-    return (
-        <DevAnnotation
-            title={`Health Rule: ${rule.id}`}
-            description="Defines a specific condition that triggers a visual health status change."
-            logic={[
-                `IF ${rule.condition} ${rule.operator} ${rule.value}`,
-                `THEN set job status color to ${rule.color}`,
-                "Rules are evaluated in order. Red overrides Orange overrides Yellow."
-            ]}
-            position='top-left'
-        >
-            <div className={`flex flex-col lg:flex-row items-center gap-4 p-4 rounded-xl border transition-all duration-200 ${rule.enabled ? 'bg-bg-card border-border-default shadow-sm hover:border-primary-300' : 'bg-bg-subtle/50 border-border-default opacity-60'}`}>
-                
-                {/* 1. Enable & Color */}
-                <div className="flex items-center gap-3 w-full lg:w-auto min-w-[180px]">
-                    <input 
-                        type="checkbox" 
-                        checked={rule.enabled} 
-                        onChange={(e) => onChange(rule.id, { enabled: e.target.checked })}
-                        className="w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
-                    />
-                    <div className="relative group w-full">
-                        <button className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-transparent text-sm font-medium transition-colors ${colorConfig[rule.color].bg} ${colorConfig[rule.color].text}`}>
-                            <span className="flex items-center gap-2">
-                                <div className={`w-2.5 h-2.5 rounded-full ${colorConfig[rule.color].text.replace('text-', 'bg-')}`}></div>
-                                {colorConfig[rule.color].label}
-                            </span>
-                        </button>
-                        <select 
-                            value={rule.color}
-                            onChange={(e) => onChange(rule.id, { color: e.target.value as HealthColor })}
-                            className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                        >
-                            {Object.keys(colorConfig).map(c => (
-                                <option key={c} value={c}>{colorConfig[c as HealthColor].label}</option>
-                            ))}
-                        </select>
-                    </div>
-                </div>
-
-                {/* 2. Condition Definition */}
-                <div className="flex-1 grid grid-cols-1 md:grid-cols-[1.5fr_1fr_1fr_auto] gap-3 w-full items-center bg-bg-subtle/30 p-2 rounded-lg border border-border-subtle/50">
-                    
-                    {/* Parameter Type */}
-                    <div className="relative">
-                        <select 
-                            value={rule.condition}
-                            onChange={(e) => onChange(rule.id, { condition: e.target.value as ConditionType })}
-                            className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 pl-9 appearance-none focus:ring-1 focus:ring-primary-500"
-                        >
-                            {conditionOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
-                        </select>
-                        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle pointer-events-none">
-                            {currentCondition?.icon}
-                        </div>
-                    </div>
-
-                    {/* Stage Selector (Dynamic) */}
-                    {currentCondition?.requiresStage ? (
-                        <select 
-                            value={rule.stage || ''}
-                            onChange={(e) => onChange(rule.id, { stage: e.target.value })}
-                            className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 text-primary-700 font-medium focus:ring-1 focus:ring-primary-500"
-                        >
-                            <option value="" disabled>בחר סטטוס...</option>
-                            {systemStages.map(s => <option key={s} value={s}>{s}</option>)}
-                        </select>
-                    ) : (
-                        <div className="hidden md:block md:bg-border-subtle/30 md:h-0.5 md:w-8 md:mx-auto rounded-full"></div> // Spacer
-                    )}
-
-                    {/* Operator */}
-                    <select 
-                        value={rule.operator}
-                        onChange={(e) => onChange(rule.id, { operator: e.target.value as Operator })}
-                        className="bg-bg-input border border-border-default text-sm rounded-md p-2"
-                    >
-                        <option value="gt">גדול מ-</option>
-                        <option value="lt">קטן מ-</option>
-                        <option value="eq">שווה ל-</option>
-                        <option value="between">בין</option>
-                    </select>
-
-                    {/* Value Input */}
-                    <div className="flex items-center gap-2 min-w-[120px]">
-                        <input 
-                            type="number" 
-                            value={rule.value}
-                            onChange={(e) => onChange(rule.id, { value: parseInt(e.target.value) || 0 })}
-                            className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 text-center font-bold focus:ring-1 focus:ring-primary-500"
-                        />
-                        {rule.operator === 'between' && (
-                            <>
-                                <span className="text-text-muted">-</span>
-                                <input 
-                                    type="number" 
-                                    value={rule.maxValue || rule.value + 1}
-                                    onChange={(e) => onChange(rule.id, { maxValue: parseInt(e.target.value) || 0 })}
-                                    className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 text-center font-bold focus:ring-1 focus:ring-primary-500"
-                                />
-                            </>
-                        )}
-                        <span className="text-xs font-semibold text-text-muted whitespace-nowrap bg-bg-subtle px-1.5 py-0.5 rounded">{currentCondition?.unit}</span>
-                    </div>
-                </div>
-
-                {/* Actions */}
-                <button onClick={() => onDelete(rule.id)} className="p-2 text-text-subtle hover:text-red-500 hover:bg-red-50 rounded-full transition-colors" title="מחק חוק">
-                    <TrashIcon className="w-5 h-5" />
-                </button>
-            </div>
-        </DevAnnotation>
-    );
+function mapLinkedOrgOption(raw: Record<string, unknown>): ScopeOption | null {
+    const organizationId = raw.organizationId ? String(raw.organizationId) : '';
+    if (!organizationId) return null;
+    const source = (raw.organization || raw.organizationTmp || {}) as Record<string, unknown>;
+    return { id: organizationId, name: String(source.name || 'ארגון') };
 }
 
+const RuleRow: React.FC<{
+    rule: HealthRule;
+    stages: string[];
+    isDragging: boolean;
+    onChange: (id: string, updates: Partial<HealthRule>) => void;
+    onDelete: (id: string) => void;
+    onHandlePointerDown: (e: React.PointerEvent, id: string) => void;
+    onHandlePointerMove: (e: React.PointerEvent) => void;
+    onHandlePointerUp: (e: React.PointerEvent) => void;
+}> = ({
+    rule,
+    stages,
+    isDragging,
+    onChange,
+    onDelete,
+    onHandlePointerDown,
+    onHandlePointerMove,
+    onHandlePointerUp,
+}) => {
+    const currentCondition = conditionOptions.find((c) => c.value === rule.condition);
+
+    return (
+        <div
+            data-rule-id={rule.id}
+            className={`flex flex-col lg:flex-row items-center gap-4 p-4 rounded-xl border transition-all duration-200 ${
+                isDragging
+                    ? 'opacity-60 border-primary-500 ring-2 ring-primary-300 shadow-lg scale-[1.01] z-10 relative bg-bg-card'
+                    : rule.enabled
+                      ? 'bg-bg-card border-border-default shadow-sm hover:border-primary-300'
+                      : 'bg-bg-subtle/50 border-border-default opacity-60'
+            }`}
+        >
+            <button
+                type="button"
+                className="flex items-center justify-center cursor-grab active:cursor-grabbing text-text-subtle hover:text-primary-600 shrink-0 p-1.5 rounded-lg hover:bg-bg-hover touch-none select-none"
+                title="גרור לשינוי סדר"
+                aria-label="גרור לשינוי סדר"
+                onPointerDown={(e) => onHandlePointerDown(e, rule.id)}
+                onPointerMove={onHandlePointerMove}
+                onPointerUp={onHandlePointerUp}
+                onPointerCancel={onHandlePointerUp}
+            >
+                <Bars3Icon className="w-5 h-5 pointer-events-none" />
+            </button>
+            <div className="flex items-center gap-3 w-full lg:w-auto min-w-[180px]">
+                <input
+                    type="checkbox"
+                    checked={rule.enabled}
+                    onChange={(e) => onChange(rule.id, { enabled: e.target.checked })}
+                    className="w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                />
+                <div className="relative group w-full">
+                    <button type="button" className={`w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-transparent text-sm font-medium transition-colors ${colorConfig[rule.color].bg} ${colorConfig[rule.color].text}`}>
+                        <span className="flex items-center gap-2">
+                            <div className={`w-2.5 h-2.5 rounded-full ${colorConfig[rule.color].text.replace('text-', 'bg-')}`}></div>
+                            {colorConfig[rule.color].label}
+                        </span>
+                    </button>
+                    <select
+                        value={rule.color}
+                        onChange={(e) => onChange(rule.id, { color: e.target.value as JobHealthColor })}
+                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                    >
+                        {Object.keys(colorConfig).map((c) => (
+                            <option key={c} value={c}>{colorConfig[c as JobHealthColor].label}</option>
+                        ))}
+                    </select>
+                </div>
+            </div>
+
+            <div className="flex-1 grid grid-cols-1 md:grid-cols-[1.5fr_1fr_1fr_auto] gap-3 w-full items-center bg-bg-subtle/30 p-2 rounded-lg border border-border-subtle/50">
+                <div className="relative">
+                    <select
+                        value={rule.condition}
+                        onChange={(e) => onChange(rule.id, { condition: e.target.value as JobHealthCondition })}
+                        className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 pl-9 appearance-none focus:ring-1 focus:ring-primary-500"
+                    >
+                        {conditionOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+                    </select>
+                    <div className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle pointer-events-none">
+                        {currentCondition?.icon}
+                    </div>
+                </div>
+
+                {currentCondition?.requiresStage ? (
+                    <select
+                        value={rule.stage || ''}
+                        onChange={(e) => onChange(rule.id, { stage: e.target.value })}
+                        className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 text-primary-700 font-medium focus:ring-1 focus:ring-primary-500"
+                    >
+                        <option value="" disabled>בחר סטטוס...</option>
+                        {stages.map((s) => <option key={s} value={s}>{s}</option>)}
+                    </select>
+                ) : (
+                    <div className="hidden md:block md:bg-border-subtle/30 md:h-0.5 md:w-8 md:mx-auto rounded-full" />
+                )}
+
+                <select
+                    value={rule.operator}
+                    onChange={(e) => onChange(rule.id, { operator: e.target.value as JobHealthOperator })}
+                    className="bg-bg-input border border-border-default text-sm rounded-md p-2"
+                >
+                    <option value="gt">גדול מ-</option>
+                    <option value="lt">קטן מ-</option>
+                    <option value="eq">שווה ל-</option>
+                    <option value="between">בין</option>
+                </select>
+
+                <div className="flex items-center gap-2 min-w-[120px]">
+                    <input
+                        type="number"
+                        value={rule.value}
+                        onChange={(e) => onChange(rule.id, { value: parseInt(e.target.value, 10) || 0 })}
+                        className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 text-center font-bold focus:ring-1 focus:ring-primary-500"
+                    />
+                    {rule.operator === 'between' && (
+                        <>
+                            <span className="text-text-muted">-</span>
+                            <input
+                                type="number"
+                                value={rule.maxValue ?? rule.value + 1}
+                                onChange={(e) => onChange(rule.id, { maxValue: parseInt(e.target.value, 10) || 0 })}
+                                className="w-full bg-bg-input border border-border-default text-sm rounded-md p-2 text-center font-bold focus:ring-1 focus:ring-primary-500"
+                            />
+                        </>
+                    )}
+                    <span className="text-xs font-semibold text-text-muted whitespace-nowrap bg-bg-subtle px-1.5 py-0.5 rounded">{currentCondition?.unit}</span>
+                </div>
+            </div>
+
+            <button type="button" onClick={() => onDelete(rule.id)} className="p-2 text-text-subtle hover:text-red-500 hover:bg-red-50 rounded-full transition-colors" title="מחק חוק">
+                <TrashIcon className="w-5 h-5" />
+            </button>
+        </div>
+    );
+};
+
 const JobHealthSettingsView: React.FC = () => {
+    const { user, ready: authReady } = useAuth();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
+
+    const [scopeOptions, setScopeOptions] = useState<ScopeOption[]>([]);
+    const [selectedScopeId, setSelectedScopeId] = useState('');
     const [isSystemActive, setIsSystemActive] = useState(true);
     const [selectedProfile, setSelectedProfile] = useState<ProfileId>('standard');
-    const [profileRules, setProfileRules] = useState<Record<ProfileId, HealthRule[]>>(initialRules);
+    const [profileRules, setProfileRules] = useState<JobHealthProfilesDto>(emptyProfiles());
+    const [baseline, setBaseline] = useState<{ isSystemActive: boolean; profiles: JobHealthProfilesDto } | null>(null);
+    const [stages, setStages] = useState<string[]>([]);
+    const [loadingScopes, setLoadingScopes] = useState(false);
+    const [loadingRules, setLoadingRules] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [saveMessage, setSaveMessage] = useState<string | null>(null);
+    const [draggingId, setDraggingId] = useState<string | null>(null);
+    const draggingIdRef = useRef<string | null>(null);
+
+    const activeClientId = isPlatformAdmin ? selectedScopeId : tenantClientId;
+    const activeOrganizationId = isPlatformAdmin ? null : (selectedScopeId || null);
+
+    useEffect(() => {
+        if (!authReady || !apiBase) return;
+        let active = true;
+        setLoadingScopes(true);
+        setError(null);
+
+        const load = async () => {
+            try {
+                if (isPlatformAdmin) {
+                    const res = await fetch(`${apiBase}/api/clients`, { headers: authHeaders(true) });
+                    if (!res.ok) throw new Error('טעינת לקוחות נכשלה');
+                    const data = await res.json();
+                    const list = Array.isArray(data) ? data : (data?.data ?? []);
+                    if (!active) return;
+                    const opts: ScopeOption[] = list
+                        .map((c: { id?: string; displayName?: string; name?: string }) => ({
+                            id: String(c.id),
+                            name: String(c.displayName || c.name || 'לקוח'),
+                        }))
+                        .filter((o: ScopeOption) => o.id);
+                    setScopeOptions(opts);
+                    setSelectedScopeId((prev) => prev || opts[0]?.id || '');
+                } else if (tenantClientId) {
+                    const res = await fetch(
+                        `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`,
+                        { headers: authHeaders(true) },
+                    );
+                    if (!res.ok) throw new Error('טעינת ארגונים מקושרים נכשלה');
+                    const data = await res.json();
+                    const list = Array.isArray(data) ? data : [];
+                    if (!active) return;
+                    const opts = list
+                        .map((row: Record<string, unknown>) => mapLinkedOrgOption(row))
+                        .filter((o: ScopeOption | null): o is ScopeOption => Boolean(o));
+                    setScopeOptions(opts);
+                    setSelectedScopeId((prev) => prev || opts[0]?.id || '');
+                } else {
+                    setScopeOptions([]);
+                    setSelectedScopeId('');
+                }
+            } catch (e: any) {
+                if (active) setError(e?.message || 'טעינת הרשימה נכשלה');
+            } finally {
+                if (active) setLoadingScopes(false);
+            }
+        };
+        void load();
+        return () => { active = false; };
+    }, [authReady, apiBase, isPlatformAdmin, tenantClientId]);
+
+    const loadRules = useCallback(async () => {
+        if (!activeClientId) {
+            setProfileRules(emptyProfiles());
+            setBaseline(null);
+            return;
+        }
+        if (!isPlatformAdmin && !activeOrganizationId) {
+            setProfileRules(emptyProfiles());
+            setBaseline(null);
+            return;
+        }
+        setLoadingRules(true);
+        setError(null);
+        setSaveMessage(null);
+        try {
+            const data = await fetchJobHealthRules(activeClientId, activeOrganizationId);
+            setIsSystemActive(data.isSystemActive);
+            setProfileRules(data.profiles);
+            setStages(data.stages);
+            setBaseline({ isSystemActive: data.isSystemActive, profiles: data.profiles });
+        } catch (e: any) {
+            setError(e?.message || 'טעינת חוקי בריאות משרה נכשלה');
+            setProfileRules(emptyProfiles());
+            setBaseline(null);
+        } finally {
+            setLoadingRules(false);
+        }
+    }, [activeClientId, activeOrganizationId, isPlatformAdmin]);
+
+    useEffect(() => {
+        void loadRules();
+    }, [loadRules]);
+
+    const canEdit = Boolean(activeClientId && (isPlatformAdmin || activeOrganizationId));
+    const scopeLabel = isPlatformAdmin ? 'לקוח' : 'ארגון';
 
     const handleAddRule = () => {
         const newRule: HealthRule = {
-            id: Date.now().toString(),
+            id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `tmp-${Date.now()}`,
             color: 'gray',
             condition: 'candidates_at_stage',
-            stage: 'ראיון HR',
+            stage: stages[0] || 'חדש',
             operator: 'gt',
             value: 0,
-            enabled: true
+            enabled: true,
         };
-        setProfileRules(prev => ({
+        setProfileRules((prev) => ({
             ...prev,
-            [selectedProfile]: [...prev[selectedProfile], newRule]
+            [selectedProfile]: [...prev[selectedProfile], newRule],
         }));
+        setSaveMessage(null);
     };
 
     const handleUpdateRule = (id: string, updates: Partial<HealthRule>) => {
-        setProfileRules(prev => ({
+        setProfileRules((prev) => ({
             ...prev,
-            [selectedProfile]: prev[selectedProfile].map(r => r.id === id ? { ...r, ...updates } : r)
+            [selectedProfile]: prev[selectedProfile].map((r) => (r.id === id ? { ...r, ...updates } : r)),
         }));
+        setSaveMessage(null);
     };
 
     const handleDeleteRule = (id: string) => {
-        setProfileRules(prev => ({
+        setProfileRules((prev) => ({
             ...prev,
-            [selectedProfile]: prev[selectedProfile].filter(r => r.id !== id)
+            [selectedProfile]: prev[selectedProfile].filter((r) => r.id !== id),
         }));
+        setSaveMessage(null);
+    };
+
+    const handleRulePointerDown = (e: React.PointerEvent, id: string) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        draggingIdRef.current = id;
+        setDraggingId(id);
+        try {
+            (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        } catch {
+            /* ignore */
+        }
+    };
+
+    const handleRulePointerMove = (e: React.PointerEvent) => {
+        const id = draggingIdRef.current;
+        if (!id) return;
+        const el = document.elementFromPoint(e.clientX, e.clientY);
+        const row = el?.closest('[data-rule-id]') as HTMLElement | null;
+        const overId = row?.dataset?.ruleId;
+        if (!overId || overId === id) return;
+
+        setProfileRules((prev) => {
+            const list = prev[selectedProfile];
+            const from = list.findIndex((r) => r.id === id);
+            const to = list.findIndex((r) => r.id === overId);
+            if (from < 0 || to < 0 || from === to) return prev;
+            const nextList = [...list];
+            const [moved] = nextList.splice(from, 1);
+            nextList.splice(to, 0, moved);
+            return { ...prev, [selectedProfile]: nextList };
+        });
+        setSaveMessage(null);
+    };
+
+    const handleRulePointerUp = (e: React.PointerEvent) => {
+        if (!draggingIdRef.current) return;
+        draggingIdRef.current = null;
+        setDraggingId(null);
+        try {
+            (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+        } catch {
+            /* ignore */
+        }
+    };
+
+    const handleCancel = () => {
+        if (!baseline) return;
+        setIsSystemActive(baseline.isSystemActive);
+        setProfileRules(baseline.profiles);
+        setSaveMessage(null);
+        setError(null);
+    };
+
+    const handleSave = async () => {
+        if (!activeClientId) return;
+        if (!isPlatformAdmin && !activeOrganizationId) {
+            setError('יש לבחור ארגון');
+            return;
+        }
+        setSaving(true);
+        setError(null);
+        setSaveMessage(null);
+        try {
+            const saved = await syncJobHealthRules(activeClientId, {
+                organizationId: activeOrganizationId,
+                isSystemActive,
+                profiles: profileRules,
+            });
+            setIsSystemActive(saved.isSystemActive);
+            setProfileRules(saved.profiles);
+            setBaseline({ isSystemActive: saved.isSystemActive, profiles: saved.profiles });
+            setSaveMessage('הפרופילים נשמרו בהצלחה');
+        } catch (e: any) {
+            setError(e?.message || 'שמירה נכשלה');
+        } finally {
+            setSaving(false);
+        }
     };
 
     return (
         <div className="space-y-6 animate-fade-in max-w-6xl mx-auto pb-10">
-            {/* Header Section */}
             <div className="bg-bg-card p-6 rounded-2xl border border-border-default shadow-sm flex flex-col md:flex-row justify-between gap-6">
-                <div>
-                    <div className="flex items-center gap-3 mb-2">
-                        <div className="bg-primary-100 p-2 rounded-lg text-primary-600"><SparklesIcon className="w-6 h-6"/></div>
-                        <h2 className="text-2xl font-bold text-text-default">פרופילי בריאות משרה (Job Health Profiles)</h2>
+                <div className="flex-1">
+                    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4 mb-2">
+                        <div className="flex items-center gap-3">
+                            <div className="bg-primary-100 p-2 rounded-lg text-primary-600"><SparklesIcon className="w-6 h-6"/></div>
+                            <h2 className="text-2xl font-bold text-text-default">פרופילי בריאות משרה (Job Health Profiles)</h2>
+                        </div>
+                        <div className="relative min-w-[220px] max-w-full md:w-72">
+                            <label className="block text-xs font-bold text-text-muted mb-1.5">{scopeLabel}</label>
+                            <div className="relative">
+                                <BuildingOffice2Icon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                <select
+                                    value={selectedScopeId}
+                                    onChange={(e) => setSelectedScopeId(e.target.value)}
+                                    disabled={loadingScopes || scopeOptions.length === 0}
+                                    className="w-full appearance-none bg-bg-input border border-border-default rounded-xl py-2.5 pr-10 pl-3 text-sm font-bold text-text-default focus:ring-2 focus:ring-primary-500 outline-none disabled:opacity-60"
+                                >
+                                    {scopeOptions.length === 0 ? (
+                                        <option value="">{loadingScopes ? 'טוען…' : (isPlatformAdmin ? 'אין לקוחות' : 'אין ארגונים מקושרים')}</option>
+                                    ) : (
+                                        scopeOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)
+                                    )}
+                                </select>
+                            </div>
+                        </div>
                     </div>
                     <p className="text-sm text-text-muted max-w-2xl leading-relaxed">
-                        הגדר חוקים שונים עבור סוגי משרות שונים. בעת פתיחת משרה, הרכז יבחר את הפרופיל המתאים (למשל "מסת גיוס" או "בכירים"), והמערכת תתריע על חריגות בהתאם לחוקים שהגדרת כאן.
+                        הגדר חוקים שונים עבור סוגי משרות שונים. בעת פתיחת משרה, הרכז יבחר את הפרופיל המתאים, והמערכת תתריע על חריגות בהתאם לחוקים שהגדרת כאן.
                     </p>
                 </div>
                 <div className="flex items-start">
@@ -265,21 +475,39 @@ const JobHealthSettingsView: React.FC = () => {
                             {isSystemActive ? 'מערכת פעילה' : 'מערכת כבויה'}
                         </span>
                         <label className="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" checked={isSystemActive} onChange={(e) => setIsSystemActive(e.target.checked)} className="sr-only peer" />
+                            <input
+                                type="checkbox"
+                                checked={isSystemActive}
+                                onChange={(e) => { setIsSystemActive(e.target.checked); setSaveMessage(null); }}
+                                disabled={!canEdit}
+                                className="sr-only peer"
+                            />
                             <div className="w-11 h-6 bg-gray-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
                         </label>
                     </div>
                 </div>
             </div>
 
+            {error && (
+                <div className="bg-red-50 border border-red-200 text-red-700 text-sm font-medium px-4 py-3 rounded-xl">{error}</div>
+            )}
+            {saveMessage && (
+                <div className="bg-green-50 border border-green-200 text-green-700 text-sm font-medium px-4 py-3 rounded-xl">{saveMessage}</div>
+            )}
+
             {isSystemActive && (
                 <>
-                    {/* Profile Selector Tabs */}
                     <div className="flex space-x-2 space-x-reverse overflow-x-auto pb-2">
                         {(Object.keys(profileMetadata) as ProfileId[]).map((profileId) => (
                             <button
                                 key={profileId}
-                                onClick={() => setSelectedProfile(profileId)}
+                                type="button"
+                                onClick={() => {
+                                    setSelectedProfile(profileId);
+                                    draggingIdRef.current = null;
+                                    setDraggingId(null);
+                                    setSaveMessage(null);
+                                }}
                                 className={`flex items-center gap-2 px-6 py-3 rounded-xl font-bold text-sm transition-all whitespace-nowrap ${
                                     selectedProfile === profileId
                                         ? 'bg-primary-600 text-white shadow-md'
@@ -300,44 +528,70 @@ const JobHealthSettingsView: React.FC = () => {
 
                         <div className="flex justify-between items-center mb-4">
                             <h4 className="text-sm font-bold text-text-default uppercase tracking-wider">רשימת חוקים פעילים</h4>
-                            <button onClick={handleAddRule} className="flex items-center gap-2 text-sm font-bold text-white bg-primary-600 hover:bg-primary-700 px-4 py-2 rounded-lg transition shadow-sm shadow-primary-500/20">
+                            <button
+                                type="button"
+                                onClick={handleAddRule}
+                                disabled={!canEdit || loadingRules}
+                                className="flex items-center gap-2 text-sm font-bold text-white bg-primary-600 hover:bg-primary-700 px-4 py-2 rounded-lg transition shadow-sm shadow-primary-500/20 disabled:opacity-50"
+                            >
                                 <PlusIcon className="w-4 h-4" />
                                 הוסף חוק לפרופיל זה
                             </button>
                         </div>
-                        
-                        <div className="space-y-3">
-                            {profileRules[selectedProfile].length > 0 ? (
-                                profileRules[selectedProfile].map((rule) => (
-                                    <RuleRow 
-                                        key={rule.id} 
-                                        rule={rule} 
-                                        onChange={handleUpdateRule} 
+
+                        {loadingRules ? (
+                            <div className="text-center py-12 text-text-muted text-sm">טוען חוקים…</div>
+                        ) : !canEdit ? (
+                            <div className="text-center py-12 bg-bg-subtle/30 border-2 border-dashed border-border-default rounded-xl">
+                                <p className="text-text-muted font-medium">
+                                    {isPlatformAdmin ? 'בחר לקוח כדי לערוך פרופילי בריאות.' : 'בחר ארגון מקושר כדי לערוך פרופילי בריאות.'}
+                                </p>
+                            </div>
+                        ) : profileRules[selectedProfile].length > 0 ? (
+                            <div className="space-y-3">
+                                <p className="text-xs text-text-subtle mb-1">גררו את אייקון ≡ בצד השורה כדי לשנות סדר בדיקה (מלמעלה למטה). אל תשכחו לשמור.</p>
+                                {profileRules[selectedProfile].map((rule) => (
+                                    <RuleRow
+                                        key={rule.id}
+                                        rule={rule}
+                                        stages={stages}
+                                        isDragging={draggingId === rule.id}
+                                        onChange={handleUpdateRule}
                                         onDelete={handleDeleteRule}
+                                        onHandlePointerDown={handleRulePointerDown}
+                                        onHandlePointerMove={handleRulePointerMove}
+                                        onHandlePointerUp={handleRulePointerUp}
                                     />
-                                ))
-                            ) : (
-                                <div className="text-center py-12 bg-bg-subtle/30 border-2 border-dashed border-border-default rounded-xl">
-                                    <p className="text-text-muted font-medium">לא הוגדרו חוקים לפרופיל זה. המערכת תציג "ירוק" כברירת מחדל.</p>
-                                    <button onClick={handleAddRule} className="text-primary-600 font-bold text-sm mt-2 hover:underline">צור חוק ראשון</button>
-                                </div>
-                            )}
-                        </div>
+                                ))}
+                            </div>
+                        ) : (
+                            <div className="text-center py-12 bg-bg-subtle/30 border-2 border-dashed border-border-default rounded-xl">
+                                <p className="text-text-muted font-medium">לא הוגדרו חוקים לפרופיל זה. המערכת תציג &quot;ירוק&quot; כברירת מחדל.</p>
+                                <button type="button" onClick={handleAddRule} className="text-primary-600 font-bold text-sm mt-2 hover:underline">צור חוק ראשון</button>
+                            </div>
+                        )}
                     </div>
                 </>
             )}
-            
+
             {isSystemActive && (
                 <div className="flex justify-end gap-3">
-                    <button className="px-6 py-3 rounded-xl text-text-muted font-bold hover:bg-bg-hover transition">
+                    <button
+                        type="button"
+                        onClick={handleCancel}
+                        disabled={!canEdit || saving || loadingRules}
+                        className="px-6 py-3 rounded-xl text-text-muted font-bold hover:bg-bg-hover transition disabled:opacity-50"
+                    >
                         בטל שינויים
                     </button>
-                    <button 
-                        className="px-8 py-3 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 shadow-lg shadow-primary-500/20 transition flex items-center gap-2"
-                        onClick={() => alert('הפרופילים נשמרו בהצלחה! החוקים יחולו על משרות בהתאם לפרופיל הנבחר.')}
+                    <button
+                        type="button"
+                        disabled={!canEdit || saving || loadingRules}
+                        className="px-8 py-3 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 shadow-lg shadow-primary-500/20 transition flex items-center gap-2 disabled:opacity-50"
+                        onClick={() => void handleSave()}
                     >
                         <CheckCircleIcon className="w-5 h-5" />
-                        שמור הגדרות פרופילים
+                        {saving ? 'שומר…' : 'שמור הגדרות פרופילים'}
                     </button>
                 </div>
             )}

@@ -986,26 +986,32 @@ ${contextParts.join('\n')}
 
 const CandidateOrganization = require('../models/CandidateOrganization');
 const Organization = require('../models/Organization');
+const { isGenericBucketName } = require('../constants/genericOrganizationBuckets');
 
 const ensureOrganizationsFromExperience = async (experience, candidateId = null) => {
   const companyNames = extractCompanyNames(experience);
   if (!companyNames.length) return;
   console.debug('[candidateController] syncing organizations for workExperience', { companyNames });
   try {
-    await Promise.all(
-      companyNames.map(async (name) => {
-        console.debug('[candidateController] ensuring organization', { name });
-        const org = await organizationService.findOrCreateByName(name, { candidateId });
-        console.debug('[candidateController] ensured organization', { name, orgId: org?.id });
-        // Only create link when we got a real Organization instance (not OrganizationTmp)
-        if (candidateId && org && org.id && org instanceof Organization) {
+    // Process sequentially to avoid saturating the DB connection pool.
+    // findOrCreateByName + CandidateOrganization.findOrCreate both open transactions.
+    for (const name of companyNames) {
+      console.debug('[candidateController] ensuring organization', { name });
+      const org = await organizationService.findOrCreateByName(name, { candidateId });
+      console.debug('[candidateController] ensured organization', { name, orgId: org?.id });
+      // Only create link when we got a real Organization instance (not OrganizationTmp)
+      // and the organization is not a generic bucket (כללי / גנרי).
+      if (candidateId && org && org.id && org instanceof Organization) {
+        const orgName = org.name || (org.toJSON ? org.toJSON().name : '');
+        if (!isGenericBucketName(orgName)) {
           await CandidateOrganization.findOrCreate({
             where: { candidateId, organizationId: org.id },
           });
+        } else {
+          console.debug('[candidateController] skipping CandidateOrganization link for generic org', orgName);
         }
-        return org;
-      }),
-    );
+      }
+    }
     if (candidateId) {
       await candidateService.refreshCompanyExperiencesForCandidate(candidateId);
     }
@@ -1429,9 +1435,7 @@ const findMissingResumeKeys = (parsed) => {
   return missing;
 };
 
-let resumePromptCache = null;
 const getResumePromptTemplate = async () => {
-  if (resumePromptCache) return resumePromptCache;
   try {
     const record = await promptService.getById('cv_parsing');
     const schemaJson = buildCandidateModelSchemaJsonForPrompt();
@@ -1442,12 +1446,11 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
     template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}\n${CV_PARSING_MILITARY_APPENDIX}`;
-    resumePromptCache = { ...record, template };
+    return { ...record, template };
   } catch (err) {
     console.warn('[attachMedia-ai] cv_parsing prompt missing', err.message || err);
-    resumePromptCache = null;
+    return null;
   }
-  return resumePromptCache;
 };
 
 const parseResumeWithAi = async ({ resumeText }) => {
@@ -1560,6 +1563,96 @@ const parseResumeWithAi = async ({ resumeText }) => {
   }
 
   return parsed;
+};
+
+/**
+ * Build and fire a Gemini generateContent request with the given user parts.
+ * Used by both the native-PDF and page-image CV parsing paths.
+ */
+const _callGeminiForCvParsing = async (userParts, label) => {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) return null;
+
+  const promptRecord = await getResumePromptTemplate();
+  const systemPrompt = promptRecord?.template
+    ? String(promptRecord.template).replace('{candidate_tag}', getCandidateTagsSchemaText())
+    : buildAiResumePrompt(getCandidateTagsSchemaText());
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const body = {
+    systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
+    contents: [{ role: 'user', parts: userParts }],
+    generationConfig: {
+      temperature: 0.1,
+      maxOutputTokens: 16384,
+      responseMimeType: 'application/json',
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  };
+
+  const fetchFn = (...args) => import('node-fetch').then(({ default: f }) => f(...args));
+  const res = await fetchFn(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    console.error(`[${label}] Gemini error`, res.status, errText.slice(0, 500));
+    return null;
+  }
+  const data = await res.json();
+  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const raw = parts.map((p) => (typeof p.text === 'string' ? p.text : '')).join('').trim();
+  if (!raw) return null;
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  return tryParseJson(cleaned) || null;
+};
+
+/**
+ * Primary vision fallback: send the raw PDF buffer to Gemini as a native PDF
+ * input (gemini-2.5-flash understands PDFs natively — no text extraction or
+ * page rendering required). Much more reliable than Tesseract for Hebrew CVs.
+ */
+const parseResumeFromPdfBuffer = async (pdfBuffer) => {
+  if (!pdfBuffer?.length) return null;
+  try {
+    console.log('[cv-vision] trying native PDF input, bytes:', pdfBuffer.length);
+    const parts = [
+      { inlineData: { mimeType: 'application/pdf', data: pdfBuffer.toString('base64') } },
+      { text: 'The document above is a candidate resume (CV). Extract all data exactly as instructed in the system prompt and return the JSON object.' },
+    ];
+    const result = await _callGeminiForCvParsing(parts, 'cv-vision-pdf');
+    if (result) console.log('[cv-vision] native PDF extraction succeeded');
+    return result;
+  } catch (err) {
+    console.error('[cv-vision-pdf] failed:', err?.message || err);
+    return null;
+  }
+};
+
+/**
+ * Secondary vision fallback: parse a CV from rendered PDF page PNG images.
+ * Used when the native-PDF path also fails.
+ */
+const parseResumeFromImages = async (pageBuffers) => {
+  if (!pageBuffers?.length) return null;
+  try {
+    console.log('[cv-vision] trying image fallback with', Math.min(pageBuffers.length, 5), 'pages');
+    const imageParts = pageBuffers.slice(0, 5).map((buf) => ({
+      inlineData: { mimeType: 'image/png', data: buf.toString('base64') },
+    }));
+    const parts = [
+      ...imageParts,
+      { text: 'The images above are pages of a candidate resume. Extract all CV data exactly as instructed in the system prompt and return the JSON object.' },
+    ];
+    const result = await _callGeminiForCvParsing(parts, 'cv-vision-images');
+    if (result) console.log('[cv-vision] image extraction succeeded');
+    return result;
+  } catch (err) {
+    console.error('[cv-vision-images] failed:', err?.message || err);
+    return null;
+  }
 };
 
 const parseCandidateListParams = (req) => {
@@ -1899,8 +1992,9 @@ const createFromAi = async (req, res) => {
     const sendWelcome = req.body?.sendWelcomeEmail !== false;
     const { resumeText, fileBase64, mimeType, fileName } = req.body || {};
     let text = typeof resumeText === 'string' ? resumeText : '';
+    let buffer = null;
     if (fileBase64 && !text) {
-      let buffer = decodeFileBase64Payload(fileBase64);
+      buffer = decodeFileBase64Payload(fileBase64);
       if (!buffer?.length) {
         buffer = Buffer.from(String(fileBase64).replace(/\s/g, ''), 'base64');
       }
@@ -1919,20 +2013,42 @@ const createFromAi = async (req, res) => {
         }
       }
     }
-    if (!text || !String(text).trim()) {
-      return res.status(400).json({
-        message:
-          'Could not extract readable text from this file. If the PDF is a scan or image-only, paste the resume as text in resumeText, or export a text-based PDF. Otherwise ensure fileBase64 is a valid file.',
-      });
+    // ── Gemini Vision fallback when text extraction fails ──────────────────
+    // Gemini 2.5 Flash understands PDFs natively — no text extraction or OCR
+    // needed. We try: 1) raw PDF bytes → Gemini, 2) rendered PNG pages → Gemini.
+    let visionAiResult = null;
+    if ((!text || !String(text).trim()) && buffer && (isPdfMagicBuffer(buffer) || (String(mimeType).toLowerCase().includes('pdf')))) {
+      console.log('[cv-vision] text extraction failed — attempting Gemini Vision fallback');
+      // 1. Native PDF input (simplest — no rendering required)
+      visionAiResult = await parseResumeFromPdfBuffer(buffer);
+      // 2. Rendered page images (fallback if native PDF fails)
+      if (!visionAiResult) {
+        try {
+          const pages = await renderPdfPagesToPngBuffers(buffer);
+          if (pages.length) visionAiResult = await parseResumeFromImages(pages);
+        } catch (visionErr) {
+          console.error('[cv-vision] render/parse failed:', visionErr?.message || visionErr);
+        }
+      }
     }
-    if (looksLikeRawPdfUtf8String(text)) {
+
+    if (!text || !String(text).trim()) {
+      if (!visionAiResult) {
+        return res.status(400).json({
+          message:
+            'Could not extract readable text from this file. If the PDF is a scan or image-only, paste the resume as text in resumeText, or export a text-based PDF. Otherwise ensure fileBase64 is a valid file.',
+        });
+      }
+      // Vision succeeded — skip text-based AI call below, jump straight to normalization
+    }
+    if (text && looksLikeRawPdfUtf8String(text)) {
       return res.status(400).json({
         message:
           'Extracted data looks like raw PDF bytes, not text. The PDF may be image-based — use resumeText to paste the CV, or a text-based PDF export.',
       });
     }
 
-    const aiResult = (await parseResumeWithAi({ resumeText: text })) || {};
+    const aiResult = (visionAiResult || (await parseResumeWithAi({ resumeText: text }))) || {};
     const fallback = extractStructuredFields(text);
 
     const aiSkills = aiResult.skills || {};
@@ -4115,6 +4231,55 @@ const getJobDeepInsight = async (req, res) => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * PATCH /api/candidates/:id/work-experience/:index/organization
+ * Update one work-experience entry (company, organizationId, title, startDate, endDate).
+ * Re-syncs CandidateOrganization links when organizationId changes.
+ */
+const patchWorkExperienceOrganization = async (req, res) => {
+  try {
+    const { id, index } = req.params;
+    const { organizationId, organizationName, title, startDate, endDate } = req.body;
+
+    const candidate = await Candidate.findByPk(id);
+    if (!candidate) return res.status(404).json({ message: 'Candidate not found' });
+
+    const experience = Array.isArray(candidate.workExperience) ? candidate.workExperience.map(e => ({ ...e })) : [];
+    const idx = parseInt(index, 10);
+    if (Number.isNaN(idx) || idx < 0 || idx >= experience.length) {
+      return res.status(400).json({ message: 'Invalid experience index' });
+    }
+
+    const prev = experience[idx];
+    const orgChanged = organizationId !== undefined && organizationId !== prev.organizationId;
+
+    experience[idx] = {
+      ...prev,
+      ...(organizationName !== undefined ? { company: organizationName || prev.company } : {}),
+      ...(organizationId  !== undefined ? { organizationId: organizationId || null } : {}),
+      ...(title      !== undefined ? { title }     : {}),
+      ...(startDate  !== undefined ? { startDate } : {}),
+      ...(endDate    !== undefined ? { endDate }   : {}),
+    };
+
+    await candidate.update({ workExperience: experience });
+
+    // Re-sync organization links only when org changed
+    if (orgChanged) {
+      try {
+        await ensureOrganizationsFromExperience(experience, id);
+      } catch (err) {
+        console.warn('[patchWorkExperienceOrganization] org sync failed', err?.message || err);
+      }
+    }
+
+    res.json({ success: true, workExperience: experience });
+  } catch (err) {
+    console.error('[patchWorkExperienceOrganization]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Update failed' });
+  }
+};
+
 module.exports = {
   list,
   listPost,
@@ -4158,6 +4323,7 @@ module.exports = {
   listJobMatchIgnores,
   clearJobMatchIgnore,
   getJobDeepInsight,
+  patchWorkExperienceOrganization,
 };
 
 

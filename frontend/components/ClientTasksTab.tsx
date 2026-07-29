@@ -3,16 +3,26 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { 
     ClipboardDocumentCheckIcon, CheckCircleIcon, ExclamationTriangleIcon, 
-    BanknotesIcon, UserGroupIcon, PlusIcon, PencilIcon, TrashIcon, 
+    PlusIcon, PencilIcon, TrashIcon, 
     CalendarIcon, CheckIcon, SparklesIcon, ChevronDownIcon, ClockIcon, XMarkIcon,
     BuildingOffice2Icon, MagnifyingGlassIcon, FunnelIcon, CalendarDaysIcon,
-    FlagIcon, UserIcon, ArrowRightIcon
+    FlagIcon, UserIcon, ArrowRightIcon, BriefcaseIcon
 } from './Icons';
+import { authHeaders } from '../utils/authHeaders';
+import { useAuth } from '../context/AuthContext';
+import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
 // --- TYPES ---
 
-type TaskType = 'sales' | 'retention';
+/** Pipeline id from תהליכי עבודה settings (UUID) or legacy sales/retention. */
+type TaskType = string;
 type TaskStatus = 'pending' | 'done';
 type TaskPriority = 'high' | 'medium' | 'low';
+
+type PipelineOption = {
+    id: string;
+    name: string;
+    stages: { id: string; name: string }[];
+};
 
 export interface TaskHistoryItem {
     date: string;
@@ -32,35 +42,20 @@ export interface ClientTask {
     isOverdue?: boolean;
     clientName?: string;
     clientId?: string; // Added for navigation
+    organizationId?: string;
+    organizationName?: string;
     contactName?: string;
     processStage?: string; // Linked to pipeline stage
     history?: TaskHistoryItem[]; // Added history
 }
 
-// Pipeline Definitions for filtering
-const pipelines = [
-    {
-        id: 'sales',
-        name: 'מכירות',
-        stages: [
-            { id: 'lead', name: 'ליד' },
-            { id: 'meeting', name: 'פגישה' },
-            { id: 'proposal', name: 'הצעת מחיר' },
-            { id: 'negotiation', name: 'משא ומתן' },
-            { id: 'won', name: 'סגירה' },
-        ]
-    },
-    {
-        id: 'retention',
-        name: 'שימור',
-        stages: [
-            { id: 'onboarding', name: 'קליטה' },
-            { id: 'active', name: 'לקוח פעיל' },
-            { id: 'renewal', name: 'חידוש חוזה' },
-            { id: 'risk', name: 'בסיכון' },
-        ]
-    }
-];
+function mapPipelineOptions(rows: PipelineDto[]): PipelineOption[] {
+    return rows.map((p) => ({
+        id: p.id,
+        name: p.name,
+        stages: (p.stages || []).map((s) => ({ id: s.id, name: s.name })),
+    }));
+}
 
 const fallbackAssignees = ['אני'];
 
@@ -83,11 +78,16 @@ interface TaskFormModalProps {
     onSave: (task: ClientTask) => void;
     taskToEdit?: ClientTask | null;
     assignees: string[];
+    pipelines: PipelineOption[];
     /** When creating a task across all clients, user must pick which client it belongs to. */
     aggregateMode?: boolean;
     clientPickerOptions?: { id: string; name: string }[];
     pickedClientId?: string;
     onPickedClientIdChange?: (id: string) => void;
+    /** When creating across orgs under a tenant client, user must pick an organization. */
+    organizationPickerOptions?: { id: string; name: string }[];
+    pickedOrganizationId?: string;
+    onPickedOrganizationIdChange?: (id: string) => void;
 }
 
 const TaskFormModal: React.FC<TaskFormModalProps> = ({
@@ -96,21 +96,28 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
     onSave,
     taskToEdit,
     assignees,
+    pipelines,
     aggregateMode,
     clientPickerOptions = [],
     pickedClientId,
     onPickedClientIdChange,
+    organizationPickerOptions = [],
+    pickedOrganizationId,
+    onPickedOrganizationIdChange,
 }) => {
+    const defaultPipelineId = pipelines[0]?.id || '';
+    const defaultStageId = pipelines[0]?.stages[0]?.id || '';
+    const orgPickerMode = !aggregateMode && organizationPickerOptions.length > 0;
     const [formData, setFormData] = useState<Partial<ClientTask>>({
         title: '',
         description: '',
-        type: 'sales',
+        type: defaultPipelineId,
         priority: 'medium',
         dueDate: new Date().toISOString().split('T')[0],
         assignee: assignees?.[0] || 'אני',
         status: 'pending',
         clientName: '',
-        processStage: ''
+        processStage: defaultStageId,
     });
 
     useEffect(() => {
@@ -118,20 +125,22 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
             if (taskToEdit) {
                 setFormData(taskToEdit);
             } else {
+                const pid = pipelines[0]?.id || '';
+                const sid = pipelines[0]?.stages[0]?.id || '';
                 setFormData({
                     title: '',
                     description: '',
-                    type: 'sales',
+                    type: pid,
                     priority: 'medium',
                     dueDate: new Date().toISOString().split('T')[0],
                     assignee: assignees?.[0] || 'אני',
                     status: 'pending',
                     clientName: '',
-                    processStage: pipelines[0].stages[0].id
+                    processStage: sid,
                 });
             }
         }
-    }, [isOpen, taskToEdit, assignees]);
+    }, [isOpen, taskToEdit, assignees, pipelines]);
 
     if (!isOpen) return null;
 
@@ -139,13 +148,17 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
         e.preventDefault();
         if (!formData.title) return;
         if (aggregateMode && !taskToEdit && !pickedClientId) return;
+        if (orgPickerMode && !taskToEdit && !pickedOrganizationId) return;
 
         const picked = clientPickerOptions.find((c) => c.id === pickedClientId);
+        const pickedOrg = organizationPickerOptions.find((o) => o.id === pickedOrganizationId);
         onSave({
             id: taskToEdit ? taskToEdit.id : `tmp-${Date.now()}`,
             ...formData as ClientTask,
             clientId: taskToEdit?.clientId || pickedClientId || formData.clientId,
             clientName: taskToEdit?.clientName || picked?.name || formData.clientName,
+            organizationId: taskToEdit?.organizationId || pickedOrganizationId || formData.organizationId,
+            organizationName: taskToEdit?.organizationName || pickedOrg?.name || formData.organizationName,
             history: taskToEdit?.history || [{ date: new Date().toISOString(), user: 'אני', action: 'יצירת משימה' }],
         });
         onClose();
@@ -176,6 +189,24 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
                                 {clientPickerOptions.map((c) => (
                                     <option key={c.id} value={c.id}>
                                         {c.name}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                    )}
+                    {orgPickerMode && !taskToEdit && (
+                        <div>
+                            <label className="block text-sm font-bold text-text-default mb-2">ארגון</label>
+                            <select
+                                value={pickedOrganizationId || ''}
+                                onChange={(e) => onPickedOrganizationIdChange?.(e.target.value)}
+                                required
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all shadow-sm"
+                            >
+                                <option value="">בחר ארגון…</option>
+                                {organizationPickerOptions.map((o) => (
+                                    <option key={o.id} value={o.id}>
+                                        {o.name}
                                     </option>
                                 ))}
                             </select>
@@ -242,20 +273,22 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
 
                     <div className="grid grid-cols-2 gap-5">
                         <div>
-                             <label className="block text-sm font-bold text-text-default mb-2">תהליך (Type)</label>
+                             <label className="block text-sm font-bold text-text-default mb-2">תהליך עבודה</label>
                              <select 
-                                value={formData.type}
+                                value={formData.type || ''}
                                 onChange={e => {
-                                    const newType = e.target.value as TaskType;
+                                    const newType = e.target.value;
                                     const newPipeline = pipelines.find(p => p.id === newType);
                                     setFormData({
                                         ...formData, 
                                         type: newType,
-                                        processStage: newPipeline ? newPipeline.stages[0].id : ''
+                                        processStage: newPipeline?.stages[0]?.id || '',
                                     });
                                 }}
-                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
+                                disabled={!pipelines.length}
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm disabled:opacity-60"
                              >
+                                 {!pipelines.length && <option value="">אין תהליכים מוגדרים</option>}
                                  {pipelines.map(p => (
                                      <option key={p.id} value={p.id}>{p.name}</option>
                                  ))}
@@ -264,11 +297,13 @@ const TaskFormModal: React.FC<TaskFormModalProps> = ({
                         <div>
                              <label className="block text-sm font-bold text-text-default mb-2">שלב בתהליך</label>
                              <select 
-                                value={formData.processStage}
+                                value={formData.processStage || ''}
                                 onChange={e => setFormData({...formData, processStage: e.target.value})}
-                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
+                                disabled={!activePipeline?.stages?.length}
+                                className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm disabled:opacity-60"
                              >
-                                 {activePipeline.stages.map(s => (
+                                 {!(activePipeline?.stages?.length) && <option value="">—</option>}
+                                 {(activePipeline?.stages || []).map(s => (
                                      <option key={s.id} value={s.id}>{s.name}</option>
                                  ))}
                              </select>
@@ -305,7 +340,8 @@ const TaskCard: React.FC<{
     onToggle: (id: string) => void;
     onDelete: (id: string) => void;
     onEdit: (task: ClientTask) => void;
-}> = ({ task, onToggle, onDelete, onEdit }) => {
+    pipelineName?: string;
+}> = ({ task, onToggle, onDelete, onEdit, pipelineName }) => {
     const navigate = useNavigate();
     const [isExpanded, setIsExpanded] = useState(false);
     const [showHistory, setShowHistory] = useState(false);
@@ -327,10 +363,14 @@ const TaskCard: React.FC<{
 
     const handleClientClick = (e: React.MouseEvent) => {
         e.stopPropagation();
-        if (task.clientId) {
+        if (task.organizationId) {
+            navigate(`/organizations/${task.organizationId}`);
+        } else if (task.clientId) {
             navigate(`/clients/${task.clientId}`);
         }
     };
+
+    const entityLabel = task.organizationName || task.clientName;
 
     return (
         <div 
@@ -353,11 +393,9 @@ const TaskCard: React.FC<{
                 <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between gap-2">
                          <div className="flex items-center gap-2 overflow-hidden">
-                             {task.type === 'sales' ? (
-                                <span title="מכירות"><BanknotesIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-green-600'}`} /></span>
-                            ) : (
-                                <span title="שימור/שירות"><UserGroupIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-blue-600'}`} /></span>
-                            )}
+                             <span title={pipelineName || 'תהליך עבודה'}>
+                                <BriefcaseIcon className={`w-4 h-4 flex-shrink-0 ${isDone ? 'text-text-muted' : 'text-primary-600'}`} />
+                             </span>
                              <span className={`text-sm font-bold truncate ${isDone ? 'line-through text-text-muted' : 'text-text-default'}`}>
                                 {task.title}
                             </span>
@@ -372,13 +410,13 @@ const TaskCard: React.FC<{
                     
                     {/* Secondary Info Line */}
                     <div className="flex items-center gap-3 text-xs text-text-subtle mt-1.5">
-                         {task.clientName && (
+                         {entityLabel && (
                             <button 
                                 onClick={handleClientClick}
                                 className="flex items-center gap-1 px-1.5 py-0.5 rounded bg-bg-subtle/50 font-medium hover:bg-primary-50 hover:text-primary-700 transition-colors border border-transparent hover:border-primary-200"
                             >
                                 <BuildingOffice2Icon className="w-3 h-3" />
-                                {task.clientName}
+                                {entityLabel}
                             </button>
                         )}
                         <span className={`flex items-center gap-1 ${task.isOverdue && !isDone ? 'text-red-600 font-bold' : ''}`}>
@@ -464,22 +502,58 @@ interface ClientTasksTabProps {
     showPipeline?: boolean;
     /** Omit to load and manage tasks for all clients (admin list view). */
     clientId?: string;
+    /** When set, list/create tasks for this organization only (tenant org profile). */
+    organizationId?: string;
     /** Used when `clientId` is omitted — required to create new tasks (pick target client). */
     clientPickerOptions?: { id: string; name: string }[];
+    /** Used with tenant `clientId` — pick target org when creating tasks across linked orgs. */
+    organizationPickerOptions?: { id: string; name: string }[];
 }
 
 const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     showPipeline = true,
     clientId,
+    organizationId,
     clientPickerOptions = [],
+    organizationPickerOptions = [],
 }) => {
+    const { user } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [tasks, setTasks] = useState<ClientTask[]>([]);
     const [assignees, setAssignees] = useState<string[]>(fallbackAssignees);
+    const [pipelines, setPipelines] = useState<PipelineOption[]>([]);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
     const aggregateMode = !clientId;
+    const orgPickerMode = Boolean(clientId && !organizationId && organizationPickerOptions.length > 0);
+    const orgNameById = useMemo(() => {
+        const map = new Map<string, string>();
+        for (const o of organizationPickerOptions) map.set(o.id, o.name);
+        return map;
+    }, [organizationPickerOptions]);
+    const pipelinesClientId = clientId
+        || (user?.clientId ? String(user.clientId) : null)
+        || clientPickerOptions[0]?.id
+        || null;
+
+    useEffect(() => {
+        if (!pipelinesClientId) {
+            setPipelines([]);
+            return;
+        }
+        let active = true;
+        void fetchPipelines(pipelinesClientId)
+            .then((rows) => {
+                if (!active) return;
+                setPipelines(mapPipelineOptions(rows));
+            })
+            .catch(() => {
+                if (!active) return;
+                setPipelines([]);
+            });
+        return () => { active = false; };
+    }, [pipelinesClientId]);
 
     useEffect(() => {
         if (!apiBase) return;
@@ -487,18 +561,21 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
         let active = true;
         setIsLoading(true);
         setError(null);
+        const orgQs = organizationId
+            ? `?organizationId=${encodeURIComponent(organizationId)}`
+            : '';
         const tasksUrl = aggregateMode
             ? `${apiBase}/api/clients/all-tasks`
-            : `${apiBase}/api/clients/${clientId}/tasks`;
+            : `${apiBase}/api/clients/${clientId}/tasks${orgQs}`;
         const contactsUrl = aggregateMode
             ? `${apiBase}/api/clients/all-contacts`
-            : `${apiBase}/api/clients/${clientId}/contacts`;
+            : `${apiBase}/api/clients/${clientId}/contacts${orgQs}`;
         Promise.all([
-            fetch(tasksUrl).then((r) => {
+            fetch(tasksUrl, { headers: authHeaders(true) }).then((r) => {
                 if (!r.ok) throw new Error('Failed to load tasks');
                 return r.json();
             }),
-            fetch(contactsUrl).then((r) => {
+            fetch(contactsUrl, { headers: authHeaders(true) }).then((r) => {
                 if (!r.ok) return [];
                 return r.json();
             }),
@@ -509,13 +586,20 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 const mapped: ClientTask[] = list
                     .map((row: any) => {
                         const cli = row.client;
+                        const org = row.organization;
                         const resolvedClientId = String(row.clientId || clientId || cli?.id || '');
                         const clientName = cli
                             ? String(cli.displayName || cli.name || '').trim()
                             : '';
+                        const resolvedOrgId = row.organizationId
+                            ? String(row.organizationId)
+                            : '';
+                        const organizationName = org
+                            ? String(org.name || '').trim()
+                            : (resolvedOrgId ? (orgNameById.get(resolvedOrgId) || '') : '');
                         return {
                             id: String(row.id),
-                            type: (row.type as TaskType) || 'sales',
+                            type: String(row.type || ''),
                             status: (row.status as TaskStatus) || 'pending',
                             priority: (row.priority as TaskPriority) || 'medium',
                             title: row.title || '',
@@ -524,6 +608,8 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                             assignee: row.assignee || '',
                             clientId: resolvedClientId,
                             clientName,
+                            organizationId: resolvedOrgId || undefined,
+                            organizationName: organizationName || undefined,
                             processStage: row.processStage || '',
                             history: Array.isArray(row.history) ? row.history : [],
                         };
@@ -551,7 +637,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
         return () => {
             active = false;
         };
-    }, [apiBase, clientId, aggregateMode]);
+    }, [apiBase, clientId, organizationId, aggregateMode, orgNameById]);
     
     // Filters State
     const [searchTerm, setSearchTerm] = useState('');
@@ -564,6 +650,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingTask, setEditingTask] = useState<ClientTask | null>(null);
     const [pickedClientIdForNewTask, setPickedClientIdForNewTask] = useState('');
+    const [pickedOrganizationIdForNewTask, setPickedOrganizationIdForNewTask] = useState('');
     
     // Derived filtering options
     const activePipeline = pipelines.find(p => p.id === filterProcess);
@@ -571,7 +658,11 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     // Filtering Logic
     const filteredTasks = useMemo(() => {
         return tasks.filter(task => {
-            const matchesSearch = !searchTerm || task.title.toLowerCase().includes(searchTerm.toLowerCase()) || task.clientName?.toLowerCase().includes(searchTerm.toLowerCase());
+            const q = searchTerm.toLowerCase();
+            const matchesSearch = !searchTerm
+                || task.title.toLowerCase().includes(q)
+                || task.clientName?.toLowerCase().includes(q)
+                || task.organizationName?.toLowerCase().includes(q);
             
             const matchesStatus = 
                 filterStatus === 'all' || 
@@ -622,7 +713,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
         try {
             const res = await fetch(`${apiBase}/api/clients/${targetClientId}/tasks/${id}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ status: newStatus, history: newHistory }),
             });
             if (!res.ok) throw new Error('Update failed');
@@ -639,7 +730,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
         setTasks(prev => prev.filter(t => t.id !== id));
         if (!apiBase || !targetClientId) return;
         try {
-            const res = await fetch(`${apiBase}/api/clients/${targetClientId}/tasks/${id}`, { method: 'DELETE' });
+            const res = await fetch(`${apiBase}/api/clients/${targetClientId}/tasks/${id}`, { method: 'DELETE', headers: authHeaders(true) });
             if (!res.ok) throw new Error('Delete failed');
         } catch (_e) {
             setTasks(prevTasks);
@@ -652,6 +743,11 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
             setPickedClientIdForNewTask(clientPickerOptions[0].id);
         } else {
             setPickedClientIdForNewTask('');
+        }
+        if (orgPickerMode) {
+            setPickedOrganizationIdForNewTask(organizationPickerOptions[0]?.id || '');
+        } else {
+            setPickedOrganizationIdForNewTask('');
         }
         setIsModalOpen(true);
     };
@@ -679,7 +775,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
             try {
                 const res = await fetch(`${apiBase}/api/clients/${saveClientId}/tasks/${task.id}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
                     body: JSON.stringify({
                         type: updatedTask.type,
                         status: updatedTask.status,
@@ -697,7 +793,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 // keep optimistic update for now
             }
         } else {
-            const createPayload = {
+            const createPayload: Record<string, unknown> = {
                 type: task.type,
                 status: task.status,
                 priority: task.priority,
@@ -708,14 +804,20 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 processStage: task.processStage,
                 history: task.history || [{ date: new Date().toISOString(), user: 'אני', action: 'יצירת משימה' }],
             };
+            if (organizationId) createPayload.organizationId = organizationId;
+            else if (task.organizationId) createPayload.organizationId = task.organizationId;
+            else if (pickedOrganizationIdForNewTask) createPayload.organizationId = pickedOrganizationIdForNewTask;
             try {
                 const res = await fetch(`${apiBase}/api/clients/${saveClientId}/tasks`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
                     body: JSON.stringify(createPayload),
                 });
                 if (!res.ok) throw new Error('Create failed');
                 const created = await res.json();
+                const createdOrgId = created.organizationId
+                    ? String(created.organizationId)
+                    : (task.organizationId || pickedOrganizationIdForNewTask || undefined);
                 const createdTask: ClientTask = {
                     id: String(created.id),
                     type: (created.type as TaskType) || task.type,
@@ -727,6 +829,9 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                     assignee: created.assignee || task.assignee,
                     clientId: String(created.clientId || saveClientId),
                     clientName: task.clientName,
+                    organizationId: createdOrgId,
+                    organizationName: task.organizationName
+                        || (createdOrgId ? orgNameById.get(createdOrgId) : undefined),
                     processStage: created.processStage || task.processStage,
                     history: Array.isArray(created.history) ? created.history : createPayload.history,
                 };
@@ -757,7 +862,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none"/>
                         <input 
                             type="text" 
-                            placeholder="חיפוש משימה, לקוח..." 
+                            placeholder={orgPickerMode || organizationId ? 'חיפוש משימה, ארגון...' : 'חיפוש משימה, לקוח...'} 
                             value={searchTerm}
                             onChange={(e) => setSearchTerm(e.target.value)}
                             className="w-full bg-bg-subtle/50 border border-border-default rounded-full py-2.5 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 outline-none transition-all hover:bg-white"
@@ -838,8 +943,17 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                          <button
                             type="button"
                             onClick={handleCreateTask}
-                            disabled={aggregateMode && clientPickerOptions.length === 0}
-                            title={aggregateMode && clientPickerOptions.length === 0 ? 'טען לקוחות כדי ליצור משימה' : undefined}
+                            disabled={
+                                (aggregateMode && clientPickerOptions.length === 0)
+                                || (orgPickerMode && organizationPickerOptions.length === 0)
+                            }
+                            title={
+                                aggregateMode && clientPickerOptions.length === 0
+                                    ? 'טען לקוחות כדי ליצור משימה'
+                                    : orgPickerMode && organizationPickerOptions.length === 0
+                                      ? 'קשר ארגון כדי ליצור משימה'
+                                      : undefined
+                            }
                             className="bg-primary-600 text-white font-bold py-2 px-5 rounded-full hover:bg-primary-700 transition shadow-md shadow-primary-500/20 flex items-center gap-2 whitespace-nowrap text-sm disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             <PlusIcon className="w-4 h-4" />
@@ -866,7 +980,8 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                             task={task} 
                             onToggle={handleToggleTask} 
                             onDelete={handleDeleteTask} 
-                            onEdit={handleEditTask} 
+                            onEdit={handleEditTask}
+                            pipelineName={pipelines.find((p) => p.id === task.type)?.name}
                         />
                     ))
                 ) : !isLoading ? (
@@ -890,10 +1005,14 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
                 onSave={handleSaveTask}
                 taskToEdit={editingTask}
                 assignees={assignees}
+                pipelines={pipelines}
                 aggregateMode={aggregateMode && !editingTask}
                 clientPickerOptions={clientPickerOptions}
                 pickedClientId={pickedClientIdForNewTask}
                 onPickedClientIdChange={setPickedClientIdForNewTask}
+                organizationPickerOptions={orgPickerMode ? organizationPickerOptions : []}
+                pickedOrganizationId={pickedOrganizationIdForNewTask}
+                onPickedOrganizationIdChange={setPickedOrganizationIdForNewTask}
             />
         </div>
     );

@@ -82,6 +82,12 @@ const TagAiDecision = sequelize.define(
       allowNull: true,
       field: 'dilemma_reasoning',
     },
+    manualApprovalStatus: {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      defaultValue: 'pending',
+      field: 'manual_approval_status',
+    },
   },
   {
     tableName: 'tag_ai_decisions',

@@ -2427,6 +2427,7 @@ const normalizeQueryStringArray = (val) => {
  */
 /**
  * All display labels that map a screening row's `clientName` to a tenant Client row.
+ * Includes the client record names plus linked organization / org-tmp names (job company labels).
  * @param {string} clientId
  * @returns {Promise<string[]>}
  */
@@ -2454,6 +2455,44 @@ async function collectClientScopeLabels(clientId) {
       for (const alias of plain.metadata.aliases) add(alias);
     }
   }
+
+  // Screening rows store the job company name in clientName — usually a linked org, not the agency Client.name.
+  try {
+    const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+    const Organization = require('../models/Organization');
+    const OrganizationTmp = require('../models/OrganizationTmp');
+    const links = await ClientOrganizationLink.findAll({
+      where: { clientId: id },
+      include: [
+        {
+          model: Organization,
+          as: 'organization',
+          required: false,
+          attributes: ['name', 'nameEn', 'legalName', 'aliases'],
+        },
+        {
+          model: OrganizationTmp,
+          as: 'organizationTmp',
+          required: false,
+          attributes: ['name', 'nameEn', 'legalName', 'aliases'],
+        },
+      ],
+    });
+    for (const link of links) {
+      const org = link.organization || link.organizationTmp;
+      if (!org) continue;
+      const o = org.get ? org.get({ plain: true }) : org;
+      add(o.name);
+      add(o.nameEn);
+      add(o.legalName);
+      if (Array.isArray(o.aliases)) {
+        for (const alias of o.aliases) add(alias);
+      }
+    }
+  } catch (err) {
+    console.warn('[email][collectClientScopeLabels] linked orgs:', err?.message || err);
+  }
+
   return [...labels];
 }
 
@@ -3320,9 +3359,7 @@ const coercePreferredWorkingHoursFromAi = (raw) => {
   return s.slice(0, 255);
 };
 
-let resumePromptCache = null;
 const getResumePromptTemplate = async () => {
-  if (resumePromptCache) return resumePromptCache;
   try {
     const record = await promptService.getById('cv_parsing');
     const schemaJson = buildCandidateModelSchemaJsonForPrompt();
@@ -3333,12 +3370,11 @@ const getResumePromptTemplate = async () => {
     template = template.replace(/\$\{Mobility\}/g, mobilityPicklist);
     template = template.replace(/\$\{DrivingLicenses\}/g, drivingPicklist);
     template = `${String(template).trimEnd()}\n${CV_PARSING_SCHEDULE_AND_AVAILABILITY_APPENDIX}\n${CV_PARSING_TAG_QUOTE_APPENDIX}\n${CV_PARSING_TAG_COUNT_APPENDIX}`;
-    resumePromptCache = { ...record, template };
+    return { ...record, template };
   } catch (err) {
     console.warn('[emailController] cv_parsing prompt missing', err.message || err);
-    resumePromptCache = null;
+    return null;
   }
-  return resumePromptCache;
 };
 
 const parseResumeWithAi = async ({ resumeText }) => {

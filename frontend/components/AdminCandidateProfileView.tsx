@@ -5,18 +5,12 @@ import {
     AvatarIcon, ArrowLeftIcon, PhoneIcon, MapPinIcon, EnvelopeIcon, 
     BriefcaseIcon, UserIcon, ClockIcon, DocumentTextIcon, 
     TrashIcon, NoSymbolIcon, PencilIcon, CheckCircleIcon,
-    InformationCircleIcon,
+    InformationCircleIcon, XMarkIcon, MagnifyingGlassIcon,
 } from './Icons';
 import ResumeViewer from './ResumeViewer';
 import ActivityLogModal from './ActivityLogModal'; // Reuse existing logs logic
 
 // Mock Logs
-const mockSystemLogs = [
-    { date: '2025-11-20T10:00:00', action: 'פרופיל נוצר (ייבוא מקובץ)', user: 'מערכת' },
-    { date: '2025-11-20T10:05:00', action: 'ניתוח AI הושלם בהצלחה', user: 'System AI' },
-    { date: '2025-11-21T09:30:00', action: 'נשלח SMS אימות (נכשל)', user: 'מערכת' },
-    { date: '2025-11-21T14:00:00', action: 'עודכן סטטוס ל"פעיל" ע"י דנה כהן', user: 'דנה כהן' },
-];
 
 const defaultTagForm = {
     tagKey: '',
@@ -27,6 +21,14 @@ const defaultTagForm = {
     is_in_summary: false,
     confidence_score: 1,
 };
+
+const InfoRow: React.FC<{ label: string; value?: string | null }> = ({ label, value }) =>
+    value ? (
+        <div className="flex items-start justify-between gap-2">
+            <p className="text-text-muted text-xs font-bold uppercase shrink-0">{label}</p>
+            <p className="font-medium text-text-default text-xs text-left">{value}</p>
+        </div>
+    ) : null;
 
 const TabButton: React.FC<{ title: string; icon: React.ReactNode; isActive: boolean; onClick: () => void }> = ({ title, icon, isActive, onClick }) => (
     <button
@@ -97,6 +99,8 @@ const AdminCandidateProfileView: React.FC = () => {
         return Array.isArray(st?.matchedTerms) ? st.matchedTerms.filter(Boolean) : [];
     }, [location.state]);
     const [activeTab, setActiveTab] = useState<'overview' | 'resume' | 'logs'>('overview');
+    const [auditLogs, setAuditLogs] = useState<any[]>([]);
+    const [auditLogsLoading, setAuditLogsLoading] = useState(false);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [candidate, setCandidate] = useState<any | null>(null);
     const [resumeText, setResumeText] = useState<string>('');
@@ -132,25 +136,139 @@ const AdminCandidateProfileView: React.FC = () => {
         loadCandidate();
     }, [loadCandidate]);
 
+    const loadAuditLogs = useCallback(async () => {
+        if (!apiBase || !candidateId) return;
+        setAuditLogsLoading(true);
+        try {
+            const res = await fetch(`${apiBase}/api/audit-logs/by-entity/candidate/${candidateId}?limit=200`);
+            if (!res.ok) throw new Error('Failed to load logs');
+            const data = await res.json();
+            setAuditLogs(Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : []);
+        } catch {
+            setAuditLogs([]);
+        } finally {
+            setAuditLogsLoading(false);
+        }
+    }, [apiBase, candidateId]);
+
+    useEffect(() => {
+        if (activeTab === 'logs') loadAuditLogs();
+    }, [activeTab, loadAuditLogs]);
+
+    // ── Work-experience inline editing ───────────────────────────────────────
+    const [editingExpIdx, setEditingExpIdx] = useState<number | null>(null);
+    const [expSearch, setExpSearch] = useState('');
+    const [expResults, setExpResults] = useState<{ id: string; name: string; nameEn?: string; location?: string }[]>([]);
+    const [expSelected, setExpSelected] = useState<{ id: string; name: string } | null>(null);
+    const [expEditTitle, setExpEditTitle] = useState('');
+    const [expEditStartDate, setExpEditStartDate] = useState('');
+    const [expEditEndDate, setExpEditEndDate] = useState('');
+    const [expSaving, setExpSaving] = useState(false);
+    const expSearchRef = useRef<HTMLInputElement>(null);
+
+    const openExpEdit = (idx: number) => {
+        const we = (candidate?.workExperience ?? [])[idx];
+        setEditingExpIdx(idx);
+        setExpSelected(null);
+        setExpSearch(we?.company || '');
+        setExpEditTitle(we?.title || we?.role || '');
+        setExpEditStartDate(we?.startDate || '');
+        setExpEditEndDate(we?.endDate === 'Present' ? '' : (we?.endDate || ''));
+    };
+
+    useEffect(() => {
+        if (editingExpIdx === null) { setExpSearch(''); setExpResults([]); setExpSelected(null); return; }
+        setTimeout(() => expSearchRef.current?.focus(), 50);
+    }, [editingExpIdx]);
+
+    useEffect(() => {
+        if (!expSearch.trim() || expSearch.length < 2) { setExpResults([]); return; }
+        const controller = new AbortController();
+        const timer = setTimeout(async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/organizations?search=${encodeURIComponent(expSearch)}&limit=8`, { signal: controller.signal, credentials: 'include' });
+                if (!res.ok) return;
+                const body = await res.json();
+                const list = Array.isArray(body?.data) ? body.data : Array.isArray(body) ? body : [];
+                setExpResults(list.map((o: any) => ({ id: String(o.id), name: o.name || '', nameEn: o.nameEn || '', location: o.location || '' })));
+            } catch { /* aborted */ }
+        }, 300);
+        return () => { clearTimeout(timer); controller.abort(); };
+    }, [expSearch, apiBase]);
+
+    const handleSaveExpOrg = async (expIdx: number) => {
+        if (!candidateId || !apiBase) return;
+        setExpSaving(true);
+        try {
+            const body: Record<string, string | null> = {
+                title: expEditTitle.trim(),
+                startDate: expEditStartDate.trim() || '',
+                endDate: expEditEndDate.trim() || 'Present',
+            };
+            if (expSelected) {
+                body.organizationId = expSelected.id;
+                body.organizationName = expSelected.name;
+            }
+            const res = await fetch(`${apiBase}/api/candidates/${candidateId}/work-experience/${expIdx}/organization`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) throw new Error('Save failed');
+            setEditingExpIdx(null);
+            await loadCandidate();
+        } catch (err) {
+            console.error('[handleSaveExpOrg]', err);
+        } finally {
+            setExpSaving(false);
+        }
+    };
+    // ────────────────────────────────────────────────────────────────────────
+
+
     const [isEditingDetails, setIsEditingDetails] = useState(false);
-    const [editForm, setEditForm] = useState<{ fullName: string; phone: string; email: string; address: string; source: string; status: string }>({
-        fullName: '',
-        phone: '',
-        email: '',
-        address: '',
-        source: '',
-        status: '',
+    const [editForm, setEditForm] = useState({
+        // Basic identity
+        fullName: '', phone: '', email: '', address: '', location: '',
+        gender: '', birthYear: '', maritalStatus: '', idNumber: '',
+        // Professional
+        title: '', professionalSummary: '',
+        availability: '', employmentType: '', jobScope: '',
+        salaryMin: '', salaryMax: '',
+        mobility: '', drivingLicense: '',
+        // System
+        source: '', status: '', statusExplanation: '', internalNotes: '',
     });
+
+    const setField = (key: keyof typeof editForm) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+        setEditForm(prev => ({ ...prev, [key]: e.target.value }));
 
     useEffect(() => {
         if (candidate) {
             setEditForm({
-                fullName: candidate.fullName || candidate.name || '',
-                phone: candidate.phone || '',
-                email: candidate.email || '',
-                address: candidate.address || '',
-                source: candidate.source || candidate.sourceDetail || '',
-                status: candidate.status || '',
+                fullName:          candidate.fullName || candidate.name || '',
+                phone:             candidate.phone || '',
+                email:             candidate.email || '',
+                address:           candidate.address || '',
+                location:          candidate.location || '',
+                gender:            candidate.gender || '',
+                birthYear:         candidate.birthYear || '',
+                maritalStatus:     candidate.maritalStatus || '',
+                idNumber:          candidate.idNumber || '',
+                title:             candidate.title || '',
+                professionalSummary: candidate.professionalSummary || '',
+                availability:      candidate.availability || '',
+                employmentType:    candidate.employmentType || '',
+                jobScope:          candidate.jobScope || '',
+                salaryMin:         String(candidate.salaryMin || ''),
+                salaryMax:         String(candidate.salaryMax || ''),
+                mobility:          candidate.mobility || '',
+                drivingLicense:    candidate.drivingLicense || '',
+                source:            candidate.source || candidate.sourceDetail || '',
+                status:            candidate.status || '',
+                statusExplanation: candidate.statusExplanation || '',
+                internalNotes:     candidate.internalNotes || '',
             });
         }
     }, [candidate]);
@@ -266,17 +384,34 @@ const AdminCandidateProfileView: React.FC = () => {
     const handleSaveDetails = async () => {
         if (!candidateId || !apiBase) return;
         const payload = {
-            fullName: editForm.fullName,
-            phone: editForm.phone,
-            email: editForm.email,
-            address: editForm.address,
-            source: editForm.source,
-            status: editForm.status,
+            fullName:          editForm.fullName,
+            phone:             editForm.phone,
+            email:             editForm.email,
+            address:           editForm.address,
+            location:          editForm.location,
+            gender:            editForm.gender,
+            birthYear:         editForm.birthYear,
+            maritalStatus:     editForm.maritalStatus,
+            idNumber:          editForm.idNumber,
+            title:             editForm.title,
+            professionalSummary: editForm.professionalSummary,
+            availability:      editForm.availability,
+            employmentType:    editForm.employmentType,
+            jobScope:          editForm.jobScope,
+            salaryMin:         editForm.salaryMin ? Number(editForm.salaryMin) : null,
+            salaryMax:         editForm.salaryMax ? Number(editForm.salaryMax) : null,
+            mobility:          editForm.mobility,
+            drivingLicense:    editForm.drivingLicense,
+            source:            editForm.source,
+            status:            editForm.status,
+            statusExplanation: editForm.statusExplanation,
+            internalNotes:     editForm.internalNotes,
         };
         try {
             const res = await fetch(`${apiBase}/api/candidates/${candidateId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
                 body: JSON.stringify(payload),
             });
             if (!res.ok) throw new Error('Save failed');
@@ -351,7 +486,12 @@ const AdminCandidateProfileView: React.FC = () => {
                 <nav className="flex items-center px-4 overflow-x-auto">
                     <TabButton title="סקירה כללית" icon={<UserIcon className="w-5 h-5"/>} isActive={activeTab === 'overview'} onClick={() => setActiveTab('overview')} />
                     <TabButton title="קורות חיים" icon={<DocumentTextIcon className="w-5 h-5"/>} isActive={activeTab === 'resume'} onClick={() => setActiveTab('resume')} />
-                    <TabButton title="לוג מערכת" icon={<ClockIcon className="w-5 h-5"/>} isActive={activeTab === 'logs'} onClick={() => setActiveTab('logs')} />
+                    <TabButton
+                        title="לוג מערכת"
+                        icon={<ClockIcon className="w-5 h-5"/>}
+                        isActive={activeTab === 'logs'}
+                        onClick={() => setActiveTab('logs')}
+                    />
                 </nav>
             </div>
 
@@ -360,69 +500,272 @@ const AdminCandidateProfileView: React.FC = () => {
                 {activeTab === 'overview' && (
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
                         
-                        {/* Left Column: Basic Info */}
-                        <div className="space-y-6">
-                            <div className="bg-bg-card rounded-2xl border border-border-default p-6 shadow-sm">
-                                <h3 className="font-bold text-lg text-text-default mb-4 flex items-center gap-2">
-                                    <UserIcon className="w-5 h-5 text-primary-500" /> פרטי קשר ומידע
-                                </h3>
-                                <div className="space-y-4 text-sm">
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">שם מלא</p>
-                                        {isEditingDetails ? (
-                                            <input value={editForm.fullName} onChange={(e) => setEditForm(prev => ({ ...prev, fullName: e.target.value }))} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                                        ) : (
-                                            <p className="font-medium">{editForm.fullName}</p>
-                                        )}
+                        {/* Left Column: Full Candidate Details */}
+                        <div className="space-y-5">
+
+                            {/* ── Edit toolbar ── */}
+                            <div className="flex items-center justify-between">
+                                <span className="text-xs font-bold uppercase text-text-muted tracking-wide">פרטי מועמד</span>
+                                {!isEditingDetails ? (
+                                    <button
+                                        onClick={() => setIsEditingDetails(true)}
+                                        className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold border border-border-default rounded-lg text-text-muted hover:border-primary-400 hover:text-primary-600 hover:bg-primary-50 transition"
+                                    >
+                                        <PencilIcon className="w-3.5 h-3.5" /> עריכה
+                                    </button>
+                                ) : (
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={handleSaveDetails}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition"
+                                        >
+                                            <CheckCircleIcon className="w-3.5 h-3.5" /> שמור
+                                        </button>
+                                        <button
+                                            onClick={() => { setIsEditingDetails(false); setError(null); }}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold border border-border-default rounded-lg text-text-muted hover:bg-bg-hover transition"
+                                        >
+                                            ביטול
+                                        </button>
                                     </div>
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">טלפון</p>
-                                        {isEditingDetails ? (
-                                            <input value={editForm.phone} onChange={(e) => setEditForm(prev => ({ ...prev, phone: e.target.value }))} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                                        ) : (
-                                            <p className="font-medium flex items-center gap-2">{candidate.phone} <a href={`tel:${candidate.phone}`} className="p-1 bg-green-50 text-green-600 rounded-full"><PhoneIcon className="w-3 h-3"/></a></p>
-                                        )}
-                                    </div>
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">אימייל</p>
-                                        {isEditingDetails ? (
-                                            <input value={editForm.email} onChange={(e) => setEditForm(prev => ({ ...prev, email: e.target.value }))} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                                        ) : (
-                                            <p className="font-medium flex items-center gap-2">{candidate.email || 'לא צוין'} <a href={`mailto:${candidate.email}`} className="p-1 bg-blue-50 text-blue-600 rounded-full"><EnvelopeIcon className="w-3 h-3"/></a></p>
-                                        )}
-                                    </div>
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">מקור הגעה</p>
-                                        {isEditingDetails ? (
-                                            <input value={editForm.source} onChange={(e) => setEditForm(prev => ({ ...prev, source: e.target.value }))} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                                        ) : (
-                                            <p className="font-medium bg-bg-subtle px-2 py-1 rounded inline-block text-xs mt-1">{candidate.source || candidate.sourceDetail}</p>
-                                        )}
-                                    </div>
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">כתובת</p>
-                                        {isEditingDetails ? (
-                                            <input value={editForm.address} onChange={(e) => setEditForm(prev => ({ ...prev, address: e.target.value }))} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                                        ) : (
-                                            <p className="font-medium">{candidate.address}</p>
-                                        )}
-                                    </div>
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">סטטוס</p>
-                                        {isEditingDetails ? (
-                                            <input value={editForm.status} onChange={(e) => setEditForm(prev => ({ ...prev, status: e.target.value }))} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
-                                        ) : (
-                                            <p className="font-medium">{candidate.status}</p>
-                                        )}
-                                    </div>
-                                    <div>
-                                        <p className="text-text-muted text-xs font-bold uppercase">תאריך הרשמה</p>
-                                        <p className="font-medium">{candidate.createdAt}</p>
-                                    </div>
-                                </div>
+                                )}
                             </div>
-                            
-                            
+
+                            {/* ── Section: פרטי זיהוי ── */}
+                            <div className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm">
+                                <h3 className="font-bold text-base text-text-default mb-4 flex items-center gap-2">
+                                    <UserIcon className="w-4 h-4 text-primary-500" /> פרטי זיהוי
+                                </h3>
+                                {isEditingDetails ? (
+                                    <div className="grid grid-cols-2 gap-3 text-sm">
+                                        <div className="col-span-2">
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">שם מלא</label>
+                                            <input value={editForm.fullName} onChange={setField('fullName')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">מגדר</label>
+                                            <select value={editForm.gender} onChange={setField('gender')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm">
+                                                <option value="">לא צוין</option>
+                                                <option value="זכר">זכר</option>
+                                                <option value="נקבה">נקבה</option>
+                                                <option value="אחר">אחר</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">שנת לידה</label>
+                                            <input value={editForm.birthYear} onChange={setField('birthYear')} placeholder="1990" className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">מצב משפחתי</label>
+                                            <select value={editForm.maritalStatus} onChange={setField('maritalStatus')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm">
+                                                <option value="">לא צוין</option>
+                                                <option value="רווק/ה">רווק/ה</option>
+                                                <option value="נשוי/אה">נשוי/אה</option>
+                                                <option value="גרוש/ה">גרוש/ה</option>
+                                                <option value="אלמן/ה">אלמן/ה</option>
+                                            </select>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">ת.ז.</label>
+                                            <input value={editForm.idNumber} onChange={setField('idNumber')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" dir="ltr" />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2 text-sm">
+                                        <InfoRow label="שם מלא" value={editForm.fullName} />
+                                        <InfoRow label="מגדר" value={editForm.gender} />
+                                        <InfoRow label="שנת לידה" value={editForm.birthYear} />
+                                        <InfoRow label="מצב משפחתי" value={editForm.maritalStatus} />
+                                        <InfoRow label="ת.ז." value={editForm.idNumber} />
+                                        <InfoRow label="תאריך הרשמה" value={candidate.createdAt ? new Date(candidate.createdAt).toLocaleDateString('he-IL') : ''} />
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ── Section: פרטי קשר ── */}
+                            <div className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm">
+                                <h3 className="font-bold text-base text-text-default mb-4 flex items-center gap-2">
+                                    <PhoneIcon className="w-4 h-4 text-primary-500" /> פרטי קשר
+                                </h3>
+                                {isEditingDetails ? (
+                                    <div className="space-y-3 text-sm">
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">טלפון</label>
+                                            <input value={editForm.phone} onChange={setField('phone')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" dir="ltr" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">אימייל</label>
+                                            <input value={editForm.email} onChange={setField('email')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" dir="ltr" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">כתובת</label>
+                                            <input value={editForm.address} onChange={setField('address')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">עיר / אזור</label>
+                                            <input value={editForm.location} onChange={setField('location')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2 text-sm">
+                                        <div className="flex items-center justify-between">
+                                            <p className="text-text-muted text-xs font-bold uppercase">טלפון</p>
+                                            <div className="flex items-center gap-2">
+                                                <p className="font-medium">{candidate.phone || 'לא צוין'}</p>
+                                                {candidate.phone && <a href={`tel:${candidate.phone}`} className="p-1 bg-green-50 text-green-600 rounded-full"><PhoneIcon className="w-3 h-3"/></a>}
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center justify-between">
+                                            <p className="text-text-muted text-xs font-bold uppercase">אימייל</p>
+                                            <div className="flex items-center gap-2">
+                                                <p className="font-medium truncate max-w-[160px]">{candidate.email || 'לא צוין'}</p>
+                                                {candidate.email && <a href={`mailto:${candidate.email}`} className="p-1 bg-blue-50 text-blue-600 rounded-full"><EnvelopeIcon className="w-3 h-3"/></a>}
+                                            </div>
+                                        </div>
+                                        <InfoRow label="כתובת" value={editForm.address} />
+                                        <InfoRow label="עיר / אזור" value={editForm.location} />
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ── Section: פרופיל מקצועי ── */}
+                            <div className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm">
+                                <h3 className="font-bold text-base text-text-default mb-4 flex items-center gap-2">
+                                    <BriefcaseIcon className="w-4 h-4 text-primary-500" /> פרופיל מקצועי
+                                </h3>
+                                {isEditingDetails ? (
+                                    <div className="space-y-3 text-sm">
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">כותרת מקצועית</label>
+                                            <input value={editForm.title} onChange={setField('title')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">סיכום מקצועי</label>
+                                            <textarea value={editForm.professionalSummary} onChange={setField('professionalSummary')} rows={3} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm resize-none" />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">זמינות</label>
+                                                <select value={editForm.availability} onChange={setField('availability')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm">
+                                                    <option value="">לא צוין</option>
+                                                    <option value="מיידי">מיידי</option>
+                                                    <option value="עד חודש">עד חודש</option>
+                                                    <option value="1-3 חודשים">1-3 חודשים</option>
+                                                    <option value="3+ חודשים">3+ חודשים</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">סוג העסקה</label>
+                                                <select value={editForm.employmentType} onChange={setField('employmentType')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm">
+                                                    <option value="">לא צוין</option>
+                                                    <option value="משרה מלאה">משרה מלאה</option>
+                                                    <option value="משרה חלקית">משרה חלקית</option>
+                                                    <option value="פרילנס">פרילנס</option>
+                                                    <option value="חוזה">חוזה</option>
+                                                </select>
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">היקף משרה</label>
+                                                <input value={editForm.jobScope} onChange={setField('jobScope')} placeholder="לדוג׳ 100%" className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">ניידות</label>
+                                                <input value={editForm.mobility} onChange={setField('mobility')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">שכר מינימום (₪)</label>
+                                                <input type="number" value={editForm.salaryMin} onChange={setField('salaryMin')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" dir="ltr" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">שכר מקסימום (₪)</label>
+                                                <input type="number" value={editForm.salaryMax} onChange={setField('salaryMax')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" dir="ltr" />
+                                            </div>
+                                            <div className="col-span-2">
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">רישיון נהיגה</label>
+                                                <input value={editForm.drivingLicense} onChange={setField('drivingLicense')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2 text-sm">
+                                        <InfoRow label="כותרת" value={editForm.title} />
+                                        {editForm.professionalSummary && (
+                                            <p className="text-xs text-text-muted leading-relaxed line-clamp-4">{editForm.professionalSummary}</p>
+                                        )}
+                                        <InfoRow label="זמינות" value={editForm.availability} />
+                                        <InfoRow label="סוג העסקה" value={editForm.employmentType} />
+                                        <InfoRow label="היקף משרה" value={editForm.jobScope} />
+                                        <InfoRow label="ניידות" value={editForm.mobility} />
+                                        {(editForm.salaryMin || editForm.salaryMax) && (
+                                            <InfoRow label="ציפיות שכר" value={[editForm.salaryMin && `₪${Number(editForm.salaryMin).toLocaleString()}`, editForm.salaryMax && `₪${Number(editForm.salaryMax).toLocaleString()}`].filter(Boolean).join(' – ')} />
+                                        )}
+                                        <InfoRow label="רישיון נהיגה" value={editForm.drivingLicense} />
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ── Section: ניהול פנימי ── */}
+                            <div className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm">
+                                <h3 className="font-bold text-base text-text-default mb-4 flex items-center gap-2">
+                                    <DocumentTextIcon className="w-4 h-4 text-primary-500" /> ניהול פנימי
+                                </h3>
+                                {isEditingDetails ? (
+                                    <div className="space-y-3 text-sm">
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">סטטוס</label>
+                                                <input value={editForm.status} onChange={setField('status')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                            </div>
+                                            <div>
+                                                <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">מקור הגעה</label>
+                                                <input value={editForm.source} onChange={setField('source')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">הסבר סטטוס</label>
+                                            <input value={editForm.statusExplanation} onChange={setField('statusExplanation')} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">הערות פנימיות</label>
+                                            <textarea value={editForm.internalNotes} onChange={setField('internalNotes')} rows={4} className="w-full bg-bg-input border border-border-default rounded-lg p-2 text-sm resize-none" />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2 text-sm">
+                                        <InfoRow label="סטטוס" value={editForm.status} />
+                                        <InfoRow label="מקור הגעה" value={editForm.source} />
+                                        {editForm.statusExplanation && <InfoRow label="הסבר סטטוס" value={editForm.statusExplanation} />}
+                                        {editForm.internalNotes && (
+                                            <div>
+                                                <p className="text-text-muted text-xs font-bold uppercase mb-1">הערות פנימיות</p>
+                                                <p className="text-xs text-text-default leading-relaxed whitespace-pre-wrap bg-yellow-50 border border-yellow-100 rounded-lg p-2">{editForm.internalNotes}</p>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* ── Bottom save bar (visible when editing) ── */}
+                            {isEditingDetails && (
+                                <div className="flex gap-2 pt-1">
+                                    <button
+                                        onClick={handleSaveDetails}
+                                        className="flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-bold bg-primary-600 text-white rounded-xl hover:bg-primary-700 transition shadow"
+                                    >
+                                        <CheckCircleIcon className="w-4 h-4" /> שמור שינויים
+                                    </button>
+                                    <button
+                                        onClick={() => { setIsEditingDetails(false); setError(null); }}
+                                        className="px-4 py-2.5 text-sm font-bold border border-border-default rounded-xl text-text-muted hover:bg-bg-hover transition"
+                                    >
+                                        ביטול
+                                    </button>
+                                </div>
+                            )}
+                            {error && isEditingDetails && (
+                                <p className="text-xs text-red-600 font-semibold text-center">{error}</p>
+                            )}
+
                         </div>
 
                         {/* Right Column: Activity */}
@@ -435,34 +778,122 @@ const AdminCandidateProfileView: React.FC = () => {
                                     <table className="w-full text-sm text-right">
                                         <thead className="bg-bg-subtle text-text-muted text-xs uppercase font-bold">
                                             <tr>
-                                                <th className="p-4">לקוח</th>
-                                                <th className="p-4">משרה</th>
-                                                <th className="p-4">סטטוס</th>
-                                                <th className="p-4">תאריך</th>
-                                                <th className="p-4">רכז מטפל</th>
+                                                <th className="p-4 w-[35%]">חברה</th>
+                                                <th className="p-4">תפקיד</th>
+                                                <th className="p-4">תאריכים</th>
+                                                <th className="p-4 w-[90px]">פעולה</th>
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-border-default">
                                             {Array.isArray(candidate.workExperience) && candidate.workExperience.length > 0 ? (
                                                 candidate.workExperience.map((we: any, idx: number) => (
                                                     <tr key={idx} className="hover:bg-bg-hover">
-                                                        <td className="p-4 font-bold">{we.company || 'לא צוין'}</td>
-                                                        <td className="p-4 text-primary-600">{we.title || we.role || 'תפקיד לא צוין'}</td>
-                                                        <td className="p-4">
-                                                            <span className="bg-green-50 text-green-700 px-2 py-0.5 rounded text-xs font-bold">
-                                                                {we.status || 'ניסיון'}
-                                                            </span>
-                                                        </td>
-                                                        <td className="p-4 text-text-muted">
-                                                            {we.startDate ? new Date(we.startDate).toLocaleDateString('he-IL') : ''}
-                                                            {we.endDate ? ` - ${we.endDate === 'Present' ? 'כיום' : new Date(we.endDate).toLocaleDateString('he-IL')}` : ''}
-                                                        </td>
-                                                        <td className="p-4 text-text-muted">{we.coordinator || ''}</td>
+                                                        {editingExpIdx === idx ? (
+                                                            /* ── Inline edit row spanning all columns ── */
+                                                            <td colSpan={4} className="p-3 bg-primary-50/40 border-r-2 border-primary-400">
+                                                                <div className="space-y-3">
+                                                                    {/* Title */}
+                                                                    <div>
+                                                                        <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">תפקיד</label>
+                                                                        <input type="text" value={expEditTitle} onChange={e => setExpEditTitle(e.target.value)}
+                                                                            className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-xs focus:ring-1 focus:ring-primary-500 outline-none" />
+                                                                    </div>
+                                                                    {/* Dates */}
+                                                                    <div className="flex gap-3">
+                                                                        <div className="flex-1">
+                                                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">מתאריך</label>
+                                                                            <input type="text" value={expEditStartDate} onChange={e => setExpEditStartDate(e.target.value)}
+                                                                                placeholder="YYYY-MM-DD"
+                                                                                className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-xs focus:ring-1 focus:ring-primary-500 outline-none" />
+                                                                        </div>
+                                                                        <div className="flex-1">
+                                                                            <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">עד תאריך</label>
+                                                                            <input type="text" value={expEditEndDate} onChange={e => setExpEditEndDate(e.target.value)}
+                                                                                placeholder="YYYY-MM-DD או ריק = כיום"
+                                                                                className="w-full bg-white border border-border-default rounded-lg py-1.5 px-2.5 text-xs focus:ring-1 focus:ring-primary-500 outline-none" />
+                                                                        </div>
+                                                                    </div>
+                                                                    {/* Company org override */}
+                                                                    <div>
+                                                                        <label className="block text-[10px] font-bold uppercase text-text-muted mb-1">קישור לחברה במאגר (אופציונלי)</label>
+                                                                        {expSelected ? (
+                                                                            <div className="flex items-center gap-1.5 text-xs bg-primary-50 border border-primary-200 rounded-lg px-2 py-1.5">
+                                                                                <span className="font-bold text-primary-700 truncate">{expSelected.name}</span>
+                                                                                <button type="button" onClick={() => { setExpSelected(null); setExpSearch(''); }} className="flex-shrink-0 text-primary-400 hover:text-red-500">
+                                                                                    <XMarkIcon className="w-3.5 h-3.5" />
+                                                                                </button>
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div className="relative">
+                                                                                <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-subtle absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                                                                <input
+                                                                                    ref={expSearchRef}
+                                                                                    type="text"
+                                                                                    value={expSearch}
+                                                                                    onChange={e => setExpSearch(e.target.value)}
+                                                                                    placeholder="חפש חברה במאגר לקישור..."
+                                                                                    className="w-full bg-white border border-border-default rounded-lg py-1.5 pr-8 pl-2 text-xs focus:ring-1 focus:ring-primary-500 outline-none"
+                                                                                />
+                                                                                {expResults.length > 0 && (
+                                                                                    <div className="absolute top-full right-0 mt-1 w-72 bg-white border border-border-default rounded-xl shadow-xl z-50 max-h-48 overflow-y-auto custom-scrollbar">
+                                                                                        {expResults.map(org => (
+                                                                                            <button key={org.id} type="button"
+                                                                                                onClick={() => { setExpSelected(org); setExpSearch(''); setExpResults([]); }}
+                                                                                                className="w-full text-right px-3 py-2 hover:bg-bg-hover flex items-start gap-2 border-b border-border-subtle last:border-0">
+                                                                                                <div className="min-w-0">
+                                                                                                    <p className="text-xs font-bold text-text-default truncate">{org.name}</p>
+                                                                                                    {(org.nameEn || org.location) && (
+                                                                                                        <p className="text-[10px] text-text-muted truncate">{[org.nameEn, org.location].filter(Boolean).join(' · ')}</p>
+                                                                                                    )}
+                                                                                                </div>
+                                                                                            </button>
+                                                                                        ))}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
+                                                                    {/* Action buttons */}
+                                                                    <div className="flex gap-2 pt-1">
+                                                                        <button type="button" disabled={expSaving}
+                                                                            onClick={() => void handleSaveExpOrg(idx)}
+                                                                            className="px-4 py-1.5 text-xs font-bold bg-primary-600 text-white rounded-lg disabled:opacity-40 hover:bg-primary-700 transition">
+                                                                            {expSaving ? 'שומר...' : '💾 שמור שינויים'}
+                                                                        </button>
+                                                                        <button type="button" onClick={() => setEditingExpIdx(null)}
+                                                                            className="px-4 py-1.5 text-xs font-bold border border-border-default rounded-lg hover:bg-bg-hover transition">
+                                                                            ביטול
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            </td>
+                                                        ) : (
+                                                            <>
+                                                                {/* Company cell */}
+                                                                <td className="p-3 align-top">
+                                                                    <p className="font-bold text-sm text-text-default">{we.company || 'לא צוין'}</p>
+                                                                    {we.organizationId && (
+                                                                        <span className="text-[10px] text-emerald-600 font-semibold">✓ מקושר למאגר</span>
+                                                                    )}
+                                                                </td>
+                                                                <td className="p-3 align-top text-primary-600 text-sm">{we.title || we.role || 'תפקיד לא צוין'}</td>
+                                                                <td className="p-3 align-top text-text-muted text-xs whitespace-nowrap">
+                                                                    {we.startDate ? new Date(we.startDate).toLocaleDateString('he-IL') : ''}
+                                                                    {we.endDate ? ` – ${we.endDate === 'Present' ? 'כיום' : new Date(we.endDate).toLocaleDateString('he-IL')}` : ''}
+                                                                </td>
+                                                                <td className="p-3 align-top">
+                                                                    <button type="button" onClick={() => openExpEdit(idx)}
+                                                                        className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold border border-border-default rounded-lg text-text-muted hover:border-primary-300 hover:text-primary-600 hover:bg-primary-50 transition">
+                                                                        <PencilIcon className="w-3 h-3" /> עריכה
+                                                                    </button>
+                                                                </td>
+                                                            </>
+                                                        )}
                                                     </tr>
                                                 ))
                                             ) : (
                                                 <tr>
-                                                    <td colSpan={5} className="p-6 text-center text-text-muted">אין היסטוריית פעילות זמינה</td>
+                                                    <td colSpan={4} className="p-6 text-center text-text-muted">אין ניסיון תעסוקתי זמין</td>
                                                 </tr>
                                             )}
                                         </tbody>
@@ -481,7 +912,7 @@ const AdminCandidateProfileView: React.FC = () => {
 
                 )}
 
-
+                {activeTab === 'overview' && (
 <div className="w-full bg-bg-card rounded-2xl border border-border-default p-6 shadow-sm space-y-4">
                                 <div className="flex items-center justify-between">
                                     <h3 className="font-bold text-lg text-text-default flex items-center gap-2">
@@ -674,6 +1105,7 @@ const AdminCandidateProfileView: React.FC = () => {
                                     <p className="text-text-muted text-sm italic">אין תגיות מקצועיות פרטניות כרגע.</p>
                                 )}
                             </div>
+                )}
 
 
 
@@ -708,30 +1140,92 @@ const AdminCandidateProfileView: React.FC = () => {
                 )}
 
                 {activeTab === 'logs' && (
-                    <div className="bg-bg-card rounded-2xl border border-border-default overflow-hidden shadow-sm animate-fade-in">
-                         <div className="p-5 border-b border-border-default bg-bg-subtle/30">
-                            <h3 className="font-bold text-lg text-text-default">לוג פעולות מערכת (System Audit)</h3>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 animate-fade-in">
+                        {/* Summary card */}
+                        <div className="bg-bg-card rounded-2xl border border-border-default p-5 shadow-sm space-y-3">
+                            <h3 className="font-bold text-sm text-text-default flex items-center gap-2">
+                                <ClockIcon className="w-4 h-4 text-primary-500" /> סיכום לוג
+                            </h3>
+                            {auditLogsLoading ? (
+                                <p className="text-text-muted text-xs">טוען...</p>
+                            ) : (
+                                <>
+                                    <div className="flex justify-between text-xs">
+                                        <span className="text-text-muted">סה"כ רשומות</span>
+                                        <span className="font-bold text-text-default">{auditLogs.length}</span>
+                                    </div>
+                                    {auditLogs[0] && (
+                                        <div className="flex justify-between text-xs">
+                                            <span className="text-text-muted">פעולה אחרונה</span>
+                                            <span className="font-bold text-text-default">
+                                                {new Date(auditLogs[0].createdAt || auditLogs[0].timestamp).toLocaleDateString('he-IL')}
+                                            </span>
+                                        </div>
+                                    )}
+                                    {(() => {
+                                        const counts: Record<string, number> = {};
+                                        auditLogs.forEach(l => { const a = l.action || 'אחר'; counts[a] = (counts[a] || 0) + 1; });
+                                        return Object.entries(counts).map(([action, count]) => (
+                                            <div key={action} className="flex justify-between text-xs">
+                                                <span className="text-text-muted">{action}</span>
+                                                <span className="font-semibold text-text-default bg-bg-subtle px-1.5 py-0.5 rounded">{count}</span>
+                                            </div>
+                                        ));
+                                    })()}
+                                </>
+                            )}
                         </div>
-                        <div className="divide-y divide-border-default">
-                            {mockSystemLogs.map((log, i) => (
-                                <div key={i} className="p-4 flex items-center justify-between hover:bg-bg-hover transition-colors">
-                                    <div className="flex items-center gap-3">
-                                        <div className="p-2 bg-bg-subtle rounded-full text-text-muted">
-                                            <ClockIcon className="w-4 h-4"/>
-                                        </div>
-                                        <div>
-                                            <p className="font-semibold text-sm text-text-default">{log.action}</p>
-                                            <p className="text-xs text-text-muted">בוצע ע"י: {log.user}</p>
-                                        </div>
-                                    </div>
-                                    <div className="text-xs font-mono text-text-subtle">
-                                        {new Date(log.date).toLocaleString('he-IL')}
-                                    </div>
+
+                        {/* Full log table — spans 2 cols */}
+                        <div className="lg:col-span-2 bg-bg-card rounded-2xl border border-border-default shadow-sm overflow-hidden">
+                            <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
+                                <h3 className="font-bold text-sm text-text-default flex items-center gap-2">
+                                    <ClockIcon className="w-4 h-4 text-primary-500" /> היסטוריית פעולות
+                                </h3>
+                                <button onClick={loadAuditLogs} className="text-xs text-text-muted hover:text-primary-600 border border-border-default rounded-lg px-3 py-1.5 hover:bg-bg-hover transition">
+                                    רענן
+                                </button>
+                            </div>
+                            {auditLogsLoading ? (
+                                <div className="p-8 text-center text-text-muted text-sm">טוען לוג...</div>
+                            ) : auditLogs.length === 0 ? (
+                                <div className="p-8 text-center text-text-muted text-sm">אין רשומות לוג למועמד זה.</div>
+                            ) : (
+                                <div className="overflow-y-auto max-h-[600px] [scrollbar-width:thin]">
+                                    <table className="w-full text-sm text-right">
+                                        <thead className="bg-bg-subtle text-text-muted text-xs font-bold uppercase sticky top-0">
+                                            <tr>
+                                                <th className="px-4 py-3">תאריך</th>
+                                                <th className="px-4 py-3">פעולה</th>
+                                                <th className="px-4 py-3">משתמש</th>
+                                                <th className="px-4 py-3">פרטים</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody className="divide-y divide-border-subtle">
+                                            {auditLogs.map((log, i) => (
+                                                <tr key={log.id || i} className="hover:bg-bg-hover transition-colors">
+                                                    <td className="px-4 py-3 text-xs text-text-muted whitespace-nowrap">
+                                                        {new Date(log.createdAt || log.timestamp).toLocaleString('he-IL', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <span className="inline-block px-2 py-0.5 rounded-full text-[11px] font-bold bg-primary-50 text-primary-700 border border-primary-100">
+                                                            {log.action || '—'}
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-xs text-text-muted">{log.actorName || log.actor || '—'}</td>
+                                                    <td className="px-4 py-3 text-xs text-text-muted max-w-xs truncate" title={typeof log.changes === 'object' ? JSON.stringify(log.changes) : log.changes}>
+                                                        {typeof log.changes === 'object' ? JSON.stringify(log.changes) : (log.changes || log.description || '—')}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
                                 </div>
-                            ))}
+                            )}
                         </div>
                     </div>
                 )}
+
             </main>
             <style>{`
                 @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }

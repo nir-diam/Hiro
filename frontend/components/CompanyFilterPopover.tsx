@@ -16,7 +16,8 @@ interface CompanyFilterPopoverProps {
     onClose: () => void;
     filters: CompanyFilters;
     setFilters: React.Dispatch<React.SetStateAction<CompanyFilters>>;
-    onApply?: () => void;
+    /** Called with the committed draft after Apply. Prefer fetching here with this payload. */
+    onApply?: (filters: CompanyFilters) => void;
 }
 
 const companySizeOptions = [
@@ -171,10 +172,12 @@ const CompanyFilterPopover: React.FC<CompanyFilterPopoverProps> = ({ onClose, fi
     const handleClear = () =>
         setDraft({ sizes: [], sectors: [], industries: [], fields: [], roles: [] }); // roles kept for API compat
 
-    // Commit draft to parent and trigger search — only on Apply click
+    // Commit draft to parent and trigger search — only on Apply click.
+    // Call onApply BEFORE setFilters so the parent can set skip/prev guards
+    // before the companyFilters effect runs (avoids a duplicate GET).
     const handleApply = () => {
+        onApply?.(draft);
         setFilters(draft);
-        onApply?.();
         onClose();
     };
 

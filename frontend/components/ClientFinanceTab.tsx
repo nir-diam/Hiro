@@ -6,6 +6,7 @@ import {
     PlusIcon, MinusIcon
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
+import { authHeaders } from '../utils/authHeaders';
 
 interface ClientFinanceTabProps {
     clientName: string;
@@ -33,7 +34,7 @@ const ClientFinanceTab: React.FC<ClientFinanceTabProps> = ({ clientName, clientI
         let active = true;
         setIsLoading(true);
         setError(null);
-        fetch(`${apiBase}/api/clients/${clientId}/finance`)
+        fetch(`${apiBase}/api/clients/${clientId}/finance`, { headers: authHeaders(true) })
             .then((r) => {
                 if (!r.ok) throw new Error('Failed to load finance');
                 return r.json();
@@ -65,7 +66,7 @@ const ClientFinanceTab: React.FC<ClientFinanceTabProps> = ({ clientName, clientI
         if (!apiBase || !clientId) return;
         await fetch(`${apiBase}/api/clients/${clientId}/finance`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders(true),
             body: JSON.stringify(financeData),
         }).catch(() => null);
     };

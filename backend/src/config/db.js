@@ -7,6 +7,12 @@ const sequelize = new Sequelize(
     || 'postgres://postgres:qwe123ZZZ@herodb.cjauwauq6xes.eu-north-1.rds.amazonaws.com:5432/postgres',
   {
     logging: false,
+    pool: {
+      max: 20,       // up from default 5
+      min: 2,
+      acquire: 60000, // ms to wait before throwing ConnectionAcquireTimeoutError
+      idle: 10000,    // ms a connection can be idle before being released
+    },
   },
 );
 
@@ -22,13 +28,20 @@ const connectDb = async () => {
   require('../models/JobCandidateScreening');
   require('../models/MessageLog');
   require('../models/Organization');
+  require('../models/OrganizationLocation');
   require('../models/OrganizationChangeHistory');
   require('../models/Client');
   require('../models/ClientOrganizationLink');
   require('../models/ClientContact');
   require('../models/ClientContactGroup');
   require('../models/ClientTask');
+  require('../models/ClientPipeline');
+  require('../models/ClientPipelineStage');
+  require('../models/ClientHealthRule');
+  require('../models/JobHealthRule');
+  require('../models/JobHealthSetting');
   require('../models/JobPublication');
+  require('../models/JobImage');
   require('../models/Tag');
   require('../models/TagHistory');
   require('../models/SystemTag');
@@ -79,6 +92,11 @@ const connectDb = async () => {
   Job.hasOne(JobPublication, { foreignKey: 'jobId', as: 'publication' });
   JobPublication.belongsTo(Job, { foreignKey: 'jobId', as: 'job' });
 
+  const ClientPipeline = require('../models/ClientPipeline');
+  const ClientPipelineStage = require('../models/ClientPipelineStage');
+  ClientPipeline.hasMany(ClientPipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
+  ClientPipelineStage.belongsTo(ClientPipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+
   await sequelize.sync();
 
   // users table has legacy is_active + duplicate "isActive" from sync — keep them aligned (false wins).
@@ -117,6 +135,167 @@ const connectDb = async () => {
     ALTER TABLE clients
       ADD COLUMN IF NOT EXISTS "logoUrl" VARCHAR(2048),
       ADD COLUMN IF NOT EXISTS "primaryColor" VARCHAR(32);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_contacts
+      ADD COLUMN IF NOT EXISTS "organizationId" UUID NULL REFERENCES organizations(id) ON DELETE SET NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_contacts
+      ADD COLUMN IF NOT EXISTS "pipelineId" UUID NULL,
+      ADD COLUMN IF NOT EXISTS "processStage" VARCHAR(255) NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_client_contacts_org
+      ON client_contacts ("organizationId")
+      WHERE "organizationId" IS NOT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_organization_links
+      ADD COLUMN IF NOT EXISTS pipeline_id UUID NULL,
+      ADD COLUMN IF NOT EXISTS pipeline_stage VARCHAR(255) NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_tasks
+      ADD COLUMN IF NOT EXISTS "organizationId" UUID NULL REFERENCES organizations(id) ON DELETE SET NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_client_tasks_org
+      ON client_tasks ("organizationId")
+      WHERE "organizationId" IS NOT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS client_pipelines (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_client_pipelines_client
+      ON client_pipelines (client_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS client_pipeline_stages (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      pipeline_id UUID NOT NULL REFERENCES client_pipelines(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      color VARCHAR(120) NOT NULL DEFAULT 'bg-gray-100 text-gray-700',
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      sla_limit INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_client_pipeline_stages_pipeline
+      ON client_pipeline_stages (pipeline_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS client_health_rules (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      organization_id UUID NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      pipeline_id UUID NULL REFERENCES client_pipelines(id) ON DELETE CASCADE,
+      color VARCHAR(32) NOT NULL DEFAULT 'gray',
+      condition VARCHAR(64) NOT NULL,
+      operator VARCHAR(32) NOT NULL DEFAULT 'gt',
+      value INTEGER NOT NULL DEFAULT 0,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE client_health_rules
+      ADD COLUMN IF NOT EXISTS pipeline_id UUID NULL REFERENCES client_pipelines(id) ON DELETE CASCADE;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_client_health_rules_scope
+      ON client_health_rules (client_id, organization_id, pipeline_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS organization_locations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      description VARCHAR(255) NOT NULL DEFAULT '',
+      location VARCHAR(255) NOT NULL DEFAULT '',
+      address VARCHAR(255) NULL,
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_organization_locations_org
+      ON organization_locations (organization_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS job_health_settings (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      organization_id UUID NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      is_active BOOLEAN NOT NULL DEFAULT true,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_job_health_settings_client
+      ON job_health_settings (client_id)
+      WHERE organization_id IS NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_job_health_settings_org
+      ON job_health_settings (client_id, organization_id)
+      WHERE organization_id IS NOT NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS job_health_rules (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      organization_id UUID NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      profile_id VARCHAR(32) NOT NULL DEFAULT 'standard',
+      color VARCHAR(32) NOT NULL DEFAULT 'gray',
+      condition VARCHAR(64) NOT NULL,
+      operator VARCHAR(32) NOT NULL DEFAULT 'gt',
+      value INTEGER NOT NULL DEFAULT 0,
+      max_value INTEGER NULL,
+      stage VARCHAR(255) NULL,
+      enabled BOOLEAN NOT NULL DEFAULT true,
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_job_health_rules_scope
+      ON job_health_rules (client_id, organization_id, profile_id, sort_index);
   `).catch(() => {});
 
   await sequelize.query(`

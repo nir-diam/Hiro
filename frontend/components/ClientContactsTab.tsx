@@ -1,6 +1,5 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { 
     PlusIcon, PencilIcon, TrashIcon, UserGroupIcon, Cog6ToothIcon, 
     TableCellsIcon, Squares2X2Icon, PhoneIcon, EnvelopeIcon, WhatsappIcon, 
@@ -10,6 +9,7 @@ import Drawer from './Drawer';
 import { MessageModalConfig } from '../hooks/useUIState';
 import { useLanguage } from '../context/LanguageContext';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
+import { authHeaders } from '../utils/authHeaders';
 
 // --- TYPES ---
 interface Contact {
@@ -67,13 +67,12 @@ const FormTextArea: React.FC<{ label: string; name: string; value: string; onCha
 
 const ContactCard: React.FC<{ 
     contact: Contact; 
-    clientId: string; 
     onEdit: (c: Contact) => void; 
     onDelete: (c: Contact) => void; 
     onActionClick: (mode: 'email' | 'sms' | 'whatsapp', contact: Contact) => void;
     isSelected: boolean;
     onSelect: () => void;
-}> = ({ contact, clientId, onEdit, onDelete, onActionClick, isSelected, onSelect }) => (
+}> = ({ contact, onEdit, onDelete, onActionClick, isSelected, onSelect }) => (
     <div className={`bg-bg-card rounded-lg border shadow-sm p-4 flex flex-col justify-between transition-all relative ${isSelected ? 'border-primary-500 ring-1 ring-primary-500 bg-primary-50/10' : 'border-border-default'}`}>
         <div className="absolute top-4 left-4" onClick={e => e.stopPropagation()}>
             <input 
@@ -85,7 +84,7 @@ const ContactCard: React.FC<{
         </div>
         <div>
             <div className="flex justify-between items-start pr-6"> {/* Added padding right for checkbox */}
-                <Link to={`/clients/${clientId}/contacts/${contact.id}`} className="font-semibold text-primary-700 hover:underline">{contact.name}</Link>
+                <button type="button" onClick={() => onEdit(contact)} className="font-semibold text-primary-700 hover:underline text-right">{contact.name}</button>
                 <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${contact.isActive ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'}`}>{contact.isActive ? 'פעיל' : 'לא פעיל'}</span>
             </div>
             <p className="text-sm text-text-muted">{contact.role}</p>
@@ -112,11 +111,13 @@ const ContactCard: React.FC<{
 
 interface ClientContactsTabProps {
     clientId: string;
+    /** When set, list/create contacts for this organization only (tenant org profile). */
+    organizationId?: string;
     onOpenMessageModal: (config: MessageModalConfig) => void;
 }
 
 
-const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenMessageModal }) => {
+const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organizationId, onOpenMessageModal }) => {
     const { t } = useLanguage();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [contacts, setContacts] = useState<Contact[]>([]);
@@ -206,9 +207,12 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         let active = true;
         setIsLoading(true);
         setError(null);
+        const orgQs = organizationId
+            ? `?organizationId=${encodeURIComponent(organizationId)}`
+            : '';
         Promise.all([
-            fetch(`${apiBase}/api/clients/${clientId}/contacts`).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load contacts'))),
-            fetch(`${apiBase}/api/clients/${clientId}/contact-groups`).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load groups'))),
+            fetch(`${apiBase}/api/clients/${clientId}/contacts${orgQs}`, { headers: authHeaders(true) }).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load contacts'))),
+            fetch(`${apiBase}/api/clients/${clientId}/contact-groups`, { headers: authHeaders(true) }).then(r => r.ok ? r.json() : Promise.reject(new Error('Failed to load groups'))),
         ])
             .then(([contactsData, groupsData]) => {
                 if (!active) return;
@@ -227,7 +231,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
                 if (active) setIsLoading(false);
             });
         return () => { active = false; };
-    }, [apiBase, clientId]);
+    }, [apiBase, clientId, organizationId]);
 
     // Filter Logic
     const filteredContacts = useMemo(() => {
@@ -292,7 +296,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         if (!formData) return;
         if (!apiBase || !clientId) return;
 
-        const payload = {
+        const payload: Record<string, unknown> = {
             name: formData.name,
             phone: formData.phone,
             mobilePhone: formData.mobilePhone,
@@ -306,11 +310,14 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
             isInvited: Boolean(formData.isInvited),
             groupId: formData.groupId || null,
         };
+        if (organizationId) {
+            payload.organizationId = organizationId;
+        }
 
         if (String(formData.id).startsWith('tmp-')) {
             const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify(payload),
             });
             if (res.ok) {
@@ -320,7 +327,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         } else {
             const res = await fetch(`${apiBase}/api/clients/${clientId}/contacts/${formData.id}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify(payload),
             });
             if (res.ok) {
@@ -339,7 +346,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         setContacts(prev => prev.filter(c => c.id !== id));
         setContactToDelete(null);
         if (!apiBase || !clientId) return;
-        await fetch(`${apiBase}/api/clients/${clientId}/contacts/${id}`, { method: 'DELETE' }).catch(() => null);
+        await fetch(`${apiBase}/api/clients/${clientId}/contacts/${id}`, { method: 'DELETE', headers: authHeaders(true) }).catch(() => null);
     };
     const handleStatusToggle = async (e: React.SyntheticEvent, contactId: string) => { 
         e.stopPropagation();
@@ -349,7 +356,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         if (!apiBase || !clientId) return;
         await fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders(true),
             body: JSON.stringify({ isActive: next }),
         }).catch(() => null);
     };
@@ -390,7 +397,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
             idsToAdd.map((contactId) =>
                 fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
                     body: JSON.stringify({ groupId }),
                 }).catch(() => null)
             )
@@ -403,7 +410,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         try {
             const res = await fetch(`${apiBase}/api/clients/${clientId}/contact-groups`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify({ name: newGroupName }),
             });
             if (!res.ok) throw new Error('Create group failed');
@@ -427,7 +434,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         if (!apiBase || !clientId) return;
         await fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders(true),
             body: JSON.stringify({ hasSystemAccess: next }),
         }).catch(() => null);
     };
@@ -439,7 +446,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
         if (!apiBase || !clientId) return;
         await fetch(`${apiBase}/api/clients/${clientId}/contacts/${contactId}`, {
             method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
+            headers: authHeaders(true),
             body: JSON.stringify({ isInvited: true, hasSystemAccess: true }),
         }).catch(() => null);
     };
@@ -456,7 +463,15 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
                      <input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => handleSelectContact(contact.id)} className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer" />
                 </div>
             );
-            case 'name': return <Link to={`/clients/${clientId}/contacts/${contact.id}`} onClick={e => e.stopPropagation()} className="font-semibold text-primary-700 hover:underline">{contact.name}</Link>;
+            case 'name': return (
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); handleEdit(contact); }}
+                    className="font-semibold text-primary-700 hover:underline text-right"
+                >
+                    {contact.name}
+                </button>
+            );
             case 'isActive': return <label onClick={e => e.stopPropagation()} className="relative inline-flex items-center cursor-pointer"><input type="checkbox" checked={contact.isActive} onChange={(e) => handleStatusToggle(e, contact.id)} className="sr-only peer" /><div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-primary-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div></label>;
             case 'system_access': return (
                 <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
@@ -592,7 +607,6 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, onOpenM
                             <ContactCard 
                                 key={contact.id} 
                                 contact={contact} 
-                                clientId={clientId} 
                                 onEdit={handleEdit} 
                                 onDelete={handleDelete} 
                                 onActionClick={handleActionClick}

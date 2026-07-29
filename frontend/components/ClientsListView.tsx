@@ -10,6 +10,7 @@ import {
     EllipsisVerticalIcon, DocumentArrowDownIcon, PlayIcon, CalendarDaysIcon, ClipboardDocumentCheckIcon, LinkIcon
 } from './Icons';
 import { MessageModalConfig } from '../hooks/useUIState';
+import { fetchPublishingLinks, type PublishingLinkRow } from '../services/publishingApi';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
@@ -20,7 +21,10 @@ import CompanyFilterPopover from './CompanyFilterPopover';
 import ContactDrawer from './ContactDrawer';
 import ClientDetailsDrawer from './ClientDetailsDrawer';
 import SearchableSelect from './SearchableSelect'; 
-import ClientTasksTab from './ClientTasksTab'; 
+import ClientTasksTab from './ClientTasksTab';
+import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
+import { fetchClientHealthPulse, type OrgHealthPulseDto } from '../services/clientHealthRulesApi';
+import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 
 // --- TYPES ---
 type ClientStatus = 'פעיל' | 'לא פעיל' | 'בהקפאה' | 'ליד חדש';
@@ -55,6 +59,7 @@ export interface Client {
 export interface Contact {
     id: string;
     clientId?: string;
+    organizationId?: string | null;
     name: string;
     role: string;
     clientName: string;
@@ -83,6 +88,8 @@ export type LinkedOrganizationItem = {
     logo: string;
     employeeCount: string;
     statusLabel: string;
+    pipelineId?: string;
+    pipelineStage?: string;
 };
 
 const normalizeLinkedOrganization = (raw: Record<string, unknown>): LinkedOrganizationItem => {
@@ -111,6 +118,8 @@ const normalizeLinkedOrganization = (raw: Record<string, unknown>): LinkedOrgani
         logo: String(source.logo || ''),
         employeeCount: String(source.employeeCount || ''),
         statusLabel: isPending ? 'ממתין לאישור' : String(source.activityStatus || source.dataConfidence || 'מאושר'),
+        pipelineId: raw.pipelineId ? String(raw.pipelineId) : undefined,
+        pipelineStage: raw.pipelineStage ? String(raw.pipelineStage) : undefined,
     };
 };
 
@@ -134,29 +143,25 @@ interface Pipeline {
     stages: PipelineStage[];
 }
 
-const pipelines: Pipeline[] = [
-    {
-        id: 'sales',
-        name: 'תהליך מכירה (Sales)',
-        stages: [
-            { id: 'lead', name: 'ליד חדש', color: 'border-blue-500', bg: 'bg-blue-50', accent: 'text-blue-700' },
-            { id: 'meeting', name: 'פגישה', color: 'border-purple-500', bg: 'bg-purple-50', accent: 'text-purple-700' },
-            { id: 'proposal', name: 'הצעת מחיר', color: 'border-yellow-500', bg: 'bg-yellow-50', accent: 'text-yellow-700' },
-            { id: 'negotiation', name: 'משא ומתן', color: 'border-orange-500', bg: 'bg-orange-50', accent: 'text-orange-700' },
-            { id: 'won', name: 'סגירה (זכייה)', color: 'border-green-500', bg: 'bg-green-50', accent: 'text-green-700' },
-        ]
-    },
-    {
-        id: 'retention',
-        name: 'שימור לקוחות (Retention)',
-        stages: [
-            { id: 'onboarding', name: 'קליטה (Onboarding)', color: 'border-indigo-500', bg: 'bg-indigo-50', accent: 'text-indigo-700' },
-            { id: 'active', name: 'לקוח פעיל', color: 'border-green-500', bg: 'bg-green-50', accent: 'text-green-700' },
-            { id: 'risk', name: 'בסיכון (At Risk)', color: 'border-red-500', bg: 'bg-red-50', accent: 'text-red-700' },
-            { id: 'renewal', name: 'חידוש חוזה', color: 'border-cyan-500', bg: 'bg-cyan-50', accent: 'text-cyan-700' },
-        ]
-    }
-];
+function mapPipelineDto(d: PipelineDto): Pipeline {
+    return {
+        id: d.id,
+        name: d.name,
+        stages: (d.stages || []).map((s) => {
+            const parts = String(s.color || '').split(/\s+/).filter(Boolean);
+            const bgToken = parts.find((p) => p.startsWith('bg-')) || 'bg-gray-100';
+            const accent = parts.find((p) => p.startsWith('text-')) || 'text-gray-700';
+            const family = bgToken.match(/^bg-([a-z]+)-/)?.[1] || 'gray';
+            return {
+                id: s.id,
+                name: s.name,
+                color: `border-${family}-500`,
+                bg: `bg-${family}-50`,
+                accent,
+            };
+        }),
+    };
+}
 
 // --- RICH MOCK DATA ---
 export const clientsData: Client[] = [
@@ -194,7 +199,7 @@ const normalizeClient = (raw: any): Client => {
     };
 };
 
-function inferPipelineIdForStage(stageId: string | undefined): string | undefined {
+function inferPipelineIdForStage(stageId: string | undefined, pipelines: Pipeline[]): string | undefined {
     if (!stageId) return undefined;
     for (const p of pipelines) {
         if (p.stages.some((s) => s.id === stageId)) return p.id;
@@ -214,13 +219,29 @@ function formatRelativeHebrew(iso: string | undefined): string {
     return d.toLocaleDateString('he-IL');
 }
 
-function mapServerContactToListContact(row: any, clientsById: Map<string, Client>): Contact {
+function mapServerContactToListContact(
+    row: any,
+    clientsById: Map<string, Client>,
+    pipelines: Pipeline[] = [],
+    orgsById: Map<string, { name: string; logo?: string }> = new Map(),
+): Contact {
     const clientRow = row.client;
+    const orgRow = row.organization;
     const cid = String(row.clientId || clientRow?.id || '');
+    const organizationId = row.organizationId ? String(row.organizationId) : null;
     const fallback = cid ? clientsById.get(cid) : undefined;
-    const clientName = String(clientRow?.displayName || clientRow?.name || fallback?.name || 'לקוח').trim();
-    const logo = clientRow?.logoUrl || fallback?.logo;
-    const stageFromMeta = clientRow?.metadata?.pipelineStage || fallback?.pipelineStage;
+    const linkedOrg = organizationId ? orgsById.get(organizationId) : undefined;
+    const orgName = String(
+        row.organizationName
+        || orgRow?.name
+        || orgRow?.nameEn
+        || linkedOrg?.name
+        || '',
+    ).trim();
+    const tenantClientName = String(clientRow?.displayName || clientRow?.name || fallback?.name || '').trim();
+    // Prefer organization name for "שם לקוח" when the contact is linked to an org.
+    const clientName = orgName || tenantClientName || 'לקוח';
+    const logo = row.organizationLogo || orgRow?.logo || linkedOrg?.logo || clientRow?.logoUrl || fallback?.logo;
     const nm = String(row.name || '').trim();
     const initials =
         nm
@@ -236,9 +257,13 @@ function mapServerContactToListContact(row: any, clientsById: Map<string, Client
             : createdRaw
               ? new Date(createdRaw).toISOString()
               : undefined;
+    const contactPipelineId = row.pipelineId ? String(row.pipelineId) : undefined;
+    const contactStageId = row.processStage ? String(row.processStage) : undefined;
+    const stageFromMeta = contactStageId || undefined;
     return {
         id: String(row.id),
         clientId: cid || undefined,
+        organizationId,
         name: nm,
         role: row.role || '',
         clientName,
@@ -247,7 +272,7 @@ function mapServerContactToListContact(row: any, clientsById: Map<string, Client
         email: row.email || '',
         lastContact: formatRelativeHebrew(row.updatedAt || row.createdAt),
         avatar: initials,
-        pipelineId: inferPipelineIdForStage(stageFromMeta),
+        pipelineId: contactPipelineId || inferPipelineIdForStage(stageFromMeta, pipelines),
         stageId: stageFromMeta || undefined,
         createdAt,
     };
@@ -262,7 +287,7 @@ const statusStyles: { [key in ClientStatus]: { text: string; bg: string; border:
 
 // --- Column Definitions ---
 const allClientColumns = [
-    { id: 'health', label: 'דופק' },
+    { id: 'health', label: 'דופק לקוח' },
     { id: 'name', label: 'לקוח' },
     { id: 'lastContact', label: 'קשר אחרון' },
     { id: 'nextActivity', label: 'פעילות הבאה' },
@@ -271,6 +296,16 @@ const allClientColumns = [
     { id: 'contactPerson', label: 'איש קשר' },
     { id: 'phone', label: 'טלפון' },
     { id: 'actions', label: 'פעולות' }
+];
+
+const allLinkedOrgColumns = [
+    { id: 'name', label: 'שם חברה' },
+    { id: 'health', label: 'דופק לקוח' },
+    { id: 'mainField', label: 'תחום' },
+    { id: 'location', label: 'מיקום' },
+    { id: 'employeeCount', label: 'עובדים' },
+    { id: 'website', label: 'אתר' },
+    { id: 'actions', label: 'פעולות' },
 ];
 
 const allContactColumns = [
@@ -283,60 +318,110 @@ const allContactColumns = [
     { id: 'actions', label: 'פעולות' }
 ];
 
-// --- LOGIC: CLIENT HEALTH (UPDATED) ---
-// This mimics the "Rules" we will set in the settings
-const getClientHealthData = (client: Client) => {
-    // Rule 1: Churned / Inactive
-    if (client.status === 'לא פעיל') {
-        return { color: 'bg-gray-300', message: 'לקוח לא פעיל / ארכיון', pulse: false };
-    }
+type ClientPulseLevel = 'green' | 'yellow' | 'red';
 
-    // Rule 2: Critical Risk (Red)
-    // Condition: Active client but no contact > 30 days OR Pipeline Risk
-    if (client.daysSinceLastContact > 30) {
-         return { color: 'bg-red-500', message: `קריטי: נתק של ${client.daysSinceLastContact} ימים!`, pulse: true };
-    }
-    if (client.pipelineStage === 'risk') {
-        return { color: 'bg-red-500', message: 'קריטי: הלקוח סומן בסיכון נטישה', pulse: true };
-    }
-
-    // Rule 3: Warning (Orange)
-    // Condition: Open jobs but no future activity scheduled OR No contact > 14 days
-    if (client.openJobs > 0 && !client.nextScheduledActivity) {
-         return { color: 'bg-orange-500', message: 'אזהרה: יש משרות פתוחות אך אין פעילות עתידית מתוכננת', pulse: false };
-    }
-    if (client.daysSinceLastContact > 14) {
-        return { color: 'bg-orange-500', message: `אזהרה: שבועיים ללא קשר`, pulse: false };
-    }
-
-    // Rule 4: Attention (Yellow)
-    // Condition: No contact > 7 days
-    if (client.daysSinceLastContact > 7) {
-        return { color: 'bg-yellow-400', message: 'תשומת לב: שבוע ללא קשר', pulse: false };
-    }
-
-    // Rule 5: Healthy (Green)
-    return { color: 'bg-emerald-500', message: 'תקין: פעילות שוטפת', pulse: false };
+const pulseLevelStyles: Record<ClientPulseLevel, { dot: string; badge: string; label: string }> = {
+    green: {
+        dot: 'bg-green-500',
+        badge: 'bg-green-50 text-green-800 border-green-200',
+        label: 'ירוק',
+    },
+    yellow: {
+        dot: 'bg-yellow-400',
+        badge: 'bg-yellow-50 text-yellow-800 border-yellow-200',
+        label: 'צהוב',
+    },
+    red: {
+        dot: 'bg-red-500',
+        badge: 'bg-red-50 text-red-800 border-red-200',
+        label: 'אדום',
+    },
 };
 
-// --- COMPONENTS ---
+/** Traffic-light pulse from client activity signals (green / yellow / red). */
+const getClientHealthData = (client: Client): { level: ClientPulseLevel; message: string; pulse: boolean } => {
+    if (client.status === 'לא פעיל') {
+        return { level: 'yellow', message: 'לקוח לא פעיל / ארכיון', pulse: false };
+    }
+
+    // Red — critical
+    if (client.daysSinceLastContact > 30) {
+        return { level: 'red', message: `קריטי: נתק של ${client.daysSinceLastContact} ימים!`, pulse: true };
+    }
+    if (client.pipelineStage === 'risk') {
+        return { level: 'red', message: 'קריטי: הלקוח סומן בסיכון נטישה', pulse: true };
+    }
+
+    // Yellow — attention
+    if (client.openJobs > 0 && !client.nextScheduledActivity) {
+        return { level: 'yellow', message: 'אזהרה: יש משרות פתוחות אך אין פעילות עתידית מתוכננת', pulse: false };
+    }
+    if (client.daysSinceLastContact > 14) {
+        return { level: 'yellow', message: 'אזהרה: שבועיים ללא קשר', pulse: false };
+    }
+    if (client.daysSinceLastContact > 7) {
+        return { level: 'yellow', message: 'תשומת לב: שבוע ללא קשר', pulse: false };
+    }
+
+    // Green — healthy
+    return { level: 'green', message: 'תקין: פעילות שוטפת', pulse: false };
+};
 
 const HealthTooltip: React.FC<{ message: string }> = ({ message }) => (
-    <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-max max-w-[200px] bg-gray-900 text-white text-xs rounded-lg py-1.5 px-3 shadow-xl z-50 text-center transition-opacity opacity-0 group-hover/health:opacity-100 pointer-events-none">
+    <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 w-max max-w-[220px] bg-gray-900 text-white text-xs rounded-lg py-1.5 px-3 shadow-xl z-50 text-center transition-opacity opacity-0 group-hover/health:opacity-100 pointer-events-none">
         {message}
         <div className="absolute top-full left-1/2 transform -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
     </div>
 );
 
-const ClientHealthIndicator: React.FC<{ client: Client }> = ({ client }) => {
-    const { color, message, pulse } = getClientHealthData(client);
-    
-    return (
-        <div className="group/health relative inline-flex items-center justify-center cursor-help mx-auto w-8 h-8">
-            <div className="absolute inset-0 flex items-center justify-center w-full h-full">
-                 <div className={`w-3 h-3 rounded-full ${color} ${pulse ? 'animate-pulse ring-2 ring-offset-1 ring-red-200' : ''} shadow-sm`}></div>
+const ClientHealthIndicator: React.FC<{ client: Client; compact?: boolean }> = ({ client, compact }) => {
+    const { level, message, pulse } = getClientHealthData(client);
+    return <PulseBadge level={level} message={message} pulse={pulse} compact={compact} />;
+};
+
+/** Pulse for linked organizations (tenant companies table). */
+const getOrgHealthData = (org: LinkedOrganizationItem): { level: ClientPulseLevel; message: string; pulse: boolean } => {
+    if (org.isPending) {
+        return { level: 'yellow', message: 'ממתין לאישור', pulse: false };
+    }
+    return { level: 'green', message: 'תקין: ארגון פעיל', pulse: false };
+};
+
+const OrgHealthIndicator: React.FC<{
+    org: LinkedOrganizationItem;
+    pulseData?: OrgHealthPulseDto | null;
+}> = ({ org, pulseData }) => {
+    const fallback = getOrgHealthData(org);
+    const level = (pulseData?.level || fallback.level) as ClientPulseLevel;
+    const message = pulseData?.message || fallback.message;
+    const pulse = pulseData?.pulse ?? fallback.pulse;
+    return <PulseBadge level={level} message={message} pulse={pulse} />;
+};
+
+const PulseBadge: React.FC<{
+    level: ClientPulseLevel;
+    message: string;
+    pulse?: boolean;
+    compact?: boolean;
+}> = ({ level, message, pulse, compact }) => {
+    const style = pulseLevelStyles[level];
+
+    if (compact) {
+        return (
+            <div className="group/health relative inline-flex items-center justify-center cursor-help w-8 h-8" title={message}>
+                <div className={`w-3 h-3 rounded-full ${style.dot} ${pulse ? 'animate-pulse ring-2 ring-offset-1 ring-red-200' : ''} shadow-sm`} />
+                <HealthTooltip message={message} />
             </div>
-             <HealthTooltip message={message} />
+        );
+    }
+
+    return (
+        <div className="group/health relative inline-flex cursor-help" title={message}>
+            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-bold ${style.badge}`}>
+                <span className={`w-2 h-2 rounded-full ${style.dot} ${pulse ? 'animate-pulse' : ''}`} />
+                {style.label}
+            </span>
+            <HealthTooltip message={message} />
         </div>
     );
 };
@@ -373,7 +458,7 @@ const StageUpdateModal: React.FC<{
     useEffect(() => {
         if (client) {
             setNotes(client.notes || '');
-            setStage(client.pipelineStage || activePipeline.stages[0].id);
+            setStage(client.pipelineStage || activePipeline?.stages[0]?.id || '');
         }
     }, [client, activePipeline]);
 
@@ -411,13 +496,14 @@ const StageUpdateModal: React.FC<{
                 
                 <div className="p-6 space-y-5">
                     <div>
-                        <label className="block text-sm font-bold text-text-default mb-2">עדכון שלב ({activePipeline.name})</label>
+                        <label className="block text-sm font-bold text-text-default mb-2">עדכון שלב ({activePipeline?.name || 'תהליך'})</label>
                         <select 
                             value={stage} 
                             onChange={(e) => setStage(e.target.value)}
                             className="w-full bg-bg-input border border-border-default rounded-xl p-3 text-sm font-medium focus:ring-2 focus:ring-primary-500 outline-none"
+                            disabled={!activePipeline?.stages?.length}
                         >
-                            {activePipeline.stages.map(s => (
+                            {(activePipeline?.stages || []).map(s => (
                                 <option key={s.id} value={s.id}>{s.name}</option>
                             ))}
                         </select>
@@ -466,14 +552,36 @@ const StageUpdateModal: React.FC<{
     );
 };
 
-const KanbanCard: React.FC<{ client: Client; onClick: () => void; onDragStart: (e: React.DragEvent) => void }> = ({ client, onClick, onDragStart }) => (
+const KanbanCard: React.FC<{
+    client: Client;
+    onClick: () => void;
+    onDragStart: (e: React.DragEvent) => void;
+    isSelected?: boolean;
+    onToggleSelect?: () => void;
+}> = ({ client, onClick, onDragStart, isSelected, onToggleSelect }) => (
     <div 
         draggable
         onDragStart={onDragStart}
         onClick={onClick}
-        className={`bg-white p-4 rounded-xl border border-border-default shadow-sm hover:shadow-md transition-all cursor-grab active:cursor-grabbing group mb-3 relative overflow-hidden ${client.isContactProcess ? 'border-primary-200 bg-primary-50/20' : ''}`}
+        className={`bg-white p-4 rounded-xl border shadow-sm hover:shadow-md transition-all cursor-grab active:cursor-grabbing group mb-3 relative overflow-hidden ${
+            isSelected
+                ? 'border-primary-500 ring-1 ring-primary-500'
+                : client.isContactProcess
+                    ? 'border-primary-200 bg-primary-50/20'
+                    : 'border-border-default'
+        }`}
     >
         <div className={`absolute top-0 right-0 w-1.5 h-full ${client.status === 'פעיל' ? 'bg-green-500' : client.status === 'בהקפאה' ? 'bg-amber-500' : 'bg-gray-300'}`}></div>
+        {onToggleSelect ? (
+            <div className="absolute top-2 left-2 z-10" onClick={(e) => e.stopPropagation()}>
+                <input
+                    type="checkbox"
+                    className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                    checked={Boolean(isSelected)}
+                    onChange={onToggleSelect}
+                />
+            </div>
+        ) : null}
         <div className="pr-3">
             <div className="flex justify-between items-start mb-2">
                  <div className="flex items-center gap-2">
@@ -518,10 +626,11 @@ const ContactGridCard: React.FC<{
     isSelected: boolean; 
     onSelect: () => void; 
     onAction: (action: 'email' | 'sms' | 'whatsapp') => void;
-    onStartProcess: (contact: Contact, type: 'sales' | 'retention') => void;
+    onStartProcess: (contact: Contact, pipelineId: string) => void;
+    processOptions: Pipeline[];
     onViewProfile: (contact: Contact) => void;
     onDelete: (contact: Contact) => void;
-}> = ({ contact, isSelected, onSelect, onAction, onStartProcess, onViewProfile, onDelete }) => {
+}> = ({ contact, isSelected, onSelect, onAction, onStartProcess, processOptions, onViewProfile, onDelete }) => {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
@@ -557,18 +666,15 @@ const ContactGridCard: React.FC<{
                             >
                                 <UserIcon className="w-4 h-4 text-text-subtle"/> צפה בפרופיל
                             </button>
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); setIsMenuOpen(false); onStartProcess(contact, 'sales'); }}
-                                className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2"
-                            >
-                                <PlusIcon className="w-4 h-4 text-primary-600"/> פתח תהליך מכירה
-                            </button>
-                            <button 
-                                onClick={(e) => { e.stopPropagation(); setIsMenuOpen(false); onStartProcess(contact, 'retention'); }}
-                                className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2 border-t border-border-subtle"
-                            >
-                                <PlusIcon className="w-4 h-4 text-purple-600"/> פתח תהליך שימור
-                            </button>
+                            {processOptions.map((p, idx) => (
+                                <button
+                                    key={p.id}
+                                    onClick={(e) => { e.stopPropagation(); setIsMenuOpen(false); onStartProcess(contact, p.id); }}
+                                    className={`w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2 ${idx === 0 ? '' : 'border-t border-border-subtle'}`}
+                                >
+                                    <PlusIcon className="w-4 h-4 text-primary-600"/> פתח {p.name}
+                                </button>
+                            ))}
                             <button 
                                 onClick={(e) => { e.stopPropagation(); setIsMenuOpen(false); onDelete(contact); }}
                                 className="w-full text-right px-4 py-2.5 text-sm hover:bg-red-50 text-red-600 flex items-center gap-2 border-t border-border-subtle"
@@ -631,11 +737,14 @@ const ClientGridCard: React.FC<{
     onClick: () => void;
     stageName: string;
     activePipelineColor: string;
+    pipelines: Pipeline[];
     onStatusChange: (clientId: number, newStatus: ClientStatus) => void;
     onStageChange: (clientId: number, newStage: string) => void;
     onDelete?: (client: Client) => void;
     isDeleting?: boolean;
-}> = ({ client, onClick, stageName, activePipelineColor, onStatusChange, onStageChange, onDelete, isDeleting }) => {
+    isSelected?: boolean;
+    onToggleSelect?: () => void;
+}> = ({ client, onClick, stageName, activePipelineColor, pipelines, onStatusChange, onStageChange, onDelete, isDeleting, isSelected, onToggleSelect }) => {
     let currentPipeline = pipelines[0];
     for (const pipeline of pipelines) {
         if (pipeline.stages.some(s => s.id === client.pipelineStage)) {
@@ -645,11 +754,22 @@ const ClientGridCard: React.FC<{
     }
 
     return (
-    <div onClick={onClick} className="bg-bg-card border border-border-default rounded-xl p-4 shadow-sm hover:shadow-md transition-all cursor-pointer group flex flex-col h-full relative overflow-hidden">
+    <div onClick={onClick} className={`bg-bg-card border rounded-xl p-4 shadow-sm hover:shadow-md transition-all cursor-pointer group flex flex-col h-full relative overflow-hidden ${isSelected ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'}`}>
         {/* Risk Indicator Strip */}
         {client.daysSinceLastContact > 14 && (
              <div className="absolute top-0 right-0 left-0 h-1 bg-red-500"></div>
         )}
+
+        {onToggleSelect ? (
+            <div className="absolute top-3 left-3 z-10" onClick={(e) => e.stopPropagation()}>
+                <input
+                    type="checkbox"
+                    className="w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                    checked={Boolean(isSelected)}
+                    onChange={onToggleSelect}
+                />
+            </div>
+        ) : null}
 
         <div className="flex justify-between items-start mb-3 pt-2">
              <div>
@@ -686,7 +806,7 @@ const ClientGridCard: React.FC<{
                         client.name.substring(0, 2)
                     )}
                  </div>
-                 <ClientHealthIndicator client={client} />
+                 <ClientHealthIndicator client={client} compact />
              </div>
         </div>
         
@@ -726,7 +846,7 @@ const ClientGridCard: React.FC<{
                              onChange={(e) => onStageChange(client.id, e.target.value)}
                              className={`appearance-none inline-flex items-center pr-2 pl-5 py-0.5 rounded-md text-xs font-bold border cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary-500 ${activePipelineColor} ${activePipelineColor.replace('border-', 'bg-').replace('500', '50')} text-text-default`}
                          >
-                             {currentPipeline.stages.map(stage => (
+                             {(currentPipeline?.stages || []).map(stage => (
                                  <option key={stage.id} value={stage.id}>{stage.name}</option>
                              ))}
                          </select>
@@ -806,11 +926,24 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     // --- Clients Data & State ---
     const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [pipelines, setPipelines] = useState<Pipeline[]>([]);
     const [clients, setClients] = useState<Client[]>(clientsData);
     const [linkedOrganizations, setLinkedOrganizations] = useState<LinkedOrganizationItem[]>([]);
+    const [orgPulseById, setOrgPulseById] = useState<Record<string, OrgHealthPulseDto>>({});
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
+    const [orgDrawer, setOrgDrawer] = useState<{ org: LinkedOrganizationItem; full: Record<string, unknown> | null } | null>(null);
+    const [orgDrawerLoading, setOrgDrawerLoading] = useState(false);
+    type OrgJobLink = {
+        jobId: string;
+        jobTitle: string;
+        totalVisits: number;
+        totalSubmissions: number;
+        sources: Array<{ source: string; url: string; visits: number; submissions: number; subPercent: number }>;
+    };
+    const [orgDrawerLinks, setOrgDrawerLinks] = useState<OrgJobLink[]>([]);
+    const [orgDrawerLinksLoading, setOrgDrawerLinksLoading] = useState(false);
 
     useEffect(() => {
         if (!apiBase || !authReady || isTenantUser) return;
@@ -836,6 +969,27 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             });
         return () => { active = false; };
     }, [apiBase, authReady, isTenantUser]);
+
+    const pipelinesClientId = tenantClientId
+        || (isPlatformAdmin && clients[0]?.id ? String(clients[0].id) : null);
+
+    useEffect(() => {
+        if (!authReady || !pipelinesClientId) {
+            setPipelines([]);
+            return;
+        }
+        let active = true;
+        void fetchPipelines(pipelinesClientId)
+            .then((rows) => {
+                if (!active) return;
+                setPipelines(rows.map(mapPipelineDto));
+            })
+            .catch(() => {
+                if (!active) return;
+                setPipelines([]);
+            });
+        return () => { active = false; };
+    }, [authReady, pipelinesClientId]);
 
     useEffect(() => {
         if (!apiBase || !authReady || !tenantClientId) return;
@@ -864,8 +1018,64 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         return () => { active = false; };
     }, [apiBase, authReady, tenantClientId]);
 
+    const openOrgDrawer = async (org: LinkedOrganizationItem) => {
+        setOrgDrawer({ org, full: null });
+        setOrgDrawerLinks([]);
+
+        const fetchDetails = org.organizationId
+            ? (async () => {
+                setOrgDrawerLoading(true);
+                try {
+                    const res = await fetch(`${apiBase}/api/organizations/${encodeURIComponent(org.organizationId!)}`, {
+                        headers: authHeaders(true),
+                    });
+                    if (res.ok) {
+                        const data = await res.json() as Record<string, unknown>;
+                        setOrgDrawer((prev) => prev ? { ...prev, full: data } : null);
+                    }
+                } catch { /* show partial data */ }
+                finally { setOrgDrawerLoading(false); }
+            })()
+            : Promise.resolve();
+
+        const fetchLinks = (async () => {
+            setOrgDrawerLinksLoading(true);
+            try {
+                const all = await fetchPublishingLinks(tenantClientId ?? undefined);
+                const orgName = org.name.trim().toLowerCase();
+                const filtered = all.filter(
+                    (l) => (l.employer || l.client || '').trim().toLowerCase() === orgName,
+                );
+                // Group by jobId — one card per job, sources listed inside
+                const byJob = new Map<string, typeof filtered>();
+                for (const l of filtered) {
+                    const key = l.jobId;
+                    if (!byJob.has(key)) byJob.set(key, []);
+                    byJob.get(key)!.push(l);
+                }
+                const grouped = [...byJob.entries()].map(([jobId, links]) => ({
+                    jobId,
+                    jobTitle: links[0].jobTitle,
+                    totalVisits: links.reduce((s, l) => s + (l.visits || 0), 0),
+                    totalSubmissions: links.reduce((s, l) => s + (l.submissions || 0), 0),
+                    sources: links.map((l) => ({
+                        source: l.source,
+                        url: l.url,
+                        visits: l.visits || 0,
+                        submissions: l.submissions || 0,
+                        subPercent: l.subPercent || 0,
+                    })),
+                }));
+                setOrgDrawerLinks(grouped);
+            } catch { /* ignore */ }
+            finally { setOrgDrawerLinksLoading(false); }
+        })();
+
+        await Promise.all([fetchDetails, fetchLinks]);
+    };
+
     useEffect(() => {
-        if (!apiBase || activeTab !== 'contacts' || !authReady) return;
+        if (!apiBase || !authReady) return;
 
         if (!isPlatformAdmin && !tenantClientId) {
             setContacts([]);
@@ -874,9 +1084,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             return;
         }
 
-        const contactsUrl = isPlatformAdmin
-            ? `${apiBase}/api/clients/all-contacts`
-            : `${apiBase}/api/clients/${encodeURIComponent(tenantClientId!)}/contacts`;
+        const contactsUrl = `${apiBase}/api/clients/all-contacts`;
 
         let active = true;
         setContactsLoading(true);
@@ -890,7 +1098,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 if (!active) return;
                 const list = Array.isArray(data) ? data : [];
                 const byId = new Map<string, Client>(clients.map((c) => [c.id, c]));
-                setContacts(list.map((row: any) => mapServerContactToListContact(row, byId)));
+                const orgsById = new Map<string, { name: string; logo?: string }>();
+                for (const org of linkedOrganizations) {
+                    if (org.organizationId) {
+                        orgsById.set(org.organizationId, { name: org.name, logo: org.logo || undefined });
+                    }
+                }
+                setContacts(
+                    list.map((row: any) =>
+                        mapServerContactToListContact(row, byId, pipelines, orgsById),
+                    ),
+                );
             })
             .catch((e: any) => {
                 if (active) setContactsError(e?.message || 'טעינת אנשי קשר נכשלה');
@@ -901,9 +1119,16 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         return () => {
             active = false;
         };
-    }, [apiBase, activeTab, clients, authReady, isPlatformAdmin, tenantClientId]);
+    }, [apiBase, clients, authReady, isPlatformAdmin, tenantClientId, pipelines, linkedOrganizations]);
 
     const { viewMode, setViewMode } = useScreenTablePreferences('clients_list', {
+        defaultLayoutMode: isTenantUser ? 'cards' : 'list',
+        defaultVisibleColumns: [],
+    });
+    const {
+        viewMode: contactsViewMode,
+        setViewMode: setContactsViewMode,
+    } = useScreenTablePreferences('clients_contacts', {
         defaultLayoutMode: 'list',
         defaultVisibleColumns: [],
     });
@@ -912,11 +1137,37 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const [selectedClient, setSelectedClient] = useState<Client | null>(null);
     const [isStageModalOpen, setIsStageModalOpen] = useState(false);
 
+    useEffect(() => {
+        if (!authReady || !tenantClientId || linkedOrganizations.length === 0) {
+            setOrgPulseById({});
+            return;
+        }
+        let active = true;
+        const pipelineIdForPulse =
+            activePipelineId && activePipelineId !== 'all'
+                ? activePipelineId
+                : null;
+        void fetchClientHealthPulse(tenantClientId, pipelineIdForPulse)
+            .then((map) => {
+                if (!active) return;
+                setOrgPulseById(map);
+            })
+            .catch(() => {
+                if (!active) return;
+                setOrgPulseById({});
+            });
+        return () => { active = false; };
+    }, [authReady, tenantClientId, linkedOrganizations, activePipelineId, isTenantUser]);
+
     // --- Contacts Data & State ---
     const [contacts, setContacts] = useState<Contact[]>([]);
     const [contactsLoading, setContactsLoading] = useState(false);
     const [contactsError, setContactsError] = useState<string | null>(null);
-    const [contactsViewMode, setContactsViewMode] = useState<'table' | 'grid'>('table');
+    const [linkedOrgVisibleColumns, setLinkedOrgVisibleColumns] = useState<string[]>([
+        'name', 'health', 'mainField', 'location', 'employeeCount', 'website', 'actions',
+    ]);
+    /** Multi-select on companies tab: client.id (admin) or linkId (tenant orgs). */
+    const [selectedCompanyIds, setSelectedCompanyIds] = useState<Set<string>>(new Set());
     const [selectedContactIds, setSelectedContactIds] = useState<Set<string>>(new Set());
     const [contactVisibleColumns, setContactVisibleColumns] = useState<string[]>(['name', 'role', 'clientName', 'phone', 'email', 'lastContact', 'actions']);
     const [isColumnPopoverOpen, setIsColumnPopoverOpen] = useState(false);
@@ -1003,24 +1254,53 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         return { totalOpenJobs, activeClients, totalValue, winRate };
     }, [clients, isTenantUser, linkedOrganizations]);
 
+    const activePipeline = pipelines.find(p => p.id === activePipelineId); // Can be undefined if 'all'
+
     const filteredLinkedOrganizations = useMemo(() => {
         const q = searchTerm.trim().toLowerCase();
-        if (!q) return linkedOrganizations;
+        const industry = String(companyFilters.industry || '').trim().toLowerCase();
         return linkedOrganizations.filter((org) => {
-            const hay = [
-                org.name,
-                org.mainField,
-                org.secondaryField,
-                org.location,
-                org.website,
-                ...org.subFields,
-            ].join(' ').toLowerCase();
-            return hay.includes(q);
+            if (q) {
+                const hay = [
+                    org.name,
+                    org.mainField,
+                    org.secondaryField,
+                    org.location,
+                    org.website,
+                    ...org.subFields,
+                ].join(' ').toLowerCase();
+                if (!hay.includes(q)) return false;
+            }
+            if (filterStatus === 'pending' && !org.isPending) return false;
+            if (filterStatus === 'approved' && org.isPending) return false;
+            if (industry) {
+                const fields = [org.mainField, org.secondaryField, ...org.subFields]
+                    .join(' ')
+                    .toLowerCase();
+                if (!fields.includes(industry)) return false;
+            }
+            if (selectedLocations.length > 0) {
+                const locHay = String(org.location || '').toLowerCase();
+                const matchesLocation = selectedLocations.some((loc) => {
+                    const v = String(loc.value || '').toLowerCase();
+                    return v && locHay.includes(v);
+                });
+                if (!matchesLocation) return false;
+            }
+            if (activePipelineId !== 'all') {
+                const stageIds = activePipeline?.stages.map((s) => s.id) || [];
+                if (activeStageId !== 'all') {
+                    if (org.pipelineStage !== activeStageId) return false;
+                } else {
+                    const inThisPipeline = org.pipelineId === activePipelineId
+                        || Boolean(org.pipelineStage && stageIds.includes(org.pipelineStage));
+                    const unassigned = !org.pipelineId && !org.pipelineStage;
+                    if (!inThisPipeline && !unassigned) return false;
+                }
+            }
+            return true;
         });
-    }, [linkedOrganizations, searchTerm]);
-
-    // --- Filter Logic ---
-    const activePipeline = pipelines.find(p => p.id === activePipelineId); // Can be undefined if 'all'
+    }, [linkedOrganizations, searchTerm, filterStatus, companyFilters.industry, selectedLocations, activePipelineId, activeStageId, activePipeline]);
     
     // Dynamic Filter Options
     const accountManagers = useMemo(() => Array.from(new Set(clients.map(c => c.accountManager))), [clients]);
@@ -1039,7 +1319,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         if (filterContactPipeline === 'all') return [];
         const pipeline = pipelines.find(p => p.id === filterContactPipeline);
         return pipeline ? pipeline.stages : [];
-    }, [filterContactPipeline]);
+    }, [filterContactPipeline, pipelines]);
 
 
     const filteredClients = useMemo(() => {
@@ -1107,7 +1387,9 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             // NOTE: Mock data assumes fields exist. In real app, make sure fields match interface.
             // Using logic assuming if field doesn't exist, it passes 'all' check but fails specific check
             
-            const matchesPipeline = filterContactPipeline === 'all' || c.pipelineId === filterContactPipeline;
+            const matchesPipeline = filterContactPipeline === 'all'
+                || c.pipelineId === filterContactPipeline
+                || (!c.pipelineId && !c.stageId);
             const matchesStage = filterContactStage === 'all' || c.stageId === filterContactStage;
             
             let matchesDate = true;
@@ -1212,6 +1494,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
 
     const handleKanbanDrop = async (e: React.DragEvent, stageId: string) => {
         const clientId = String(e.dataTransfer.getData('clientId') || '');
+        const orgLinkId = String(e.dataTransfer.getData('orgLinkId') || '');
+        const contactId = String(e.dataTransfer.getData('contactId') || '');
+
+        if (orgLinkId) {
+            await handleOrgKanbanDrop(orgLinkId, stageId);
+            return;
+        }
+        if (contactId) {
+            await handleContactKanbanDrop(contactId, stageId);
+            return;
+        }
         if (!clientId) return;
 
         const prevClient = clients.find(c => c.id === clientId);
@@ -1237,6 +1530,83 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         }
     };
 
+    const handleOrgKanbanDragStart = (e: React.DragEvent, linkId: string) => {
+        e.dataTransfer.setData('orgLinkId', linkId);
+    };
+
+    const handleOrgKanbanDrop = async (linkId: string, stageId: string) => {
+        const prev = linkedOrganizations.find((o) => o.linkId === linkId);
+        if (!prev || !tenantClientId || !apiBase) return;
+        const pipelineId = activePipelineId !== 'all' ? activePipelineId : (prev.pipelineId || pipelines[0]?.id || '');
+        const prevStage = prev.pipelineStage;
+        const prevPipelineId = prev.pipelineId;
+
+        setLinkedOrganizations((list) =>
+            list.map((o) =>
+                o.linkId === linkId ? { ...o, pipelineStage: stageId, pipelineId: pipelineId || o.pipelineId } : o,
+            ),
+        );
+
+        try {
+            const res = await fetch(
+                `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/organization-link/${encodeURIComponent(linkId)}`,
+                {
+                    method: 'PATCH',
+                    headers: authHeaders(true),
+                    body: JSON.stringify({ pipelineStage: stageId, pipelineId: pipelineId || null }),
+                },
+            );
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            setLinkedOrganizations((list) =>
+                list.map((o) =>
+                    o.linkId === linkId ? { ...o, pipelineStage: prevStage, pipelineId: prevPipelineId } : o,
+                ),
+            );
+        }
+    };
+
+    const handleContactKanbanDragStart = (e: React.DragEvent, contactId: string) => {
+        e.dataTransfer.setData('contactId', contactId);
+    };
+
+    const handleContactKanbanDrop = async (contactId: string, stageId: string) => {
+        const prev = contacts.find((c) => c.id === contactId);
+        if (!prev) return;
+        const clientId = resolveContactClientId(prev);
+        const pipelineId = filterContactPipeline !== 'all'
+            ? filterContactPipeline
+            : (prev.pipelineId || pipelines[0]?.id || '');
+        const prevStage = prev.stageId;
+        const prevPipelineId = prev.pipelineId;
+
+        setContacts((list) =>
+            list.map((c) =>
+                c.id === contactId
+                    ? { ...c, stageId, pipelineId: pipelineId || c.pipelineId }
+                    : c,
+            ),
+        );
+
+        if (!apiBase || !clientId) return;
+        try {
+            const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contactId)}`, {
+                method: 'PUT',
+                headers: authHeaders(true),
+                body: JSON.stringify({ processStage: stageId, pipelineId: pipelineId || null }),
+            });
+            if (!res.ok) throw new Error('Update failed');
+        } catch (_e) {
+            setContacts((list) =>
+                list.map((c) =>
+                    c.id === contactId
+                        ? { ...c, stageId: prevStage, pipelineId: prevPipelineId }
+                        : c,
+                ),
+            );
+        }
+    };
+
     // --- Actions (Clients) ---
     const handleCardClick = (client: Client) => {
         // If "All Pipelines" is selected, we need to know WHICH pipeline to show in modal.
@@ -1244,7 +1614,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         let inferredPipelineId = activePipelineId;
         if (activePipelineId === 'all') {
              const foundPipeline = pipelines.find(p => p.stages.some(s => s.id === client.pipelineStage));
-             inferredPipelineId = foundPipeline ? foundPipeline.id : pipelines[0].id;
+             inferredPipelineId = foundPipeline ? foundPipeline.id : (pipelines[0]?.id || 'all');
         }
 
         setSelectedClient(client);
@@ -1404,8 +1774,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     };
     
     const handleQuickAdd = (clientData: Partial<Client>) => {
-        const targetPipeline = activePipelineId === 'all' ? pipelines[0] : activePipeline!; // Fallback
-        const defaultStage = targetPipeline.stages[0].id;
+        const targetPipeline = activePipelineId === 'all' ? pipelines[0] : activePipeline;
+        const defaultStage = targetPipeline?.stages[0]?.id || '';
 
         const newClient: Client = {
             id: `tmp-${Date.now()}`,
@@ -1458,31 +1828,250 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         else setSelectedContactIds(new Set());
     };
 
+    const companySelectableIds = useMemo(
+        () =>
+            isTenantUser
+                ? filteredLinkedOrganizations.map((o) => o.linkId)
+                : sortedClients.map((c) => c.id),
+        [isTenantUser, filteredLinkedOrganizations, sortedClients],
+    );
+
+    const toggleCompanySelect = (id: string) => {
+        setSelectedCompanyIds((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
+    };
+
+    const handleSelectAllCompanies = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.checked) setSelectedCompanyIds(new Set(companySelectableIds));
+        else setSelectedCompanyIds(new Set());
+    };
+
+    const contactToRecipientOption = (c: Contact) => ({
+        id: c.id,
+        name: c.name,
+        email: c.email || '',
+        phone: c.phone || '',
+        subtitle: c.clientName || '',
+    });
+
     const handleBulkAction = (action: 'email' | 'sms' | 'whatsapp') => {
-        // Mock bulk action
-        alert(`שולח ${action} ל-${selectedContactIds.size} אנשי קשר...`);
+        const selected = sortedContacts.filter((c) => selectedContactIds.has(c.id));
+        if (!selected.length) return;
+        const allOptions = contacts.map(contactToRecipientOption);
+        const initialIds = selected
+            .filter((c) => (action === 'email' ? Boolean(c.email?.trim()) : Boolean(c.phone?.trim())))
+            .map((c) => c.id);
+        const fallbackIds = initialIds.length ? initialIds : selected.map((c) => c.id);
+        const primary =
+            selected.find((c) => (action === 'email' ? Boolean(c.email?.trim()) : Boolean(c.phone?.trim())))
+            || selected[0];
+        openMessageModal({
+            mode: action,
+            candidateName:
+                selected.length === 1
+                    ? primary.name
+                    : `${primary.name} (+${selected.length - 1})`,
+            candidatePhone: selected.map((c) => String(c.phone || '').trim()).filter(Boolean).join('; '),
+            candidateEmail: selected.map((c) => String(c.email || '').trim()).filter(Boolean).join(', '),
+            recipientOptions: allOptions.length ? allOptions : selected.map(contactToRecipientOption),
+            initialRecipientIds: fallbackIds,
+        });
         setSelectedContactIds(new Set());
     };
-    
-    const handleBulkStartProcess = (type: 'sales' | 'retention') => {
-        const count = selectedContactIds.size;
-        if (count === 0) return;
-        
-        // Mock Logic
-        const processName = type === 'sales' ? 'תהליך מכירה' : 'תהליך שימור';
-        alert(`פותח ${processName} עבור ${count} אנשי קשר שנבחרו.\nהם יתווספו ללוח הקאן-בן בסטטוס ההתחלתי.`);
-        
-        // In real app: Update backend, then local state (add to clients list as ContactProcess items)
+
+    const handleCompanyBulkAction = (action: 'email' | 'sms' | 'whatsapp') => {
+        let related: Contact[] = [];
+        let label = '';
+
+        if (isTenantUser) {
+            const orgs = filteredLinkedOrganizations.filter((o) => selectedCompanyIds.has(o.linkId));
+            if (!orgs.length) return;
+            const orgIds = new Set(orgs.map((o) => o.organizationId).filter(Boolean) as string[]);
+            related = contacts.filter((c) => c.organizationId && orgIds.has(c.organizationId));
+            label =
+                orgs.length === 1
+                    ? orgs[0].name
+                    : `${orgs[0].name} (+${orgs.length - 1})`;
+        } else {
+            const selected = sortedClients.filter((c) => selectedCompanyIds.has(c.id));
+            if (!selected.length) return;
+            const clientIds = new Set(selected.map((c) => c.id));
+            related = contacts.filter((c) => c.clientId && clientIds.has(c.clientId));
+            label =
+                selected.length === 1
+                    ? selected[0].name
+                    : `${selected[0].name} (+${selected.length - 1})`;
+        }
+
+        const recipientOptions = related.map(contactToRecipientOption);
+        if (!recipientOptions.length) {
+            window.alert('אין אנשי קשר לחברות שנבחרו. הוסיפו אנשי קשר ואז נסו שוב.');
+            return;
+        }
+
+        const initialIds = related
+            .filter((c) => (action === 'email' ? Boolean(c.email?.trim()) : Boolean(c.phone?.trim())))
+            .map((c) => c.id);
+        const primary =
+            related.find((c) => (action === 'email' ? Boolean(c.email?.trim()) : Boolean(c.phone?.trim())))
+            || related[0];
+
+        openMessageModal({
+            mode: action,
+            candidateName: primary?.name || label,
+            candidatePhone: primary?.phone || '',
+            candidateEmail: primary?.email || '',
+            recipientOptions,
+            initialRecipientIds: initialIds.length ? initialIds : [related[0].id],
+        });
+        setSelectedCompanyIds(new Set());
+    };
+
+    const handleBulkStartProcess = (pipelineId: string) => {
+        const selected = sortedContacts.filter((c) => selectedContactIds.has(c.id));
+        if (!selected.length) return;
+        const pipeline = pipelines.find((p) => p.id === pipelineId);
+        const firstStage = pipeline?.stages[0]?.id || '';
+        const now = Date.now();
+        const newItems: Client[] = selected.map((contact, idx) => ({
+            id: `tmp-${now}-${idx}`,
+            name: `${contact.name} (${contact.clientName})`,
+            contactPerson: contact.name,
+            phone: contact.phone,
+            email: contact.email,
+            openJobs: 0,
+            status: 'ליד חדש',
+            accountManager: 'אני',
+            city: 'לא ידוע',
+            region: 'מרכז',
+            industry: 'כללי',
+            tier: 'Standard',
+            pipelineStage: firstStage,
+            pipelineValue: 0,
+            lastContactDate: new Date().toISOString(),
+            daysSinceLastContact: 0,
+            nextScheduledActivity: null,
+            activePlacements: 0,
+            isContactProcess: true,
+        }));
+        setClients((prev) => [...prev, ...newItems]);
+        setActiveTab('companies');
+        setActivePipelineId(pipelineId);
+        if (!isTenantUser) setViewMode('board');
         setSelectedContactIds(new Set());
         setIsBulkProcessMenuOpen(false);
     };
 
+    const handleCompanyBulkStartProcess = (pipelineId: string) => {
+        const pipeline = pipelines.find((p) => p.id === pipelineId);
+        const firstStage = pipeline?.stages[0]?.id || '';
+        if (!firstStage) {
+            setIsBulkProcessMenuOpen(false);
+            return;
+        }
+        if (isTenantUser) {
+            const orgs = filteredLinkedOrganizations.filter((o) => selectedCompanyIds.has(o.linkId));
+            if (!orgs.length) return;
+            const now = Date.now();
+            const newItems: Client[] = orgs.map((org, idx) => ({
+                id: `tmp-org-${now}-${idx}`,
+                name: org.name,
+                contactPerson: '',
+                phone: '',
+                email: '',
+                openJobs: 0,
+                status: 'ליד חדש',
+                accountManager: user?.name || 'אני',
+                city: org.location || 'לא ידוע',
+                region: 'מרכז',
+                industry: org.mainField || 'כללי',
+                tier: 'Standard',
+                pipelineStage: firstStage,
+                pipelineValue: 0,
+                lastContactDate: new Date().toISOString(),
+                daysSinceLastContact: 0,
+                nextScheduledActivity: null,
+                activePlacements: 0,
+                logo: org.logo || undefined,
+            }));
+            setClients((prev) => [...prev, ...newItems]);
+            setViewMode('board');
+        } else {
+            setClients((prev) =>
+                prev.map((c) =>
+                    selectedCompanyIds.has(c.id)
+                        ? { ...c, pipelineStage: firstStage, status: 'ליד חדש' as ClientStatus }
+                        : c,
+                ),
+            );
+            setActivePipelineId(pipelineId);
+            setViewMode('board');
+        }
+        setSelectedCompanyIds(new Set());
+        setIsBulkProcessMenuOpen(false);
+    };
+
     const handleBulkExport = () => {
-        const count = selectedContactIds.size;
-        if (count === 0) return;
-        alert(`מייצא ${count} אנשי קשר לקובץ Excel...`);
-        // Mock download logic here
+        const rows = sortedContacts.filter((c) => selectedContactIds.has(c.id));
+        if (!rows.length) return;
+        const stamp = new Date().toISOString().slice(0, 10);
+        downloadRowsAsXlsx(
+            rows,
+            [
+                { key: 'name', label: 'שם איש קשר' },
+                { key: 'role', label: 'תפקיד' },
+                { key: 'clientName', label: 'שם לקוח' },
+                { key: 'phone', label: 'טלפון' },
+                { key: 'email', label: 'אימייל' },
+                { key: 'lastContact', label: 'קשר אחרון' },
+            ],
+            `contacts_${stamp}.xlsx`,
+        );
         setSelectedContactIds(new Set());
+    };
+
+    const handleCompanyBulkExport = () => {
+        if (selectedCompanyIds.size === 0) return;
+        const stamp = new Date().toISOString().slice(0, 10);
+        if (isTenantUser) {
+            const rows = filteredLinkedOrganizations.filter((o) => selectedCompanyIds.has(o.linkId));
+            if (!rows.length) return;
+            downloadRowsAsXlsx(
+                rows,
+                [
+                    { key: 'name', label: 'שם חברה' },
+                    { key: 'mainField', label: 'תחום' },
+                    { key: 'location', label: 'מיקום' },
+                    { key: 'employeeCount', label: 'עובדים' },
+                    { key: 'website', label: 'אתר' },
+                    { key: 'statusLabel', label: 'סטטוס' },
+                ],
+                `companies_${stamp}.xlsx`,
+            );
+        } else {
+            const rows = sortedClients.filter((c) => selectedCompanyIds.has(c.id));
+            if (!rows.length) return;
+            downloadRowsAsXlsx(
+                rows,
+                [
+                    { key: 'name', label: 'לקוח' },
+                    { key: 'status', label: 'סטטוס' },
+                    { key: 'accountManager', label: 'מנהל תיק' },
+                    { key: 'industry', label: 'תעשייה' },
+                    { key: 'city', label: 'עיר' },
+                    { key: 'region', label: 'אזור' },
+                    { key: 'contactPerson', label: 'איש קשר' },
+                    { key: 'phone', label: 'טלפון' },
+                    { key: 'email', label: 'אימייל' },
+                ],
+                `clients_${stamp}.xlsx`,
+            );
+        }
+        setSelectedCompanyIds(new Set());
     };
     
     const handleSingleContactAction = (action: 'email' | 'sms' | 'whatsapp', contact: Contact) => {
@@ -1505,6 +2094,12 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             prev.includes(columnId) ? prev.filter(c => c !== columnId) : [...prev, columnId]
         );
     };
+
+    const handleLinkedOrgColumnToggle = (columnId: string) => {
+        setLinkedOrgVisibleColumns((prev) =>
+            prev.includes(columnId) ? prev.filter((c) => c !== columnId) : [...prev, columnId],
+        );
+    };
     
     // --- New Contact Actions ---
     const handleOpenContactDrawer = (contact: Contact) => {
@@ -1513,41 +2108,60 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         setActiveActionMenuId(null);
     };
 
-    const handleStartProcess = (contact: Contact, type: 'sales' | 'retention') => {
-        // 1. Create a "Client" like entity for the Kanban board representing this contact interaction
-        const newProcessItem: Client = {
-            id: `tmp-${Date.now()}`,
-            name: `${contact.name} (${contact.clientName})`, // Combine name
-            contactPerson: contact.name,
-            phone: contact.phone,
-            email: contact.email,
-            openJobs: 0,
-            status: 'ליד חדש',
-            accountManager: 'אני',
-            city: 'לא ידוע', // Could inherit from client
-            region: 'מרכז',
-            industry: 'כללי',
-            tier: 'Standard',
-            pipelineStage: pipelines.find(p => p.id === type)?.stages[0].id || 'lead', // Default stage
-            pipelineValue: 0,
-            lastContactDate: new Date().toISOString(),
-            daysSinceLastContact: 0,
-            nextScheduledActivity: null,
-            activePlacements: 0,
-            isContactProcess: true
-        };
+    const handleStartProcess = async (contact: Contact, pipelineId: string) => {
+        const pipeline = pipelines.find((p) => p.id === pipelineId);
+        const firstStage = pipeline?.stages[0]?.id || '';
+        const clientId = resolveContactClientId(contact);
 
-        // 2. Add to clients list (which feeds Kanban)
-        setClients(prev => [...prev, newProcessItem]);
-        
-        // 3. Switch to Kanban view and relevant pipeline
-        setActiveTab('companies');
-        setActivePipelineId(type);
-        setViewMode('board');
+        setContacts((list) =>
+            list.map((c) =>
+                c.id === contact.id
+                    ? { ...c, pipelineId, stageId: firstStage }
+                    : c,
+            ),
+        );
+
+        if (apiBase && clientId) {
+            try {
+                await fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`, {
+                    method: 'PUT',
+                    headers: authHeaders(true),
+                    body: JSON.stringify({ pipelineId, processStage: firstStage }),
+                });
+            } catch (_e) { /* keep optimistic */ }
+        }
+
+        // Tenant: also put the linked organization onto the same pipeline stage.
+        if (isTenantUser && contact.organizationId && tenantClientId && apiBase) {
+            const orgLink = linkedOrganizations.find((o) => o.organizationId === contact.organizationId);
+            if (orgLink) {
+                setLinkedOrganizations((list) =>
+                    list.map((o) =>
+                        o.linkId === orgLink.linkId
+                            ? { ...o, pipelineId, pipelineStage: firstStage }
+                            : o,
+                    ),
+                );
+                try {
+                    await fetch(
+                        `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/organization-link/${encodeURIComponent(orgLink.linkId)}`,
+                        {
+                            method: 'PATCH',
+                            headers: authHeaders(true),
+                            body: JSON.stringify({ pipelineId, pipelineStage: firstStage }),
+                        },
+                    );
+                } catch (_e) { /* keep optimistic */ }
+            }
+        }
+
+        setFilterContactPipeline(pipelineId);
+        setFilterContactStage('all');
+        setActiveTab('contacts');
+        setContactsViewMode('board');
         setIsContactDrawerOpen(false);
         setActiveActionMenuId(null);
-        
-        alert(`תהליך ${type === 'sales' ? 'מכירה' : 'שימור'} נפתח עבור ${contact.name}!`);
+        alert(`תהליך ${pipeline?.name || 'עבודה'} נפתח עבור ${contact.name}!`);
     };
 
     const resolveContactClientId = (contact: Contact): string | null => {
@@ -1614,7 +2228,11 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const renderClientCell = (client: Client, colId: string) => {
         switch(colId) {
             case 'health':
-                return <ClientHealthIndicator client={client} />;
+                return (
+                    <div className="flex justify-center">
+                        <ClientHealthIndicator client={client} />
+                    </div>
+                );
             case 'name':
                 return (
                     <div className="flex items-center gap-3">
@@ -1686,7 +2304,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                              onChange={(e) => handleStageChange(client.id, e.target.value)}
                              className={`appearance-none inline-flex items-center pr-2.5 pl-6 py-0.5 rounded-md text-xs font-bold border cursor-pointer hover:opacity-80 transition-opacity focus:outline-none focus:ring-2 focus:ring-primary-500 ${stageColor} ${stageBg} text-text-default`}
                          >
-                             {currentPipeline.stages.map(stage => (
+                             {(currentPipeline?.stages || []).map(stage => (
                                  <option key={stage.id} value={stage.id}>{stage.name}</option>
                              ))}
                          </select>
@@ -1764,7 +2382,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
              const found = pipelines.find(p => p.stages.some(s => s.id === selectedClient?.pipelineStage));
              if (found) return found.id;
         }
-        return pipelines[0].id;
+        return pipelines[0]?.id || 'all';
     }
 
 
@@ -1781,6 +2399,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 .dragging { opacity: 0.5; background: rgb(var(--color-primary-100)); }
                 th[draggable] { cursor: grab; }
                 th[draggable]:active { cursor: grabbing; }
+                @keyframes slide-in-right { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+                .animate-slide-in-right { animation: slide-in-right 0.25s ease-out forwards; }
             `}</style>
 
              {/* Header & KPIs */}
@@ -1877,26 +2497,26 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
              {/* Tab Switcher */}
              <div className="flex border-b border-border-default overflow-x-auto no-scrollbar">
                  <button 
-                    onClick={() => setActiveTab('companies')} 
+                    onClick={() => { setActiveTab('companies'); setSelectedContactIds(new Set()); }} 
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'companies' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <BuildingOffice2Icon className="w-5 h-5 inline-block ml-2"/>
                      {isTenantUser ? 'חברות מקושרות' : 'תיקי לקוחות'}
                  </button>
                  <button 
-                    onClick={() => setActiveTab('contacts')} 
+                    onClick={() => { setActiveTab('contacts'); setSelectedCompanyIds(new Set()); }} 
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'contacts' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <UserGroupIcon className="w-5 h-5 inline-block ml-2"/>
                      אנשי קשר
                  </button>
-                 {/* Added Tasks Tab */}
+                 {/* Processes / Tasks — admin: across clients; tenant: across linked orgs */}
                  <button 
-                    onClick={() => setActiveTab('tasks')} 
+                    onClick={() => { setActiveTab('tasks'); setSelectedCompanyIds(new Set()); setSelectedContactIds(new Set()); }} 
                     className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'tasks' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
                  >
                      <ClipboardDocumentCheckIcon className="w-5 h-5 inline-block ml-2"/>
-                     משימות
+                     תהליכים/משימות
                  </button>
              </div>
 
@@ -1922,8 +2542,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                      </div>
                  </div>
 
-                 {/* Filters Row - Only for Companies tab */}
-                 {activeTab === 'companies' && !isTenantUser && (
+                 {/* Filters Row - Companies tab (admin clients + tenant linked orgs) */}
+                 {activeTab === 'companies' && (
                      <div className="w-full grid grid-cols-2 md:grid-cols-4 lg:flex lg:flex-wrap gap-3 items-center pt-2 border-t border-border-subtle">
                         {/* Status Filter */}
                         <div className="relative">
@@ -1933,15 +2553,25 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm pr-8 focus:ring-2 focus:ring-primary-500 outline-none appearance-none cursor-pointer pl-9"
                             >
                                 <option value="all">כל הסטטוסים</option>
-                                <option value="פעיל">פעיל</option>
-                                <option value="בהקפאה">בהקפאה</option>
-                                <option value="לא פעיל">לא פעיל</option>
-                                <option value="ליד חדש">ליד חדש</option>
+                                {isTenantUser ? (
+                                    <>
+                                        <option value="approved">מאושר</option>
+                                        <option value="pending">ממתין לאישור</option>
+                                    </>
+                                ) : (
+                                    <>
+                                        <option value="פעיל">פעיל</option>
+                                        <option value="בהקפאה">בהקפאה</option>
+                                        <option value="לא פעיל">לא פעיל</option>
+                                        <option value="ליד חדש">ליד חדש</option>
+                                    </>
+                                )}
                             </select>
                             <ChevronDownIcon className="w-4 h-4 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"/>
                         </div>
 
-                        {/* Account Manager Filter */}
+                        {/* Account Manager Filter — agency clients only */}
+                        {!isTenantUser && (
                         <div className="relative">
                             <select 
                                 value={filterAccountManager}
@@ -1953,6 +2583,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                             </select>
                             <UserIcon className="w-4 h-4 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none"/>
                         </div>
+                        )}
 
                          {/* Industry Filter (Smart Button) */}
                          <div className="relative">
@@ -1993,7 +2624,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                              />
                          </div>
 
-                        {/* Pipeline Selector (moved here) */}
+                        {/* Pipeline Selector */}
                          <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] col-span-2 md:col-span-2 lg:ml-auto w-full md:w-auto">
                             <FunnelIcon className="w-4 h-4 text-text-subtle ml-2 flex-shrink-0"/>
                             <select 
@@ -2103,7 +2734,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 options={contactClients.map(c => ({ id: c, label: c }))}
                                 value={filterContactClient === 'all' ? null : filterContactClient}
                                 onChange={(val) => setFilterContactClient(val ? String(val) : 'all')}
-                                placeholder="כל הלקוחות"
+                                placeholder={isTenantUser ? 'כל הארגונים' : 'כל הלקוחות'}
                                 className="w-full"
                                 icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle"/>}
                              />
@@ -2112,9 +2743,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                  )}
 
                  <div className="w-full flex justify-end gap-3 pt-2 border-t border-border-subtle">
-                     {activeTab === 'companies' && !isTenantUser ? (
+                     {activeTab === 'companies' ? (
                          <div className="flex items-center gap-3 w-full sm:w-auto justify-between sm:justify-end">
-                              {/* Client Column Visibility Popover Trigger */}
                             <div className="relative" ref={clientSettingsRef}>
                                 <button 
                                     onClick={() => setIsClientColumnPopoverOpen(!isClientColumnPopoverOpen)}
@@ -2127,12 +2757,20 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                     <div className="absolute top-full left-0 mt-2 w-56 bg-bg-card rounded-xl shadow-xl border border-border-default z-50 p-4 animate-fade-in">
                                         <p className="font-bold text-text-default mb-2 text-sm border-b border-border-default pb-2">בחר עמודות להצגה</p>
                                         <div className="space-y-2 max-h-60 overflow-y-auto">
-                                            {allClientColumns.map(col => (
+                                            {(isTenantUser ? allLinkedOrgColumns : allClientColumns).map(col => (
                                                 <label key={col.id} className="flex items-center gap-2 text-sm text-text-default hover:bg-bg-hover p-1.5 rounded cursor-pointer">
                                                     <input 
                                                         type="checkbox" 
-                                                        checked={clientVisibleColumns.includes(col.id)} 
-                                                        onChange={() => handleClientColumnToggle(col.id)} 
+                                                        checked={
+                                                            isTenantUser
+                                                                ? linkedOrgVisibleColumns.includes(col.id)
+                                                                : clientVisibleColumns.includes(col.id)
+                                                        }
+                                                        onChange={() =>
+                                                            isTenantUser
+                                                                ? handleLinkedOrgColumnToggle(col.id)
+                                                                : handleClientColumnToggle(col.id)
+                                                        }
                                                         className="rounded text-primary-600 focus:ring-primary-500" 
                                                     />
                                                     {col.label}
@@ -2203,14 +2841,23 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 <button 
                                     onClick={() => setContactsViewMode('table')} 
                                     className={`flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${contactsViewMode === 'table' ? 'bg-white text-primary-600 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
+                                    title="תצוגת רשימה"
                                 >
                                     <TableCellsIcon className="w-4 h-4"/>
                                 </button>
                                 <button 
                                     onClick={() => setContactsViewMode('grid')} 
                                     className={`flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${contactsViewMode === 'grid' ? 'bg-white text-primary-600 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
+                                    title="תצוגת כרטיסיות"
                                 >
                                     <Squares2X2Icon className="w-4 h-4"/>
+                                </button>
+                                <button 
+                                    onClick={() => setContactsViewMode('board')} 
+                                    className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-3 py-1.5 rounded-lg text-sm font-bold transition-all ${contactsViewMode === 'board' ? 'bg-white text-primary-600 shadow-sm' : 'text-text-muted hover:text-text-default'}`}
+                                    title="תצוגת לוח (Kanban)"
+                                >
+                                    <ChartBarIcon className="w-4 h-4 transform rotate-90"/>
                                 </button>
                              </div>
                          </div>
@@ -2228,14 +2875,283 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                      <div className="p-12 text-center text-sm text-text-muted">טוען...</div>
                  ) : null}
                  {activeTab === 'companies' ? (
-                     isTenantUser ? (
-                         <div className="overflow-y-auto custom-scrollbar p-6 bg-bg-card">
-                             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-                                 {filteredLinkedOrganizations.map((org) => (
-                                     <div
-                                         key={org.linkId}
-                                         className="bg-bg-card border border-border-default rounded-2xl p-5 shadow-sm hover:shadow-md transition-shadow"
-                                     >
+                    isTenantUser ? (
+                        viewMode === 'table' ? (
+                        <div className="overflow-x-auto custom-scrollbar bg-bg-card">
+                            <table className="w-full text-sm text-right border-collapse min-w-[600px]">
+                                <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-10 border-b border-border-default">
+                                    <tr>
+                                        <th className="p-4 w-10 text-center">
+                                            <input
+                                                type="checkbox"
+                                                className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                checked={
+                                                    filteredLinkedOrganizations.length > 0
+                                                    && filteredLinkedOrganizations.every((o) => selectedCompanyIds.has(o.linkId))
+                                                }
+                                                onChange={handleSelectAllCompanies}
+                                                onClick={(e) => e.stopPropagation()}
+                                            />
+                                        </th>
+                                        {linkedOrgVisibleColumns.map((colId) => {
+                                            const col = allLinkedOrgColumns.find((c) => c.id === colId);
+                                            if (!col) return null;
+                                            return (
+                                                <th
+                                                    key={col.id}
+                                                    className={`p-4 ${col.id === 'health' || col.id === 'actions' ? 'text-center' : ''}`}
+                                                >
+                                                    {col.label}
+                                                </th>
+                                            );
+                                        })}
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-border-subtle">
+                                    {filteredLinkedOrganizations.map((org) => (
+                                        <tr
+                                            key={org.linkId}
+                                            className={`hover:bg-bg-hover transition-colors cursor-pointer group ${selectedCompanyIds.has(org.linkId) ? 'bg-primary-50/50' : ''}`}
+                                            onClick={() => {
+                                                if (isPlatformAdmin) navigate(`/admin/companies?tab=db&search=${encodeURIComponent(org.name)}`);
+                                                else void openOrgDrawer(org);
+                                            }}
+                                        >
+                                            <td className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
+                                                <input
+                                                    type="checkbox"
+                                                    className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                    checked={selectedCompanyIds.has(org.linkId)}
+                                                    onChange={() => toggleCompanySelect(org.linkId)}
+                                                />
+                                            </td>
+                                            {linkedOrgVisibleColumns.map((colId) => {
+                                                if (colId === 'name') {
+                                                    return (
+                                            <td key={colId} className="p-4">
+                                                <div className="flex items-center gap-3">
+                                                    {org.logo ? (
+                                                        <img src={org.logo} alt="" className="w-8 h-8 rounded-lg object-contain border border-border-default bg-bg-subtle p-0.5 shrink-0" />
+                                                    ) : (
+                                                        <div className="w-8 h-8 rounded-lg bg-bg-subtle border border-border-default flex items-center justify-center shrink-0">
+                                                            <BuildingOffice2Icon className="w-4 h-4 text-text-muted" />
+                                                        </div>
+                                                    )}
+                                                    <div>
+                                                        <p className="font-bold text-text-default">{org.name}</p>
+                                                        <div className="flex gap-1 mt-0.5">
+                                                            {org.isPrimary ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-primary-50 text-primary-700">ראשית</span> : null}
+                                                            {org.isPending ? <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700">ממתין</span> : null}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </td>
+                                                    );
+                                                }
+                                                if (colId === 'health') {
+                                                    return (
+                                            <td key={colId} className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
+                                                <div className="flex justify-center">
+                                                    <OrgHealthIndicator
+                                                        org={org}
+                                                        pulseData={org.organizationId ? orgPulseById[org.organizationId] : null}
+                                                    />
+                                                </div>
+                                            </td>
+                                                    );
+                                                }
+                                                if (colId === 'mainField') {
+                                                    return <td key={colId} className="p-4 text-text-muted">{org.mainField || '—'}</td>;
+                                                }
+                                                if (colId === 'location') {
+                                                    return <td key={colId} className="p-4 text-text-muted">{org.location || '—'}</td>;
+                                                }
+                                                if (colId === 'employeeCount') {
+                                                    return <td key={colId} className="p-4 text-text-muted">{org.employeeCount || '—'}</td>;
+                                                }
+                                                if (colId === 'website') {
+                                                    return (
+                                            <td key={colId} className="p-4">
+                                                {org.website ? (
+                                                    <a
+                                                        href={org.website}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-primary-600 hover:underline inline-flex items-center gap-1 text-xs"
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    >
+                                                        {formatWebsiteHost(org.website)}
+                                                        <LinkIcon className="w-3 h-3" />
+                                                    </a>
+                                                ) : '—'}
+                                            </td>
+                                                    );
+                                                }
+                                                if (colId === 'actions') {
+                                                    return (
+                                            <td key={colId} className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
+                                                <div className="flex items-center justify-center gap-1.5">
+                                                    {org.organizationId && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => navigate(`/organizations/${org.organizationId}`)}
+                                                            className="text-xs font-bold text-primary-600 hover:text-primary-700 bg-primary-50 hover:bg-primary-100 px-2.5 py-1 rounded-lg transition whitespace-nowrap"
+                                                            title="ניהול תיק לקוח"
+                                                        >
+                                                            ניהול תיק לקוח
+                                                        </button>
+                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleUnlinkOrganization(org)}
+                                                        disabled={deleteBusyId === org.linkId}
+                                                        className="p-1.5 rounded-lg text-text-subtle hover:text-red-600 hover:bg-red-50 transition disabled:opacity-50"
+                                                        title="הסר קישור"
+                                                    >
+                                                        <TrashIcon className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            </td>
+                                                    );
+                                                }
+                                                return null;
+                                            })}
+                                        </tr>
+                                    ))}
+                                    {!isLoading && filteredLinkedOrganizations.length === 0 ? (
+                                        <tr>
+                                            <td colSpan={Math.max(2, linkedOrgVisibleColumns.length + 1)} className="p-12 text-center text-text-muted">
+                                                <BuildingOffice2Icon className="w-10 h-10 mx-auto mb-2 opacity-20"/>
+                                                <p>אין חברות מקושרות עדיין.</p>
+                                            </td>
+                                        </tr>
+                                    ) : null}
+                                </tbody>
+                            </table>
+                        </div>
+                        ) : viewMode === 'board' ? (
+                        <div className="overflow-x-auto overflow-y-hidden p-6 custom-scrollbar">
+                             {activePipelineId === 'all' ? (
+                                <div className="flex flex-col items-center justify-center h-full text-text-muted py-16">
+                                    <ChartBarIcon className="w-16 h-16 opacity-20 mb-4"/>
+                                    <h3 className="text-xl font-bold">לא ניתן להציג לוח Kanban עבור "כל התהליכים"</h3>
+                                    <p>אנא בחר תהליך ספציפי מהפילטר למעלה כדי לראות את הלוח לפי ארגונים.</p>
+                                </div>
+                             ) : (
+                                <div className="flex gap-6 h-full min-w-max">
+                                    {activePipeline && activePipeline.stages.map((stage) => {
+                                        const stageItems = filteredLinkedOrganizations.filter((o) =>
+                                            o.pipelineStage === stage.id
+                                            || (!o.pipelineStage && !o.pipelineId && stage.id === activePipeline.stages[0].id),
+                                        );
+                                        return (
+                                            <div
+                                                key={stage.id}
+                                                className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
+                                                onDragOver={handleKanbanDragOver}
+                                                onDrop={(e) => handleKanbanDrop(e, stage.id)}
+                                            >
+                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${stage.color}`}>
+                                                    <div className="flex items-center gap-2 overflow-hidden">
+                                                        <h3 className={`font-bold text-sm truncate ${stage.accent}`}>{stage.name}</h3>
+                                                        <span className="bg-bg-subtle px-2 py-0.5 rounded-full text-xs font-bold text-text-muted border border-border-subtle flex-shrink-0">
+                                                            {stageItems.length}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar max-h-[60vh]">
+                                                    {stageItems.map((org) => (
+                                                        <div
+                                                            key={org.linkId}
+                                                            draggable
+                                                            onDragStart={(e) => handleOrgKanbanDragStart(e, org.linkId)}
+                                                            role="button"
+                                                            tabIndex={0}
+                                                            onClick={() => void openOrgDrawer(org)}
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === 'Enter' || e.key === ' ') void openOrgDrawer(org);
+                                                            }}
+                                                            className={`bg-white border rounded-xl p-3 shadow-sm hover:border-primary-300 cursor-grab active:cursor-grabbing transition relative ${selectedCompanyIds.has(org.linkId) ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'}`}
+                                                        >
+                                                            <div className="absolute top-2 left-2 z-10" onClick={(e) => e.stopPropagation()}>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                                    checked={selectedCompanyIds.has(org.linkId)}
+                                                                    onChange={() => toggleCompanySelect(org.linkId)}
+                                                                />
+                                                            </div>
+                                                            <div className="flex items-start gap-3 pr-1">
+                                                                {org.logo ? (
+                                                                    <img src={org.logo} alt="" className="w-9 h-9 rounded-lg object-contain border border-border-default bg-bg-subtle p-0.5 shrink-0" />
+                                                                ) : (
+                                                                    <div className="w-9 h-9 rounded-lg bg-bg-subtle border border-border-default flex items-center justify-center shrink-0">
+                                                                        <BuildingOffice2Icon className="w-4 h-4 text-text-muted" />
+                                                                    </div>
+                                                                )}
+                                                                <div className="min-w-0 flex-1">
+                                                                    <div className="flex items-center gap-2">
+                                                                        <p className="font-bold text-sm text-text-default truncate">{org.name}</p>
+                                                                        <OrgHealthIndicator
+                                                                            org={org}
+                                                                            pulseData={org.organizationId ? orgPulseById[org.organizationId] : null}
+                                                                        />
+                                                                    </div>
+                                                                    <p className="text-xs text-text-muted mt-0.5 truncate">{org.mainField || org.location || '—'}</p>
+                                                                </div>
+                                                            </div>
+                                                            {org.organizationId && (
+                                                                <button
+                                                                    type="button"
+                                                                    onClick={(e) => { e.stopPropagation(); navigate(`/organizations/${org.organizationId}`); }}
+                                                                    className="mt-3 w-full text-xs font-bold text-primary-600 bg-primary-50 hover:bg-primary-100 rounded-lg py-1.5 transition"
+                                                                >
+                                                                    ניהול תיק לקוח
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                    {stageItems.length === 0 ? (
+                                                        <p className="text-xs text-text-muted text-center py-6">אין פריטים</p>
+                                                    ) : null}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                             )}
+                        </div>
+                        ) : (
+                        <div className="overflow-y-auto custom-scrollbar p-6 bg-bg-card">
+                            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                               {filteredLinkedOrganizations.map((org) => (
+                                    <div
+                                        key={org.linkId}
+                                        role="button"
+                                        tabIndex={0}
+                                        onClick={() => {
+                                            if (isPlatformAdmin) {
+                                                navigate(`/admin/companies?tab=db&search=${encodeURIComponent(org.name)}`);
+                                            } else {
+                                                void openOrgDrawer(org);
+                                            }
+                                        }}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' || e.key === ' ') {
+                                                if (isPlatformAdmin) navigate(`/admin/companies?tab=db&search=${encodeURIComponent(org.name)}`);
+                                                else void openOrgDrawer(org);
+                                            }
+                                        }}
+                                        className={`bg-bg-card border rounded-2xl p-5 shadow-sm hover:shadow-md hover:border-primary-300 transition-all cursor-pointer relative ${selectedCompanyIds.has(org.linkId) ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'}`}
+                                    >
+                                         <div className="absolute top-3 left-3 z-10" onClick={(e) => e.stopPropagation()}>
+                                            <input
+                                                type="checkbox"
+                                                className="w-5 h-5 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                checked={selectedCompanyIds.has(org.linkId)}
+                                                onChange={() => toggleCompanySelect(org.linkId)}
+                                            />
+                                         </div>
                                          <div className="flex items-start gap-4">
                                              {org.logo ? (
                                                  <img src={org.logo} alt="" className="w-14 h-14 rounded-xl object-contain border border-border-default bg-bg-subtle p-1 shrink-0" />
@@ -2247,6 +3163,10 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                              <div className="min-w-0 flex-1">
                                                  <div className="flex flex-wrap items-center gap-2">
                                                      <h3 className="font-bold text-text-default truncate">{org.name}</h3>
+                                                     <OrgHealthIndicator
+                                                         org={org}
+                                                         pulseData={org.organizationId ? orgPulseById[org.organizationId] : null}
+                                                     />
                                                      {org.isPrimary ? (
                                                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-primary-50 text-primary-700 border border-primary-100">ראשית</span>
                                                      ) : null}
@@ -2256,13 +3176,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                  </div>
                                                  <p className="text-sm text-text-muted mt-1">{org.mainField || '—'}</p>
                                              </div>
-                                             <button
-                                                 type="button"
-                                                 onClick={() => void handleUnlinkOrganization(org)}
-                                                 disabled={deleteBusyId === org.linkId}
-                                                 className="shrink-0 p-2 rounded-lg text-text-subtle hover:text-red-600 hover:bg-red-50 transition disabled:opacity-50"
-                                                 title="הסר קישור"
-                                             >
+                                                <button
+                                                type="button"
+                                                onClick={(e) => { e.stopPropagation(); void handleUnlinkOrganization(org); }}
+                                                disabled={deleteBusyId === org.linkId}
+                                                className="shrink-0 p-2 rounded-lg text-text-subtle hover:text-red-600 hover:bg-red-50 transition disabled:opacity-50"
+                                                title="הסר קישור"
+                                            >
                                                  <TrashIcon className="w-4 h-4" />
                                              </button>
                                          </div>
@@ -2303,6 +3223,19 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                  </dd>
                                              </div>
                                          </dl>
+                                         {/* Card footer action */}
+                                         {org.organizationId && (
+                                             <div className="mt-4 pt-4 border-t border-border-subtle" onClick={(e) => e.stopPropagation()}>
+                                                 <button
+                                                     type="button"
+                                                     onClick={(e) => { e.stopPropagation(); navigate(`/organizations/${org.organizationId}`); }}
+                                                     className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-xl text-sm font-bold text-primary-600 bg-primary-50 hover:bg-primary-100 border border-primary-200 transition"
+                                                 >
+                                                     <BriefcaseIcon className="w-4 h-4" />
+                                                     ניהול תיק לקוח
+                                                 </button>
+                                             </div>
+                                         )}
                                      </div>
                                  ))}
                              </div>
@@ -2320,18 +3253,31 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                  </div>
                              ) : null}
                          </div>
+                        )
                      ) : viewMode === 'table' ? (
                         <div className="overflow-x-auto custom-scrollbar bg-bg-card">
                              <table className="w-full text-sm text-right border-collapse min-w-[900px]">
                                  <thead className="bg-bg-subtle text-text-muted font-bold text-xs uppercase sticky top-0 z-20 border-b border-border-default shadow-sm">
                                      <tr>
+                                         <th className="p-4 w-10 text-center">
+                                            <input
+                                                type="checkbox"
+                                                className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                checked={
+                                                    sortedClients.length > 0
+                                                    && sortedClients.every((c) => selectedCompanyIds.has(c.id))
+                                                }
+                                                onChange={handleSelectAllCompanies}
+                                                onClick={(e) => e.stopPropagation()}
+                                            />
+                                         </th>
                                          {clientVisibleColumns.map((colId, index) => {
                                              const col = allClientColumns.find(c => c.id === colId);
                                              if (!col) return null;
                                              return (
                                                  <th 
                                                     key={col.id} 
-                                                    className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors select-none ${draggingColumn === col.id ? 'dragging' : ''} ${col.id === 'actions' ? 'text-left' : ''}`}
+                                                    className={`p-4 cursor-pointer hover:bg-bg-hover transition-colors select-none ${draggingColumn === col.id ? 'dragging' : ''} ${col.id === 'actions' ? 'text-left' : ''} ${col.id === 'health' ? 'text-center' : ''}`}
                                                     draggable
                                                     onDragStart={() => handleDragStart(index, col.id, 'clients')}
                                                     onDragEnter={() => handleDragEnter(index, 'clients')}
@@ -2350,9 +3296,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                          return (
                                              <tr 
                                                  key={client.id} 
-                                                 className={`hover:bg-bg-hover transition-colors group cursor-pointer ${activeActionMenuId === client.id ? 'z-50 relative' : ''}`}
+                                                 className={`hover:bg-bg-hover transition-colors group cursor-pointer ${activeActionMenuId === client.id ? 'z-50 relative' : ''} ${selectedCompanyIds.has(client.id) ? 'bg-primary-50/50' : ''}`}
                                                  onClick={() => handleOpenClientDrawer(client)}
                                              >
+                                                 <td className="p-4 text-center" onClick={(e) => e.stopPropagation()}>
+                                                    <input
+                                                        type="checkbox"
+                                                        className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                        checked={selectedCompanyIds.has(client.id)}
+                                                        onChange={() => toggleCompanySelect(client.id)}
+                                                    />
+                                                 </td>
                                                  {clientVisibleColumns.map(colId => (
                                                      <td key={colId} className="p-4">
                                                          {renderClientCell(client, colId)}
@@ -2374,7 +3328,9 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                          <div className="overflow-y-auto custom-scrollbar p-6">
                              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
                                 {sortedClients.map(client => {
-                                    const stageInfo = activePipeline ? activePipeline.stages.find(s => s.id === client.pipelineStage) : pipelines[0].stages.find(s => s.id === client.pipelineStage);
+                                    const stageInfo = activePipeline
+                                        ? activePipeline.stages.find(s => s.id === client.pipelineStage)
+                                        : pipelines[0]?.stages.find(s => s.id === client.pipelineStage);
                                     
                                     // Fallback for stage name if 'All' pipeline or missing
                                     let displayStageName = stageInfo?.name || client.pipelineStage;
@@ -2399,10 +3355,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                             onClick={() => handleOpenClientDrawer(client)}
                                             stageName={displayStageName}
                                             activePipelineColor={displayStageColor}
+                                            pipelines={pipelines}
                                             onStatusChange={handleStatusChange}
                                             onStageChange={handleStageChange}
                                             onDelete={(c) => void handleDeleteClient(c)}
                                             isDeleting={deleteBusyId === client.id}
+                                            isSelected={selectedCompanyIds.has(client.id)}
+                                            onToggleSelect={() => toggleCompanySelect(client.id)}
                                         />
                                     );
                                 })}
@@ -2454,6 +3413,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                             client={client} 
                                                             onClick={() => handleOpenClientDrawer(client)}
                                                             onDragStart={(e) => handleKanbanDragStart(e, client.id)}
+                                                            isSelected={selectedCompanyIds.has(client.id)}
+                                                            onToggleSelect={() => toggleCompanySelect(client.id)}
                                                         />
                                                     ))}
                                                 </div>
@@ -2548,18 +3509,15 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                         >
                                                                             <UserIcon className="w-4 h-4 text-text-subtle"/> צפה בפרופיל
                                                                         </button>
-                                                                        <button 
-                                                                            onClick={(e) => { e.stopPropagation(); setActiveActionMenuId(null); handleStartProcess(contact, 'sales'); }}
-                                                                            className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2"
-                                                                        >
-                                                                            <PlusIcon className="w-4 h-4 text-primary-600"/> פתח תהליך מכירה
-                                                                        </button>
-                                                                        <button 
-                                                                            onClick={(e) => { e.stopPropagation(); setActiveActionMenuId(null); handleStartProcess(contact, 'retention'); }}
-                                                                            className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2 border-t border-border-subtle"
-                                                                        >
-                                                                            <PlusIcon className="w-4 h-4 text-purple-600"/> פתח תהליך שימור
-                                                                        </button>
+                                                                        {pipelines.map((p, idx) => (
+                                                                            <button
+                                                                                key={p.id}
+                                                                                onClick={(e) => { e.stopPropagation(); setActiveActionMenuId(null); handleStartProcess(contact, p.id); }}
+                                                                                className={`w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2 ${idx === 0 ? '' : 'border-t border-border-subtle'}`}
+                                                                            >
+                                                                                <PlusIcon className="w-4 h-4 text-primary-600"/> פתח {p.name}
+                                                                            </button>
+                                                                        ))}
                                                                         <button 
                                                                             onClick={(e) => { e.stopPropagation(); handleDeleteContact(contact); }}
                                                                             className="w-full text-right px-4 py-2.5 text-sm hover:bg-red-50 text-red-600 flex items-center gap-2 border-t border-border-subtle"
@@ -2606,7 +3564,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 </div>
                              )}
                         </div>
-                     ) : (
+                     ) : contactsViewMode === 'grid' ? (
                          // CONTACTS GRID
                          <div className="overflow-y-auto custom-scrollbar p-6">
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -2623,6 +3581,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                         onSelect={() => handleContactSelect(contact.id)}
                                         onAction={(action) => handleSingleContactAction(action, contact)}
                                         onStartProcess={handleStartProcess}
+                                        processOptions={pipelines}
                                         onViewProfile={handleOpenContactDrawer}
                                         onDelete={handleDeleteContact}
                                     />
@@ -2630,15 +3589,151 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                 )}
                             </div>
                          </div>
+                     ) : (
+                         // CONTACTS KANBAN
+                         <div className="overflow-x-auto overflow-y-hidden p-6 custom-scrollbar">
+                             {filterContactPipeline === 'all' ? (
+                                <div className="flex flex-col items-center justify-center h-full text-text-muted py-16">
+                                    <ChartBarIcon className="w-16 h-16 opacity-20 mb-4"/>
+                                    <h3 className="text-xl font-bold">לא ניתן להציג לוח Kanban עבור "כל התהליכים"</h3>
+                                    <p>אנא בחר תהליך ספציפי מהפילטר למעלה כדי לראות את הלוח.</p>
+                                </div>
+                             ) : (
+                                <div className="flex gap-6 h-full min-w-max">
+                                    {(pipelines.find((p) => p.id === filterContactPipeline)?.stages || []).map((stage, idx) => {
+                                        const stageItems = sortedContacts.filter((c) =>
+                                            c.stageId === stage.id
+                                            || (!c.stageId && !c.pipelineId && idx === 0)
+                                            || (!c.stageId && c.pipelineId === filterContactPipeline && idx === 0),
+                                        );
+                                        return (
+                                            <div
+                                                key={stage.id}
+                                                className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
+                                                onDragOver={handleKanbanDragOver}
+                                                onDrop={(e) => handleKanbanDrop(e, stage.id)}
+                                            >
+                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${stage.color}`}>
+                                                    <div className="flex items-center gap-2 overflow-hidden">
+                                                        <h3 className={`font-bold text-sm truncate ${stage.accent}`}>{stage.name}</h3>
+                                                        <span className="bg-bg-subtle px-2 py-0.5 rounded-full text-xs font-bold text-text-muted border border-border-subtle flex-shrink-0">
+                                                            {stageItems.length}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <div className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar max-h-[60vh]">
+                                                    {stageItems.map((contact) => (
+                                                        <div
+                                                            key={contact.id}
+                                                            draggable
+                                                            onDragStart={(e) => handleContactKanbanDragStart(e, contact.id)}
+                                                            onClick={() => handleOpenContactDrawer(contact)}
+                                                            className={`bg-white border rounded-xl p-3 shadow-sm hover:border-primary-300 cursor-grab active:cursor-grabbing transition relative ${selectedContactIds.has(contact.id) ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'}`}
+                                                        >
+                                                            <div className="absolute top-2 left-2 z-10" onClick={(e) => e.stopPropagation()}>
+                                                                <input
+                                                                    type="checkbox"
+                                                                    className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                                                                    checked={selectedContactIds.has(contact.id)}
+                                                                    onChange={() => handleContactSelect(contact.id)}
+                                                                />
+                                                            </div>
+                                                            <div className="flex items-start gap-3">
+                                                                <div className="w-9 h-9 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center text-xs font-bold shrink-0">
+                                                                    {contact.avatar || contact.name.substring(0, 2)}
+                                                                </div>
+                                                                <div className="min-w-0 flex-1">
+                                                                    <p className="font-bold text-sm text-text-default truncate">{contact.name}</p>
+                                                                    <p className="text-xs text-text-muted mt-0.5 truncate">{contact.role || '—'}</p>
+                                                                    <p className="text-xs text-text-subtle mt-1 truncate flex items-center gap-1">
+                                                                        <BuildingOffice2Icon className="w-3 h-3"/>
+                                                                        {contact.clientName}
+                                                                    </p>
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    ))}
+                                                    {stageItems.length === 0 ? (
+                                                        <p className="text-xs text-text-muted text-center py-6">אין פריטים</p>
+                                                    ) : null}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                             )}
+                         </div>
                      )
                  ) : (
-                    // --- TASKS VIEW: all clients ---
-                    <ClientTasksTab
-                        showPipeline={false}
-                        clientPickerOptions={clients.map((c) => ({ id: c.id, name: c.name }))}
-                    />
+                    // --- TASKS VIEW: admin → all clients; tenant → orgs under tenant client ---
+                    isPlatformAdmin ? (
+                        <ClientTasksTab
+                            clientPickerOptions={clients.map((c) => ({ id: c.id, name: c.name }))}
+                        />
+                    ) : tenantClientId ? (
+                        <ClientTasksTab
+                            clientId={tenantClientId}
+                            organizationPickerOptions={linkedOrganizations
+                                .filter((o) => o.organizationId)
+                                .map((o) => ({ id: o.organizationId!, name: o.name }))}
+                        />
+                    ) : null
                  )}
              </div>
+
+             {/* Bulk Actions Bar (Companies / linked orgs) */}
+             {activeTab === 'companies' && selectedCompanyIds.size > 0 && (
+                <div className="fixed bottom-6 left-1/2 transform -translate-x-1/2 z-40 bg-bg-card rounded-full shadow-2xl border border-border-default px-6 py-3 flex items-center gap-6 animate-slide-up">
+                    <span className="font-bold text-primary-600 text-sm">{selectedCompanyIds.size} נבחרו</span>
+                    <div className="h-6 w-px bg-border-default"></div>
+
+                    <div className="relative">
+                        <button
+                            onClick={() => setIsBulkProcessMenuOpen(!isBulkProcessMenuOpen)}
+                            className="font-semibold hover:text-purple-600 transition-colors flex items-center gap-2 text-sm"
+                        >
+                            <PlayIcon className="w-4 h-4"/> פתח תהליך
+                        </button>
+                        {isBulkProcessMenuOpen && (
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-white border border-border-default rounded-lg shadow-xl overflow-hidden">
+                                {pipelines.length === 0 ? (
+                                    <div className="px-4 py-2 text-xs text-text-muted">אין תהליכים מוגדרים</div>
+                                ) : (
+                                    pipelines.map((p, idx) => (
+                                        <button
+                                            key={p.id}
+                                            onClick={() => handleCompanyBulkStartProcess(p.id)}
+                                            className={`w-full text-right px-4 py-2 text-sm hover:bg-bg-hover ${idx === 0 ? '' : 'border-t border-border-subtle'}`}
+                                        >
+                                            {p.name}
+                                        </button>
+                                    ))
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <button onClick={handleCompanyBulkExport} className="font-semibold hover:text-gray-600 transition-colors flex items-center gap-2 text-sm">
+                        <DocumentArrowDownIcon className="w-4 h-4"/> ייצוא לאקסל
+                    </button>
+
+                    <div className="h-6 w-px bg-border-default"></div>
+
+                    <button onClick={() => handleCompanyBulkAction('whatsapp')} className="font-semibold hover:text-green-600 transition-colors flex items-center gap-2 text-sm">
+                        <WhatsappIcon className="w-4 h-4"/> WhatsApp
+                    </button>
+                    <button onClick={() => handleCompanyBulkAction('email')} className="font-semibold hover:text-primary-600 transition-colors flex items-center gap-2 text-sm">
+                        <EnvelopeIcon className="w-4 h-4"/> Email
+                    </button>
+                    <button onClick={() => handleCompanyBulkAction('sms')} className="font-semibold hover:text-blue-600 transition-colors flex items-center gap-2 text-sm">
+                        <ChatBubbleBottomCenterTextIcon className="w-4 h-4"/> SMS
+                    </button>
+                    <div className="h-6 w-px bg-border-default"></div>
+                    <button onClick={() => setSelectedCompanyIds(new Set())} className="p-1 bg-bg-subtle rounded-full hover:bg-bg-hover text-text-muted" title="נקה בחירה">
+                        <XMarkIcon className="w-4 h-4"/>
+                    </button>
+                </div>
+            )}
 
              {/* Bulk Actions Bar (Contacts) */}
              {activeTab === 'contacts' && selectedContactIds.size > 0 && (
@@ -2655,9 +3750,20 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                             <PlayIcon className="w-4 h-4"/> פתח תהליך
                         </button>
                         {isBulkProcessMenuOpen && (
-                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-40 bg-white border border-border-default rounded-lg shadow-xl overflow-hidden">
-                                <button onClick={() => handleBulkStartProcess('sales')} className="w-full text-right px-4 py-2 text-sm hover:bg-bg-hover">תהליך מכירה</button>
-                                <button onClick={() => handleBulkStartProcess('retention')} className="w-full text-right px-4 py-2 text-sm hover:bg-bg-hover border-t border-border-subtle">תהליך שימור</button>
+                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-48 bg-white border border-border-default rounded-lg shadow-xl overflow-hidden">
+                                {pipelines.length === 0 ? (
+                                    <div className="px-4 py-2 text-xs text-text-muted">אין תהליכים מוגדרים</div>
+                                ) : (
+                                    pipelines.map((p, idx) => (
+                                        <button
+                                            key={p.id}
+                                            onClick={() => handleBulkStartProcess(p.id)}
+                                            className={`w-full text-right px-4 py-2 text-sm hover:bg-bg-hover ${idx === 0 ? '' : 'border-t border-border-subtle'}`}
+                                        >
+                                            {p.name}
+                                        </button>
+                                    ))
+                                )}
                             </div>
                         )}
                     </div>
@@ -2697,7 +3803,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             <QuickAddClientModal 
                 isOpen={isQuickAddOpen}
                 onClose={() => setIsQuickAddOpen(false)}
-                pipelineId={activePipelineId === 'all' ? pipelines[0].id : activePipelineId}
+                pipelineId={activePipelineId === 'all' ? (pipelines[0]?.id || '') : activePipelineId}
                 stageId={quickAddStageId}
                 onSave={handleQuickAdd}
             />
@@ -2706,8 +3812,9 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 isOpen={isContactDrawerOpen}
                 onClose={() => setIsContactDrawerOpen(false)}
                 contact={selectedContactForDrawer}
-                onStartProcess={(type) => {
-                    if (selectedContactForDrawer) handleStartProcess(selectedContactForDrawer, type);
+                processOptions={pipelines.map((p) => ({ id: p.id, name: p.name }))}
+                onStartProcess={(pipelineId) => {
+                    if (selectedContactForDrawer) handleStartProcess(selectedContactForDrawer, pipelineId);
                 }}
                 openMessageModal={openMessageModal}
             />
@@ -2744,6 +3851,157 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                             >
                                 {contactDeleteLoading ? 'מוחק…' : 'מחק'}
                             </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
+
+            {/* ── Company detail drawer (tenant users) ───────────────────── */}
+            {orgDrawer ? (
+                <div className="fixed inset-0 z-50 flex justify-end" dir="rtl">
+                    {/* backdrop */}
+                    <div className="absolute inset-0 bg-black/40" onClick={() => setOrgDrawer(null)} />
+                    <div className="relative w-full max-w-lg h-full bg-bg-card shadow-2xl flex flex-col overflow-hidden animate-slide-in-right">
+                        {/* Header */}
+                        <div className="flex items-center gap-4 px-6 py-5 border-b border-border-default shrink-0">
+                            {orgDrawer.org.logo ? (
+                                <img src={orgDrawer.org.logo} alt="" className="w-12 h-12 rounded-xl object-contain border border-border-default bg-bg-subtle p-1 shrink-0" />
+                            ) : (
+                                <div className="w-12 h-12 rounded-xl bg-bg-subtle border border-border-default flex items-center justify-center shrink-0">
+                                    <BuildingOffice2Icon className="w-6 h-6 text-text-muted" />
+                                </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                                <h2 className="text-lg font-bold text-text-default truncate">{orgDrawer.org.name}</h2>
+                                <p className="text-sm text-text-muted truncate">{orgDrawer.org.mainField || '—'}</p>
+                            </div>
+                            <button onClick={() => setOrgDrawer(null)} className="p-2 rounded-lg hover:bg-bg-hover text-text-muted">
+                                <XMarkIcon className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        {/* Body */}
+                        <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-5">
+                            {orgDrawerLoading && (
+                                <div className="text-center text-sm text-text-muted py-4">טוען פרטים...</div>
+                            )}
+
+                            {/* Status badges */}
+                            <div className="flex flex-wrap gap-2">
+                                {orgDrawer.org.isPrimary && <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-primary-50 text-primary-700 border border-primary-100">ראשית</span>}
+                                {orgDrawer.org.isPending && <span className="text-xs font-bold px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-100">ממתין לאישור</span>}
+                                {(() => {
+                                    const status = String((orgDrawer.full?.activityStatus as string) || orgDrawer.org.statusLabel || '');
+                                    if (!status) return null;
+                                    const color = status === 'פעילה' ? 'bg-green-50 text-green-700 border-green-100' : status === 'לא פעילה' ? 'bg-red-50 text-red-700 border-red-100' : 'bg-gray-50 text-gray-600 border-gray-200';
+                                    return <span className={`text-xs font-bold px-2.5 py-1 rounded-full border ${color}`}>{status}</span>;
+                                })()}
+                            </div>
+
+                            {/* Key details */}
+                            {[
+                                { label: 'תחום', value: orgDrawer.org.mainField },
+                                { label: 'תת-תחום', value: orgDrawer.org.subFields?.join(', ') },
+                                { label: 'מיקום', value: orgDrawer.full?.location as string || orgDrawer.org.location },
+                                { label: 'מספר עובדים', value: orgDrawer.full?.employeeCount as string || orgDrawer.org.employeeCount },
+                                { label: 'אתר', value: orgDrawer.full?.website as string || orgDrawer.org.website, isLink: true },
+                                { label: 'לינקדאין', value: orgDrawer.full?.linkedinUrl as string, isLink: true },
+                                { label: 'טלפון', value: orgDrawer.full?.phone as string },
+                                { label: 'דוא״ל', value: orgDrawer.full?.email as string },
+                                { label: 'כתובת', value: orgDrawer.full?.address as string },
+                                { label: 'שנת ייסוד', value: orgDrawer.full?.foundedYear as string },
+                                { label: 'סיווג', value: orgDrawer.full?.classification as string },
+                            ].map(({ label, value, isLink }) => value ? (
+                                <div key={label} className="flex gap-3 items-start text-sm">
+                                    <span className="text-text-muted w-28 shrink-0">{label}</span>
+                                    {isLink ? (
+                                        <a href={String(value).startsWith('http') ? String(value) : `https://${value}`} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline break-all">
+                                            {String(value).replace(/^https?:\/\//, '')}
+                                        </a>
+                                    ) : (
+                                        <span className="text-text-default font-medium">{String(value)}</span>
+                                    )}
+                                </div>
+                            ) : null)}
+
+                            {/* Description */}
+                            {(orgDrawer.full?.description as string) && (
+                                <div>
+                                    <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">תיאור</p>
+                                    <p className="text-sm text-text-default leading-relaxed">{orgDrawer.full?.description as string}</p>
+                                </div>
+                            )}
+
+                            {/* Tags */}
+                            {Array.isArray(orgDrawer.full?.tags) && (orgDrawer.full?.tags as string[]).length > 0 && (
+                                <div>
+                                    <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-2">תגיות</p>
+                                    <div className="flex flex-wrap gap-1.5">
+                                        {(orgDrawer.full?.tags as string[]).map((tag) => (
+                                            <span key={tag} className="text-xs px-2 py-0.5 rounded-full bg-bg-subtle border border-border-default text-text-muted">{tag}</span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Publishing links */}
+                            <div className="pt-4 border-t border-border-subtle">
+                                <p className="text-xs font-semibold text-text-muted uppercase tracking-wide mb-3">דפי נחיתה ופרסום</p>
+                                {orgDrawerLinksLoading ? (
+                                    <p className="text-sm text-text-muted">טוען דפי נחיתה...</p>
+                                ) : orgDrawerLinks.length === 0 ? (
+                                    <p className="text-sm text-text-muted italic">אין דפי נחיתה פעילים לחברה זו</p>
+                                ) : (
+                                    <div className="space-y-3">
+                                        {orgDrawerLinks.map((job) => (
+                                            <div key={job.jobId} className="bg-bg-subtle rounded-xl p-3 border border-border-default">
+                                                {/* Job header */}
+                                                <div className="flex items-start justify-between gap-2 mb-2">
+                                                    <p className="font-semibold text-sm text-text-default truncate flex-1">{job.jobTitle}</p>
+                                                    <button
+                                                        onClick={() => { setOrgDrawer(null); navigate(`/jobs/edit/${job.jobId}`); }}
+                                                        className="shrink-0 flex items-center gap-1 text-xs font-bold text-text-muted hover:text-primary-600 bg-bg-card hover:bg-primary-50 border border-border-default px-2.5 py-1 rounded-lg transition"
+                                                        title="ערוך דף נחיתה"
+                                                    >
+                                                        <PencilIcon className="w-3.5 h-3.5"/>
+                                                        ערוך
+                                                    </button>
+                                                </div>
+                                                {/* Aggregate stats */}
+                                                <div className="flex gap-4 text-xs text-text-muted mb-2">
+                                                    <span>{job.totalVisits.toLocaleString()} צפיות</span>
+                                                    <span>{job.totalSubmissions.toLocaleString()} הגשות</span>
+                                                    {job.totalVisits > 0 && job.totalSubmissions > 0 && (
+                                                        <span>{Math.round((job.totalSubmissions / job.totalVisits) * 1000) / 10}% המרה</span>
+                                                    )}
+                                                </div>
+                                                {/* Per-source rows */}
+                                                {job.sources.length > 0 && (
+                                                    <div className="border-t border-border-subtle pt-2 space-y-1.5">
+                                                        {job.sources.map((s) => (
+                                                            <div key={s.source} className="flex items-center justify-between gap-2">
+                                                                <div className="flex items-center gap-2 min-w-0">
+                                                                    <span className="text-xs font-semibold text-text-muted bg-bg-card border border-border-default rounded px-1.5 py-0.5 shrink-0">{s.source}</span>
+                                                                    <span className="text-xs text-text-subtle">{s.visits} צפיות · {s.submissions} הגשות</span>
+                                                                </div>
+                                                                <a
+                                                                    href={s.url}
+                                                                    target="_blank"
+                                                                    rel="noopener noreferrer"
+                                                                    className="shrink-0 flex items-center gap-1 text-xs font-bold text-primary-600 hover:text-primary-700 bg-primary-50 hover:bg-primary-100 px-2 py-0.5 rounded-lg transition"
+                                                                >
+                                                                    <LinkIcon className="w-3 h-3"/>
+                                                                    פתח
+                                                                </a>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </div>
                 </div>

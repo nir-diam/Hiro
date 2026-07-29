@@ -21,17 +21,22 @@ interface JobPublication {
   candidatesCount: number;
   views: number;
   board: string;
+  publishedAt: string | null;
+  unpublishedAt: string | null;
 }
 
 const allColumns = [
-  { id: 'jobTitle', header: 'שם משרה', width: '20%' },
-  { id: 'company', header: 'חברה', width: '15%' },
-  { id: 'domain', header: 'תחום', width: '10%' },
-  { id: 'board', header: 'לוח פרסום', width: '10%' },
-  { id: 'city', header: 'עיר', width: '10%' },
-  { id: 'candidatesCount', header: 'מועמדים', width: '10%' },
-  { id: 'conversion', header: 'יחס המרה', width: '15%' },
-  { id: 'publicationDate', header: 'תאריך פרסום', width: '10%' },
+  { id: 'jobTitle', header: 'שם משרה', width: '17%' },
+  { id: 'company', header: 'חברה', width: '12%' },
+  { id: 'domain', header: 'תחום', width: '8%' },
+  { id: 'board', header: 'לוח פרסום', width: '8%' },
+  { id: 'city', header: 'עיר', width: '7%' },
+  { id: 'candidatesCount', header: 'מועמדים', width: '7%' },
+  { id: 'conversion', header: 'יחס המרה', width: '11%' },
+  { id: 'publishedAt', header: 'תחילת פרסום', width: '8%' },
+  { id: 'unpublishedAt', header: 'סיום פרסום', width: '8%' },
+  { id: 'daysActive', header: 'ימים באוויר', width: '7%' },
+  { id: 'publicationDate', header: 'תאריך יצירה', width: '7%' },
 ];
 
 const defaultVisibleColumns = allColumns.map(c => c.id);
@@ -306,6 +311,8 @@ const PublicationsReportView: React.FC = () => {
                 candidatesCount: Number(r.candidatesCount) || 0,
                 views: 0,
                 board: r.sourceName || '',
+                publishedAt: r.publishedAt || null,
+                unpublishedAt: r.unpublishedAt || null,
             }));
             setAllData(mapped);
         } catch (e: unknown) {
@@ -433,6 +440,33 @@ const PublicationsReportView: React.FC = () => {
 
     const renderCell = (job: JobPublication, columnId: string) => {
         switch (columnId) {
+            case 'daysActive': {
+                if (!job.publishedAt) return <span className="text-text-subtle">—</span>;
+                const start = new Date(job.publishedAt).getTime();
+                const end = job.unpublishedAt ? new Date(job.unpublishedAt).getTime() : Date.now();
+                const days = Math.max(0, Math.floor((end - start) / 86_400_000));
+                const isActive = !job.unpublishedAt;
+                return (
+                    <span className={`inline-flex items-center gap-1 text-xs font-bold px-2 py-0.5 rounded-full border whitespace-nowrap ${isActive ? 'text-blue-700 bg-blue-50 border-blue-200' : 'text-gray-600 bg-gray-100 border-gray-200'}`}>
+                        {isActive && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />}
+                        {days} ימים
+                    </span>
+                );
+            }
+            case 'publishedAt':
+                return job.publishedAt ? (
+                    <span className="inline-flex items-center gap-1 text-xs text-green-700 bg-green-50 border border-green-200 rounded-full px-2 py-0.5 whitespace-nowrap">
+                        <span className="w-1.5 h-1.5 rounded-full bg-green-500 flex-shrink-0" />
+                        {new Date(job.publishedAt).toLocaleDateString('he-IL')}
+                    </span>
+                ) : <span className="text-text-subtle">—</span>;
+            case 'unpublishedAt':
+                return job.unpublishedAt ? (
+                    <span className="inline-flex items-center gap-1 text-xs text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5 whitespace-nowrap">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-400 flex-shrink-0" />
+                        {new Date(job.unpublishedAt).toLocaleDateString('he-IL')}
+                    </span>
+                ) : <span className="text-text-subtle text-xs">פעיל</span>;
             case 'publicationDate':
                 return job.publicationDate ? new Date(job.publicationDate).toLocaleDateString('he-IL') : '—';
             case 'jobTitle':

@@ -3,21 +3,31 @@ import React, { useState } from 'react';
 import Drawer from './Drawer';
 import { 
     UserIcon, PhoneIcon, EnvelopeIcon, BriefcaseIcon, 
-    CalendarDaysIcon, ChatBubbleBottomCenterTextIcon, 
-    CheckCircleIcon, ClockIcon, PlusIcon, ArrowRightIcon, WhatsappIcon
+    ChatBubbleBottomCenterTextIcon, 
+    ClockIcon, PlusIcon, ArrowRightIcon, WhatsappIcon
 } from './Icons';
-import { Contact, Client } from './ClientsListView';
+import { Contact } from './ClientsListView';
 import { MessageModalConfig } from '../hooks/useUIState';
+
+type ProcessOption = { id: string; name: string };
 
 interface ContactDrawerProps {
     isOpen: boolean;
     onClose: () => void;
     contact: Contact | null;
-    onStartProcess: (type: 'sales' | 'retention') => void;
+    onStartProcess: (pipelineId: string) => void;
+    processOptions?: ProcessOption[];
     openMessageModal: (config: MessageModalConfig) => void;
 }
 
-const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact, onStartProcess, openMessageModal }) => {
+const ContactDrawer: React.FC<ContactDrawerProps> = ({
+    isOpen,
+    onClose,
+    contact,
+    onStartProcess,
+    processOptions = [],
+    openMessageModal,
+}) => {
     const [activeTab, setActiveTab] = useState<'overview' | 'processes' | 'history'>('overview');
 
     if (!contact) return null;
@@ -147,19 +157,20 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact,
                             <div className="bg-primary-50 rounded-xl p-4 border border-primary-100">
                                 <h4 className="font-bold text-primary-900 mb-2">פתיחת תהליך חדש</h4>
                                 <p className="text-xs text-primary-700 mb-4">הוסף את איש הקשר ללוח המשימות (Kanban) לניהול תהליך ממוקד.</p>
-                                <div className="grid grid-cols-2 gap-3">
-                                    <button 
-                                        onClick={() => onStartProcess('sales')}
-                                        className="flex items-center justify-center gap-2 bg-white text-primary-700 py-2 rounded-lg border border-primary-200 hover:border-primary-400 font-bold text-xs shadow-sm transition-all"
-                                    >
-                                        <PlusIcon className="w-3 h-3"/> תהליך מכירה
-                                    </button>
-                                    <button 
-                                        onClick={() => onStartProcess('retention')}
-                                        className="flex items-center justify-center gap-2 bg-white text-primary-700 py-2 rounded-lg border border-primary-200 hover:border-primary-400 font-bold text-xs shadow-sm transition-all"
-                                    >
-                                        <PlusIcon className="w-3 h-3"/> תהליך שימור
-                                    </button>
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    {processOptions.length === 0 ? (
+                                        <p className="col-span-full text-xs text-primary-700">אין תהליכי עבודה מוגדרים. הגדר אותם בהגדרות תהליכי עבודה.</p>
+                                    ) : (
+                                        processOptions.map((p) => (
+                                            <button
+                                                key={p.id}
+                                                onClick={() => onStartProcess(p.id)}
+                                                className="flex items-center justify-center gap-2 bg-white text-primary-700 py-2 rounded-lg border border-primary-200 hover:border-primary-400 font-bold text-xs shadow-sm transition-all"
+                                            >
+                                                <PlusIcon className="w-3 h-3"/> {p.name}
+                                            </button>
+                                        ))
+                                    )}
                                 </div>
                             </div>
 
@@ -184,7 +195,7 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact,
 
                     {activeTab === 'history' && (
                         <div className="relative border-r border-border-default mr-3 space-y-6">
-                            {history.map((item, idx) => (
+                            {history.map((item) => (
                                 <div key={item.id} className="relative pr-6">
                                     <div className="absolute top-1 -right-1.5 w-3 h-3 bg-bg-card border-2 border-primary-500 rounded-full"></div>
                                     <div className="text-xs text-text-muted mb-1">{item.date} • {item.user}</div>
@@ -195,7 +206,6 @@ const ContactDrawer: React.FC<ContactDrawerProps> = ({ isOpen, onClose, contact,
                             ))}
                         </div>
                     )}
-
                 </div>
             </div>
         </Drawer>

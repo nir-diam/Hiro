@@ -12,6 +12,7 @@ const Organization = sequelize.define(
     name: { type: DataTypes.STRING, allowNull: false },
     nameEn: DataTypes.STRING,
     legalName: DataTypes.STRING,
+    registrationNumber: { type: DataTypes.STRING(20), allowNull: true, field: 'registration_number' },
     aliases: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     activityStatus: {
       type: DataTypes.ENUM('פעילה', 'לא פעילה', 'בפירוק', 'לא ידוע', 'merged'),

@@ -7,6 +7,7 @@ import {
     FunnelIcon, Squares2X2Icon, ListBulletIcon, XMarkIcon, UserIcon,
     ChevronUpIcon, ChevronDownIcon, CalendarIcon,
     NoSymbolIcon, ArrowPathIcon, ArrowUturnLeftIcon,
+    ArrowDownTrayIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import CandidateSummaryDrawer from './CandidateSummaryDrawer';
@@ -16,9 +17,11 @@ import {
     fetchTagCorrectionAgentEnabled,
     resolveTagAiDecisions,
     saveTagCorrectionAgentEnabled,
+    approveTagAiDecision,
     type TagAiDecisionDto,
 } from '../services/tagCorrectionsApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 
 const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -235,11 +238,16 @@ const AdminTagCorrectionsView: React.FC = () => {
     const [aiFilterDate, setAiFilterDate] = useState('');
     const [aiSortOrder, setAiSortOrder] = useState<'asc' | 'desc'>('desc');
     const [aiSearchTerm, setAiSearchTerm] = useState('');
+    const [aiDebouncedSearch, setAiDebouncedSearch] = useState('');
     const [aiFilterType, setAiFilterType] = useState('all');
     const [aiMinOccurrences, setAiMinOccurrences] = useState(1);
     const [aiReviewStatus, setAiReviewStatus] = useState<'pending_review' | 'approved' | 'overridden' | 'manual_queue' | 'all'>('all');
+    const [aiApprovalFilter, setAiApprovalFilter] = useState<'all' | 'pending' | 'approved'>('pending');
     const aiPageSize = 25;
     const [aiPage, setAiPage] = useState(1);
+    const [aiServerTotal, setAiServerTotal] = useState(0);
+    const [aiServerTotalPages, setAiServerTotalPages] = useState(1);
+    const [exportingExcel, setExportingExcel] = useState(false);
 
     // Link Action State
     const [linkSearchTerm, setLinkSearchTerm] = useState('');
@@ -258,6 +266,9 @@ const AdminTagCorrectionsView: React.FC = () => {
 
     // Optimistic local state for rows sent to manual queue (grayed-out with undo)
     const [manualQueuedDecisions, setManualQueuedDecisions] = useState<Map<string, Date>>(new Map());
+
+    // Optimistic local approval state (id → 'pending' | 'approved')
+    const [localApprovalStatus, setLocalApprovalStatus] = useState<Map<string, 'pending' | 'approved'>>(new Map());
 
     // Blacklist tab state
     const [blacklistDecisions, setBlacklistDecisions] = useState<TagAiDecisionDto[]>([]);
@@ -368,16 +379,23 @@ const AdminTagCorrectionsView: React.FC = () => {
         try {
             const decisionFilter = aiFilterDecision.includes('all') ? 'all' : aiFilterDecision[0];
             const payload = await fetchTagAiDecisions({
-                page: 1,
-                limit: 200,
+                page: aiPage,
+                limit: aiPageSize,
                 decision: decisionFilter,
                 date: aiFilterDate,
                 sortOrder: aiSortOrder,
                 reviewStatus: aiReviewStatus,
-                autoBackfill: isAgentOn && aiReviewStatus === 'pending_review',
+                autoBackfill: isAgentOn && aiReviewStatus === 'pending_review' && aiPage === 1,
                 backfillLimit: 25,
+                search: aiDebouncedSearch || undefined,
+                type: aiFilterType !== 'all' ? aiFilterType : undefined,
+                hesitation: aiFilterHesitation.includes('all') ? undefined : aiFilterHesitation,
+                statusBuckets: aiFilterStatus.includes('all') ? undefined : aiFilterStatus,
+                approvalStatus: aiApprovalFilter !== 'all' ? aiApprovalFilter : undefined,
             });
             setAiDecisions(payload.data);
+            setAiServerTotal(payload.total);
+            setAiServerTotalPages(payload.totalPages);
             if (payload.total === 0 && payload.backfill?.processed === 0 && payload.backfill?.lastError) {
                 flashStatus(`סוכן AI: ${payload.backfill.lastError}`);
             } else if (payload.backfill?.processed) {
@@ -386,10 +404,12 @@ const AdminTagCorrectionsView: React.FC = () => {
         } catch (err) {
             console.error('[AdminTagCorrectionsView] AI decisions load failed', err);
             setAiDecisions([]);
+            setAiServerTotal(0);
+            setAiServerTotalPages(1);
         } finally {
             setAiDecisionsLoading(false);
         }
-    }, [apiBase, aiFilterDecision, aiFilterDate, aiSortOrder, aiReviewStatus, isAgentOn]);
+    }, [apiBase, aiPage, aiPageSize, aiFilterDecision, aiFilterDate, aiSortOrder, aiReviewStatus, isAgentOn, aiDebouncedSearch, aiFilterType, aiFilterHesitation, aiFilterStatus, aiApprovalFilter]);
 
     const loadBlacklistDecisions = useCallback(async () => {
         setBlacklistLoading(true);
@@ -416,47 +436,89 @@ const AdminTagCorrectionsView: React.FC = () => {
         if (activeTab === 'blacklist') void loadBlacklistDecisions();
     }, [activeTab, loadAiDecisions, loadBlacklistDecisions]);
 
-    const filteredAndSortedAiDecisions = useMemo(() => {
-        let result = [...aiDecisions];
-        if (aiSearchTerm) {
-            result = result.filter(d => d.originalTerm.toLowerCase().includes(aiSearchTerm.toLowerCase()));
-        }
-        if (!aiFilterDecision.includes('all')) {
-            result = result.filter(d => aiFilterDecision.includes(d.aiDecision));
-        }
-        if (aiFilterType !== 'all') {
-            result = result.filter(d => {
-                const t = (d.detectedType || '').toLowerCase();
-                const ft = aiFilterType.toLowerCase();
-                // 'education' in filter matches 'degree' or 'education' detectedType
-                if (ft === 'education') return t === 'education' || t === 'degree';
-                return t === ft;
-            });
-        }
-        if (!aiFilterHesitation.includes('all')) {
-            result = result.filter((d) => {
-                const bucket = getHesitationBucket(d.hesitationLevel);
-                return bucket != null && aiFilterHesitation.includes(bucket);
-            });
-        }
-        if (!aiFilterStatus.includes('all')) {
-            const manualQueuedIds = new Set<string>(manualQueuedDecisions.keys());
-            result = result.filter((d) => aiFilterStatus.includes(getDecisionStatusBucket(d, manualQueuedIds)));
-        }
-        result.sort((a, b) => {
-            const dateA = new Date(a.actionDate).getTime();
-            const dateB = new Date(b.actionDate).getTime();
-            return aiSortOrder === 'asc' ? dateA - dateB : dateB - dateA;
-        });
-        return result;
-    }, [aiDecisions, aiFilterDecision, aiFilterHesitation, aiFilterStatus, aiSearchTerm, aiSortOrder, aiFilterType, manualQueuedDecisions]);
+    // Server-side pagination: data is already filtered and paged by the backend.
+    const paginatedAiDecisions = aiDecisions;
+    const aiTotalFiltered = aiServerTotal;
+    const aiTotalPages = aiServerTotalPages;
 
-    const aiTotalFiltered = filteredAndSortedAiDecisions.length;
-    const aiTotalPages = Math.max(1, Math.ceil(aiTotalFiltered / aiPageSize));
-    const paginatedAiDecisions = useMemo(() => {
-        const start = (aiPage - 1) * aiPageSize;
-        return filteredAndSortedAiDecisions.slice(start, start + aiPageSize);
-    }, [filteredAndSortedAiDecisions, aiPage, aiPageSize]);
+    const handleExportExcel = useCallback(async () => {
+        if (!apiBase || exportingExcel) return;
+        setExportingExcel(true);
+        try {
+            const decisionFilter = aiFilterDecision.includes('all') ? 'all' : aiFilterDecision[0];
+            const pageLimit = 500;
+            let page = 1;
+            let totalPages = 1;
+            const all: TagAiDecisionDto[] = [];
+            do {
+                const payload = await fetchTagAiDecisions({
+                    page,
+                    limit: pageLimit,
+                    decision: decisionFilter,
+                    date: aiFilterDate,
+                    sortOrder: aiSortOrder,
+                    reviewStatus: aiReviewStatus,
+                    autoBackfill: false,
+                    search: aiDebouncedSearch || undefined,
+                    type: aiFilterType !== 'all' ? aiFilterType : undefined,
+                    hesitation: aiFilterHesitation.includes('all') ? undefined : aiFilterHesitation,
+                    statusBuckets: aiFilterStatus.includes('all') ? undefined : aiFilterStatus,
+                    approvalStatus: aiApprovalFilter !== 'all' ? aiApprovalFilter : undefined,
+                });
+                all.push(...payload.data);
+                totalPages = Math.max(1, payload.totalPages || 1);
+                page += 1;
+            } while (page <= totalPages);
+
+            if (!all.length) {
+                flashStatus('אין תוצאות להורדה');
+                return;
+            }
+
+            const decisionLabel: Record<string, string> = {
+                merge: 'מיזוג',
+                create: 'יצירה',
+                delete: 'מחיקה',
+            };
+
+            const stamp = new Date().toISOString().slice(0, 10);
+            downloadRowsAsXlsx(
+                all,
+                [
+                    { key: 'originalTerm', label: 'מונח מקורי' },
+                    { key: 'detectedType', label: 'סוג' },
+                    { key: 'aiDecision', label: 'החלטת AI', getValue: (r) => decisionLabel[r.aiDecision] || r.aiDecision },
+                    { key: 'aiSuggestedTarget', label: 'יעד מוצע', getValue: (r) => r.aiSuggestedTarget || '' },
+                    { key: 'hesitationLevel', label: 'התלבטות', getValue: (r) => r.hesitationLevel ?? '' },
+                    { key: 'reviewStatus', label: 'סטטוס ביקורת' },
+                    { key: 'manualApprovalStatus', label: 'אישור ידני', getValue: (r) => (r.manualApprovalStatus === 'approved' ? 'אושר' : 'ממתין') },
+                    { key: 'actionDate', label: 'תאריך', getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : '') },
+                    { key: 'aiReasoning', label: 'נימוק AI', getValue: (r) => r.aiReasoning || '' },
+                    { key: 'dilemmaReasoning', label: 'נימוק התלבטות', getValue: (r) => r.dilemmaReasoning || '' },
+                    { key: 'contextSample', label: 'הקשר', getValue: (r) => r.contextSample || '' },
+                ],
+                `tag_ai_decisions_${stamp}.xlsx`,
+            );
+            flashStatus(`הורדו ${all.length} שורות לאקסל`);
+        } catch (err) {
+            console.error('[AdminTagCorrectionsView] excel export failed', err);
+            flashStatus(err instanceof Error ? err.message : 'שגיאה בהורדה לאקסל');
+        } finally {
+            setExportingExcel(false);
+        }
+    }, [
+        apiBase,
+        exportingExcel,
+        aiFilterDecision,
+        aiFilterDate,
+        aiSortOrder,
+        aiReviewStatus,
+        aiDebouncedSearch,
+        aiFilterType,
+        aiFilterHesitation,
+        aiFilterStatus,
+        aiApprovalFilter,
+    ]);
 
     useEffect(() => {
         const timer = setTimeout(() => setDebouncedSearch(searchTerm.trim()), 300);
@@ -464,7 +526,11 @@ const AdminTagCorrectionsView: React.FC = () => {
     }, [searchTerm]);
 
     useEffect(() => { setPage(1); }, [debouncedSearch, filterType, minOccurrences]);
-    useEffect(() => { setAiPage(1); }, [aiSearchTerm, aiFilterType, aiFilterDecision, aiFilterHesitation, aiFilterStatus, aiFilterDate, aiReviewStatus, aiMinOccurrences]);
+    useEffect(() => {
+        const timer = setTimeout(() => setAiDebouncedSearch(aiSearchTerm.trim()), 350);
+        return () => clearTimeout(timer);
+    }, [aiSearchTerm]);
+    useEffect(() => { setAiPage(1); }, [aiDebouncedSearch, aiFilterType, aiFilterDecision, aiFilterHesitation, aiFilterStatus, aiFilterDate, aiReviewStatus, aiMinOccurrences, aiApprovalFilter]);
 
     const loadUnmatched = useCallback(async () => {
         if (!apiBase) return;
@@ -473,6 +539,7 @@ const AdminTagCorrectionsView: React.FC = () => {
             const params = new URLSearchParams();
             params.set('page', String(page));
             params.set('limit', String(pageSize));
+            params.set('excludeAiQueued', '0'); // show all pending tags, not just non-AI-queued ones
             if (debouncedSearch) params.set('search', debouncedSearch);
             if (filterType !== 'all') params.set('type', filterType);
             if (minOccurrences > 1) params.set('minUsage', String(minOccurrences));
@@ -663,13 +730,43 @@ const AdminTagCorrectionsView: React.FC = () => {
         }
     };
 
-    const handleBulkAction = async (action: 'merge' | 'create' | 'delete') => {
+    const handleBulkAction = async (action: 'merge' | 'create' | 'delete' | 'approve' | 'pending') => {
         if (selectedDecisions.size === 0) return;
         let msg = '';
-        if (action === 'merge') msg = `האם לשנות פעולה למיזוג עבור ${selectedDecisions.size} התגיות הנבחרות?`;
-        if (action === 'create') msg = `האם לשנות פעולה ליצירת תגית חדשה עבור ${selectedDecisions.size} התגיות הנבחרות?`;
-        if (action === 'delete') msg = `האם למחוק ${selectedDecisions.size} תגיות נבחרות?`;
+        if (action === 'merge')   msg = `האם לשנות פעולה למיזוג עבור ${selectedDecisions.size} התגיות הנבחרות?`;
+        if (action === 'create')  msg = `האם לשנות פעולה ליצירת תגית חדשה עבור ${selectedDecisions.size} התגיות הנבחרות?`;
+        if (action === 'delete')  msg = `האם למחוק ${selectedDecisions.size} תגיות נבחרות?`;
+        if (action === 'approve') msg = `האם לסמן ${selectedDecisions.size} תגיות כ"אושר ידנית"?`;
+        if (action === 'pending') msg = `האם לאפס ${selectedDecisions.size} תגיות ל"ממתין לאישור"?`;
         if (!window.confirm(msg)) return;
+
+        if (action === 'approve' || action === 'pending') {
+            const newStatus = action === 'approve' ? 'approved' : 'pending';
+            const ids = Array.from(selectedDecisions);
+            // Optimistic UI
+            setLocalApprovalStatus(prev => {
+                const next = new Map(prev);
+                ids.forEach(id => next.set(id, newStatus as 'approved' | 'pending'));
+                return next;
+            });
+            try {
+                await Promise.all(ids.map(id => approveTagAiDecision(id, newStatus as 'approved' | 'pending')));
+                setSelectedDecisions(new Set());
+                setIsMultiSelectMode(false);
+                flashStatus(`${ids.length} תגיות עודכנו בהצלחה.`);
+                if (aiApprovalFilter !== 'all') void loadAiDecisions();
+            } catch (err) {
+                // Rollback optimistic
+                setLocalApprovalStatus(prev => {
+                    const next = new Map(prev);
+                    ids.forEach(id => next.delete(id));
+                    return next;
+                });
+                flashStatus(err instanceof Error ? err.message : 'הפעולה נכשלה');
+            }
+            return;
+        }
+
         try {
             await applyAiActions(Array.from(selectedDecisions), action);
             setSelectedDecisions(new Set());
@@ -677,6 +774,22 @@ const AdminTagCorrectionsView: React.FC = () => {
             flashStatus('הפעולה המרובה בוצעה בהצלחה.');
         } catch (err: unknown) {
             flashStatus(err instanceof Error ? err.message : 'הפעולה נכשלה');
+        }
+    };
+
+    const handleTagApprove = async (decisionId: string, currentStatus: 'pending' | 'approved') => {
+        const newStatus = currentStatus === 'approved' ? 'pending' : 'approved';
+        setLocalApprovalStatus(prev => new Map(prev).set(decisionId, newStatus));
+        try {
+            await approveTagAiDecision(decisionId, newStatus);
+            if (aiApprovalFilter !== 'all') {
+                // Row no longer matches filter — reload
+                void loadAiDecisions();
+            }
+        } catch (err) {
+            // Rollback optimistic update
+            setLocalApprovalStatus(prev => new Map(prev).set(decisionId, currentStatus));
+            flashStatus(err instanceof Error ? err.message : 'שגיאה בעדכון אישור');
         }
     };
 
@@ -1151,7 +1264,20 @@ const AdminTagCorrectionsView: React.FC = () => {
                         </div>
 
                         {/* Decision filter + sort + multi-select */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-bg-surface p-3 rounded-xl border border-border-subtle">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 bg-bg-surface p-3 rounded-xl border border-border-subtle">
+                            {/* Manual approval status filter */}
+                            <div className="relative min-w-0">
+                                <select
+                                    value={aiApprovalFilter}
+                                    onChange={e => setAiApprovalFilter(e.target.value as 'all' | 'pending' | 'approved')}
+                                    className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-2 pr-7 text-xs focus:ring-1 focus:ring-primary-500 appearance-none cursor-pointer"
+                                >
+                                    <option value="all">הכל (אישור ידני)</option>
+                                    <option value="pending">⏳ ממתין לאישור</option>
+                                    <option value="approved">✅ אושר ידנית</option>
+                                </select>
+                                <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                            </div>
                             <MultiSelectDropdown
                                 options={AI_STATUS_FILTER_OPTIONS}
                                 selectedValues={aiFilterStatus}
@@ -1189,6 +1315,16 @@ const AdminTagCorrectionsView: React.FC = () => {
                             <div className="flex items-center justify-end gap-2">
                                 <button
                                     type="button"
+                                    onClick={() => void handleExportExcel()}
+                                    disabled={exportingExcel || aiTotalFiltered === 0}
+                                    className="flex items-center gap-2 text-sm px-3 py-2 rounded-xl border font-bold transition-colors shadow-sm bg-white border-border-default text-text-default hover:bg-bg-hover disabled:opacity-50"
+                                    title="הורדת כל תוצאות החיפוש/הסינון לאקסל"
+                                >
+                                    <ArrowDownTrayIcon className="w-4 h-4" />
+                                    {exportingExcel ? 'מוריד...' : 'הורדה לאקסל'}
+                                </button>
+                                <button
+                                    type="button"
                                     onClick={() => { setIsMultiSelectMode(!isMultiSelectMode); if (isMultiSelectMode) setSelectedDecisions(new Set()); }}
                                     className={`flex items-center gap-2 text-sm px-3 py-2 rounded-xl border font-bold transition-colors shadow-sm ${isMultiSelectMode ? 'bg-primary-50 border-primary-300 text-primary-700' : 'bg-white border-border-default text-text-default hover:bg-bg-hover'}`}
                                 >
@@ -1203,18 +1339,24 @@ const AdminTagCorrectionsView: React.FC = () => {
                                 <select
                                     className="text-xs border border-border-default rounded flex-1 py-1 px-2 focus:ring-1 focus:ring-primary-500 outline-none"
                                     onChange={(e) => {
-                                        const action = e.target.value;
-                                        if (action === 'merge' || action === 'create' || action === 'delete') {
-                                            void handleBulkAction(action as 'merge' | 'create' | 'delete');
+                                        const action = e.target.value as 'merge' | 'create' | 'delete' | 'approve' | 'pending';
+                                        if (action) {
+                                            void handleBulkAction(action);
                                             e.target.value = '';
                                         }
                                     }}
                                     defaultValue=""
                                 >
                                     <option value="" disabled>פעולה מרובה...</option>
-                                    <option value="merge">שנה למיזוג לתגית אחרת</option>
-                                    <option value="create">שנה ליצירת תגית חדשה</option>
-                                    <option value="delete">שנה למחיקה</option>
+                                    <optgroup label="שינוי פעולת AI">
+                                        <option value="merge">שנה למיזוג לתגית אחרת</option>
+                                        <option value="create">שנה ליצירת תגית חדשה</option>
+                                        <option value="delete">שנה למחיקה</option>
+                                    </optgroup>
+                                    <optgroup label="סטטוס אישור">
+                                        <option value="approve">✅ עדכן ל: אושר ידנית</option>
+                                        <option value="pending">⏳ עדכן ל: ממתין לאישור</option>
+                                    </optgroup>
                                 </select>
                             </div>
                         )}
@@ -1227,8 +1369,8 @@ const AdminTagCorrectionsView: React.FC = () => {
                                     {isMultiSelectMode && (
                                         <th className="p-4 w-[5%]">
                                             <input type="checkbox"
-                                                onChange={(e) => { if (e.target.checked) setSelectedDecisions(new Set(filteredAndSortedAiDecisions.map((d) => d.id))); else setSelectedDecisions(new Set()); }}
-                                                checked={selectedDecisions.size === filteredAndSortedAiDecisions.length && filteredAndSortedAiDecisions.length > 0}
+                                                onChange={(e) => { if (e.target.checked) setSelectedDecisions(new Set(paginatedAiDecisions.map((d) => d.id))); else setSelectedDecisions(new Set()); }}
+                                                checked={selectedDecisions.size === paginatedAiDecisions.length && paginatedAiDecisions.length > 0}
                                                 className="w-4 h-4 rounded text-primary-600 border-border-default focus:ring-primary-500 cursor-pointer"
                                             />
                                         </th>
@@ -1245,7 +1387,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                             <tbody className="divide-y divide-border-subtle">
                                 {aiDecisionsLoading ? (
                                     <tr><td colSpan={isMultiSelectMode ? 8 : 7} className="p-8 text-center text-text-muted">טוען החלטות סוכן…</td></tr>
-                                ) : filteredAndSortedAiDecisions.length === 0 ? (
+                                ) : paginatedAiDecisions.length === 0 ? (
                                     <tr><td colSpan={isMultiSelectMode ? 8 : 7} className="p-8 text-center text-text-muted">לא נמצאו תוצאות לסינון הנוכחי.</td></tr>
                                 ) : (
                                     paginatedAiDecisions.map((decision) => (
@@ -1419,6 +1561,25 @@ const AdminTagCorrectionsView: React.FC = () => {
                                                 </div>
                                             </td>
                                             <td className="p-4 align-top">
+                                                {/* Quick approval button */}
+                                                {(() => {
+                                                    const approvalStatus = localApprovalStatus.get(decision.id) ?? (decision.manualApprovalStatus || 'pending');
+                                                    const isApproved = approvalStatus === 'approved';
+                                                    return (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => void handleTagApprove(decision.id, approvalStatus as 'pending' | 'approved')}
+                                                            className={`mb-2 w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors border shadow-sm cursor-pointer ${
+                                                                isApproved
+                                                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                                                                    : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
+                                                            }`}
+                                                            title={isApproved ? 'לחץ לביטול אישור' : 'לחץ לאשר ידנית'}
+                                                        >
+                                                            {isApproved ? '✅ אושר ידנית' : '⏳ ממתין לאישור'}
+                                                        </button>
+                                                    );
+                                                })()}
                                                 {manualQueuedDecisions.has(decision.id) ? (
                                                     <span className="text-[10px] font-bold text-gray-700 bg-gray-100 border border-gray-300 px-2 py-1.5 rounded flex flex-col items-start w-full shadow-sm text-right">
                                                         <span>הוחזר לטיפול ידני</span>

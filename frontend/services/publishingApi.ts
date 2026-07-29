@@ -270,6 +270,25 @@ export async function fetchJobCompanyImages(jobId: string): Promise<CompanyCreat
   return res.json();
 }
 
+/** Fetch images stored in the job_images table for a specific job */
+export async function fetchJobImages(jobId: string): Promise<CompanyCreatedImage[]> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/images`,
+    { headers: getAuthHeaders() },
+  );
+  if (!res.ok) throw new Error('Failed to load job images');
+  return res.json();
+}
+
+/** Delete a specific job image from the job_images table */
+export async function deleteJobImage(jobId: string, imageId: string): Promise<void> {
+  const res = await fetch(
+    `${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`,
+    { method: 'DELETE', headers: getAuthHeaders() },
+  );
+  if (!res.ok) throw new Error('Failed to delete job image');
+}
+
 const mergeCompanyImages = (...lists: CompanyCreatedImage[][]): CompanyCreatedImage[] => {
   const byUrl = new Map<string, CompanyCreatedImage>();
   for (const list of lists) {
@@ -663,6 +682,8 @@ export type BoardPublicationRow = {
   sourceName: string;
   sourceStatus: 'published' | 'draft';
   alertDays: number | null;
+  publishedAt: string | null;
+  unpublishedAt: string | null;
   candidatesCount: number;
 };
 
@@ -687,7 +708,7 @@ export async function fetchBoardPublications(params?: {
 
 export async function patchJobBoardSources(
   jobId: string,
-  recruitmentSources: Array<{ id: string; name: string; selected: boolean; status: string; alertDays: number | null }>,
+  recruitmentSources: Array<{ id: string; name: string; selected: boolean; status: string; alertDays: number | null; publishedAt?: string | null; unpublishedAt?: string | null }>,
 ): Promise<void> {
   const res = await fetch(`${apiBase()}/api/jobs/${encodeURIComponent(jobId)}/board-sources`, {
     method: 'PATCH',

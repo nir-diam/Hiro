@@ -35,18 +35,39 @@ const InfoTag: React.FC<{ children: React.ReactNode }> = ({ children }) => (
     </span>
 );
 
+const getPrimaryOrg = (client: any): Record<string, any> => {
+    const links: any[] = Array.isArray(client?.organizationLinks) ? client.organizationLinks : [];
+    const primary = links.find((l) => l.isPrimary) || links[0];
+    return (primary?.organization && typeof primary.organization === 'object') ? primary.organization : {};
+};
+
 const getClientBusinessProfile = (client: any) => {
     const meta = (client?.metadata && typeof client.metadata === 'object') ? client.metadata : {};
-    const mainField = String(client?.industry || meta.mainField || '').trim();
-    const mainField2 = Array.isArray(meta.mainField2)
-        ? meta.mainField2.map((v: unknown) => String(v || '').trim()).filter(Boolean)
-        : [];
-    const subField = Array.isArray(meta.subField)
-        ? meta.subField.map((v: unknown) => String(v || '').trim()).filter(Boolean)
-        : [];
-    const secondaryField = String(meta.secondaryField || '').trim();
+    const org = getPrimaryOrg(client);
+
+    const mainField = String(org.mainField || client?.industry || meta.mainField || '').trim();
+    const mainField2 = (() => {
+        const src = org.mainField2 ?? meta.mainField2;
+        return Array.isArray(src) ? src.map((v: unknown) => String(v || '').trim()).filter(Boolean) : [];
+    })();
+    const subField = (() => {
+        const src = org.subField ?? meta.subField;
+        return Array.isArray(src) ? src.map((v: unknown) => String(v || '').trim()).filter(Boolean) : [];
+    })();
+    const secondaryField = String(org.secondaryField || meta.secondaryField || '').trim();
     const industryDisplay = [mainField, ...mainField2].filter(Boolean).join(' · ') || '—';
-    return { mainField, mainField2, subField, secondaryField, industryDisplay };
+
+    const description = String(org.description || org.snippet || meta.description || meta.notes || '').trim();
+    const products: string[] = (() => {
+        const src = org.productType ?? org.subField ?? meta.products;
+        return Array.isArray(src) ? src.map((v: unknown) => String(v || '').trim()).filter(Boolean) : [];
+    })();
+    const website = String(org.website || meta.website || '').trim();
+    const employeeCount = String(org.employeeCount || meta.employeeCount || '').trim();
+    const ownership = String(org.structure || org.type || meta.ownership || '').trim();
+    const location = String(org.location || client?.city || org.address || meta.address || '').trim();
+
+    return { mainField, mainField2, subField, secondaryField, industryDisplay, description, products, website, employeeCount, ownership, location };
 };
 
 interface ClientDetailsTabProps {
@@ -131,19 +152,15 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpd
             <AccordionSection title={t('client_details.section_info')} icon={<PencilIcon className="w-5 h-5"/>} defaultOpen>
                  <div className="space-y-4 text-sm">
                     <p className="text-text-muted leading-relaxed">
-                        {(client?.metadata?.description || client?.metadata?.notes || '').toString() || '—'}
+                        {businessProfile.description || '—'}
                     </p>
                     <div>
                         <h4 className="font-semibold text-text-default mb-2">{t('client_details.products_services')}</h4>
                         <div className="flex flex-wrap gap-2">
-                            {(Array.isArray(client?.metadata?.products) ? client.metadata.products : [])
-                                .slice(0, 8)
-                                .map((p: any) => (
-                                    <InfoTag key={String(p)}>{String(p)}</InfoTag>
-                                ))}
-                            {(!Array.isArray(client?.metadata?.products) || client.metadata.products.length === 0) && (
-                                <InfoTag>—</InfoTag>
-                            )}
+                            {businessProfile.products.slice(0, 8).map((p) => (
+                                <InfoTag key={p}>{p}</InfoTag>
+                            ))}
+                            {businessProfile.products.length === 0 && <InfoTag>—</InfoTag>}
                         </div>
                     </div>
                     <dl className="space-y-2 pt-2 border-t border-border-default">
@@ -164,15 +181,15 @@ const ClientDetailsTab: React.FC<ClientDetailsTabProps> = ({ client, onClientUpd
                             <dt className="text-text-muted shrink-0">תחום עיסוק משני:</dt>
                             <dd className="font-semibold text-right">{businessProfile.secondaryField || '—'}</dd>
                         </div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">{client?.metadata?.employeeCount || '—'}</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">{client?.metadata?.ownership || '—'}</dd></div>
-                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">{client?.city || client?.metadata?.address || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.employees')}</dt><dd className="font-semibold">{businessProfile.employeeCount || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.ownership')}</dt><dd className="font-semibold">{businessProfile.ownership || '—'}</dd></div>
+                        <div className="flex justify-between"><dt className="text-text-muted">{t('client_details.location')}</dt><dd className="font-semibold">{businessProfile.location || '—'}</dd></div>
                         <div className="flex justify-between items-center">
                             <dt className="text-text-muted">{t('client_details.website')}</dt>
                             <dd>
-                                {client?.metadata?.website ? (
-                                    <a href={client.metadata.website} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1">
-                                        <span>{String(client.metadata.website).replace('https://www.', '').replace('http://www.', '').replace('https://', '').replace('http://', '')}</span>
+                                {businessProfile.website ? (
+                                    <a href={businessProfile.website} target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:underline font-semibold flex items-center gap-1">
+                                        <span>{businessProfile.website.replace('https://www.', '').replace('http://www.', '').replace('https://', '').replace('http://', '')}</span>
                                         <LinkIcon className="w-4 h-4" />
                                     </a>
                                 ) : (

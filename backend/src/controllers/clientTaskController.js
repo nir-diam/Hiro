@@ -1,8 +1,16 @@
 const clientTaskService = require('../services/clientTaskService');
 
 const list = async (req, res) => {
-  const rows = await clientTaskService.listByClientId(req.params.id);
-  res.json(rows);
+  try {
+    const clientId = String(req.params.id || '').trim();
+    const organizationId = req.query?.organizationId
+      ? String(req.query.organizationId).trim()
+      : null;
+    const rows = await clientTaskService.listByClientId(clientId, { organizationId });
+    res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list tasks' });
+  }
 };
 
 const listAll = async (_req, res) => {
@@ -16,7 +24,12 @@ const listAll = async (_req, res) => {
 
 const create = async (req, res) => {
   try {
-    const row = await clientTaskService.createForClient(req.params.id, req.body);
+    const clientId = String(req.params.id || '').trim();
+    const body = { ...(req.body || {}) };
+    if (body.organizationId != null) {
+      body.organizationId = String(body.organizationId).trim() || null;
+    }
+    const row = await clientTaskService.createForClient(clientId, body);
     res.status(201).json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Create failed' });
@@ -42,4 +55,3 @@ const remove = async (req, res) => {
 };
 
 module.exports = { list, listAll, create, update, remove };
-

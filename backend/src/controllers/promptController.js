@@ -2,6 +2,7 @@ const promptService = require('../services/promptService');
 const promptHistoryService = require('../services/promptHistoryService');
 
 const list = async (_req, res) => {
+  res.set('Cache-Control', 'no-store');
   const prompts = await promptService.list();
   res.json(prompts);
 };

@@ -14,6 +14,7 @@ import JobEventsView from './components/JobEventsView';
 import ClientsListView from './components/ClientsListView';
 import NewClientView from './components/NewClientView';
 import ClientProfileView from './components/ClientProfileView';
+import OrganizationProfileView from './components/OrganizationProfileView';
 import LoginScreen from './components/LoginScreen';
 import ActivationPage from './components/ActivationPage';
 import LandingPage from './components/LandingPage';
@@ -26,6 +27,7 @@ import AdminClientsView from './components/AdminClientsView';
 import AdminJobsView from './components/AdminJobsView';
 import AdminCandidatesView from './components/AdminCandidatesView';
 import AdminCandidateProfileView from './components/AdminCandidateProfileView';
+import AdminCandidateLogsView from './components/AdminCandidateLogsView';
 import AdminClientFormView from './components/AdminClientFormView';
 import MessageTemplatesView from './components/MessageTemplatesView';
 import AdminMessageTemplatesView from './components/AdminMessageTemplatesView';
@@ -918,6 +920,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/clients', element: <ClientsListView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/new', element: <NewClientView onCancel={() => {}} onSave={props.handleSaveClient} /> },
         { path: '/clients/:clientId', element: <ClientProfileView openMessageModal={props.openMessageModal} /> },
+        { path: '/organizations/:organizationId', element: <OrganizationProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/clients/:clientId/contacts/:contactId', element: <ContactProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/notifications', element: <NotificationCenter onOpenCandidateSummary={props.openSummaryDrawer} /> },
         { path: '/communications', element: <CommunicationCenterView onOpenCandidateSummary={props.openSummaryDrawer} /> },
@@ -965,6 +968,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/reports/recruitment-sources', element: <RecruitmentSourcesReportView /> },
         { path: '/reports/bi', element: <ReportsDashboardView /> },
         { path: '/p/:slug', element: <PublicCandidateProfile /> },
+        { path: '/admin/candidates/:candidateId/logs', element: <AdminCandidateLogsView /> },
         { 
             path: '/admin', 
             element: <AdminLayout />,

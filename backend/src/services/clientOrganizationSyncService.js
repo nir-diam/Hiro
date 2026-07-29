@@ -68,10 +68,8 @@ const buildClientUpdatesFromOrg = (client, org, { fullSync = false } = {}) => {
     }
   };
 
-  if (fullSync && o.name) {
-    updates.name = String(o.name).trim();
-    updates.displayName = String(o.name).trim();
-  }
+  // name and displayName are user-owned fields — never overwrite from org sync.
+  // Org identity is captured in metadata (name, nameEn, aliases, etc.).
 
   setIf('industry', o.mainField);
   setIf('city', o.location || o.hqCountry);

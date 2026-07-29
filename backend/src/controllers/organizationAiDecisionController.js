@@ -18,12 +18,27 @@ const list = async (req, res) => {
       date,
       sortOrder = 'desc',
       reviewStatus,
+      approvalStatus,
+      search,
+      reviewerAction,
+      showManual: showManualRaw,
+      showAuto: showAutoRaw,
     } = req.query;
 
-    const where = {};
+    const parseFlag = (raw, defaultValue = true) => {
+      if (raw == null || raw === '') return defaultValue;
+      const s = String(raw).toLowerCase();
+      if (s === '0' || s === 'false' || s === 'no' || s === 'off') return false;
+      if (s === '1' || s === 'true' || s === 'yes' || s === 'on') return true;
+      return defaultValue;
+    };
+    const wantManual = parseFlag(showManualRaw, true);
+    const wantAuto = parseFlag(showAutoRaw, true);
+
+    const andParts = [];
 
     if (decision && decision !== 'all') {
-      where.aiDecision = decision;
+      andParts.push({ aiDecision: decision });
     }
 
     if (date) {
@@ -31,21 +46,77 @@ const list = async (req, res) => {
       start.setHours(0, 0, 0, 0);
       const end = new Date(date);
       end.setHours(23, 59, 59, 999);
-      where.createdAt = { [Op.between]: [start, end] };
+      andParts.push({ createdAt: { [Op.between]: [start, end] } });
     }
 
     if (reviewStatus && reviewStatus !== 'all') {
-      where.reviewStatus = reviewStatus;
+      andParts.push({ reviewStatus });
     }
 
-    const offset = (Number(page) - 1) * Number(limit);
+    if (approvalStatus && approvalStatus !== 'all') {
+      andParts.push({ manualApprovalStatus: approvalStatus });
+    }
+
+    if (reviewerAction && String(reviewerAction).trim()) {
+      andParts.push({ reviewerAction: String(reviewerAction).trim() });
+    }
+
+    // Matches UI: needsManual = reviewStatus manual OR hesitation >= 60
+    //              isAutoHandled = reviewStatus approved OR hesitation < 30
+    if (!wantManual && !wantAuto) {
+      andParts.push({ id: null }); // empty result set
+    } else if (wantManual && !wantAuto) {
+      andParts.push({
+        [Op.or]: [
+          { reviewStatus: 'manual' },
+          { hesitationLevel: { [Op.gte]: 60 } },
+        ],
+      });
+    } else if (!wantManual && wantAuto) {
+      andParts.push({
+        [Op.or]: [
+          { reviewStatus: 'approved' },
+          { hesitationLevel: { [Op.lt]: 30 } },
+        ],
+      });
+    }
+
+    const searchTerm = typeof search === 'string' ? search.trim() : '';
+    // Match frontend: only apply free-text search from 3+ characters.
+    if (searchTerm.length > 2) {
+      const like = `%${searchTerm}%`;
+      const sequelizeInst = OrganizationAiDecision.sequelize;
+      const escaped = sequelizeInst.escape(like);
+      andParts.push(
+        sequelizeInst.literal(`(
+          "OrganizationAiDecision"."original_term" ILIKE ${escaped}
+          OR COALESCE("OrganizationAiDecision"."ai_suggested_target", '') ILIKE ${escaped}
+          OR EXISTS (
+            SELECT 1 FROM candidates c
+            WHERE c.id = "OrganizationAiDecision"."candidate_id"
+              AND (
+                COALESCE(c."fullName", '') ILIKE ${escaped}
+                OR COALESCE(c."firstName", '') ILIKE ${escaped}
+                OR COALESCE(c."lastName", '') ILIKE ${escaped}
+              )
+          )
+        )`),
+      );
+    }
+
+    const where = andParts.length ? { [Op.and]: andParts } : {};
+
+    const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50));
+    const safePage = Math.max(1, Number(page) || 1);
+    const offset = (safePage - 1) * safeLimit;
     const order = [['created_at', sortOrder === 'asc' ? 'ASC' : 'DESC']];
 
     const { count, rows } = await OrganizationAiDecision.findAndCountAll({
       where,
       order,
-      limit: Number(limit),
+      limit: safeLimit,
       offset,
+      distinct: true,
       include: [
         {
           model: Candidate,
@@ -91,14 +162,15 @@ const list = async (req, res) => {
         reviewerAction: r.reviewerAction,
         resolvedAt: r.resolvedAt,
         organizationTmpId: r.organizationTmpId,
+        manualApprovalStatus: r.manualApprovalStatus ?? 'pending',
       };
     });
 
     return res.json({
       data,
       total: count,
-      page: Number(page),
-      totalPages: Math.ceil(count / Number(limit)),
+      page: safePage,
+      totalPages: Math.max(1, Math.ceil(count / safeLimit)),
     });
   } catch (err) {
     console.error('[orgAiDecision] list error:', err);
@@ -199,6 +271,7 @@ const resolve = async (req, res) => {
         }
 
         // Mark the source organization as merged so it hides from the companies list
+        const CandidateOrganization = require('../models/CandidateOrganization');
         const sourceOrg = await Organization.findOne({
           where: { name: { [Op.iLike]: term || '' } },
         });
@@ -206,6 +279,27 @@ const resolve = async (req, res) => {
           await sourceOrg.update({ activityStatus: 'merged' });
           console.log(`[orgAiDecision] marked source org "${sourceOrg.name}" (${sourceOrg.id}) as merged → ${targetId}`);
           if (aliasResult) aliasResult.sourceMerged = { id: sourceOrg.id, name: sourceOrg.name };
+
+          // Re-link all candidates that were linked to the source org → target org.
+          // Skip candidates already linked to the target to avoid unique-key violations.
+          const sourceLinks = await CandidateOrganization.findAll({
+            where: { organizationId: sourceOrg.id },
+            attributes: ['id', 'candidateId', 'relationType'],
+          });
+
+          let migratedCount = 0;
+          for (const link of sourceLinks) {
+            const [, created] = await CandidateOrganization.findOrCreate({
+              where: { candidateId: link.candidateId, organizationId: targetId },
+              defaults: { relationType: link.relationType },
+            });
+            if (created) migratedCount++;
+          }
+
+          if (sourceLinks.length > 0) {
+            console.log(`[orgAiDecision] migrated ${migratedCount}/${sourceLinks.length} candidate links from "${sourceOrg.name}" → "${targetOrg.name}"`);
+            if (aliasResult) aliasResult.candidatesMigrated = migratedCount;
+          }
         }
       }
     }
@@ -338,4 +432,22 @@ const stats = async (req, res) => {
   }
 };
 
-module.exports = { list, resolve, bulkResolve, stats };
+/**
+ * PATCH /api/organizations/ai-decisions/:id/approve
+ * Toggle manualApprovalStatus for one decision.
+ */
+const approve = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const status = req.body?.status || 'approved';
+    const decision = await OrganizationAiDecision.findByPk(id);
+    if (!decision) return res.status(404).json({ message: 'Decision not found' });
+    await decision.update({ manualApprovalStatus: status });
+    return res.json({ id, manualApprovalStatus: status });
+  } catch (err) {
+    console.error('[orgAiDecision] approve error:', err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { list, resolve, bulkResolve, stats, approve };

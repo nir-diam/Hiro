@@ -19,7 +19,10 @@ const list = async (req, res) => {
   try {
     const clientId = String(req.params.id || '').trim();
     assertCanListClientContacts(req.dbUser, clientId);
-    const rows = await clientContactService.listByClientIdWithClient(clientId);
+    const organizationId = req.query?.organizationId
+      ? String(req.query.organizationId).trim()
+      : null;
+    const rows = await clientContactService.listByClientIdWithClient(clientId, { organizationId });
     res.json(rows);
   } catch (err) {
     res.status(err.status || 500).json({ message: err.message || 'Failed to list contacts' });
@@ -28,11 +31,21 @@ const list = async (req, res) => {
 
 const listAll = async (req, res) => {
   try {
-    if (!clientService.isPlatformAdmin(req.dbUser)) {
-      return res.status(403).json({ message: 'Only platform admins can list all contacts' });
+    const actor = req.dbUser;
+    if (!actor) {
+      return res.status(401).json({ message: 'Unauthorized' });
     }
-    const rows = await clientContactService.listAllWithClient();
-    res.json(rows);
+    // Platform admins see every contact; tenant staff see only their client.
+    if (clientService.isPlatformAdmin(actor)) {
+      const rows = await clientContactService.listAllWithClient();
+      return res.json(rows);
+    }
+    const tenantClientId = actor.clientId ? String(actor.clientId).trim() : '';
+    if (!tenantClientId) {
+      return res.status(403).json({ message: 'Only platform admins or tenant users can list contacts' });
+    }
+    const rows = await clientContactService.listAllWithClient({ clientId: tenantClientId });
+    return res.json(rows);
   } catch (err) {
     res.status(500).json({ message: err.message || 'Failed to list contacts' });
   }
@@ -40,7 +53,15 @@ const listAll = async (req, res) => {
 
 const create = async (req, res) => {
   try {
-    const row = await clientContactService.createForClient(req.params.id, req.body);
+    const clientId = String(req.params.id || '').trim();
+    assertCanListClientContacts(req.dbUser, clientId);
+    const body = { ...(req.body || {}) };
+    // Non-admins may only create contacts for their own client (already asserted).
+    // organizationId is optional and scopes the contact to a linked org.
+    if (body.organizationId != null) {
+      body.organizationId = String(body.organizationId).trim() || null;
+    }
+    const row = await clientContactService.createForClient(clientId, body);
     res.status(201).json(row);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Create failed' });

@@ -3,8 +3,24 @@ const { Op } = require('sequelize');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const organizationService = require('../services/organizationService');
+const Job = require('../models/Job');
 const organizationEmbeddingService = require('../services/organizationEmbeddingService');
-const { resolveSubFieldFromPicklist, searchWebsiteUrl, persistEnrichmentResults } = require('../services/organizationEnrichmentService');
+const {
+  resolveSubFieldFromPicklist,
+  persistEnrichmentResults,
+  verifyOrganizationWebsite,
+  searchAllFieldsWithGemini,
+  fetchSearchContext,
+  getWebsiteCandidates,
+  searchWebsiteUrl,
+  searchLinkedinUrl,
+  searchFoundedYear,
+  searchAddress,
+  searchPhone,
+  searchEmail,
+  searchSnippet,
+  searchRegistrationNumber,
+} = require('../services/organizationEnrichmentService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
@@ -14,6 +30,8 @@ const Candidate = require('../models/Candidate');
 const Organization = require('../models/Organization');
 const OrganizationChangeHistory = require('../models/OrganizationChangeHistory');
 const User = require('../models/User');
+const ClientOrganizationLink = require('../models/ClientOrganizationLink');
+const Client = require('../models/Client');
 
 const { sendSingleTurnChat, sendChat, resolveGeminiApiKey } = require('../services/geminiService');
 const { normalizeEmployeeCount } = require('../utils/normalizeEmployeeCount');
@@ -60,33 +78,6 @@ const resolveHistoryActorDisplay = (plain, userMap) => {
   return null;
 };
 
-// Module-level helpers so they are available before the enrich try-block
-const serperRaw = async (q, num = 5) => {
-  const response = await axios.post(
-    'https://google.serper.dev/search',
-    { q, num },
-    {
-      headers: { 'X-API-KEY': process.env.SERPDEV, 'Content-Type': 'application/json' },
-      timeout: 10000,
-    },
-  );
-  return response.data;
-};
-
-const searchSnippet = async (companyName) => {
-  if (!companyName || !process.env.SERPDEV) return null;
-  try {
-    const q = /[\u0590-\u05FF]/.test(companyName)
-      ? `${companyName} חברה`
-      : `${companyName} company`;
-    const data = await serperRaw(q, 3);
-    const top = (data?.organic || [])[0];
-    return top?.snippet ? String(top.snippet).trim() : null;
-  } catch (err) {
-    console.warn('[organization-enrich] snippet search failed', err?.message || err);
-    return null;
-  }
-};
 
 const fallbackCompanyPrompt = (companyNames, mainFieldOptions = [], website = '', snippet = '') =>
   buildCompanyEnrichmentPrompt({ companyNames, mainFieldOptions, website, snippet });
@@ -177,8 +168,13 @@ const createLogoUploadUrl = async (req, res) => {
 const list = async (req, res) => {
   const includeMerged = String(req.query.includeMerged).toLowerCase() === 'true';
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
+  const location = typeof req.query.location === 'string' ? req.query.location.trim() : '';
+  const includeAdditionalLocations =
+    String(req.query.includeAdditionalLocations || '').toLowerCase() === 'true' ||
+    String(req.query.includeAdditionalLocations || '') === '1';
+  const mainField = typeof req.query.mainField === 'string' ? req.query.mainField.trim() : '';
   const activityFrom = typeof req.query.activityFrom === 'string' ? req.query.activityFrom.trim() : '';
   const activityTo = typeof req.query.activityTo === 'string' ? req.query.activityTo.trim() : '';
   const activityDate = typeof req.query.activityDate === 'string' ? req.query.activityDate.trim() : '';
@@ -187,6 +183,9 @@ const list = async (req, res) => {
     page,
     limit,
     search,
+    location,
+    includeAdditionalLocations,
+    mainField,
     activityFrom,
     activityTo,
     activityDate,
@@ -499,252 +498,6 @@ const enrich = async (req, res) => {
       }
     };
 
-    const serperSearch = async (q, num = 5) => {
-      const response = await axios.post(
-        'https://google.serper.dev/search',
-        { q, num },
-        {
-          headers: { 'X-API-KEY': process.env.SERPDEV, 'Content-Type': 'application/json' },
-          timeout: 10000,
-        },
-      );
-      return filterSerpOrganicResults(response.data?.organic);
-    };
-
-    // Priority A: knowledgeGraph attributes (Founded / נוסד)
-    // Priority B: scan first 3 snippets for a 4-digit year near founding keywords
-    const extractFoundedYear = (serperData) => {
-      const attrs = serperData?.knowledgeGraph?.attributes || {};
-      for (const [key, val] of Object.entries(attrs)) {
-        if (/found|נוסד|הוקמ/i.test(key)) {
-          const m = String(val).match(/\b(19|20)\d{2}\b/);
-          if (m) return m[0];
-        }
-      }
-      const organic = serperData?.organic || [];
-      for (const result of organic.slice(0, 3)) {
-        const text = String(result.snippet || '');
-        if (/נוסד|הוקמ|שנת|מאז|founded|since/i.test(text)) {
-          const m = text.match(/\b(19|20)\d{2}\b/);
-          if (m) return m[0];
-        }
-      }
-      return null;
-    };
-
-    const ADDRESS_INDICATORS = /רחוב|רח׳|א\.ת|קומה|בניין|מגדל|כתובת|שד'/i;
-
-    // Extract a clean street address from a raw string that may include phone/hours noise.
-    // Looks for "כתובת:" keyword first, then falls back to street-pattern sentences.
-    const cleanAddressFromRaw = (raw) => {
-      if (!raw) return null;
-      const s = String(raw);
-
-      // Extract text after "כתובת:" stopping at noise delimiters or end
-      const afterKw = s.match(/כתובת[:\s]+(.+?)(?=\s*[|・]\s*|\s*טלפון|\s*פקס|\s*שעות|\s*$)/i);
-      if (afterKw) {
-        const candidate = afterKw[1]
-          .replace(/\s+/g, ' ')
-          .replace(/\s*\.{2,}\s*$/, '')          // trailing ellipsis
-          .replace(/[.!\s]+$/, '')                // trailing punctuation/space
-          .replace(/,\s*[\u0590-\u05FF]$/, '')    // truncated ", ת" style ending
-          .trim();
-        if (candidate.length > 5 && !/טלפון|פקס|שעות|@|http/i.test(candidate)) return candidate;
-      }
-
-      // If string already looks clean (no phone/hours), use it directly
-      if (!/טלפון|פקס|שעות|・/.test(s)) {
-        return s
-          .replace(/\s*\.{2,}\s*$/, '')
-          .replace(/[.!\s]+$/, '')
-          .replace(/,\s*[\u0590-\u05FF]$/, '')
-          .trim() || null;
-      }
-      return null;
-    };
-
-    // Extract city/location from serper data
-    const extractLocation = (serperData) => {
-      // 1. Try knowledgeGraph attributes for explicit city key
-      const attrs = serperData?.knowledgeGraph?.attributes || {};
-      for (const [key, val] of Object.entries(attrs)) {
-        if (/עיר|מיקום|location|city/i.test(key)) return String(val).trim();
-      }
-
-      // 2. Try to parse city from knowledgeGraph.address (e.g. "רח׳ כנרת 4, תל אביב")
-      const kgAddr = serperData?.knowledgeGraph?.address;
-      if (kgAddr) {
-        const cityMatch = String(kgAddr).match(/\d+\s*,\s*([\u0590-\u05FF][^,\d\n]{2,}?)(?:\s*,|\s*$)/);
-        if (cityMatch) return cityMatch[1].trim();
-      }
-
-      // 3. Scan organic snippets for city after a street number
-      const organic = serperData?.organic || [];
-      for (const result of organic.slice(0, 5)) {
-        const snippet = String(result.snippet || '');
-        if (!ADDRESS_INDICATORS.test(snippet)) continue;
-        const cityMatch = snippet.match(/(?:רחוב|רח׳)[^,\d]*\d+\s*,\s*([\u0590-\u05FF][^,\d\n]{2,}?)(?:\s*,|\s*$)/i);
-        if (cityMatch) return cityMatch[1].trim();
-      }
-
-      return null;
-    };
-
-    // Extract a clean street address from serper results.
-    const extractAddress = (serperData) => {
-      // 1. Try knowledgeGraph.address — clean it even if it contains noise
-      if (serperData?.knowledgeGraph?.address) {
-        const clean = cleanAddressFromRaw(serperData.knowledgeGraph.address);
-        if (clean) return clean;
-      }
-
-      // 2. Scan organic snippets
-      const organic = serperData?.organic || [];
-      for (const result of organic.slice(0, 5)) {
-        const snippet = String(result.title || '');
-        if (!ADDRESS_INDICATORS.test(snippet)) continue;
-
-        const clean = cleanAddressFromRaw(snippet);
-        if (clean) return clean;
-
-        // Fallback: sentence containing a street pattern
-        const m = snippet.match(/[^\n.!?]*(?:רחוב|רח׳|א\.ת|קומה|בניין|מגדל|שד')[^\n.!?]*/i);
-        if (m) return m[0].replace(/,\s*[\u0590-\u05FF]$/, '').trim();
-      }
-      return null;
-    };
-
-    const searchFoundedYear = async (companyName) => {
-      if (!companyName || !process.env.SERPDEV) return null;
-      try {
-        const isHebrew = /[\u0590-\u05FF]/.test(companyName);
-        const q = isHebrew ? `${companyName} שנת הקמה` : `${companyName} founded year`;
-        const data = await serperRaw(q, 5);
-        return extractFoundedYear(data);
-      } catch (err) {
-        console.warn('[organization-enrich] founded year search failed:', err?.message || err);
-        return null;
-      }
-    };
-
-    const searchAddress = async (companyName) => {
-      if (!companyName || !process.env.SERPDEV) return { address: null, location: null };
-      try {
-        const data = await serperRaw(`${companyName} כתובת`, 5);
-        const organic = data?.organic || [];
-
-        // Try Gemini extraction — it understands messy Hebrew snippets and titles much better than regex
-        const geminiKey = resolveGeminiApiKey();
-        if (geminiKey && organic.length) {
-          try {
-            const snippets = organic
-              .slice(0, 5)
-              .map(
-                (r, i) =>
-                  `[${i + 1}] Title: ${r.title || ''}\n    Snippet: ${r.snippet || ''}\n    Link: ${r.link || ''}`,
-              )
-              .join('\n\n');
-
-            const systemPrompt = `You extract a company's street address and city from Google search result snippets.
-Return ONLY a valid JSON object with exactly two keys:
-- "address": the street address (street name + number only, e.g. "רח׳ כנרת 4"). null if not found.
-- "city": the city name only (e.g. "איירפורט סיטי", "תל אביב"). null if not found.
-Do NOT include phone numbers, fax, hours, or any extra text.`;
-
-            const message = `Company: ${companyName}\n\nSearch results:\n${snippets}\n\nExtract street address and city.`;
-
-            const llmRes = await sendChat({
-              apiKey: geminiKey,
-              systemPrompt,
-              message,
-              responseMimeType: 'application/json',
-              responseSchema: {
-                type: 'OBJECT',
-                properties: {
-                  address: { type: 'STRING', nullable: true },
-                  city: { type: 'STRING', nullable: true },
-                },
-              },
-            });
-
-            const obj = JSON.parse(llmRes);
-            if (obj && (obj.address || obj.city)) {
-              return {
-                address: obj.address || null,
-                location: obj.city || null,
-              };
-            }
-          } catch (llmErr) {
-            console.warn('[organization-enrich] Gemini address extraction failed, falling back to regex:', llmErr?.message);
-          }
-        }
-
-        // Regex fallback if Gemini is unavailable or returned nothing
-        return {
-          address: extractAddress(data),
-          location: extractLocation(data),
-        };
-      } catch (err) {
-        console.warn('[organization-enrich] address search failed:', err?.message || err);
-        return { address: null, location: null };
-      }
-    };
-
-    const searchLinkedinUrl = async (companyName) => {
-      if (!companyName || !process.env.SERPDEV) return null;
-      try {
-        const results = await serperSearch(`${companyName} linkedin`);
-        if (!results.length) return null;
-        const companyResult =
-          results.find((r) => r.link?.toLowerCase().includes('linkedin.com/company')) ||
-          results.find((r) => r.link?.toLowerCase().includes('linkedin.com'));
-        return companyResult?.link || null;
-      } catch (err) {
-        console.error('[organization-enrich] LinkedIn search failed:', err.response?.data || err.message);
-        return null;
-      }
-    };
-
-    const searchWebsiteUrl = async (companyName) => {
-      if (!companyName || !process.env.SERPDEV) return null;
-      try {
-        const q = `${companyName}  'האתר הרשמי' `;
-        const EXCLUDED = ['linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com',
-                          'youtube.com', 'wikipedia.org', 'walla.co.il', 'ynet.co.il',
-                          'google.com', 'glassdoor.com', 'indeed.com', 'jobmaster.co.il'];
-        const results = await serperSearch(q);
-        if (!results.length) return null;
-        const official = results.find((r) => {
-          if (!r.link) return false;
-          const domain = r.link.toLowerCase();
-          return !EXCLUDED.some((ex) => domain.includes(ex));
-        });
-        return official?.link ? new URL(official.link).origin : null;
-      } catch (err) {
-        console.warn('[organization-enrich] website search failed', err?.message || err);
-        return null;
-      }
-    };
-
-    const searchPhone = async (companyName) => {
-      if (!companyName || !process.env.SERPDEV) return null;
-      const q = /[\u0590-\u05FF]/.test(companyName) ? `${companyName} טלפון` : `${companyName} phone`;
-      const results = await serperSearch(q, 5);
-      const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
-      const match = texts.match(/(?:\+972[\s-]?|0)(?:[\s-]?\d){8,10}/);
-      return match ? match[0].replace(/[^\d+]/g, '') : null;
-    };
-
-    const searchEmail = async (companyName) => {
-      if (!companyName || !process.env.SERPDEV) return null;
-      const q = /[\u0590-\u05FF]/.test(companyName) ? `${companyName} אימייל` : `${companyName} email`;
-      const results = await serperSearch(q, 5);
-      const texts = (results || []).map((r) => `${r.title || ''} ${r.snippet || ''}`).join('\n');
-      const emails = texts.match(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g) || [];
-      const skip = /noreply|no-reply|example\.com/i;
-      return emails.find((e) => !skip.test(e)) || null;
-    };
-
     const suggestions = (
       await Promise.all(
         parsed.map(async (item) => {
@@ -803,62 +556,66 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
             }
           }
 
-        
+            // ── Serper: fetch website candidates + snippet context in one shot ────
+            let websiteCandidates = [];
+            let contextText = '';
             try {
-              item.linkedinUrl = await searchLinkedinUrl(companyName);
+              ({ websiteCandidates, contextText } = await fetchSearchContext(companyName));
+              if (websiteCandidates.length) {
+                console.log(`[geminiSearch] "${companyName}" website candidates →`, websiteCandidates.join(', '));
+              }
+            } catch { /* non-fatal */ }
+
+            // ── Gemini extraction from injected context (no autonomous search tool) ─
+            let g = {};
+            try {
+              g = await searchAllFieldsWithGemini(companyName, websiteCandidates, contextText);
+              console.log(`[geminiSearch] "${companyName}" →`, JSON.stringify(g));
+              if (g.linkedinUrl)         item.linkedinUrl         = g.linkedinUrl;
+              if (g.foundedYear)         item.foundedYear          = String(g.foundedYear);
+              if (g.address)             item.address              = g.address;
+              if (g.location)            item.location             = g.location;
+              if (g.website)             item.website              = g.website;
+              if (g.snippet)             item.snippet              = g.snippet;
+              if (g.registrationNumber)  item.registrationNumber   = String(g.registrationNumber);
+              if (g.phone  && !String(item.phone  || '').trim()) item.phone = g.phone;
+              if (g.email  && !String(item.email  || '').trim()) item.email = g.email;
             } catch (err) {
-              console.warn('[organization-enrich] linkedin search failed', err?.message || err);
+              console.warn('[organization-enrich] Gemini web search failed:', err?.message || err);
             }
 
-           
-              try {
-                item.foundedYear = await searchFoundedYear(companyName);
-              } catch (err) {
-                console.warn('[organization-enrich] founded year search failed', err?.message || err);
-              }
-            
-
+            // Serper fallbacks for any field Gemini did not return
+            if (!g.linkedinUrl) {
+              try { item.linkedinUrl = await searchLinkedinUrl(companyName); } catch (err) { console.warn('[organization-enrich] linkedin search failed', err?.message || err); }
+            }
+            if (!g.foundedYear) {
+              try { item.foundedYear = await searchFoundedYear(companyName); } catch (err) { console.warn('[organization-enrich] founded year search failed', err?.message || err); }
+            }
+            if (!g.address || !g.location) {
               try {
                 const { address, location } = await searchAddress(companyName);
-               item.address = address;
-                item.location = location;
-              } catch (err) {
-                console.warn('[organization-enrich] address search failed', err?.message || err);
+                if (!g.address)  item.address  = address;
+                if (!g.location) item.location = location;
+              } catch (err) { console.warn('[organization-enrich] address search failed', err?.message || err); }
+            }
+            if (!g.website) {
+              if (websiteCandidates.length) item.website = websiteCandidates[0];
+              else {
+                try { item.website = await searchWebsiteUrl(companyName); } catch (err) { console.warn('[organization-enrich] website search failed', err?.message || err); }
               }
-
-
-           
-            
-
-          // Fill website from pre-fetched companyData if LLM/PDL didn't return one
-          try {
-            item.website = await searchWebsiteUrl(companyName);
-          } catch (err) {
-          console.warn('[organization-enrich] website search failed', err?.message || err);
-          }
-
-          try {
-            item.snippet = await searchSnippet(companyName);
-          } catch (err) {
-            console.warn('[organization-enrich] snippet search failed', err?.message || err);
-          }
-
-          if (!String(item.phone || '').trim()) {
-            try {
-              item.phone = await searchPhone(companyName);
-            } catch (err) {
-              console.warn('[organization-enrich] phone search failed', err?.message || err);
             }
-          }
-
-          if (!String(item.email || '').trim()) {
-            try {
-              item.email = await searchEmail(companyName);
-            } catch (err) {
-              console.warn('[organization-enrich] email search failed', err?.message || err);
+            if (!g.snippet) {
+              try { item.snippet = await searchSnippet(companyName); } catch (err) { console.warn('[organization-enrich] snippet search failed', err?.message || err); }
             }
-          }
-          
+            if (!g.phone && !String(item.phone || '').trim()) {
+              try { item.phone = await searchPhone(companyName); } catch (err) { console.warn('[organization-enrich] phone search failed', err?.message || err); }
+            }
+            if (!g.email && !String(item.email || '').trim()) {
+              try { item.email = await searchEmail(companyName); } catch (err) { console.warn('[organization-enrich] email search failed', err?.message || err); }
+            }
+            if (!g.registrationNumber && !String(item.registrationNumber || '').trim()) {
+              try { item.registrationNumber = await searchRegistrationNumber(companyName); } catch (err) { console.warn('[organization-enrich] registration number search failed', err?.message || err); }
+            }
 
             const bucket = normalizeEmployeeCount(item.employeeCount);
             if (bucket) item.employeeCount = bucket;
@@ -873,7 +630,28 @@ Do NOT include phone numbers, fax, hours, or any extra text.`;
                 logo = '';
               }
             
-          //after finish all those steps. add one more step for verification. dont change any code. just add one move verification check
+          // ── Gemini website verification (post-enrichment gate) ─────────────
+          const detectedWebsite = item.website || null;
+          if (detectedWebsite) {
+            const verification = await verifyOrganizationWebsite({
+              companyNameCv: companyName,
+              extractedUrl: detectedWebsite,
+            });
+            console.log(`[orgVerify] "${companyName}" → is_match=${verification.isMatch} | ${verification.reason}`);
+
+            if (!verification.isMatch) {
+              item.website    = null;
+              item.linkedinUrl = null;
+              item.phone      = null;
+              item.email      = null;
+              item.dataConfidence = 'אין התאמה';
+              logo = '';
+              console.warn(`[orgVerify] "${companyName}" – mismatch. Nullified web/contact fields.`);
+            } else {
+              item.dataConfidence = 'לביקורת';
+            }
+          }
+          // ──────────────────────────────────────────────────────────────────
 
           const enriched = { ...item , logo : logo || item.logo };
 
@@ -934,6 +712,225 @@ const rebuildEmbedding = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/organizations/:id/primary-client
+ * Returns the primary linked client (isPrimary=true, or first link) for this organization.
+ * Used by the NewJob form so admin users can resolve clientId after selecting an org.
+ */
+const getPrimaryClient = async (req, res) => {
+  try {
+    const orgId = String(req.params.id || '').trim();
+    if (!orgId) return res.status(400).json({ message: 'org id required' });
+
+    // Prefer the isPrimary link; fall back to the first created link.
+    const link = await ClientOrganizationLink.findOne({
+      where: { organizationId: orgId },
+      include: [{ model: Client, as: 'client', attributes: ['id', 'name', 'displayName'] }],
+      order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
+    });
+
+    if (!link || !link.client) {
+      return res.json({ clientId: null, clientName: null });
+    }
+
+    const c = link.client;
+    return res.json({
+      clientId: String(c.id),
+      clientName: String(c.displayName || c.name || ''),
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Failed to get primary client' });
+  }
+};
+
+const listJobs = async (req, res) => {
+  try {
+    const org = await organizationService.getById(req.params.id);
+    if (!org) return res.status(404).json({ message: 'Organization not found' });
+    const plainOrg = org.get ? org.get({ plain: true }) : org;
+    const clientId = req.query?.clientId ? String(req.query.clientId).trim() : null;
+
+    const labels = [
+      plainOrg.name,
+      plainOrg.nameEn,
+      plainOrg.legalName,
+      ...(Array.isArray(plainOrg.aliases) ? plainOrg.aliases : []),
+    ]
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+
+    const where = { [Op.or]: [] };
+    if (plainOrg.id) where[Op.or].push({ organizationId: plainOrg.id });
+    for (const label of labels) {
+      where[Op.or].push({ client: { [Op.iLike]: label } });
+    }
+    if (!where[Op.or].length) return res.json([]);
+    if (clientId) where.clientId = clientId;
+
+    const jobs = await Job.findAll({
+      where,
+      attributes: ['id', 'title', 'status', 'openDate', 'client', 'clientId', 'organizationId', 'postingCode', 'field', 'role', 'updatedAt'],
+      order: [['openDate', 'DESC']],
+      limit: 200,
+    });
+
+    // Resolve + persist organizationId when jobs match by name only
+    const { enrichJobsWithOrganizationIds } = require('../services/jobOrganizationResolveService');
+    await enrichJobsWithOrganizationIds(jobs);
+
+    res.json(jobs.map((j) => (j.get ? j.get({ plain: true }) : j)));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list jobs' });
+  }
+};
+
+/**
+ * Insights for one organization, optionally scoped to a tenant client
+ * (jobs + referrals for that org under the current client).
+ * GET /api/organizations/:id/insights?clientId=
+ */
+const getInsights = async (req, res) => {
+  try {
+    const { sequelize } = require('../config/db');
+    const NotificationMessage = require('../models/NotificationMessage');
+
+    const org = await organizationService.getById(req.params.id);
+    if (!org) return res.status(404).json({ message: 'Organization not found' });
+
+    const plainOrg = org.get ? org.get({ plain: true }) : org;
+    const clientId = req.query?.clientId ? String(req.query.clientId).trim() : null;
+
+    const orgLabels = new Set(
+      [
+        plainOrg.name,
+        plainOrg.nameEn,
+        plainOrg.legalName,
+        ...(Array.isArray(plainOrg.aliases) ? plainOrg.aliases : []),
+      ]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean),
+    );
+    const labelList = [...orgLabels];
+
+    // ── Jobs for this org (optionally under current client) ────────────────
+    const jobOr = [];
+    if (plainOrg.id) jobOr.push({ organizationId: plainOrg.id });
+    for (const label of labelList) {
+      jobOr.push({ client: { [Op.iLike]: label } });
+    }
+    const jobWhere = jobOr.length ? { [Op.or]: jobOr } : { id: null };
+    if (clientId) jobWhere.clientId = clientId;
+
+    const jobRows = await Job.findAll({
+      where: jobWhere,
+      attributes: ['id', 'status'],
+      raw: true,
+    });
+    const jobCounts = { open: 0, frozen: 0, closed: 0 };
+    const jobIds = [];
+    for (const j of jobRows) {
+      jobIds.push(String(j.id));
+      const s = String(j.status || '').toLowerCase();
+      if (s === 'פתוחה' || s === 'open') jobCounts.open++;
+      else if (s === 'מוקפאת' || s === 'frozen' || s === 'paused') jobCounts.frozen++;
+      else if (s === 'סגורה' || s === 'closed') jobCounts.closed++;
+    }
+
+    // ── Referrals: messages for org jobs or org name as clientName ────────
+    const now = new Date();
+    const weekStart = new Date(now); weekStart.setDate(now.getDate() - 7); weekStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+
+    let referralsWeek = 0;
+    let referralsMonth = 0;
+    let referralsYear = 0;
+    let hiredCount = 0;
+
+    const matchOr = [];
+    for (const l of labelList) {
+      matchOr.push(sequelize.literal(`metadata->'taskPayload'->>'clientName' ILIKE ${sequelize.escape(l)}`));
+    }
+    for (const jid of jobIds.slice(0, 200)) {
+      matchOr.push(sequelize.literal(`metadata->'taskPayload'->>'jobId' = ${sequelize.escape(jid)}`));
+    }
+
+    if (matchOr.length) {
+      try {
+        const messages = await NotificationMessage.findAll({
+          where: {
+            createdAt: { [Op.gte]: yearStart },
+            [Op.or]: matchOr,
+          },
+          attributes: ['createdAt', 'status', 'metadata'],
+          raw: true,
+        });
+
+        for (const msg of messages) {
+          const d = new Date(msg.createdAt);
+          if (d >= weekStart) referralsWeek++;
+          if (d >= monthStart) referralsMonth++;
+          referralsYear++;
+        }
+
+        const hiredAll = await NotificationMessage.findAll({
+          where: {
+            [Op.and]: [
+              { [Op.or]: matchOr },
+              {
+                [Op.or]: [
+                  { status: { [Op.iLike]: '%hired%' } },
+                  sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%hired%'`),
+                  sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%התקבל%'`),
+                ],
+              },
+            ],
+          },
+          attributes: ['id'],
+          raw: true,
+        });
+        hiredCount = hiredAll.length;
+      } catch (refErr) {
+        console.warn('[organizationInsights] referrals query failed:', refErr?.message || refErr);
+      }
+    }
+
+    // Relationship start = when this client linked the org (fallback: org createdAt)
+    let relationshipStartedAt = plainOrg.createdAt || null;
+    if (clientId && plainOrg.id) {
+      try {
+        const link = await ClientOrganizationLink.findOne({
+          where: { clientId, organizationId: plainOrg.id },
+          order: [['created_at', 'ASC']],
+        });
+        if (link?.createdAt) relationshipStartedAt = link.createdAt;
+      } catch (linkErr) {
+        console.warn('[organizationInsights] link lookup failed:', linkErr?.message || linkErr);
+      }
+    }
+
+    // Best-effort: stamp organizationId onto matched jobs for future queries
+    if (plainOrg.id && jobIds.length) {
+      Job.update(
+        { organizationId: plainOrg.id },
+        { where: { id: { [Op.in]: jobIds }, organizationId: null } },
+      ).catch(() => {});
+    }
+
+    res.json({
+      openJobs: jobCounts.open,
+      frozenJobs: jobCounts.frozen,
+      closedJobs: jobCounts.closed,
+      referrals: { week: referralsWeek, month: referralsMonth, year: referralsYear },
+      hiredCount,
+      relationshipStartedAt,
+    });
+  } catch (err) {
+    console.error('[organizationInsights]', err?.message || err);
+    res.status(500).json({ message: err?.message || 'Failed to load insights' });
+  }
+};
+
 module.exports = {
   list,
   globalLookup,
@@ -944,8 +941,11 @@ module.exports = {
   getHistory,
   enrich,
   listCandidates,
+  listJobs,
+  getInsights,
   createLogoUploadUrl,
   rebuildEmbeddings,
   rebuildEmbedding,
+  getPrimaryClient,
 };
 

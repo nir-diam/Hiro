@@ -1183,6 +1183,11 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
                 JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
                 WHERE LOWER(TRIM(o."mainField")) = LOWER(TRIM($${n2}))
                    OR o."secondaryField" ILIKE '%' || $${n2} || '%'
+                   OR EXISTS (
+                     SELECT 1
+                     FROM unnest(COALESCE(o."mainField2", ARRAY[]::text[])) AS mf2(val)
+                     WHERE LOWER(TRIM(mf2.val)) = LOWER(TRIM($${n2}))
+                   )
               )
             )`;
           });
@@ -1204,8 +1209,17 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
               OR EXISTS (
                 SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
                 JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
-                WHERE o."subField" ILIKE $${nf3}
-                   OR o."secondaryField" ILIKE $${nf3}
+                WHERE o."secondaryField" ILIKE $${nf3}
+                   OR EXISTS (
+                     SELECT 1
+                     FROM unnest(COALESCE(o."subField", ARRAY[]::text[])) AS sf(val)
+                     WHERE sf.val ILIKE $${nf3}
+                   )
+                   OR EXISTS (
+                     SELECT 1
+                     FROM unnest(COALESCE(o."mainField2", ARRAY[]::text[])) AS mf2(val)
+                     WHERE mf2.val ILIKE $${nf3}
+                   )
               )
             )`;
           });

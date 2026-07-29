@@ -368,6 +368,24 @@ const listJobCompanyImages = async (req, res) => {
   }
 };
 
+const listJobImages = async (req, res) => {
+  try {
+    const images = await jobPublicationService.listJobImages(req.params.id);
+    res.json(images);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to load job images' });
+  }
+};
+
+const deleteJobImage = async (req, res) => {
+  try {
+    await jobPublicationService.deleteJobImage(req.params.imageId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to delete job image' });
+  }
+};
+
 module.exports = {
   getPublicLanding,
   getSharePreview,
@@ -394,4 +412,6 @@ module.exports = {
   generateHeroImage,
   listCompanyCreatedImages,
   listJobCompanyImages,
+  listJobImages,
+  deleteJobImage,
 };

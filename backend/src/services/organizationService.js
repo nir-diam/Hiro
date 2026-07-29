@@ -1,5 +1,6 @@
 const { Op } = require('sequelize');
 const Organization = require('../models/Organization');
+const OrganizationLocation = require('../models/OrganizationLocation');
 const OrganizationChangeHistory = require('../models/OrganizationChangeHistory');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const { sendChat, resolveGeminiApiKey } = require('./geminiService');
@@ -115,11 +116,70 @@ const parseInclusiveDateTo = (value) => {
   return new Date(trimmed);
 };
 
+const ADDITIONAL_LOCATIONS_INCLUDE = {
+  model: OrganizationLocation,
+  as: 'additionalLocations',
+  required: false,
+  separate: true,
+  order: [['sortIndex', 'ASC']],
+};
+
+const normalizeAdditionalLocationsInput = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, index) => {
+      if (!item || typeof item !== 'object') return null;
+      const description = String(item.description || '').trim();
+      const location = String(item.location || '').trim();
+      const address = String(item.address || '').trim();
+      if (!description && !location && !address) return null;
+      return {
+        description,
+        location,
+        address: address || null,
+        sortIndex: Number.isFinite(Number(item.sortIndex)) ? Number(item.sortIndex) : index,
+      };
+    })
+    .filter(Boolean);
+};
+
+const replaceAdditionalLocations = async (organizationId, rawLocations, transaction) => {
+  const rows = normalizeAdditionalLocationsInput(rawLocations);
+  await OrganizationLocation.destroy({ where: { organizationId }, transaction });
+  if (!rows.length) return [];
+  const created = await OrganizationLocation.bulkCreate(
+    rows.map((row, index) => ({
+      organizationId,
+      description: row.description,
+      location: row.location,
+      address: row.address,
+      sortIndex: row.sortIndex ?? index,
+    })),
+    { transaction },
+  );
+  return created;
+};
+
+const attachAdditionalLocations = async (org) => {
+  if (!org) return org;
+  const json = org.toJSON ? org.toJSON() : { ...org.get() };
+  if (Array.isArray(json.additionalLocations)) return json;
+  const rows = await OrganizationLocation.findAll({
+    where: { organizationId: org.id },
+    order: [['sortIndex', 'ASC']],
+  });
+  json.additionalLocations = rows.map((r) => (r.toJSON ? r.toJSON() : r));
+  return json;
+};
+
 const list = async ({
   includeMerged = false,
   page = 1,
   limit = 50,
   search = '',
+  location = '',
+  includeAdditionalLocations = false,
+  mainField = '',
   activityDate,
   activityFrom,
   activityTo,
@@ -134,6 +194,47 @@ const list = async ({
   const searchWhere = organizationSearchWhere(search);
 
   const where = { [Op.and]: [activityWhere, searchWhere] };
+
+  if (location) {
+    const terms = location.split(',').map(s => s.trim()).filter(Boolean);
+    if (terms.length > 0) {
+      const primaryMatches = terms.map((t) => ({ location: { [Op.iLike]: `%${t}%` } }));
+      if (includeAdditionalLocations) {
+        const sequelize = Organization.sequelize;
+        const additionalMatches = terms.map((t) =>
+          sequelize.literal(
+            `EXISTS (
+              SELECT 1 FROM organization_locations ol
+              WHERE ol.organization_id = "Organization"."id"
+                AND ol.location ILIKE ${sequelize.escape(`%${t}%`)}
+            )`,
+          ),
+        );
+        where[Op.and].push({ [Op.or]: [...primaryMatches, ...additionalMatches] });
+      } else {
+        where[Op.and].push({ [Op.or]: primaryMatches });
+      }
+    }
+  }
+
+  if (mainField) {
+    const fields = mainField.split(',').map(s => s.trim()).filter(Boolean);
+    if (fields.length > 0) {
+      // Match against mainField OR any element inside the mainField2 text[] column.
+      // Op.contains generates ::VARCHAR(255)[] which is incompatible with text[],
+      // so we use a raw literal with an explicit ::text[] cast instead.
+      where[Op.and].push({
+        [Op.or]: fields.map(f => ({
+          [Op.or]: [
+            { mainField: f },
+            Organization.sequelize.literal(
+              `"Organization"."mainField2" @> ARRAY[${Organization.sequelize.escape(f)}]::text[]`
+            ),
+          ],
+        })),
+      });
+    }
+  }
 
   if (activityDate || activityFrom || activityTo) {
     const rangeStart = parseInclusiveDateFrom(activityFrom || activityDate);
@@ -157,9 +258,11 @@ const list = async ({
   const { count, rows: orgs } = await Organization.findAndCountAll({
     attributes: API_ATTRIBUTES,
     where,
+    include: [ADDITIONAL_LOCATIONS_INCLUDE],
     order: [['name', 'ASC']],
     limit,
     offset,
+    distinct: true,
   });
 
   const links = await CandidateOrganization.findAll({
@@ -179,6 +282,9 @@ const list = async ({
     const json = o.toJSON ? o.toJSON() : { ...o.get() };
     const orgKey = o.id != null ? String(o.id).toLowerCase() : null;
     json.candidateCount = orgKey && countByOrg[orgKey] ? countByOrg[orgKey].size : 0;
+    json.additionalLocations = Array.isArray(json.additionalLocations)
+      ? json.additionalLocations
+      : [];
     return json;
   });
 
@@ -300,7 +406,10 @@ const globalLookup = async (query, { limit = 6 } = {}) => {
 };
 
 const getById = async (id) => {
-  const org = await Organization.findByPk(id, { attributes: API_ATTRIBUTES });
+  const org = await Organization.findByPk(id, {
+    attributes: API_ATTRIBUTES,
+    include: [ADDITIONAL_LOCATIONS_INCLUDE],
+  });
   if (!org) {
     const err = new Error('Organization not found');
     err.status = 404;
@@ -380,6 +489,8 @@ const sanitizePayload = (payload) => {
     }
   }
   delete out.embedding;
+  delete out.additionalLocations;
+  delete out.candidateCount;
   return out;
 };
 
@@ -458,6 +569,7 @@ const recordOrganizationHistory = async ({
 };
 
 const create = async (payload, options = {}) => {
+  const additionalLocationsInput = payload?.additionalLocations;
   const clean = sanitizePayload(payload);
   const existing = await findByAnyName(clean);
   if (existing) {
@@ -475,7 +587,14 @@ const create = async (payload, options = {}) => {
   for (const mf of clean.mainField2 || []) {
     await ensureIndustryPicklistEntries(mf, []);
   }
-  const org = await Organization.create(clean);
+  const { sequelize } = require('../config/db');
+  const org = await sequelize.transaction(async (transaction) => {
+    const created = await Organization.create(clean, { transaction });
+    if (additionalLocationsInput !== undefined) {
+      await replaceAdditionalLocations(created.id, additionalLocationsInput, transaction);
+    }
+    return created;
+  });
   fireAndForget(recordOrganizationHistory({
     organizationId: org.id,
     action: 'create',
@@ -489,22 +608,29 @@ const create = async (payload, options = {}) => {
   } catch (err) {
     console.error('[organizationService] promoteClientsForNewOrganization failed', err?.message || err);
   }
-  return org;
+  return attachAdditionalLocations(org);
 };
 
 const update = async (id, payload, options = {}) => {
   const org = await getById(id);
   const beforeState = clonePlain(org);
+  const additionalLocationsInput = payload?.additionalLocations;
   const clean = sanitizePayload(payload);
   await ensureIndustryPicklistEntries(clean.mainField || org.mainField, clean.subField || org.subField);
   const extraMains = clean.mainField2 ?? org.mainField2 ?? [];
   for (const mf of extraMains) {
     await ensureIndustryPicklistEntries(mf, []);
   }
-  await org.update(clean);
-  await org.reload();
+  const { sequelize } = require('../config/db');
+  await sequelize.transaction(async (transaction) => {
+    await org.update(clean, { transaction });
+    if (additionalLocationsInput !== undefined) {
+      await replaceAdditionalLocations(org.id, additionalLocationsInput, transaction);
+    }
+  });
+  await org.reload({ include: [ADDITIONAL_LOCATIONS_INCLUDE] });
   const afterState = clonePlain(org);
-  if (hasMeaningfulOrgDiff(beforeState, afterState)) {
+  if (hasMeaningfulOrgDiff(beforeState, afterState) || additionalLocationsInput !== undefined) {
     fireAndForget(recordOrganizationHistory({
       organizationId: org.id,
       action: 'update',

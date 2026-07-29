@@ -179,6 +179,11 @@ interface LocationSelectorProps {
     summarizeAsCityNames?: boolean;
     /** Tenant brand color for public board styling */
     accentColor?: string;
+    /** Show "חפש גם בכתובות נוספות" in the region modal (Admin companies filter). */
+    showSearchAdditionalOption?: boolean;
+    /** When true, parent should also match additional org locations (default false = primary only). */
+    searchAdditionalLocations?: boolean;
+    onSearchAdditionalLocationsChange?: (value: boolean) => void;
 }
 
 const LocationSelector: React.FC<LocationSelectorProps> = ({
@@ -188,6 +193,9 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
     className = '',
     summarizeAsCityNames = false,
     accentColor,
+    showSearchAdditionalOption = false,
+    searchAdditionalLocations = false,
+    onSearchAdditionalLocationsChange,
 }) => {
     const [isOpen, setIsOpen] = useState(false);
     const [isSummaryOpen, setIsSummaryOpen] = useState(false);
@@ -674,7 +682,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                     <div className="flex-1 overflow-y-auto p-0 bg-white">
                         {activeTab === 'regions' && (
                             <>
-                                <div className="p-3 sticky top-0 bg-white z-10 border-b border-border-subtle">
+                                <div className="p-3 sticky top-0 bg-white z-10 border-b border-border-subtle space-y-2">
                                     <div className="relative">
                                         <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                                         <input 
@@ -685,6 +693,77 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                             className={`w-full bg-bg-subtle/50 border border-border-default rounded-lg py-2 pl-3 pr-9 text-sm outline-none ${brandOrPrimary(accentColor, 'focus:ring-1 focus:ring-[var(--brand-accent)]', 'focus:ring-1 focus:ring-primary-500')}`}
                                         />
                                     </div>
+                                    {showSearchAdditionalOption && (
+                                        <label className="flex items-center gap-2 cursor-pointer select-none px-0.5">
+                                            <input
+                                                type="checkbox"
+                                                checked={!!searchAdditionalLocations}
+                                                onChange={(e) => onSearchAdditionalLocationsChange?.(e.target.checked)}
+                                                className={`w-4 h-4 rounded border-gray-300 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)] focus:ring-[var(--brand-accent)]', 'text-primary-600 focus:ring-primary-500')}`}
+                                            />
+                                            <span className="text-xs text-text-muted">חפש גם בכתובות נוספות</span>
+                                        </label>
+                                    )}
+                                    {/* Select-all row */}
+                                    {!allCitiesLoading && filteredHierarchy.length > 0 && (() => {
+                                        const allFullySelected = filteredHierarchy.every((g) =>
+                                            isRegionFullySelected(g.region, g.cities),
+                                        );
+                                        const anySelected = filteredHierarchy.some((g) =>
+                                            isRegionFullySelected(g.region, g.cities) || isRegionPartiallySelected(g.region, g.cities),
+                                        );
+                                        const handleSelectAll = () => {
+                                            if (allFullySelected) {
+                                                // Deselect all visible
+                                                const visibleRegions = new Set(filteredHierarchy.map((g) => g.region));
+                                                const visibleCities = new Set(filteredHierarchy.flatMap((g) => g.cities));
+                                                onChange(
+                                                    selectedLocations.filter(
+                                                        (l) =>
+                                                            !(l.type === 'region' && visibleRegions.has(l.value)) &&
+                                                            !(l.type === 'city' && visibleCities.has(l.value)),
+                                                    ),
+                                                );
+                                            } else {
+                                                // Select all visible regions (remove individual city dupes first)
+                                                const visibleRegions = filteredHierarchy.map((g) => g.region);
+                                                const visibleCities = new Set(filteredHierarchy.flatMap((g) => g.cities));
+                                                const base = selectedLocations.filter(
+                                                    (l) =>
+                                                        !(l.type === 'region' && visibleRegions.includes(l.value)) &&
+                                                        !(l.type === 'city' && visibleCities.has(l.value)),
+                                                );
+                                                onChange([
+                                                    ...base,
+                                                    ...visibleRegions.map((r) => ({ type: 'region' as const, value: r })),
+                                                ]);
+                                            }
+                                        };
+                                        return (
+                                            <button
+                                                type="button"
+                                                onClick={handleSelectAll}
+                                                className="flex items-center gap-2 w-full px-1 py-0.5 rounded-lg hover:bg-bg-hover transition-colors text-right"
+                                            >
+                                                <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 transition-colors ${
+                                                    allFullySelected
+                                                        ? brandOrPrimary(accentColor, 'bg-[var(--brand-accent)] border-[var(--brand-accent)]', 'bg-primary-600 border-primary-600')
+                                                        : anySelected
+                                                          ? brandOrPrimary(accentColor, 'bg-[var(--brand-accent-soft)] border-[var(--brand-accent)]', 'bg-primary-100 border-primary-500')
+                                                          : 'bg-white border-border-default'
+                                                }`}>
+                                                    {allFullySelected && <CheckIcon className="w-3 h-3 text-white" />}
+                                                    {!allFullySelected && anySelected && (
+                                                        <MinusIcon className={`w-3 h-3 ${brandOrPrimary(accentColor, 'text-[var(--brand-accent)]', 'text-primary-600')}`} />
+                                                    )}
+                                                </div>
+                                                <span className="text-xs font-semibold text-text-muted">
+                                                    {allFullySelected ? 'בטל בחירת כל האזורים' : 'בחר את כל האזורים'}
+                                                    {searchTerm && ` (${filteredHierarchy.length})`}
+                                                </span>
+                                            </button>
+                                        );
+                                    })()}
                                 </div>
                                 <AreaCityGroupsPanel
                                     groups={filteredHierarchy}

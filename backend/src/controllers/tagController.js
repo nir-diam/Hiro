@@ -541,13 +541,10 @@ const listPending = async (req, res) => {
       return plain;
     });
 
-    const manualPendingWhere = aiQueuedTagIds.length
-      ? { status: 'pending', id: { [Op.notIn]: aiQueuedTagIds } }
-      : { status: 'pending' };
-
+    // Stats always reflect all pending tags (regardless of AI queue status)
     const [totalPending, pendingUsageSum] = await Promise.all([
-      Tag.count({ where: manualPendingWhere }),
-      Tag.sum('usageCount', { where: manualPendingWhere }).then((v) => Number(v) || 0),
+      Tag.count({ where: { status: 'pending' } }),
+      Tag.sum('usageCount', { where: { status: 'pending' } }).then((v) => Number(v) || 0),
     ]);
 
     res.json({
@@ -778,12 +775,22 @@ const putCorrectionAgentSettings = async (req, res) => {
 const listAiDecisions = async (req, res) => {
   try {
     const page = Number(req.query.page) || 1;
-    const limit = Number(req.query.limit) || 50;
+    const limit = Number(req.query.limit) || 25;
     const decision = req.query.decision || 'all';
     const date = req.query.date || '';
     const reviewStatus = req.query.reviewStatus || 'all';
     const reviewerAction = req.query.reviewerAction || '';
-    const listOpts = { page, limit, decision, date, reviewStatus, reviewerAction };
+    const search = req.query.search || '';
+    const type = req.query.type || 'all';
+    const hesitation = req.query.hesitation
+      ? req.query.hesitation.split(',').filter(Boolean)
+      : 'all';
+    const sortOrder = req.query.sortOrder === 'asc' ? 'asc' : 'desc';
+    const statusBuckets = req.query.statusBuckets
+      ? req.query.statusBuckets.split(',').filter(Boolean)
+      : [];
+    const approvalStatus = req.query.approvalStatus || 'all';
+    const listOpts = { page, limit, decision, date, reviewStatus, reviewerAction, search, type, hesitation, sortOrder, statusBuckets, approvalStatus };
 
     let payload = await tagCorrectionAgentService.listDecisions(listOpts);
     let backfill = null;
@@ -899,6 +906,18 @@ const rebuildEmbedding = async (req, res) => {
   }
 };
 
+const approveAiDecision = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const status = req.body?.status || 'approved';
+    const result = await tagCorrectionAgentService.setApprovalStatus(id, status);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.approveAiDecision]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to update approval status' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -921,5 +940,6 @@ module.exports = {
   getAiDecisionOccurrences,
   backfillAiDecisions,
   backfillAutoMerge,
+  approveAiDecision,
 };
 

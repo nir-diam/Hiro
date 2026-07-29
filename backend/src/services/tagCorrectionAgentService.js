@@ -419,13 +419,20 @@ const schedulePendingIfNeeded = (pendingTagId, contextSample = '', options = {})
 
 const listDecisions = async ({
   page = 1,
-  limit = 50,
+  limit = 25,
   decision = 'all',
   date = '',
   reviewStatus = 'pending_review',
   reviewerAction = '',
+  search = '',
+  type = 'all',
+  hesitation = 'all',
+  sortOrder = 'desc',
+  statusBuckets = [],
+  approvalStatus = 'all',
 } = {}) => {
   const where = {};
+
   if (reviewStatus && reviewStatus !== 'all') {
     where.reviewStatus = reviewStatus;
   }
@@ -441,10 +448,52 @@ const listDecisions = async ({
       [Op.lt]: new Date(`${date}T23:59:59.999Z`),
     };
   }
+  if (search && search.trim()) {
+    where.originalTerm = { [Op.iLike]: `%${search.trim()}%` };
+  }
+  if (type && type !== 'all') {
+    const dbTypes = type === 'education' ? ['degree', 'education'] : [type];
+    where.detectedType = { [Op.in]: dbTypes };
+  }
+  if (hesitation && hesitation !== 'all') {
+    const hGroups = Array.isArray(hesitation) ? hesitation : [hesitation];
+    const hConds = [];
+    if (hGroups.includes('low')) hConds.push({ hesitationLevel: { [Op.lt]: 31 }, [Op.and]: { hesitationLevel: { [Op.not]: null } } });
+    if (hGroups.includes('medium')) hConds.push({ hesitationLevel: { [Op.gte]: 31, [Op.lt]: 61 } });
+    if (hGroups.includes('high')) hConds.push({ hesitationLevel: { [Op.gte]: 61 } });
+    if (hConds.length > 0) where[Op.or] = hConds;
+  }
+  // Map status-bucket multi-filter to DB conditions
+  const buckets = Array.isArray(statusBuckets) ? statusBuckets.filter((b) => b && b !== 'all') : [];
+  if (buckets.length > 0) {
+    const bucketConds = [];
+    if (buckets.includes('pending')) bucketConds.push({ reviewStatus: 'pending_review' });
+    if (buckets.includes('approved')) bucketConds.push({ reviewStatus: 'approved' });
+    if (buckets.includes('manual')) bucketConds.push({ reviewStatus: 'manual_queue' });
+    if (buckets.includes('delete')) bucketConds.push({ reviewerAction: { [Op.in]: ['blacklist', 'delete'] } });
+    if (buckets.includes('changed')) bucketConds.push({
+      reviewStatus: 'overridden',
+      reviewerAction: { [Op.notIn]: ['blacklist', 'delete'] },
+    });
+    if (bucketConds.length > 0) {
+      // Merge OR into existing OR (for hesitation) if both present
+      if (where[Op.or]) {
+        where[Op.and] = [{ [Op.or]: where[Op.or] }, { [Op.or]: bucketConds }];
+        delete where[Op.or];
+      } else {
+        where[Op.or] = bucketConds;
+      }
+    }
+  }
 
-  const safeLimit = Math.min(100, Math.max(1, Number(limit) || 50));
+  if (approvalStatus && approvalStatus !== 'all') {
+    where.manualApprovalStatus = approvalStatus;
+  }
+
+  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 25));
   const safePage = Math.max(1, Number(page) || 1);
   const offset = (safePage - 1) * safeLimit;
+  const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
 
   const { rows, count } = await TagAiDecision.findAndCountAll({
     where,
@@ -465,7 +514,7 @@ const listDecisions = async ({
         ],
       },
     ],
-    order: [['createdAt', 'DESC']],
+    order: [['createdAt', sortDir]],
     limit: safeLimit,
     offset,
   });
@@ -526,6 +575,7 @@ const listDecisions = async ({
         reviewerAction: plain.reviewerAction ?? null,
         hesitationLevel: typeof plain.hesitationLevel === 'number' ? plain.hesitationLevel : null,
         dilemmaReasoning: plain.dilemmaReasoning ?? null,
+        manualApprovalStatus: plain.manualApprovalStatus ?? 'pending',
       };
     }),
     total: count,
@@ -643,6 +693,13 @@ const backfillAutoMergeDecisions = async (threshold = 30, limit = 200) => {
   return { applied, skipped, total: rows.length, errors };
 };
 
+const setApprovalStatus = async (id, status = 'approved') => {
+  const decision = await TagAiDecision.findByPk(id);
+  if (!decision) throw Object.assign(new Error('Decision not found'), { status: 404 });
+  await decision.update({ manualApprovalStatus: status });
+  return { id, manualApprovalStatus: status };
+};
+
 module.exports = {
   PROMPT_ID,
   parseAgentJson,
@@ -656,4 +713,5 @@ module.exports = {
   backfillPendingWithoutDecisions,
   backfillAutoMergeDecisions,
   resolveOccurrencesTagId,
+  setApprovalStatus,
 };

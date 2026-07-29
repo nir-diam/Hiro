@@ -108,13 +108,33 @@ const buildClientUpdatePayload = (client, payload = {}) => {
   return out;
 };
 
+/**
+ * Defensive helper: if a client's displayName was corrupted by a previous org-sync bug
+ * (detectable by metadata.organizationSyncedAt being set), clear it from the serialised
+ * response so the client's own `name` field is used instead.
+ * This does NOT write back to the DB — run the SQL migration to permanently fix rows:
+ *   UPDATE clients SET display_name = NULL
+ *   WHERE metadata->>'organizationSyncedAt' IS NOT NULL AND display_name IS NOT NULL;
+ */
+const sanitizeClientDisplayName = (client) => {
+  const plain = client && typeof client.get === 'function' ? client.get({ plain: true }) : client;
+  if (!plain) return plain;
+  const meta = plain.metadata;
+  // If this row was synced from an org, and displayName differs from name, it was likely corrupted.
+  if (meta?.organizationSyncedAt && plain.displayName && plain.displayName !== plain.name) {
+    return { ...plain, displayName: null };
+  }
+  return plain;
+};
+
 const list = async (options = {}) => {
   const activeOnly = Boolean(options.activeOnly);
   const q = { order: [['name', 'ASC']] };
   if (activeOnly) {
     q.where = { isActive: true };
   }
-  return Client.findAll(q);
+  const rows = await Client.findAll(q);
+  return rows.map(sanitizeClientDisplayName);
 };
 
 const getById = async (id) => {
@@ -190,7 +210,20 @@ const linkOrganizationForClient = async (clientId, payload = {}) => {
 
 const getByIdWithLinks = async (id) => {
   const client = await getById(id);
-  const links = await clientOrganizationSyncService.listLinksForClient(id);
+  // Use the full linked-orgs query so organizationLinks includes org names
+  const links = await ClientOrganizationLink.findAll({
+    where: { clientId: id },
+    include: [
+      {
+        model: Organization,
+        as: 'organization',
+        required: false,
+        attributes: { exclude: ['embedding'] },
+      },
+      { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: ['id', 'name'] },
+    ],
+    order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
+  });
   const json = client.toJSON ? client.toJSON() : { ...client.get() };
   json.organizationLinks = links.map((l) => (l.toJSON ? l.toJSON() : l));
   return json;
@@ -202,8 +235,8 @@ const listLinkedOrganizationsForClient = async (clientId) => {
   const rows = await ClientOrganizationLink.findAll({
     where: { clientId },
     include: [
-      { model: Organization, as: 'organization', required: false },
-      { model: OrganizationTmp, as: 'organizationTmp', required: false },
+      { model: Organization, as: 'organization', required: false, attributes: { exclude: ['embedding'] } },
+      { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: { exclude: ['embedding'] } },
     ],
     order: [['isPrimary', 'DESC'], ['created_at', 'ASC']],
   });
@@ -235,6 +268,36 @@ const unlinkOrganizationFromClient = async (clientId, linkId, actor) => {
   }
   await row.destroy();
   return true;
+};
+
+const updateOrganizationLinkForClient = async (clientId, linkId, payload, actor) => {
+  assertCanAccessClientOrganizations(actor, clientId);
+  const row = await ClientOrganizationLink.findOne({
+    where: { id: linkId, clientId },
+  });
+  if (!row) {
+    const err = new Error('Organization link not found');
+    err.status = 404;
+    throw err;
+  }
+  const patch = {};
+  if (Object.prototype.hasOwnProperty.call(payload || {}, 'pipelineId')) {
+    const v = payload.pipelineId;
+    patch.pipelineId = v != null && String(v).trim() !== '' ? String(v).trim() : null;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload || {}, 'pipelineStage')) {
+    const v = payload.pipelineStage;
+    patch.pipelineStage = v != null && String(v).trim() !== '' ? String(v).trim() : null;
+  }
+  if (Object.keys(patch).length) {
+    await row.update(patch);
+  }
+  return row.reload({
+    include: [
+      { model: Organization, as: 'organization', required: false, attributes: { exclude: ['embedding'] } },
+      { model: OrganizationTmp, as: 'organizationTmp', required: false, attributes: { exclude: ['embedding'] } },
+    ],
+  });
 };
 
 const update = async (id, payload) => {
@@ -286,6 +349,7 @@ module.exports = {
   linkOrganizationForClient,
   listLinkedOrganizationsForClient,
   unlinkOrganizationFromClient,
+  updateOrganizationLinkForClient,
   assertCanAccessClientOrganizations,
   isPlatformAdmin,
   isClientManager,

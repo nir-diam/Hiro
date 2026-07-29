@@ -53,6 +53,8 @@ router.post('/:id/events', authMiddleware, attachDbUser, candidateEventControlle
 router.put('/:id/events/:eventId', authMiddleware, attachDbUser, candidateEventController.update);
 router.delete('/:id/events/:eventId', authMiddleware, attachDbUser, candidateEventController.remove);
 
+router.patch('/:id/work-experience/:index/organization', candidateController.patchWorkExperienceOrganization);
+
 router.get('/:id', candidateController.get);
 router.post('/', candidateController.create);
 router.put('/:id', candidateController.update);

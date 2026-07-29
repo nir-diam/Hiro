@@ -40,6 +40,7 @@ export type TagAiDecisionDto = {
     reviewerAction?: string | null;
     hesitationLevel?: number | null;
     dilemmaReasoning?: string | null;
+    manualApprovalStatus: 'pending' | 'approved';
 };
 
 export async function fetchTagCorrectionAgentEnabled(): Promise<boolean> {
@@ -83,6 +84,11 @@ export async function fetchTagAiDecisions(params: {
     reviewerAction?: string;
     autoBackfill?: boolean;
     backfillLimit?: number;
+    search?: string;
+    type?: string;
+    hesitation?: string[];
+    statusBuckets?: string[];
+    approvalStatus?: 'all' | 'pending' | 'approved';
 }): Promise<{
     data: TagAiDecisionDto[];
     total: number;
@@ -101,18 +107,25 @@ export async function fetchTagAiDecisions(params: {
         q.set('autoBackfill', '1');
         if (params.backfillLimit) q.set('backfillLimit', String(params.backfillLimit));
     }
+    if (params.search) q.set('search', params.search);
+    if (params.type && params.type !== 'all') q.set('type', params.type);
+    if (params.sortOrder) q.set('sortOrder', params.sortOrder);
+    if (params.hesitation && !params.hesitation.includes('all') && params.hesitation.length > 0) {
+        q.set('hesitation', params.hesitation.join(','));
+    }
+    if (params.statusBuckets && !params.statusBuckets.includes('all') && params.statusBuckets.length > 0) {
+        q.set('statusBuckets', params.statusBuckets.join(','));
+    }
+    if (params.approvalStatus && params.approvalStatus !== 'all') {
+        q.set('approvalStatus', params.approvalStatus);
+    }
     const res = await fetch(`${apiBase()}/api/tags/ai-decisions?${q.toString()}`, {
         headers: authHeaders(),
         cache: 'no-store',
     });
     if (!res.ok) throw new Error(await parseErr(res));
     const body = await res.json();
-    let data = Array.isArray(body?.data) ? body.data : [];
-    if (params.sortOrder === 'asc') {
-        data = [...data].sort(
-            (a, b) => new Date(a.actionDate).getTime() - new Date(b.actionDate).getTime(),
-        );
-    }
+    const data = Array.isArray(body?.data) ? body.data : [];
     return {
         data,
         total: typeof body.total === 'number' ? body.total : data.length,
@@ -120,6 +133,16 @@ export async function fetchTagAiDecisions(params: {
         totalPages: typeof body.totalPages === 'number' ? body.totalPages : 1,
         backfill: body.backfill,
     };
+}
+
+export async function approveTagAiDecision(id: string, status: 'approved' | 'pending' = 'approved'): Promise<{ id: string; manualApprovalStatus: string }> {
+    const res = await fetch(`${apiBase()}/api/tags/ai-decisions/${encodeURIComponent(id)}/approve`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
 }
 
 export async function resolveTagAiDecisions(payload: {

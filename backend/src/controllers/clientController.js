@@ -168,6 +168,26 @@ const unlinkOrganization = async (req, res) => {
   }
 };
 
+/** Update CRM pipeline stage on a client–organization link (tenant kanban). */
+const updateOrganizationLink = async (req, res) => {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    const linkId = String(req.params.linkId || '').trim();
+    if (!clientId || !linkId) {
+      return res.status(400).json({ message: 'client id and link id required' });
+    }
+    const row = await clientService.updateOrganizationLinkForClient(
+      clientId,
+      linkId,
+      req.body || {},
+      req.dbUser,
+    );
+    res.json(row.toJSON ? row.toJSON() : row);
+  } catch (err) {
+    res.status(err.status || 400).json({ message: err.message || 'Update link failed' });
+  }
+};
+
 /** Staff users (User.clientId) for job distribution / notifications — no passwords. */
 const listStaffUsers = async (req, res) => {
   try {
@@ -183,4 +203,203 @@ const listStaffUsers = async (req, res) => {
   }
 };
 
-module.exports = { list, get, create, update, remove, listStaffUsers, linkOrganization, listLinkedOrganizations, unlinkOrganization };
+/**
+ * GET /api/clients/:id/job-companies
+ * Returns distinct company names (job.client field) from jobs that belong to this client.
+ * Used by NewJobView to populate the "שם החברה" dropdown for tenant users.
+ */
+const listJobCompanies = async (req, res) => {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    if (!clientId) return res.status(400).json({ message: 'client id required' });
+
+    const actor = req.dbUser;
+    if (!actor) return res.status(401).json({ message: 'Unauthorized' });
+
+    const { isPlatformAdmin } = clientService;
+    if (!isPlatformAdmin(actor) && String(actor.clientId) !== clientId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+
+    const { sequelize } = require('../config/db');
+    const rows = await sequelize.query(
+      `SELECT DISTINCT "client" AS name
+       FROM jobs
+       WHERE client_id = :clientId
+         AND "client" IS NOT NULL
+         AND "client" <> ''
+       ORDER BY "client"`,
+      { replacements: { clientId }, type: sequelize.QueryTypes.SELECT }
+    );
+
+    const list = Array.isArray(rows) ? rows : [];
+    res.json(list.map((r) => ({ name: String((r && r.name) || '').trim() })).filter((r) => r.name));
+  } catch (err) {
+    res.status(500).json({ message: err.message || 'Failed to list job companies' });
+  }
+};
+
+const getInsights = async (req, res) => {
+  try {
+    const { id: clientId } = req.params;
+    const { sequelize } = require('../config/db');
+    const Job = require('../models/Job');
+    const NotificationMessage = require('../models/NotificationMessage');
+    const Client = require('../models/Client');
+
+    const client = await Client.findByPk(clientId, { attributes: ['id', 'name', 'displayName', 'domain', 'metadata'] });
+    if (!client) return res.status(404).json({ message: 'Client not found' });
+
+    // ── Job counts by status ──────────────────────────────────────────────
+    const jobRows = await Job.findAll({
+      where: { clientId },
+      attributes: ['status'],
+      raw: true,
+    });
+    const jobCounts = { open: 0, frozen: 0, closed: 0 };
+    for (const j of jobRows) {
+      const s = String(j.status || '').toLowerCase();
+      if (s === 'פתוחה' || s === 'open') jobCounts.open++;
+      else if (s === 'מוקפאת' || s === 'frozen' || s === 'paused') jobCounts.frozen++;
+      else if (s === 'סגורה' || s === 'closed') jobCounts.closed++;
+    }
+
+    // ── Referral counts from notification_messages ────────────────────────
+    const plain = client.get ? client.get({ plain: true }) : client;
+    const labels = new Set([plain.name, plain.displayName, plain.domain].filter(Boolean));
+    const meta = plain.metadata || {};
+    if (meta.legalName) labels.add(meta.legalName);
+    if (meta.nameEn) labels.add(meta.nameEn);
+    if (Array.isArray(meta.aliases)) meta.aliases.forEach((a) => labels.add(a));
+    const labelList = [...labels].filter(Boolean);
+
+    const now = new Date();
+    const weekStart = new Date(now); weekStart.setDate(now.getDate() - 7); weekStart.setHours(0, 0, 0, 0);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const yearStart = new Date(now.getFullYear(), 0, 1);
+
+    let referralsWeek = 0, referralsMonth = 0, referralsYear = 0, hiredCount = 0;
+    if (labelList.length) {
+      const messages = await NotificationMessage.findAll({
+        where: {
+          createdAt: { [Op.gte]: yearStart },
+          [Op.or]: labelList.map((l) => sequelize.literal(`metadata->'taskPayload'->>'clientName' ILIKE ${sequelize.escape(l)}`)),
+        },
+        attributes: ['createdAt', 'status', 'metadata'],
+        raw: true,
+      });
+
+      for (const msg of messages) {
+        const d = new Date(msg.createdAt);
+        const wfStatus = msg.metadata?.referralWorkflowStatus || msg.status || '';
+        if (d >= weekStart) referralsWeek++;
+        if (d >= monthStart) referralsMonth++;
+        referralsYear++;
+        if (String(wfStatus).includes('hired') || String(wfStatus).includes('התקבל')) hiredCount++;
+      }
+
+      // Hired count: all time, not just this year
+      const hiredAll = await NotificationMessage.findAll({
+        where: {
+          [Op.and]: [
+            { [Op.or]: labelList.map((l) => sequelize.literal(`metadata->'taskPayload'->>'clientName' ILIKE ${sequelize.escape(l)}`)) },
+            { [Op.or]: [
+              { status: { [Op.iLike]: '%hired%' } },
+              sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%hired%'`),
+              sequelize.literal(`metadata->>'referralWorkflowStatus' ILIKE '%התקבל%'`),
+            ]},
+          ],
+        },
+        attributes: ['id'],
+        raw: true,
+      });
+      hiredCount = hiredAll.length;
+    }
+
+    res.json({
+      openJobs: jobCounts.open,
+      frozenJobs: jobCounts.frozen,
+      closedJobs: jobCounts.closed,
+      referrals: { week: referralsWeek, month: referralsMonth, year: referralsYear },
+      hiredCount,
+    });
+  } catch (err) {
+    console.error('[clientInsights]', err?.message || err);
+    res.status(500).json({ message: err?.message || 'Failed to load insights' });
+  }
+};
+
+/**
+ * Jobs for every organization linked to this client (ClientOrganizationLink),
+ * plus name-matched jobs under the same clientId.
+ * GET /api/clients/:id/linked-jobs
+ */
+const listLinkedJobs = async (req, res) => {
+  try {
+    const clientId = String(req.params.id || '').trim();
+    if (!clientId) return res.status(400).json({ message: 'clientId required' });
+
+    const Job = require('../models/Job');
+    const links = await clientService.listLinkedOrganizationsForClient(clientId);
+
+    const orgIds = [];
+    const labels = new Set();
+    for (const link of links) {
+      const org = link.organization || link.organizationTmp;
+      if (!org) continue;
+      if (org.id) orgIds.push(String(org.id));
+      for (const v of [
+        org.name,
+        org.nameEn,
+        org.legalName,
+        ...(Array.isArray(org.aliases) ? org.aliases : []),
+      ]) {
+        const label = String(v || '').trim();
+        if (label) labels.add(label);
+      }
+    }
+
+    const or = [];
+    if (orgIds.length) or.push({ organizationId: { [Op.in]: orgIds } });
+    for (const label of labels) {
+      or.push({ client: { [Op.iLike]: label } });
+    }
+
+    const where = or.length
+      ? { clientId, [Op.or]: or }
+      : { clientId };
+
+    const jobs = await Job.findAll({
+      where,
+      attributes: [
+        'id', 'title', 'status', 'openDate', 'client', 'clientId',
+        'organizationId', 'postingCode', 'field', 'role', 'updatedAt', 'associatedCandidates',
+      ],
+      order: [['openDate', 'DESC']],
+      limit: 500,
+    });
+
+    const { enrichJobsWithOrganizationIds } = require('../services/jobOrganizationResolveService');
+    await enrichJobsWithOrganizationIds(jobs);
+
+    res.json(jobs.map((j) => (j.get ? j.get({ plain: true }) : j)));
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list linked jobs' });
+  }
+};
+
+module.exports = {
+  list,
+  get,
+  create,
+  update,
+  remove,
+  listStaffUsers,
+  linkOrganization,
+  listLinkedOrganizations,
+  unlinkOrganization,
+  updateOrganizationLink,
+  listJobCompanies,
+  getInsights,
+  listLinkedJobs,
+};

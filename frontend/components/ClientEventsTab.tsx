@@ -12,6 +12,7 @@ import {
   type MergedRow,
 } from '../utils/mergeJournalAndAudit';
 import { fetchAuditLogsByEntity, type AuditLogEntry } from '../services/auditLogsApi';
+import { authHeaders } from '../utils/authHeaders';
 
 const AUDIT_LOG_FILTER_LABEL = 'יומן ביקורת';
 const AUDIT_ACTION_HE: Record<string, string> = {
@@ -48,6 +49,8 @@ export interface Event {
 interface ClientEventsTabProps {
     clientId: string;
     clientName: string;
+    /** When set, list/create events for this organization only (tenant org profile). */
+    organizationId?: string;
 }
 
 const eventStatusStyles: { [key in EventStatus]: { bg: string; text: string; } } = {
@@ -95,7 +98,7 @@ const normalizeEvent = (row: any): Event => ({
     history: Array.isArray(row.history) ? row.history : [],
 });
 
-const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName }) => {
+const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName, organizationId }) => {
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [events, setEvents] = useState<Event[]>([]);
     const [entityAuditItems, setEntityAuditItems] = useState<AuditLogEntry[]>([]);
@@ -260,7 +263,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         if (window.confirm('האם אתה בטוח שברצונך למחוק את האירוע?')) {
             setEvents(events.filter(e => e.id !== eventId));
             if (apiBase && clientId) {
-                await fetch(`${apiBase}/api/clients/${clientId}/events/${eventId}`, { method: 'DELETE' }).catch(() => null);
+                await fetch(`${apiBase}/api/clients/${clientId}/events/${eventId}`, { method: 'DELETE', headers: authHeaders(true) }).catch(() => null);
             }
         }
         setOpenMenuId(null);
@@ -320,7 +323,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             };
             const res = await fetch(`${apiBase}/api/clients/${clientId}/events/${eventData.id}`, {
                 method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify(payload),
             });
             if (res.ok) {
@@ -328,7 +331,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                 setEvents(events.map((e) => (e.id === updated.id ? updated : e)));
             }
         } else {
-            const payload = {
+            const payload: Record<string, unknown> = {
                 title: eventData.title,
                 type: eventData.type,
                 date: eventData.date,
@@ -338,9 +341,10 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
                 linkedTo: newLinkedSingle ?? { type: 'לקוח', name: clientName },
                 history: [{ user: 'אני', timestamp: new Date().toISOString(), summary: 'יצר את האירוע' }],
             };
+            if (organizationId) payload.organizationId = organizationId;
             const res = await fetch(`${apiBase}/api/clients/${clientId}/events`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authHeaders(true),
                 body: JSON.stringify(payload),
             });
             if (res.ok) {
@@ -356,7 +360,10 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
         let active = true;
         setIsLoading(true);
         setError(null);
-        fetch(`${apiBase}/api/clients/${clientId}/events`)
+        const orgQs = organizationId
+            ? `?organizationId=${encodeURIComponent(organizationId)}`
+            : '';
+        fetch(`${apiBase}/api/clients/${clientId}/events${orgQs}`, { headers: authHeaders(true) })
             .then(r => { if (!r.ok) throw new Error('Failed to load events'); return r.json(); })
             .then(data => {
                 if (!active) return;
@@ -366,7 +373,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName 
             .catch((e: any) => { if (!active) return; setError(e?.message || 'Failed to load events'); setEvents([]); })
             .finally(() => { if (active) setIsLoading(false); });
         return () => { active = false; };
-    }, [apiBase, clientId]);
+    }, [apiBase, clientId, organizationId]);
 
     useEffect(() => {
         if (!apiBase || !clientId) {

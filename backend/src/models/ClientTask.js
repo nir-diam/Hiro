@@ -1,6 +1,7 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 const Client = require('./Client');
+const Organization = require('./Organization');
 
 const ClientTask = sequelize.define(
   'ClientTask',
@@ -15,6 +16,13 @@ const ClientTask = sequelize.define(
       allowNull: false,
       references: { model: Client, key: 'id' },
       onDelete: 'CASCADE',
+    },
+    /** When set, task belongs to a specific linked organization (tenant org profile). */
+    organizationId: {
+      type: DataTypes.UUID,
+      allowNull: true,
+      references: { model: Organization, key: 'id' },
+      onDelete: 'SET NULL',
     },
     type: { type: DataTypes.STRING, allowNull: false, defaultValue: 'sales' },
     status: { type: DataTypes.STRING, allowNull: false, defaultValue: 'pending' },
@@ -31,6 +39,8 @@ const ClientTask = sequelize.define(
 
 ClientTask.belongsTo(Client, { foreignKey: 'clientId', as: 'client' });
 Client.hasMany(ClientTask, { foreignKey: 'clientId', as: 'tasks' });
+ClientTask.belongsTo(Organization, { foreignKey: 'organizationId', as: 'organization' });
+Organization.hasMany(ClientTask, { foreignKey: 'organizationId', as: 'tasks' });
 
 module.exports = ClientTask;
 
