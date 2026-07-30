@@ -29,6 +29,7 @@ const connectDb = async () => {
   require('../models/MessageLog');
   require('../models/Organization');
   require('../models/OrganizationLocation');
+  require('../models/OrganizationContact');
   require('../models/OrganizationChangeHistory');
   require('../models/Client');
   require('../models/ClientOrganizationLink');
@@ -249,6 +250,28 @@ const connectDb = async () => {
   await sequelize.query(`
     CREATE INDEX IF NOT EXISTS idx_organization_locations_org
       ON organization_locations (organization_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS organization_contacts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      first_name VARCHAR(255) NOT NULL DEFAULT '',
+      last_name VARCHAR(255) NOT NULL DEFAULT '',
+      role VARCHAR(255) NULL DEFAULT '',
+      office_phone VARCHAR(255) NULL DEFAULT '',
+      mobile VARCHAR(255) NULL DEFAULT '',
+      website VARCHAR(255) NULL DEFAULT '',
+      linkedin VARCHAR(255) NULL DEFAULT '',
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_organization_contacts_org
+      ON organization_contacts (organization_id, sort_index);
   `).catch(() => {});
 
   await sequelize.query(`

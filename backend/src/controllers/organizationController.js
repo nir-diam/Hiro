@@ -25,6 +25,7 @@ const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
 const axios = require('axios');
+const organizationContactService = require('../services/organizationContactService');
 const CandidateOrganization = require('../models/CandidateOrganization');
 const Candidate = require('../models/Candidate');
 const Organization = require('../models/Organization');
@@ -975,6 +976,54 @@ const getInsights = async (req, res) => {
   }
 };
 
+const listContacts = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ message: 'Missing organization id' });
+    const data = await organizationContactService.listByOrganization(id);
+    res.json({ data });
+  } catch (err) {
+    console.error('[organizationController.listContacts]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list contacts' });
+  }
+};
+
+const createContact = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) return res.status(400).json({ message: 'Missing organization id' });
+    const row = await organizationContactService.create(id, req.body || {});
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('[organizationController.createContact]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to create contact' });
+  }
+};
+
+const updateContact = async (req, res) => {
+  try {
+    const { id, contactId } = req.params;
+    if (!id || !contactId) return res.status(400).json({ message: 'Missing ids' });
+    const row = await organizationContactService.update(id, contactId, req.body || {});
+    res.json(row);
+  } catch (err) {
+    console.error('[organizationController.updateContact]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to update contact' });
+  }
+};
+
+const removeContact = async (req, res) => {
+  try {
+    const { id, contactId } = req.params;
+    if (!id || !contactId) return res.status(400).json({ message: 'Missing ids' });
+    await organizationContactService.remove(id, contactId);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[organizationController.removeContact]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to delete contact' });
+  }
+};
+
 module.exports = {
   list,
   listQuery,
@@ -992,5 +1041,9 @@ module.exports = {
   rebuildEmbeddings,
   rebuildEmbedding,
   getPrimaryClient,
+  listContacts,
+  createContact,
+  updateContact,
+  removeContact,
 };
 

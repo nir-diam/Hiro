@@ -26,9 +26,13 @@ router.patch('/ai-decisions/:id/approve', organizationAiDecisionController.appro
 router.get('/:id/history', organizationController.getHistory);
 router.get('/:id/primary-client', organizationController.getPrimaryClient);
 router.get('/:id/insights', organizationController.getInsights);
-router.get('/:id', organizationController.get);
 router.get('/:id/candidates', organizationController.listCandidates);
 router.get('/:id/jobs', organizationController.listJobs);
+router.get('/:id/contacts', organizationController.listContacts);
+router.post('/:id/contacts', ...orgWrite, organizationController.createContact);
+router.put('/:id/contacts/:contactId', ...orgWrite, organizationController.updateContact);
+router.delete('/:id/contacts/:contactId', ...orgWrite, organizationController.removeContact);
+router.get('/:id', organizationController.get);
 router.post('/:id/rebuild-embedding', organizationController.rebuildEmbedding);
 router.post('/', ...orgWrite, organizationController.create);
 router.put('/:id', ...orgWrite, organizationController.update);

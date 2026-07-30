@@ -8,7 +8,7 @@ import {
     ChartBarIcon, BoltIcon, ShieldCheckIcon, Cog6ToothIcon, ChatBubbleBottomCenterTextIcon,
     BuildingOffice2Icon, ExclamationTriangleIcon, CheckCircleIcon, AdjustmentsHorizontalIcon, FunnelIcon,
     AvatarIcon, ArrowTopRightOnSquareIcon, UserGroupIcon, ArrowUpTrayIcon, ArrowDownTrayIcon,
-    EnvelopeIcon, PhoneIcon,
+    EnvelopeIcon, PhoneIcon, PencilIcon,
 } from './Icons';
 import { GoogleGenAI, Chat, FunctionDeclaration, Type } from '@google/genai';
 import HiroAIChat from './HiroAIChat';
@@ -904,6 +904,387 @@ const CompanyCandidatesListModal: React.FC<{
     );
 };
 
+// --- Organization Contacts Tab (אנשי קשר) ---
+type OrgContact = {
+    id: string;
+    firstName: string;
+    lastName: string;
+    role: string;
+    officePhone: string;
+    mobile: string;
+    website: string;
+    linkedin: string;
+};
+
+const emptyOrgContactForm = (): Omit<OrgContact, 'id'> => ({
+    firstName: '',
+    lastName: '',
+    role: '',
+    officePhone: '',
+    mobile: '',
+    website: '',
+    linkedin: '',
+});
+
+const CompanyContactsTab: React.FC<{ organizationId?: CompanyId | null }> = ({ organizationId }) => {
+    const apiBase = import.meta.env.VITE_API_BASE || '';
+    const [contacts, setContacts] = useState<OrgContact[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [editingId, setEditingId] = useState<string | null>(null);
+    const [showForm, setShowForm] = useState(false);
+    const [form, setForm] = useState(emptyOrgContactForm());
+
+    const canPersist = Boolean(organizationId && isPersistedOrganizationId(organizationId));
+
+    const loadContacts = useCallback(async () => {
+        if (!apiBase || !canPersist) {
+            setContacts([]);
+            return;
+        }
+        setLoading(true);
+        setError(null);
+        try {
+            const res = await fetch(
+                `${apiBase}/api/organizations/${encodeURIComponent(String(organizationId))}/contacts`,
+                { credentials: 'include', headers: organizationApiHeaders(false) },
+            );
+            if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+            const payload = await res.json();
+            const rows = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload) ? payload : [];
+            setContacts(
+                rows.map((r: Record<string, unknown>) => ({
+                    id: String(r.id),
+                    firstName: String(r.firstName || ''),
+                    lastName: String(r.lastName || ''),
+                    role: String(r.role || ''),
+                    officePhone: String(r.officePhone || ''),
+                    mobile: String(r.mobile || ''),
+                    website: String(r.website || ''),
+                    linkedin: String(r.linkedin || ''),
+                })),
+            );
+        } catch (e) {
+            console.error('[CompanyContactsTab] load', e);
+            setError('שגיאה בטעינת אנשי קשר');
+            setContacts([]);
+        } finally {
+            setLoading(false);
+        }
+    }, [apiBase, canPersist, organizationId]);
+
+    useEffect(() => {
+        void loadContacts();
+    }, [loadContacts]);
+
+    const openCreate = () => {
+        setEditingId(null);
+        setForm(emptyOrgContactForm());
+        setShowForm(true);
+        setError(null);
+    };
+
+    const openEdit = (c: OrgContact) => {
+        setEditingId(c.id);
+        setForm({
+            firstName: c.firstName,
+            lastName: c.lastName,
+            role: c.role,
+            officePhone: c.officePhone,
+            mobile: c.mobile,
+            website: c.website,
+            linkedin: c.linkedin,
+        });
+        setShowForm(true);
+        setError(null);
+    };
+
+    const cancelForm = () => {
+        setShowForm(false);
+        setEditingId(null);
+        setForm(emptyOrgContactForm());
+    };
+
+    const handleSave = async () => {
+        if (!canPersist || !apiBase) return;
+        if (!form.firstName.trim() && !form.lastName.trim()) {
+            setError('נא למלא שם או שם משפחה');
+            return;
+        }
+        setSaving(true);
+        setError(null);
+        try {
+            const body = {
+                firstName: form.firstName.trim(),
+                lastName: form.lastName.trim(),
+                role: form.role.trim(),
+                officePhone: form.officePhone.trim(),
+                mobile: form.mobile.trim(),
+                website: form.website.trim(),
+                linkedin: form.linkedin.trim(),
+            };
+            const url = editingId
+                ? `${apiBase}/api/organizations/${encodeURIComponent(String(organizationId))}/contacts/${encodeURIComponent(editingId)}`
+                : `${apiBase}/api/organizations/${encodeURIComponent(String(organizationId))}/contacts`;
+            const res = await fetch(url, {
+                method: editingId ? 'PUT' : 'POST',
+                credentials: 'include',
+                headers: organizationApiHeaders(true),
+                body: JSON.stringify(body),
+            });
+            if (!res.ok) {
+                const t = await res.text().catch(() => '');
+                throw new Error(t || `HTTP ${res.status}`);
+            }
+            cancelForm();
+            await loadContacts();
+        } catch (e) {
+            console.error('[CompanyContactsTab] save', e);
+            setError('שגיאה בשמירת איש קשר');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleDelete = async (id: string) => {
+        if (!canPersist || !apiBase) return;
+        if (!window.confirm('למחוק את איש הקשר?')) return;
+        setError(null);
+        try {
+            const res = await fetch(
+                `${apiBase}/api/organizations/${encodeURIComponent(String(organizationId))}/contacts/${encodeURIComponent(id)}`,
+                {
+                    method: 'DELETE',
+                    credentials: 'include',
+                    headers: organizationApiHeaders(false),
+                },
+            );
+            if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+            if (editingId === id) cancelForm();
+            await loadContacts();
+        } catch (e) {
+            console.error('[CompanyContactsTab] delete', e);
+            setError('שגיאה במחיקת איש קשר');
+        }
+    };
+
+    if (!canPersist) {
+        return (
+            <div className="p-6 text-center text-text-muted text-sm">
+                שמרו את החברה קודם כדי להוסיף אנשי קשר.
+            </div>
+        );
+    }
+
+    return (
+        <div className="p-6 space-y-4" dir="rtl">
+            <div className="flex items-center justify-between gap-3">
+                <div>
+                    <h3 className="text-sm font-bold text-text-default">אנשי קשר</h3>
+                    <p className="text-xs text-text-muted mt-0.5">אנשי קשר משויכים לחברה במאגר</p>
+                </div>
+                {!showForm && (
+                    <button
+                        type="button"
+                        onClick={openCreate}
+                        className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-primary-600 text-white text-xs font-bold hover:bg-primary-700 transition-colors"
+                    >
+                        <PlusIcon className="w-4 h-4" />
+                        הוסף איש קשר
+                    </button>
+                )}
+            </div>
+
+            {error && (
+                <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{error}</div>
+            )}
+
+            {showForm && (
+                <div className="border border-border-default rounded-xl bg-bg-subtle/40 p-4 space-y-4">
+                    <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider">
+                        {editingId ? 'עריכת איש קשר' : 'איש קשר חדש'}
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">שם</label>
+                            <input
+                                type="text"
+                                value={form.firstName}
+                                onChange={(e) => setForm((f) => ({ ...f, firstName: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">שם משפחה</label>
+                            <input
+                                type="text"
+                                value={form.lastName}
+                                onChange={(e) => setForm((f) => ({ ...f, lastName: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                            />
+                        </div>
+                        <div className="md:col-span-2">
+                            <label className="block text-xs font-semibold text-text-muted mb-1">תפקיד</label>
+                            <input
+                                type="text"
+                                value={form.role}
+                                onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">טלפון משרד</label>
+                            <input
+                                type="tel"
+                                value={form.officePhone}
+                                onChange={(e) => setForm((f) => ({ ...f, officePhone: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                                dir="ltr"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">נייד</label>
+                            <input
+                                type="tel"
+                                value={form.mobile}
+                                onChange={(e) => setForm((f) => ({ ...f, mobile: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                                dir="ltr"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">אתר</label>
+                            <input
+                                type="url"
+                                value={form.website}
+                                onChange={(e) => setForm((f) => ({ ...f, website: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                                placeholder="https://..."
+                                dir="ltr"
+                            />
+                        </div>
+                        <div>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">לינקדאין</label>
+                            <input
+                                type="url"
+                                value={form.linkedin}
+                                onChange={(e) => setForm((f) => ({ ...f, linkedin: e.target.value }))}
+                                className="w-full bg-bg-input border border-border-default rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-primary-500"
+                                placeholder="https://linkedin.com/in/..."
+                                dir="ltr"
+                            />
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 justify-end">
+                        <button
+                            type="button"
+                            onClick={cancelForm}
+                            className="px-3 py-2 rounded-lg text-xs font-bold text-text-muted hover:bg-bg-hover"
+                            disabled={saving}
+                        >
+                            ביטול
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleSave()}
+                            disabled={saving}
+                            className="px-4 py-2 rounded-lg bg-primary-600 text-white text-xs font-bold hover:bg-primary-700 disabled:opacity-60"
+                        >
+                            {saving ? 'שומר...' : 'שמור'}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {loading ? (
+                <div className="text-center text-text-muted text-sm py-8">טוען אנשי קשר...</div>
+            ) : contacts.length === 0 && !showForm ? (
+                <div className="text-center text-text-muted text-sm py-8 border border-dashed border-border-default rounded-xl">
+                    אין אנשי קשר עדיין
+                </div>
+            ) : (
+                <div className="overflow-x-auto border border-border-default rounded-xl">
+                    <table className="w-full text-right text-sm">
+                        <thead className="bg-bg-subtle text-text-muted text-[10px] uppercase tracking-wider">
+                            <tr>
+                                <th className="p-3 font-bold">שם</th>
+                                <th className="p-3 font-bold">תפקיד</th>
+                                <th className="p-3 font-bold">טלפון משרד</th>
+                                <th className="p-3 font-bold">נייד</th>
+                                <th className="p-3 font-bold">קישורים</th>
+                                <th className="p-3 font-bold w-24"></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {contacts.map((c) => {
+                                const fullName = [c.firstName, c.lastName].filter(Boolean).join(' ') || '—';
+                                return (
+                                    <tr key={c.id} className="border-t border-border-default hover:bg-primary-50/20">
+                                        <td className="p-3 font-semibold text-text-default">{fullName}</td>
+                                        <td className="p-3 text-text-muted">{c.role || '—'}</td>
+                                        <td className="p-3 text-text-muted" dir="ltr">{c.officePhone || '—'}</td>
+                                        <td className="p-3 text-text-muted" dir="ltr">{c.mobile || '—'}</td>
+                                        <td className="p-3">
+                                            <div className="flex items-center gap-2">
+                                                {c.website ? (
+                                                    <a
+                                                        href={c.website.startsWith('http') ? c.website : `https://${c.website}`}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-primary-600 hover:text-primary-700"
+                                                        title="אתר"
+                                                    >
+                                                        <GlobeAmericasIcon className="w-4 h-4" />
+                                                    </a>
+                                                ) : null}
+                                                {c.linkedin ? (
+                                                    <a
+                                                        href={c.linkedin.startsWith('http') ? c.linkedin : `https://${c.linkedin}`}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="text-primary-600 hover:text-primary-700"
+                                                        title="לינקדאין"
+                                                    >
+                                                        <LinkedInIcon className="w-4 h-4" />
+                                                    </a>
+                                                ) : null}
+                                                {!c.website && !c.linkedin ? (
+                                                    <span className="text-text-subtle">—</span>
+                                                ) : null}
+                                            </div>
+                                        </td>
+                                        <td className="p-3">
+                                            <div className="flex items-center justify-end gap-1">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => openEdit(c)}
+                                                    className="p-1.5 rounded-lg text-text-subtle hover:text-primary-600 hover:bg-bg-hover"
+                                                    title="ערוך"
+                                                >
+                                                    <PencilIcon className="w-4 h-4" />
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => void handleDelete(c.id)}
+                                                    className="p-1.5 rounded-lg text-text-subtle hover:text-red-600 hover:bg-red-50"
+                                                    title="מחק"
+                                                >
+                                                    <TrashIcon className="w-4 h-4" />
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+        </div>
+    );
+};
+
 // --- Company Modal Component ---
 const CompanyModal: React.FC<{
     isOpen: boolean;
@@ -918,7 +1299,7 @@ const CompanyModal: React.FC<{
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const logoFileInputRef = useRef<HTMLInputElement>(null);
     const [logoUploading, setLogoUploading] = useState(false);
-    const [activeTab, setActiveTab] = useState<'details' | 'users' | 'history'>('details');
+    const [activeTab, setActiveTab] = useState<'details' | 'users' | 'contacts' | 'history'>('details');
     const [formData, setFormData] = useState<Company>({
         id: 0,
         name: '', nameEn: '', legalName: '', registrationNumber: '', aliases: [],
@@ -1160,6 +1541,12 @@ const CompanyModal: React.FC<{
                             onClick={() => setActiveTab('users')}
                         >
                             משתמשים
+                        </button>
+                        <button 
+                            className={`px-4 py-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'contacts' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default hover:border-border-default'}`}
+                            onClick={() => setActiveTab('contacts')}
+                        >
+                            אנשי קשר
                         </button>
                         <button 
                             className={`px-4 py-2 text-sm font-bold border-b-2 transition-colors ${activeTab === 'history' ? 'border-primary-500 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default hover:border-border-default'}`}
@@ -1637,6 +2024,11 @@ const CompanyModal: React.FC<{
                         companyName={formData.name}
                         organizationId={formData.id}
                     />
+                    </div>
+                )}
+                {activeTab === 'contacts' && (
+                    <div className="flex-1 overflow-y-auto">
+                        <CompanyContactsTab organizationId={formData.id} />
                     </div>
                 )}
                 {activeTab === 'history' && (
