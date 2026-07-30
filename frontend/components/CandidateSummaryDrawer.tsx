@@ -476,7 +476,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
       const attachRes = await fetch(`${base}/api/candidates/${id}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ key, type: 'resume' }),
+        body: JSON.stringify({ key, type: 'resume', fileName: file.name }),
       });
       if (!attachRes.ok) throw new Error('Failed to attach media');
       const updated = await attachRes.json();

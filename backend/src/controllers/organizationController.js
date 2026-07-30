@@ -166,32 +166,76 @@ const createLogoUploadUrl = async (req, res) => {
 };
 
 const list = async (req, res) => {
-  const includeMerged = String(req.query.includeMerged).toLowerCase() === 'true';
-  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
-  const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
-  const location = typeof req.query.location === 'string' ? req.query.location.trim() : '';
+  try {
+    const result = await organizationService.list(parseOrganizationListParams(req));
+    res.json(result);
+  } catch (err) {
+    console.error('[organizationController.list]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'List failed' });
+  }
+};
+
+/** POST body variant — avoids GET URL limits when many location cities are selected. */
+const listQuery = async (req, res) => {
+  try {
+    const result = await organizationService.list(parseOrganizationListParams(req));
+    res.json(result);
+  } catch (err) {
+    console.error('[organizationController.listQuery]', err.message || err);
+    res.status(err.status || 500).json({ message: err.message || 'List failed' });
+  }
+};
+
+/**
+ * Read list filters from query (GET) and/or JSON body (POST /query).
+ * @param {import('express').Request} req
+ */
+function parseOrganizationListParams(req) {
+  const q = req.query || {};
+  const b = req.body && typeof req.body === 'object' ? req.body : {};
+  const pick = (key) => (b[key] !== undefined && b[key] !== null ? b[key] : q[key]);
+
+  const includeMerged = String(pick('includeMerged') || '').toLowerCase() === 'true';
+  const page = Math.max(1, parseInt(String(pick('page') ?? '1'), 10) || 1);
+  const limit = Math.min(500, Math.max(1, parseInt(String(pick('limit') ?? '50'), 10) || 50));
+  const search = typeof pick('search') === 'string' ? pick('search').trim() : '';
   const includeAdditionalLocations =
-    String(req.query.includeAdditionalLocations || '').toLowerCase() === 'true' ||
-    String(req.query.includeAdditionalLocations || '') === '1';
-  const mainField = typeof req.query.mainField === 'string' ? req.query.mainField.trim() : '';
-  const activityFrom = typeof req.query.activityFrom === 'string' ? req.query.activityFrom.trim() : '';
-  const activityTo = typeof req.query.activityTo === 'string' ? req.query.activityTo.trim() : '';
-  const activityDate = typeof req.query.activityDate === 'string' ? req.query.activityDate.trim() : '';
-  const result = await organizationService.list({
+    String(pick('includeAdditionalLocations') || '').toLowerCase() === 'true' ||
+    String(pick('includeAdditionalLocations') || '') === '1';
+  const mainField = typeof pick('mainField') === 'string' ? pick('mainField').trim() : '';
+  const activityFrom = typeof pick('activityFrom') === 'string' ? pick('activityFrom').trim() : '';
+  const activityTo = typeof pick('activityTo') === 'string' ? pick('activityTo').trim() : '';
+  const activityDate = typeof pick('activityDate') === 'string' ? pick('activityDate').trim() : '';
+
+  let locations = null;
+  const rawLocations = pick('locations');
+  if (Array.isArray(rawLocations)) {
+    locations = rawLocations.map((x) => String(x || '').trim()).filter(Boolean);
+  } else if (typeof rawLocations === 'string' && rawLocations.trim()) {
+    locations = rawLocations.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  const location =
+    locations && locations.length
+      ? ''
+      : typeof pick('location') === 'string'
+        ? pick('location').trim()
+        : '';
+
+  return {
     includeMerged,
     page,
     limit,
     search,
     location,
+    locations,
     includeAdditionalLocations,
     mainField,
     activityFrom,
     activityTo,
     activityDate,
-  });
-  res.json(result);
-};
+  };
+}
 
 const globalLookup = async (req, res) => {
   try {
@@ -933,6 +977,7 @@ const getInsights = async (req, res) => {
 
 module.exports = {
   list,
+  listQuery,
   globalLookup,
   get,
   create,

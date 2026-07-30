@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { ChevronDownIcon, MagnifyingGlassIcon, CheckIcon, MinusIcon, MapPinIcon, EyeIcon, XMarkIcon } from './Icons';
 import {
     buildCityToRegionMap,
@@ -226,13 +227,53 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
     const [radiusCitiesFilter, setRadiusCitiesFilter] = useState('');
 
     const containerRef = useRef<HTMLDivElement>(null);
+    const panelRef = useRef<HTMLDivElement>(null);
+    const searchInputRef = useRef<HTMLInputElement>(null);
+    const [menuPos, setMenuPos] = useState<{ top: number; right: number; left: number } | null>(null);
+
+    const updateMenuPos = useCallback(() => {
+        const el = containerRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        setMenuPos({
+            top: rect.bottom + 4,
+            right: Math.max(8, window.innerWidth - rect.right),
+            left: Math.max(8, rect.left),
+        });
+    }, []);
+
+    useEffect(() => {
+        if (!isOpen && !isSummaryOpen) {
+            setMenuPos(null);
+            return;
+        }
+        updateMenuPos();
+        const onReposition = () => updateMenuPos();
+        window.addEventListener('resize', onReposition);
+        // Capture scrolls from modal overflow containers
+        document.addEventListener('scroll', onReposition, true);
+        return () => {
+            window.removeEventListener('resize', onReposition);
+            document.removeEventListener('scroll', onReposition, true);
+        };
+    }, [isOpen, isSummaryOpen, isDropdownExpanded, updateMenuPos]);
+
+    // Auto-focus search when the location dropdown opens (regions tab).
+    useEffect(() => {
+        if (!isOpen || activeTab !== 'regions' || !menuPos) return;
+        const id = window.requestAnimationFrame(() => {
+            searchInputRef.current?.focus();
+        });
+        return () => window.cancelAnimationFrame(id);
+    }, [isOpen, activeTab, menuPos]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
-            if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-                setIsOpen(false);
-                setIsSummaryOpen(false);
-            }
+            const t = event.target as Node;
+            if (containerRef.current?.contains(t)) return;
+            if (panelRef.current?.contains(t)) return;
+            setIsOpen(false);
+            setIsSummaryOpen(false);
         };
         document.addEventListener('mousedown', handleClickOutside);
         return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -610,7 +651,10 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                 {/* Main Trigger */}
                 <button 
                     type="button"
-                    onClick={() => setIsOpen(!isOpen)} 
+                    onClick={() => {
+                        if (!isOpen) updateMenuPos();
+                        setIsOpen(!isOpen);
+                    }} 
                     className="flex-grow flex items-center justify-between py-2.5 pl-2 pr-3 text-sm h-[42px] truncate min-w-0"
                 >
                     <div className="flex items-center gap-2 truncate">
@@ -626,7 +670,12 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                     <div className="flex items-center border-r border-border-subtle pr-1 h-6">
                          <button
                             type="button"
-                            onClick={(e) => { e.stopPropagation(); setIsSummaryOpen(!isSummaryOpen); setIsOpen(false); }}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (!isSummaryOpen) updateMenuPos();
+                                setIsSummaryOpen(!isSummaryOpen);
+                                setIsOpen(false);
+                            }}
                             className={`p-1.5 rounded-full transition-colors ${isSummaryOpen ? brandOrPrimary(accentColor, 'text-[var(--brand-accent)] bg-[var(--brand-accent-soft)]', 'text-primary-600 bg-primary-50') : brandOrPrimary(accentColor, 'text-text-subtle hover:bg-[var(--brand-accent-soft)]', 'text-text-subtle hover:bg-primary-50')}`}
                             title="צפה בבחירה"
                         >
@@ -641,11 +690,13 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                 </div>
             </div>
 
-            {/* Selection Dropdown */}
-            {isOpen && (
+            {/* Selection Dropdown — portaled so it isn't clipped by modal overflow */}
+            {isOpen && menuPos && createPortal(
                 <div
-                    className={`absolute top-full right-0 mt-1 bg-white border border-border-default rounded-xl shadow-2xl z-50 flex flex-col animate-fade-in overflow-hidden transition-all duration-300 ease-in-out ${
-                        isDropdownExpanded ? 'w-[640px] md:w-[700px] max-h-[900px]' : 'w-[300px] md:w-[350px] max-h-[450px]'
+                    ref={panelRef}
+                    style={{ position: 'fixed', top: menuPos.top, right: menuPos.right, zIndex: 200 }}
+                    className={`bg-white border border-border-default rounded-xl shadow-2xl flex flex-col animate-fade-in overflow-hidden transition-all duration-300 ease-in-out ${
+                        isDropdownExpanded ? 'w-[640px] md:w-[700px] max-h-[min(900px,calc(100vh-24px))]' : 'w-[300px] md:w-[350px] max-h-[min(450px,calc(100vh-24px))]'
                     }`}
                 >
                     <div className="flex border-b border-border-default bg-bg-subtle/30 relative">
@@ -686,6 +737,7 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                                     <div className="relative">
                                         <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                                         <input 
+                                            ref={searchInputRef}
                                             type="text" 
                                             value={searchTerm}
                                             onChange={(e) => setSearchTerm(e.target.value)}
@@ -1000,12 +1052,17 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                             אישור ({selectedLocations.length})
                         </button>
                     </div>
-                </div>
+                </div>,
+                document.body,
             )}
             
-            {/* Summary Bubble Popover */}
-            {isSummaryOpen && selectedCityNames.length > 0 && (
-                 <div className="absolute top-full left-0 mt-1 bg-white border border-border-default rounded-xl shadow-2xl z-50 w-72 p-3 animate-fade-in">
+            {/* Summary Bubble Popover — portaled for the same overflow reason */}
+            {isSummaryOpen && selectedCityNames.length > 0 && menuPos && createPortal(
+                 <div
+                    ref={panelRef}
+                    style={{ position: 'fixed', top: menuPos.top, left: menuPos.left, zIndex: 200 }}
+                    className="bg-white border border-border-default rounded-xl shadow-2xl w-72 p-3 animate-fade-in"
+                 >
                     <div className="flex justify-between items-center mb-2 pb-2 border-b border-border-default">
                         <span className="text-sm font-bold text-text-default">ערים ואזורים שנבחרו</span>
                         <button type="button" onClick={() => setIsSummaryOpen(false)}><XMarkIcon className="w-4 h-4 text-text-muted hover:text-text-default"/></button>
@@ -1055,7 +1112,8 @@ const LocationSelector: React.FC<LocationSelectorProps> = ({
                             </div>
                         )}
                     </div>
-                </div>
+                </div>,
+                document.body,
             )}
         </div>
     );

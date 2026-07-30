@@ -1116,8 +1116,14 @@ const CompanyModal: React.FC<{
         }
     };
 
+    const requestCloseFromOutside = () => {
+        if (window.confirm('האם אתה בטוח שאתה רוצה לסגור את החלון?')) {
+            onClose();
+        }
+    };
+
     return (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4" onClick={onClose}>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4" onClick={requestCloseFromOutside}>
             <div className="bg-bg-card rounded-2xl shadow-2xl w-full max-w-4xl flex flex-col max-h-[90vh] overflow-hidden border border-border-default animate-fade-in" onClick={e => e.stopPropagation()}>
                 <header className="flex items-center justify-between p-6 border-b border-border-default bg-bg-subtle/30">
                     <div>
@@ -1922,11 +1928,38 @@ const AdminCompaniesView: React.FC = () => {
                 ? filters.mainField
                 : filters.mainField ? [String(filters.mainField)] : [];
             if (mainFieldArr.length > 0) params.set('mainField', mainFieldArr.join(','));
-            const res = await fetch(`${apiBase}/api/organizations?${params.toString()}`, {
-                cache: 'no-store',
-                credentials: 'include',
-                headers: organizationApiHeaders(false),
-            });
+
+            // Many cities (e.g. whole regions) blow past GET URL limits — use POST body.
+            const locationList = [...expandedCities];
+            const locationQueryLen = locationList.length
+                ? encodeURIComponent(locationList.join(',')).length
+                : 0;
+            const usePostBody = locationList.length > 15 || locationQueryLen > 1200;
+
+            const headers = organizationApiHeaders(usePostBody);
+            const res = usePostBody
+                ? await fetch(`${apiBase}/api/organizations/query`, {
+                    method: 'POST',
+                    cache: 'no-store',
+                    credentials: 'include',
+                    headers,
+                    body: JSON.stringify({
+                        includeMerged: includeMerged || undefined,
+                        page: opts?.page ?? 1,
+                        limit: PAGE_SIZE,
+                        search: search || undefined,
+                        activityFrom: from || undefined,
+                        activityTo: to || undefined,
+                        locations: locationList,
+                        includeAdditionalLocations: filters.searchAdditionalLocations || undefined,
+                        mainField: mainFieldArr.length ? mainFieldArr.join(',') : undefined,
+                    }),
+                })
+                : await fetch(`${apiBase}/api/organizations?${params.toString()}`, {
+                    cache: 'no-store',
+                    credentials: 'include',
+                    headers,
+                });
             if (!res.ok) {
                 const t = await res.text().catch(() => '');
                 throw new Error(t || `HTTP ${res.status}`);

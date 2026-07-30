@@ -1151,7 +1151,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
           const attachRes = await fetch(`${apiBase}/api/candidates/${candidateId}/media`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', ...authHeaders() },
-              body: JSON.stringify({ key, type: 'resume' }),
+              body: JSON.stringify({ key, type: 'resume', fileName: file.name }),
           });
           if (!attachRes.ok) throw new Error('Failed to attach media');
           const updated = await attachRes.json();

@@ -178,6 +178,7 @@ const list = async ({
   limit = 50,
   search = '',
   location = '',
+  locations = null,
   includeAdditionalLocations = false,
   mainField = '',
   activityDate,
@@ -195,25 +196,28 @@ const list = async ({
 
   const where = { [Op.and]: [activityWhere, searchWhere] };
 
-  if (location) {
-    const terms = location.split(',').map(s => s.trim()).filter(Boolean);
-    if (terms.length > 0) {
-      const primaryMatches = terms.map((t) => ({ location: { [Op.iLike]: `%${t}%` } }));
-      if (includeAdditionalLocations) {
-        const sequelize = Organization.sequelize;
-        const additionalMatches = terms.map((t) =>
-          sequelize.literal(
-            `EXISTS (
+  const locationTerms = Array.isArray(locations) && locations.length > 0
+    ? locations.map((s) => String(s || '').trim()).filter(Boolean)
+    : location
+      ? String(location).split(',').map((s) => s.trim()).filter(Boolean)
+      : [];
+
+  if (locationTerms.length > 0) {
+    const primaryMatches = locationTerms.map((t) => ({ location: { [Op.iLike]: `%${t}%` } }));
+    if (includeAdditionalLocations) {
+      const sequelize = Organization.sequelize;
+      const additionalMatches = locationTerms.map((t) =>
+        sequelize.literal(
+          `EXISTS (
               SELECT 1 FROM organization_locations ol
               WHERE ol.organization_id = "Organization"."id"
                 AND ol.location ILIKE ${sequelize.escape(`%${t}%`)}
             )`,
-          ),
-        );
-        where[Op.and].push({ [Op.or]: [...primaryMatches, ...additionalMatches] });
-      } else {
-        where[Op.and].push({ [Op.or]: primaryMatches });
-      }
+        ),
+      );
+      where[Op.and].push({ [Op.or]: [...primaryMatches, ...additionalMatches] });
+    } else {
+      where[Op.and].push({ [Op.or]: primaryMatches });
     }
   }
 

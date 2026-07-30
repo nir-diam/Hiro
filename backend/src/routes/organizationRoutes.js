@@ -10,6 +10,7 @@ const router = express.Router();
 const orgWrite = [optionalAuth, optionalAttachDbUser];
 
 router.get('/', organizationController.list);
+router.post('/query', organizationController.listQuery);
 router.use('/tmp', organizationTmpRoutes);
 router.get('/rebuild-embeddings', organizationController.rebuildEmbeddings);
 router.post('/logo/upload-url', organizationController.createLogoUploadUrl);

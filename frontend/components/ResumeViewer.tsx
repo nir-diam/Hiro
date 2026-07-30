@@ -621,7 +621,7 @@ const ResumeViewer: React.FC<ResumeViewerProps> = ({
       const attachRes = await fetch(`${apiBase}/api/candidates/${targetId}/media`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({ key, type: 'resume' }),
+        body: JSON.stringify({ key, type: 'resume', fileName: file.name }),
       });
       if (!attachRes.ok) throw new Error('Failed to attach media');
 

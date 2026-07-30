@@ -1836,7 +1836,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             const attachRes = await fetch(`${base}/api/candidates/${id}/media`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify({ key, type }),
+                body: JSON.stringify({ key, type, fileName: file.name }),
             });
             if (!attachRes.ok) throw new Error('Failed to attach media');
             const updated = await attachRes.json();

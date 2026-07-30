@@ -88,6 +88,7 @@ app.use('/api/messaging', messagingRoutes);
 app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/recruitment-sources', recruitmentSourceRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/dashboard', require('./routes/dashboardRoutes'));
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
 app.use('/api/admin/matching-engine', matchingEngineRoutes);

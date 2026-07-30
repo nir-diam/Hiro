@@ -83,27 +83,94 @@ const trimStr = (x) => (x != null ? String(x).trim() : '');
 const splitFullNameToParts = (full) => {
   const t = trimStr(full);
   if (!t) return { firstName: '', lastName: '' };
-  const idx = t.indexOf(' ');
-  if (idx === -1) return { firstName: t, lastName: '' };
-  return { firstName: t.slice(0, idx).trim(), lastName: t.slice(idx + 1).trim() };
+  const tokens = t.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return { firstName: tokens[0] || '', lastName: '' };
+  // Keep middle name(s) in firstName — never collapse "אליהו ארי יחזקאל" → first/last only.
+  return {
+    firstName: tokens.slice(0, -1).join(' '),
+    lastName: tokens[tokens.length - 1],
+  };
 };
 
 const buildFullNameFromParts = (first, last) =>
   [trimStr(first), trimStr(last)].filter(Boolean).join(' ');
 
+const nameTokenList = (s) =>
+  trimStr(s)
+    .replace(/[״"']/g, '')
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+/** True when every token of `shorter` appears in order inside `longer`. */
+const isNameTokenSubsequence = (shorter, longer) => {
+  const a = nameTokenList(shorter);
+  const b = nameTokenList(longer);
+  if (!a.length || a.length > b.length) return false;
+  let i = 0;
+  for (const t of b) {
+    if (t === a[i]) i += 1;
+    if (i >= a.length) return true;
+  }
+  return false;
+};
+
+/**
+ * Prefer the fullest consistent full name.
+ * Fixes the common CV-parse bug: fullName="אליהו ארי יחזקאל" but first/last omit the middle,
+ * and rebuilding from parts would wrongly save "אליהו יחזקאל".
+ */
+const pickBestFullName = (...candidates) => {
+  const names = candidates.map((n) => trimStr(n)).filter(Boolean);
+  if (!names.length) return '';
+  let best = names[0];
+  for (let i = 1; i < names.length; i += 1) {
+    const cur = names[i];
+    const bestTok = nameTokenList(best);
+    const curTok = nameTokenList(cur);
+    if (isNameTokenSubsequence(best, cur) && curTok.length > bestTok.length) {
+      best = cur;
+      continue;
+    }
+    if (isNameTokenSubsequence(cur, best) && bestTok.length > curTok.length) {
+      continue;
+    }
+    // Same first+last ends, prefer more middle tokens
+    if (
+      bestTok.length >= 2
+      && curTok.length >= 2
+      && bestTok[0] === curTok[0]
+      && bestTok[bestTok.length - 1] === curTok[curTok.length - 1]
+      && curTok.length > bestTok.length
+    ) {
+      best = cur;
+    }
+  }
+  return best;
+};
+
+const applySyncedNameParts = (p, fullName) => {
+  const full = trimStr(fullName);
+  if (!full) {
+    p.fullName = 'מועמד חדש';
+    p.firstName = null;
+    p.lastName = null;
+    return;
+  }
+  const parts = splitFullNameToParts(full);
+  p.fullName = full;
+  p.firstName = parts.firstName || null;
+  p.lastName = parts.lastName || null;
+};
+
 const syncCandidateNameForCreate = (p) => {
-  let first = trimStr(p.firstName);
-  let last = trimStr(p.lastName);
+  const first = trimStr(p.firstName);
+  const last = trimStr(p.lastName);
   const full = trimStr(p.fullName);
-  if (first || last) {
-    p.firstName = first || null;
-    p.lastName = last || null;
-    p.fullName = buildFullNameFromParts(first, last) || full || 'מועמד חדש';
-  } else if (full) {
-    const parts = splitFullNameToParts(full);
-    p.firstName = parts.firstName || null;
-    p.lastName = parts.lastName || null;
-    p.fullName = full;
+  const fromParts = buildFullNameFromParts(first, last);
+  const best = pickBestFullName(full, fromParts);
+  if (best) {
+    applySyncedNameParts(p, best);
   } else {
     p.fullName = 'מועמד חדש';
     p.firstName = null;
@@ -119,22 +186,29 @@ const syncCandidateNameForUpdate = (p, existing) => {
 
   const exFirst = trimStr(existing.firstName);
   const exLast = trimStr(existing.lastName);
-  const exFull = trimStr(existing.fullName);
+  const exFull = trimStr(existing.fullName) || buildFullNameFromParts(exFirst, exLast);
 
   const first = hasFirst ? trimStr(p.firstName) : exFirst;
   const last = hasLast ? trimStr(p.lastName) : exLast;
   const fullIn = hasFull ? trimStr(p.fullName) : '';
+  const fromParts = buildFullNameFromParts(first, last);
 
-  if (hasFirst || hasLast) {
-    p.firstName = first || null;
-    p.lastName = last || null;
-    p.fullName = buildFullNameFromParts(first, last) || fullIn || exFull || 'מועמד חדש';
-  } else if (hasFull && fullIn) {
-    p.fullName = fullIn;
-    const parts = splitFullNameToParts(fullIn);
-    p.firstName = parts.firstName || null;
-    p.lastName = parts.lastName || null;
+  // Prefer fuller name among explicit full + parts. If the incoming name only drops a
+  // middle token from the existing one (same first/last), keep the existing fuller form.
+  let best = pickBestFullName(fullIn, fromParts);
+  if (
+    best
+    && exFull
+    && isNameTokenSubsequence(best, exFull)
+    && nameTokenList(exFull).length > nameTokenList(best).length
+  ) {
+    const b = nameTokenList(best);
+    const e = nameTokenList(exFull);
+    if (b.length >= 2 && e[0] === b[0] && e[e.length - 1] === b[b.length - 1]) {
+      best = exFull;
+    }
   }
+  if (best) applySyncedNameParts(p, best);
 };
 
 const enrichCandidateNameForRead = (payload) => {
@@ -1134,10 +1208,10 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       }
     }
 
-    // Company background filter — searches ALL experiences in companyExperiences JSONB array
+    // Company background filter — denormalized columns + companyExperiences JSONB only.
+    // No per-row organizations join (that made list filters multi-second).
     const cf = advanced.companyFilters;
     if (cf && typeof cf === 'object') {
-      // Support both old single-value fields (industry/field) and new arrays (industries/fields)
       const cfIndustries = Array.isArray(cf.industries) ? cf.industries.map((s) => String(s).trim()).filter(Boolean)
         : (cf.industry ? [String(cf.industry).trim()] : []);
       const cfFields = Array.isArray(cf.fields) ? cf.fields.map((s) => String(s).trim()).filter(Boolean)
@@ -1147,23 +1221,21 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
       const cfSizes    = Array.isArray(cf.sizes)     ? cf.sizes.map((s)    => String(s).trim()).filter(Boolean)  : [];
 
       if (cfIndustries.length || cfFields.length || cfRoles.length || cfSectors.length || cfSizes.length) {
-        // Each dimension builds its own clause (OR within dimension), then all dimensions are AND'd.
-        // This ensures e.g. "tech industry AND 200+ employees" both must hold.
         const dimensionClauses = [];
+        const ceArr = `COALESCE(candidates."companyExperiences", '[]'::jsonb)`;
 
         // ── INDUSTRY dimension ────────────────────────────────────────────────
-        // The user picks a taxonomy category name ("טכנולוגיה וחדשנות") but candidates store
-        // the sub-values ("הייטק", "פיתוח תוכנה") in their columns. We join picklist_category_values
-        // to match ALL values that belong to that category, plus direct name match + JSONB.
-        // We ALSO match via the organizations table: if the candidate worked at a company
-        // whose org record has that mainField, count it as a match.
         if (cfIndustries.length) {
           const indOrs = cfIndustries.map((indName) => {
             const n = pushBind(binds, indName.trim());
-            const n2 = pushBind(binds, indName.trim()); // separate bind for org join
             return `(
               candidates.industry ILIKE '%' || $${n} || '%'
-              OR candidates.field   ILIKE '%' || $${n} || '%'
+              OR candidates.field ILIKE '%' || $${n} || '%'
+              OR EXISTS (
+                SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+                WHERE ce->>'industry' ILIKE '%' || $${n} || '%'
+                   OR ce->>'field' ILIKE '%' || $${n} || '%'
+              )
               OR EXISTS (
                 SELECT 1 FROM picklist_category_values pcv
                 INNER JOIN picklist_categories pc ON pc.id = pcv."categoryId"
@@ -1173,21 +1245,11 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
                     candidates.industry ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
                     OR candidates.field ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
                     OR EXISTS (
-                      SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
+                      SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
                       WHERE ce->>'industry' ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
+                         OR ce->>'field' ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
                     )
                   )
-              )
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
-                WHERE LOWER(TRIM(o."mainField")) = LOWER(TRIM($${n2}))
-                   OR o."secondaryField" ILIKE '%' || $${n2} || '%'
-                   OR EXISTS (
-                     SELECT 1
-                     FROM unnest(COALESCE(o."mainField2", ARRAY[]::text[])) AS mf2(val)
-                     WHERE LOWER(TRIM(mf2.val)) = LOWER(TRIM($${n2}))
-                   )
               )
             )`;
           });
@@ -1198,28 +1260,13 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
         if (cfFields.length) {
           const fieldOrs = cfFields.map((f) => {
             const nf = pushBind(binds, `%${f}%`);
-            const nf2 = pushBind(binds, `%${f}%`);
-            const nf3 = pushBind(binds, `%${f}%`);
             return `(
               candidates.field ILIKE $${nf}
+              OR candidates.industry ILIKE $${nf}
               OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                WHERE ce->>'industry' ILIKE $${nf2}
-              )
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
-                WHERE o."secondaryField" ILIKE $${nf3}
-                   OR EXISTS (
-                     SELECT 1
-                     FROM unnest(COALESCE(o."subField", ARRAY[]::text[])) AS sf(val)
-                     WHERE sf.val ILIKE $${nf3}
-                   )
-                   OR EXISTS (
-                     SELECT 1
-                     FROM unnest(COALESCE(o."mainField2", ARRAY[]::text[])) AS mf2(val)
-                     WHERE mf2.val ILIKE $${nf3}
-                   )
+                SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+                WHERE ce->>'industry' ILIKE $${nf}
+                   OR ce->>'field' ILIKE $${nf}
               )
             )`;
           });
@@ -1244,19 +1291,12 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
         // ── SECTOR dimension ──────────────────────────────────────────────────
         if (cfSectors.length) {
           const sectorOrs = cfSectors.map((s) => {
-            const ns = pushBind(binds, s);
-            const ns2 = pushBind(binds, s);
-            const ns3 = pushBind(binds, s);
+            const ns = pushBind(binds, `%${s}%`);
             return `(
               candidates.sector ILIKE $${ns}
               OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                WHERE ce->>'sector' ILIKE $${ns2}
-              )
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
-                WHERE o.classification ILIKE $${ns3}
+                SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+                WHERE ce->>'sector' ILIKE $${ns}
               )
             )`;
           });
@@ -1267,18 +1307,11 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
         if (cfSizes.length) {
           const sizeOrs = cfSizes.map((sz) => {
             const nsz = pushBind(binds, sz);
-            const nsz2 = pushBind(binds, sz);
-            const nsz3 = pushBind(binds, sz);
             return `(
               candidates."companySize" = $${nsz}
               OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                WHERE ce->>'companySize' = $${nsz2}
-              )
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(candidates."companyExperiences") AS ce
-                JOIN organizations o ON LOWER(TRIM(o.name)) = LOWER(TRIM(ce->>'company'))
-                WHERE o."employeeCount" = $${nsz3}
+                SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+                WHERE ce->>'companySize' = $${nsz}
               )
             )`;
           });

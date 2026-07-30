@@ -162,6 +162,452 @@ const isPdfMagicBuffer = (buf) =>
  */
 const looksLikeRawPdfUtf8String = (s) => Boolean(s && typeof s === 'string' && s.trimStart().startsWith('%PDF'));
 
+const HEBREW_CHAR_RE = /[\u0590-\u05FF]/g;
+const HEBREW_WORD_RE = /[\u0590-\u05FF]{2,}/g;
+const REPLACEMENT_CHAR_RE = /\uFFFD/g;
+const PUA_CHAR_RE = /[\uE000-\uF8FF]/g;
+/** Classic UTF-8 mis-decoded as Latin-1 / Windows-1252 mojibake markers. */
+const MOJIBAKE_RE = /Ã.|Â.|â€™|â€œ|â€|ðŸ/;
+
+/** Common Hebrew CV lexicon — used to detect character-reversed pdf-parse output. */
+const HEBREW_CV_LEXICON = [
+  'ניסיון', 'נסיון', 'השכלה', 'ניהול', 'שיווק', 'מכירות', 'עבודה', 'לקוחות',
+  'פיתוח', 'עסקי', 'עסקאות', 'ישראל', 'תל', 'אביב', 'רמת', 'חיפה', 'ירושלים',
+  'קורות', 'חיים', 'השכלה', 'תואר', 'אוניברסיטה', 'מכללה', 'שירות', 'צבאי',
+  'אחראי', 'מנהל', 'רכז', 'יועץ', 'מהנדס', 'חשבונאות', 'כספים', 'משאבי',
+  'וסגירת', 'אסטרטגיים', 'קשרים', 'בנייה', 'נדלן', 'הזדמנויות',
+];
+
+const reverseUnicode = (s) => [...String(s || '')].reverse().join('');
+
+
+const hebrewTextLooksCharReversed = (text) => {
+  const head = String(text || '').slice(0, 1200);
+  const words = head.match(HEBREW_WORD_RE) || [];
+  if (words.length < 4) return false;
+  let rawHits = 0;
+  let revHits = 0;
+  for (const w of words.slice(0, 60)) {
+    const clean = w.replace(/[״׳"'`]/g, '');
+    if (clean.length < 4) continue;
+    const rev = reverseUnicode(clean);
+    if (HEBREW_CV_LEXICON.includes(clean)) rawHits += 1;
+    if (HEBREW_CV_LEXICON.includes(rev)) revHits += 1;
+  }
+  return revHits >= 3 && revHits > rawHits;
+};
+
+const fixHebrewPdfLineDirection = (line) => {
+  if (!line || /^\r?\n$/.test(line)) return line;
+  const heb = (line.match(HEBREW_CHAR_RE) || []).length;
+  if (heb < 4) return line;
+  const latinOrAt = (line.match(/[A-Za-z@]/g) || []).length;
+  const digits = (line.match(/\d/g) || []).length;
+
+  const scoreHebrewWords = (src) => {
+    let rawHits = 0;
+    let revHits = 0;
+    for (const w of src.match(HEBREW_WORD_RE) || []) {
+      const clean = w.replace(/[״׳"'`]/g, '');
+      if (clean.length < 4) continue;
+      const rev = reverseUnicode(clean);
+      if (HEBREW_CV_LEXICON.includes(clean)) rawHits += 1;
+      if (HEBREW_CV_LEXICON.includes(rev)) revHits += 1;
+    }
+    return { rawHits, revHits };
+  };
+
+  // Mixed contact/title lines: only reverse Hebrew glyphs when those words look reversed.
+  // Avoid mangling correctly-encoded city names sitting next to email/phone.
+  if (latinOrAt > 0 || digits >= 2) {
+    const { rawHits, revHits } = scoreHebrewWords(line);
+    if (!(revHits >= 1 && revHits > rawHits)) return line;
+    return line.replace(HEBREW_WORD_RE, (w) => reverseUnicode(w));
+  }
+
+  // Pure Hebrew line (name / title / bullet) — reverse chars and word order
+  const charFixed = line.replace(HEBREW_WORD_RE, (w) => reverseUnicode(w));
+  const leading = charFixed.match(/^\s*/)?.[0] || '';
+  const trailing = charFixed.match(/\s*$/)?.[0] || '';
+  const core = charFixed.trim();
+  if (!core) return line;
+  return `${leading}${core.split(/\s+/).reverse().join(' ')}${trailing}`;
+};
+
+const firstPureHebrewLine = (text) => {
+  for (const line of String(text || '').split(/\r?\n/)) {
+    const t = line.trim();
+    if (!t) continue;
+    if (!/[\u0590-\u05FF]{3,}/u.test(t)) continue;
+    if (/[A-Za-z@\d]/.test(t)) continue;
+    return t;
+  }
+  return null;
+};
+
+/**
+ * Fix character-reversed Hebrew words from pdf-parse. For pure-Hebrew lines also reverse
+ * word order (name lines are stored last→first).
+ * Also triggers when the first Hebrew line, after fix, matches a filename name hint.
+ */
+const fixCharReversedHebrewText = (text, fileNameHint = null) => {
+  const raw = String(text || '');
+  if (!raw.trim()) return raw;
+
+  let shouldFix = hebrewTextLooksCharReversed(raw);
+  if (!shouldFix && fileNameHint) {
+    const first = firstPureHebrewLine(raw);
+    if (first) {
+      const fixedFirst = fixHebrewPdfLineDirection(first).trim();
+      const fullRev = reverseUnicode(first).trim();
+      const hintNorm = normalizeNameForCompare(fileNameHint);
+      if (
+        hintNorm
+        && (
+          normalizeNameForCompare(fixedFirst) === hintNorm
+          || normalizeNameForCompare(fullRev) === hintNorm
+        )
+      ) {
+        shouldFix = true;
+      }
+    }
+  }
+  if (!shouldFix) return raw;
+
+  return raw.split(/(\r?\n)/).map((line) => fixHebrewPdfLineDirection(line)).join('');
+};
+
+/**
+ * Pull a person-name hint from an upload filename, e.g.
+ * "1784194056069-קורות חיים של אליהו ארי יחזקאל.pdf" → "אליהו ארי יחזקאל"
+ * Returns { name, confident } — confident when filename uses "קורות חיים של …" / "CV of …".
+ */
+const extractNameHintFromFileName = (fileName) => {
+  if (!fileName || typeof fileName !== 'string') return null;
+  let base = path.basename(fileName);
+  base = base.replace(/\.[^.]+$/u, '');
+  try {
+    base = decodeURIComponent(base);
+  } catch (_e) { /* keep raw */ }
+  base = base
+    .replace(/^\d{8,16}[-_\s.]*/u, '')
+    .replace(/[_\+]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!base) return null;
+
+  const stripNoise = (s) =>
+    String(s || '')
+      .replace(/\.(pdf|docx?|rtf|txt)$/iu, '')
+      .replace(/\b(final|new|updated|scan|copy|cv|resume)\b/gi, ' ')
+      .replace(/[()[\]{}]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+  const looksLikeName = (s) => {
+    const t = stripNoise(s);
+    if (!t || t.length < 3 || t.length > 80) return false;
+    if (/\d{4,}/.test(t) || /@/.test(t)) return false;
+    const tokens = t.split(/\s+/).filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 5) return false;
+    const heb = (t.match(HEBREW_CHAR_RE) || []).length;
+    const lat = (t.match(/[A-Za-z]/g) || []).length;
+    if (heb >= 4) return tokens.every((w) => /[\u0590-\u05FF]{2,}/u.test(w) || /^[A-Za-z]{2,}$/u.test(w));
+    if (lat >= 4) return tokens.every((w) => /^[A-Za-z][A-Za-z'\-]{1,}$/u.test(w));
+    return false;
+  };
+
+  const confidentPatterns = [
+    /(?:קורות\s*חיים|קו["״']?ח)\s+של\s+(.+)$/u,
+    /(?:cv|resume|curriculum\s*vitae)\s+(?:of\s+)(.+)$/iu,
+  ];
+  for (const re of confidentPatterns) {
+    const m = base.match(re);
+    if (m && looksLikeName(m[1])) return { name: stripNoise(m[1]), confident: true };
+  }
+
+  const softPatterns = [
+    /(?:קורות\s*חיים|קו["״']?ח)\s*[-–:]\s*(.+)$/u,
+    /(?:cv|resume)\s*[-–:]\s*(.+)$/iu,
+  ];
+  for (const re of softPatterns) {
+    const m = base.match(re);
+    if (m && looksLikeName(m[1])) return { name: stripNoise(m[1]), confident: false };
+  }
+  if (looksLikeName(base)) return { name: stripNoise(base), confident: false };
+  return null;
+};
+
+/** @deprecated string-only helper — prefer extractNameHintFromFileName(...).name */
+const extractNameHintString = (fileName) => {
+  const h = extractNameHintFromFileName(fileName);
+  return h?.name || null;
+};
+
+const namePartsFromFullName = (fullName) => {
+  const tokens = String(fullName || '').trim().split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) {
+    return { fullName: tokens[0] || null, firstName: tokens[0] || null, lastName: null };
+  }
+  return {
+    fullName: tokens.join(' '),
+    firstName: tokens.slice(0, -1).join(' '),
+    lastName: tokens[tokens.length - 1],
+  };
+};
+
+const normalizeNameForCompare = (s) =>
+  String(s || '')
+    .replace(/[״"']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
+const nameTokenList = (s) => normalizeNameForCompare(s).split(' ').filter(Boolean);
+
+const isNameTokenSubsequence = (shorter, longer) => {
+  const a = nameTokenList(shorter);
+  const b = nameTokenList(longer);
+  if (!a.length || a.length > b.length) return false;
+  let i = 0;
+  for (const t of b) {
+    if (t === a[i]) i += 1;
+    if (i >= a.length) return true;
+  }
+  return false;
+};
+
+const looksLikePersonNameLine = (s) => {
+  const t = String(s || '').replace(/\s+/g, ' ').trim();
+  if (!t || t.length < 3 || t.length > 80) return false;
+  if (/\d{3,}/.test(t) || /@/.test(t) || /https?:/i.test(t)) return false;
+  if (/ניסיון|נסיון|השכלה|skills|experience|education|טלפון|נייד|דוא"?ל|email|phone|linkedin|כתובת/i.test(t)) {
+    return false;
+  }
+  if (/קורות\s*חיים|curriculum|resume\b/i.test(t)) return false;
+  const tokens = t.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2 || tokens.length > 5) return false;
+  const heb = (t.match(HEBREW_CHAR_RE) || []).length;
+  const lat = (t.match(/[A-Za-z]/g) || []).length;
+  if (heb >= 4) return tokens.every((w) => /[\u0590-\u05FF]{2,}/u.test(w) || /^[A-Za-z]{2,}$/u.test(w));
+  if (lat >= 4) return tokens.every((w) => /^[A-Za-z][A-Za-z'\-]{1,}$/u.test(w));
+  return false;
+};
+
+/** Top-of-CV lines that look like a person name (after RTL fix). */
+const extractNameCandidatesFromResumeText = (text) => {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const out = [];
+  for (const line of lines.slice(0, 15)) {
+    if (looksLikePersonNameLine(line)) out.push(line);
+  }
+  return out;
+};
+
+const pickFullerName = (...candidates) => {
+  const names = candidates.map((n) => String(n || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!names.length) return null;
+  let best = names[0];
+  for (let i = 1; i < names.length; i += 1) {
+    const cur = names[i];
+    const bestTok = nameTokenList(best);
+    const curTok = nameTokenList(cur);
+    if (isNameTokenSubsequence(best, cur) && curTok.length > bestTok.length) {
+      best = cur;
+      continue;
+    }
+    if (isNameTokenSubsequence(cur, best) && bestTok.length > curTok.length) continue;
+    if (
+      bestTok.length >= 2
+      && curTok.length >= 2
+      && bestTok[0] === curTok[0]
+      && bestTok[bestTok.length - 1] === curTok[curTok.length - 1]
+      && curTok.length > bestTok.length
+    ) {
+      best = cur;
+    }
+  }
+  return best;
+};
+
+/**
+ * Multi-signal name resolution for diverse CV layouts:
+ * filename (strongest when "קורות חיים של X"), PDF header lines, then AI fields.
+ * Always prefers the fullest name when one is a token-subsequence of another
+ * (keeps middle names like "ארי").
+ */
+const resolveCandidateIdentityName = (aiResult, { fileName = null, resumeText = null } = {}) => {
+  const hintInfo = extractNameHintFromFileName(fileName);
+  const hint = hintInfo?.name || (typeof fileName === 'string' && looksLikePersonNameLine(fileName) ? fileName : null);
+  const headerNames = extractNameCandidatesFromResumeText(resumeText);
+  const ai = aiResult && typeof aiResult === 'object' ? { ...aiResult } : {};
+  const aiFull =
+    strOrNull(ai.fullName)
+    || [strOrNull(ai.firstName), strOrNull(ai.lastName)].filter(Boolean).join(' ')
+    || '';
+
+  const candidates = [];
+  if (hint) candidates.push({ name: hint, source: 'filename', confident: Boolean(hintInfo?.confident) });
+  for (const h of headerNames) candidates.push({ name: h, source: 'header', confident: false });
+  if (aiFull) candidates.push({ name: aiFull, source: 'ai', confident: false });
+
+  if (!candidates.length) return { ai, hint: null, chosen: null };
+
+  const score = (c) => {
+    let s = 0;
+    const tokens = nameTokenList(c.name);
+    if (tokens.length < 2 || tokens.length > 5) s -= 40;
+    else s += tokens.length * 12; // prefer 3-part names over 2-part
+    if (c.source === 'filename') s += c.confident ? 100 : 55;
+    if (c.source === 'header') s += 45;
+    if (c.source === 'ai') s += nameFieldsLookUnreliable(ai) ? -10 : 15;
+    if (hint) {
+      const hn = normalizeNameForCompare(hint);
+      const cn = normalizeNameForCompare(c.name);
+      if (cn === hn) s += 80;
+      else if (isNameTokenSubsequence(c.name, hint)) s += 25;
+      const ht = nameTokenList(hint);
+      if (
+        tokens.length >= 2
+        && ht.length >= 2
+        && tokens[0] === ht[0]
+        && tokens[tokens.length - 1] === ht[ht.length - 1]
+      ) {
+        s += 35;
+      }
+    }
+    // Boost header names that agree with filename
+    if (c.source === 'header' && hint && normalizeNameForCompare(c.name) === normalizeNameForCompare(hint)) {
+      s += 40;
+    }
+    return s;
+  };
+
+  candidates.sort((a, b) => score(b) - score(a));
+  let chosen = candidates[0].name;
+
+  // Never keep a shorter name when a higher-signal candidate is a fuller form of it.
+  for (const c of candidates) {
+    const fuller = pickFullerName(chosen, c.name);
+    if (fuller && fuller !== chosen) {
+      // Only upgrade when the fuller form is backed by filename or header
+      if (c.source === 'filename' || c.source === 'header' || isNameTokenSubsequence(chosen, c.name)) {
+        chosen = fuller;
+      }
+    }
+  }
+
+  // Confident filename always wins unless AI names a clearly different person (different first AND last).
+  if (hintInfo?.confident && hint) {
+    const a = nameTokenList(aiFull);
+    const h = nameTokenList(hint);
+    const clearlyDifferent =
+      a.length >= 2
+      && h.length >= 2
+      && a[0] !== h[0]
+      && a[a.length - 1] !== h[h.length - 1]
+      && !isNameTokenSubsequence(aiFull, hint)
+      && !isNameTokenSubsequence(hint, aiFull);
+    if (!clearlyDifferent) chosen = hint;
+  }
+
+  const parts = namePartsFromFullName(chosen);
+  const prev = aiFull || null;
+  ai.fullName = parts.fullName;
+  ai.firstName = parts.firstName;
+  ai.lastName = parts.lastName;
+  if (normalizeNameForCompare(prev) !== normalizeNameForCompare(parts.fullName)) {
+    console.log('[cv-name-resolve] chose identity name', {
+      chosen: parts.fullName,
+      previous: prev,
+      hint: hint || null,
+      header: headerNames[0] || null,
+      confidentFile: Boolean(hintInfo?.confident),
+    });
+  }
+  return { ai, hint: hint || null, chosen: parts.fullName };
+};
+
+/**
+ * Prefer a filename-derived name over AI/pdf-parse when the extract is wrong
+ * (e.g. "אליהו והרה יחזקאל" vs file "…של אליהו ארי יחזקאל").
+ */
+const applyFileNameNameHint = (aiResult, fileName, resumeText = null) =>
+  resolveCandidateIdentityName(aiResult, { fileName, resumeText });
+
+/**
+ * pdf-parse text layer is often wrong for Hebrew/CID fonts even when "enough" characters come back.
+ * Prefer Gemini native-PDF / page vision for structured fields (especially names) when this fires.
+ */
+const isUnreliableResumeTextExtract = (text) => {
+  const s = String(text || '').trim();
+  if (!s) return true;
+  if (looksLikeRawPdfUtf8String(s)) return true;
+  // Thin text layer — common for designed / partially image CVs
+  if (s.length < 400) return true;
+  if (hebrewTextLooksCharReversed(s)) return true;
+
+  const replacement = (s.match(REPLACEMENT_CHAR_RE) || []).length;
+  const pua = (s.match(PUA_CHAR_RE) || []).length;
+  if (replacement >= 3 || pua >= 3) return true;
+  if (MOJIBAKE_RE.test(s)) return true;
+
+  const head = s.slice(0, 1000);
+  const headHebrew = (head.match(HEBREW_CHAR_RE) || []).length;
+  if (headHebrew >= 15) {
+    // Broken CID / RTL extracts often explode into single-letter tokens
+    const tokens = head.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 12) {
+      const singleLetter = tokens.filter((t) => /^[A-Za-z\u0590-\u05FF]$/u.test(t)).length;
+      if (singleLetter / tokens.length > 0.35) return true;
+    }
+  }
+  return false;
+};
+
+/** Identity fields that look garbled / missing after text-layer AI parse. */
+const nameFieldsLookUnreliable = (aiResult) => {
+  if (!aiResult || typeof aiResult !== 'object') return true;
+  const first = strOrNull(aiResult.firstName) || '';
+  const last = strOrNull(aiResult.lastName) || '';
+  const full =
+    strOrNull(aiResult.fullName)
+    || [first, last].filter(Boolean).join(' ').trim()
+    || '';
+  if (!full || full.length < 2) return true;
+  if (REPLACEMENT_CHAR_RE.test(full) || PUA_CHAR_RE.test(full)) return true;
+  if (MOJIBAKE_RE.test(full)) return true;
+  // Single-glyph "names" from broken font maps
+  if (/^[\sA-Za-z\u0590-\u05FF]{1,2}$/u.test(full.replace(/\s+/g, ''))) return true;
+  const parts = full.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2 && parts.every((p) => p.length === 1)) return true;
+  return false;
+};
+
+const isPdfUploadBuffer = (buffer, mimeType) =>
+  Boolean(
+    (buffer && isPdfMagicBuffer(buffer))
+    || String(mimeType || '').toLowerCase().includes('pdf'),
+  );
+
+/**
+ * Prefer Gemini vision identity / contact fields when pdf-parse text is unreliable.
+ * Keeps other text-AI fields unless vision also provides them.
+ */
+const preferVisionIdentityFields = (textAiResult, visionAiResult) => {
+  if (!visionAiResult || typeof visionAiResult !== 'object') return textAiResult || {};
+  if (!textAiResult || typeof textAiResult !== 'object') return visionAiResult;
+  const out = { ...textAiResult };
+  for (const key of ['firstName', 'lastName', 'fullName', 'email', 'phone', 'title', 'idNumber']) {
+    const v = strOrNull(visionAiResult[key]);
+    if (v) out[key] = v;
+  }
+  return out;
+};
+
 /** Decode client `fileBase64`: strip `data:*;base64,` and whitespace (common in browsers / copy-paste). */
 const decodeFileBase64Payload = (raw) => {
   if (typeof raw !== 'string' || !raw.trim()) return null;
@@ -1453,7 +1899,7 @@ const getResumePromptTemplate = async () => {
   }
 };
 
-const parseResumeWithAi = async ({ resumeText }) => {
+const parseResumeWithAi = async ({ resumeText, fileNameHint = null }) => {
   const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) {
     console.log('[attachMedia-ai] missing GEMINI_API_KEY/API_KEY/GOOGLE_API_KEY -> skip ai');
@@ -1473,36 +1919,27 @@ const parseResumeWithAi = async ({ resumeText }) => {
     : buildAiResumePrompt(getCandidateTagsSchemaText());
 
   const cvText = String(resumeText).slice(0, 50000);
-  // NOTE: we deliberately do NOT pass a `responseSchema` here.
-  // gemini-3-flash-preview rejects `maxItems` (HTTP 400 INVALID_ARGUMENT), and
-  // without `maxItems` a strict responseSchema makes the model run away —
-  // it keeps generating tag/work-experience items until it hits maxOutputTokens
-  // (we observed 32,753 output tokens / ~100KB of JSON for one CV).
-  // We keep `responseMimeType: 'application/json'` to force JSON-only output,
-  // and rely on the prompt's brevity rules + the validate-and-repair
-  // pass + the truncation salvager to keep the result clean and complete.
+  const nameHintLine = fileNameHint
+    ? `\n\nFILENAME NAME HINT (strong signal — use this EXACT full name including every middle name for firstName/lastName/fullName unless the CV clearly shows a different person):\n${fileNameHint}\nIMPORTANT: Do NOT drop middle names. If the hint is "אליהו ארי יחזקאל", fullName must be "אליהו ארי יחזקאל", firstName "אליהו ארי", lastName "יחזקאל".\n`
+    : '';
   const generationConfig = {
     temperature: 0.1,
-    // 16K is plenty for any reasonable CV; if the model still overshoots we
-    // fail fast and let the salvager + repair pass clean up.
     maxOutputTokens: 16384,
     responseMimeType: 'application/json',
-    // Disable hidden chain-of-thought — extraction is deterministic and the
-    // thinking budget would otherwise eat the whole output budget.
     thinkingConfig: { thinkingBudget: 0 },
   };
 
-  console.log('[attachMedia-ai] calling gemini', { resumeLen: cvText.length });
-  // First pass: pass the CV exactly once (stop double-feeding via history+message).
+  console.log('[attachMedia-ai] calling gemini', { resumeLen: cvText.length, fileNameHint: fileNameHint || null });
   const raw = await sendChat({
     apiKey,
     systemPrompt,
-    message: `CV TEXT (verbatim, do not summarize before extracting):\n\n${cvText}`,
+    message: `CV TEXT (verbatim, do not summarize before extracting):${nameHintLine}\n\n${cvText}`,
     generationConfig,
     promptId: 'cv_parsing',
     llmInputJson: {
       cvTextLength: cvText.length,
       cvTextPreview: cvText.slice(0, 4000),
+      fileNameHint: fileNameHint || null,
     },
   });
   const rawStr = String(raw || '');
@@ -1614,13 +2051,16 @@ const _callGeminiForCvParsing = async (userParts, label) => {
  * input (gemini-2.5-flash understands PDFs natively — no text extraction or
  * page rendering required). Much more reliable than Tesseract for Hebrew CVs.
  */
-const parseResumeFromPdfBuffer = async (pdfBuffer) => {
+const parseResumeFromPdfBuffer = async (pdfBuffer, { fileNameHint = null } = {}) => {
   if (!pdfBuffer?.length) return null;
   try {
     console.log('[cv-vision] trying native PDF input, bytes:', pdfBuffer.length);
+    const hint = fileNameHint
+      ? ` Prefer this exact candidate full name from the filename unless the document clearly shows another person: "${fileNameHint}".`
+      : '';
     const parts = [
       { inlineData: { mimeType: 'application/pdf', data: pdfBuffer.toString('base64') } },
-      { text: 'The document above is a candidate resume (CV). Extract all data exactly as instructed in the system prompt and return the JSON object.' },
+      { text: `The document above is a candidate resume (CV). Extract all data exactly as instructed in the system prompt and return the JSON object.${hint}` },
     ];
     const result = await _callGeminiForCvParsing(parts, 'cv-vision-pdf');
     if (result) console.log('[cv-vision] native PDF extraction succeeded');
@@ -1635,16 +2075,19 @@ const parseResumeFromPdfBuffer = async (pdfBuffer) => {
  * Secondary vision fallback: parse a CV from rendered PDF page PNG images.
  * Used when the native-PDF path also fails.
  */
-const parseResumeFromImages = async (pageBuffers) => {
+const parseResumeFromImages = async (pageBuffers, { fileNameHint = null } = {}) => {
   if (!pageBuffers?.length) return null;
   try {
     console.log('[cv-vision] trying image fallback with', Math.min(pageBuffers.length, 5), 'pages');
     const imageParts = pageBuffers.slice(0, 5).map((buf) => ({
       inlineData: { mimeType: 'image/png', data: buf.toString('base64') },
     }));
+    const hint = fileNameHint
+      ? ` Prefer this exact candidate full name from the filename unless the document clearly shows another person: "${fileNameHint}".`
+      : '';
     const parts = [
       ...imageParts,
-      { text: 'The images above are pages of a candidate resume. Extract all CV data exactly as instructed in the system prompt and return the JSON object.' },
+      { text: `The images above are pages of a candidate resume. Extract all CV data exactly as instructed in the system prompt and return the JSON object.${hint}` },
     ];
     const result = await _callGeminiForCvParsing(parts, 'cv-vision-images');
     if (result) console.log('[cv-vision] image extraction succeeded');
@@ -1653,6 +2096,22 @@ const parseResumeFromImages = async (pageBuffers) => {
     console.error('[cv-vision-images] failed:', err?.message || err);
     return null;
   }
+};
+
+/**
+ * Native PDF → Gemini, then rendered page images. Used when pdf-parse text is empty or unreliable.
+ */
+const tryParseResumeViaPdfVision = async (pdfBuffer, { fileNameHint = null } = {}) => {
+  if (!pdfBuffer?.length) return null;
+  let result = await parseResumeFromPdfBuffer(pdfBuffer, { fileNameHint });
+  if (result) return result;
+  try {
+    const pages = await renderPdfPagesToPngBuffers(pdfBuffer);
+    if (pages.length) result = await parseResumeFromImages(pages, { fileNameHint });
+  } catch (err) {
+    console.error('[cv-vision] render/parse failed:', err?.message || err);
+  }
+  return result || null;
 };
 
 const parseCandidateListParams = (req) => {
@@ -2013,23 +2472,34 @@ const createFromAi = async (req, res) => {
         }
       }
     }
-    // ── Gemini Vision fallback when text extraction fails ──────────────────
-    // Gemini 2.5 Flash understands PDFs natively — no text extraction or OCR
-    // needed. We try: 1) raw PDF bytes → Gemini, 2) rendered PNG pages → Gemini.
-    let visionAiResult = null;
-    if ((!text || !String(text).trim()) && buffer && (isPdfMagicBuffer(buffer) || (String(mimeType).toLowerCase().includes('pdf')))) {
-      console.log('[cv-vision] text extraction failed — attempting Gemini Vision fallback');
-      // 1. Native PDF input (simplest — no rendering required)
-      visionAiResult = await parseResumeFromPdfBuffer(buffer);
-      // 2. Rendered page images (fallback if native PDF fails)
-      if (!visionAiResult) {
-        try {
-          const pages = await renderPdfPagesToPngBuffers(buffer);
-          if (pages.length) visionAiResult = await parseResumeFromImages(pages);
-        } catch (visionErr) {
-          console.error('[cv-vision] render/parse failed:', visionErr?.message || visionErr);
-        }
+    // Filename often carries the real name for Hebrew CVs with broken text layers.
+    const fileNameHint = extractNameHintFromFileName(fileName)?.name || null;
+    if (fileNameHint) {
+      console.log('[cv-name-hint] from filename', { fileName, fileNameHint });
+    }
+    // Fix Hebrew pdf-parse character-reversal (e.g. "לאקזחי ירא והילא" → "אליהו ארי יחזקאל")
+    if (text) {
+      const fixed = fixCharReversedHebrewText(text, fileNameHint);
+      if (fixed !== text) {
+        console.log('[cv-hebrew-rtl] applied character-reversed Hebrew fix', {
+          beforeHead: String(text).trim().slice(0, 80),
+          afterHead: String(fixed).trim().slice(0, 80),
+        });
+        text = fixed;
       }
+    }
+
+    // ── Gemini Vision: empty extract OR unreliable pdf-parse text (Hebrew/CID/name issues) ──
+    // Gemini 2.5 Flash understands PDFs natively — better for names than broken text layers.
+    let visionAiResult = null;
+    const pdfBuffer = buffer && isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
+    const unreliableText = isUnreliableResumeTextExtract(text);
+    if (pdfBuffer && (!String(text || '').trim() || unreliableText)) {
+      console.log('[cv-vision] running Gemini Vision', {
+        reason: !String(text || '').trim() ? 'empty-text' : 'unreliable-text',
+        textLen: String(text || '').trim().length,
+      });
+      visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
     }
 
     if (!text || !String(text).trim()) {
@@ -2041,15 +2511,40 @@ const createFromAi = async (req, res) => {
       }
       // Vision succeeded — skip text-based AI call below, jump straight to normalization
     }
-    if (text && looksLikeRawPdfUtf8String(text)) {
+    if (text && looksLikeRawPdfUtf8String(text) && !visionAiResult) {
       return res.status(400).json({
         message:
           'Extracted data looks like raw PDF bytes, not text. The PDF may be image-based — use resumeText to paste the CV, or a text-based PDF export.',
       });
     }
 
-    const aiResult = (visionAiResult || (await parseResumeWithAi({ resumeText: text }))) || {};
+    let aiResult = {};
+    if (visionAiResult && (!String(text || '').trim() || unreliableText)) {
+      // Prefer full vision structured parse when the text layer is empty/unreliable
+      aiResult = visionAiResult;
+      console.log('[cv-vision] using vision result as primary structured parse');
+    } else if (String(text || '').trim() && !looksLikeRawPdfUtf8String(text)) {
+      aiResult = (await parseResumeWithAi({ resumeText: text, fileNameHint })) || {};
+      // Text AI ran, but name still looks wrong — try vision just for identity fields
+      if (pdfBuffer && nameFieldsLookUnreliable(aiResult)) {
+        console.log('[cv-vision] text AI name unreliable — trying vision for identity fields');
+        if (!visionAiResult) visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+        if (visionAiResult) {
+          aiResult = preferVisionIdentityFields(aiResult, visionAiResult);
+          console.log('[cv-vision] merged vision identity fields into text AI result');
+        }
+      }
+    } else if (visionAiResult) {
+      aiResult = visionAiResult;
+    }
+    // Multi-signal name: filename + PDF header + AI (keeps middle names; confident "של X" wins).
+    aiResult = applyFileNameNameHint(aiResult, fileName, text).ai;
+
     const fallback = extractStructuredFields(text);
+    if (fileNameHint) {
+      const hintParts = namePartsFromFullName(fileNameHint);
+      if (!fallback.fullName) fallback.fullName = hintParts.fullName;
+    }
 
     const aiSkills = aiResult.skills || {};
     let softSkills = normalizeStringArray(aiSkills.soft);
@@ -2124,6 +2619,22 @@ const createFromAi = async (req, res) => {
       searchTextSavedAt: new Date(),
       source: strOrNull(aiResult.source) || 'ai-upload',
     };
+
+    // Keep first/last/full consistent (never let first+last drop a middle name from fullName).
+    {
+      const bestFull =
+        pickFullerName(
+          candidatePayload.fullName,
+          [candidatePayload.firstName, candidatePayload.lastName].filter(Boolean).join(' '),
+          fileNameHint,
+        ) || candidatePayload.fullName;
+      const synced = namePartsFromFullName(bestFull);
+      if (synced.fullName) {
+        candidatePayload.fullName = synced.fullName;
+        candidatePayload.firstName = synced.firstName;
+        candidatePayload.lastName = synced.lastName;
+      }
+    }
 
     let createdCandidate;
     try {
@@ -2511,7 +3022,7 @@ const createUploadUrl = async (req, res) => {
 };
 
 const attachMedia = async (req, res) => {
-  const { key, type } = req.body;
+  const { key, type, fileName: bodyFileName, filename: bodyFilename } = req.body;
   if (!key || !type) {
     return res.status(400).json({ message: 'key and type are required' });
   }
@@ -2524,9 +3035,34 @@ const attachMedia = async (req, res) => {
     if (type === 'resume') attachUpdates.resumeUploadedAt = new Date();
     const baseCandidate = await candidateService.update(req.params.id, attachUpdates);
     if (type === 'resume') {
-      const extraText = await fetchResumeText(url, baseCandidate.id);
-      console.log('[attachMedia] resume extraText length', baseCandidate.id, extraText ? extraText.length : 0);
-      const refreshedCandidate = await enrichCandidateFromResumeText(baseCandidate, extraText || '', {});
+      let extraText = '';
+      let pdfBuffer = null;
+      try {
+        const bin = await fetchResumeBinaryForMail(url, baseCandidate.id);
+        if (bin?.buffer?.length) {
+          if (isPdfUploadBuffer(bin.buffer, bin.contentType)) pdfBuffer = bin.buffer;
+          if ((bin.contentType || '').startsWith('image/')) {
+            extraText = await extractTextFromImageBuffer(bin.buffer);
+          } else {
+            extraText = await extractFromBuffer(bin.buffer, bin.contentType);
+          }
+        }
+      } catch (e) {
+        console.warn('[attachMedia] binary extract failed, falling back to fetchResumeText', e?.message || e);
+      }
+      if (!String(extraText || '').trim()) {
+        extraText = await fetchResumeText(url, baseCandidate.id);
+      }
+      console.log('[attachMedia] resume extraText length', baseCandidate.id, extraText ? extraText.length : 0, {
+        hasPdfBuffer: Boolean(pdfBuffer),
+        unreliableText: isUnreliableResumeTextExtract(extraText),
+      });
+      // Prefer client-provided original name; S3 keys often keep ".../original-name.pdf"
+      const resumeFileName = bodyFileName || bodyFilename || path.basename(String(key || ''));
+      const refreshedCandidate = await enrichCandidateFromResumeText(baseCandidate, extraText || '', {
+        pdfBuffer: pdfBuffer || undefined,
+        fileName: resumeFileName,
+      });
       await candidateCompletenessService.refreshCandidateDataStatusAfterSave(baseCandidate.id, req);
       return res.json(refreshedCandidate);
     }
@@ -2616,8 +3152,52 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
   let mergedUpdates = { ...baseUpdates };
   let aiTagEntries = [];
   try {
-    const ai = await parseResumeWithAi({ resumeText: extraText || '' });
+    let workingText = String(extraText || '');
+    const fileNameHint = extractNameHintFromFileName(options.fileName || options.filename || null)?.name || null;
+    const rtlFixed = fixCharReversedHebrewText(workingText, fileNameHint);
+    if (rtlFixed !== workingText) {
+      console.log('[cv-hebrew-rtl][enrich] applied character-reversed Hebrew fix', baseCandidate?.id);
+      workingText = rtlFixed;
+      if (workingText.trim()) {
+        mergedUpdates.searchText = workingText.slice(0, 50000);
+        mergedUpdates.searchTextSavedAt = new Date();
+      }
+    }
+
+    const pdfBuffer = options.pdfBuffer && Buffer.isBuffer(options.pdfBuffer) ? options.pdfBuffer : null;
+    const unreliableText = isUnreliableResumeTextExtract(workingText);
+    let ai = options.pdfVisionResult && typeof options.pdfVisionResult === 'object'
+      ? options.pdfVisionResult
+      : null;
+
+    if (!ai && pdfBuffer && (!String(workingText || '').trim() || unreliableText)) {
+      console.log('[cv-vision][enrich] running Gemini Vision', {
+        candidateId: baseCandidate?.id,
+        reason: !String(workingText || '').trim() ? 'empty-text' : 'unreliable-text',
+        textLen: String(workingText || '').trim().length,
+      });
+      ai = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+    }
+
+    const usedVisionAsPrimary = Boolean(ai && (!String(workingText || '').trim() || unreliableText));
+
+    if (!usedVisionAsPrimary) {
+      const textAi = await parseResumeWithAi({ resumeText: workingText || '', fileNameHint });
+      if (textAi && typeof textAi === 'object') {
+        if (pdfBuffer && nameFieldsLookUnreliable(textAi)) {
+          console.log('[cv-vision][enrich] text AI name unreliable — vision for identity', baseCandidate?.id);
+          if (!ai) ai = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
+          ai = ai ? preferVisionIdentityFields(textAi, ai) : textAi;
+        } else {
+          ai = textAi;
+        }
+      } else if (!ai) {
+        ai = textAi;
+      }
+    }
+
     if (ai && typeof ai === 'object') {
+      ai = applyFileNameNameHint(ai, options.fileName || options.filename || null, workingText).ai;
       const candidateUpdates = { ...buildPersistFieldsFromAiParse(ai, {}) };
       if (
         ai.industryAnalysis &&
@@ -2648,9 +3228,9 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
 
       const currentSoft = normalizeStringArray(candidateUpdates.skills?.soft);
       const currentTech = normalizeStringArray(candidateUpdates.skills?.technical);
-      if ((!currentSoft.length && !currentTech.length) && (extraText || '').trim().length > 50) {
+      if ((!currentSoft.length && !currentTech.length) && (workingText || '').trim().length > 50) {
         try {
-          const skillsOnly = await parseSkillsWithAi({ resumeText: extraText });
+          const skillsOnly = await parseSkillsWithAi({ resumeText: workingText });
           const soft2 = normalizeStringArray(skillsOnly?.skills?.soft);
           const tech2 = normalizeStringArray(skillsOnly?.skills?.technical);
           if (soft2.length || tech2.length) {
@@ -2665,7 +3245,7 @@ const enrichCandidateFromResumeText = async (baseCandidate, extraText, options =
               technical: Array.from(new Set([...existingTech, ...tech2])).slice(0, 50),
             };
           } else {
-            const heur = extractSkillsHeuristic(extraText);
+            const heur = extractSkillsHeuristic(workingText);
             if (heur.soft.length || heur.technical.length) {
               candidateUpdates.skills = {
                 soft: heur.soft,
@@ -2898,6 +3478,10 @@ const processResumeUploadForCandidate = async (
   mimeType,
   options = {},
 ) => {
+  let buffer = decodeFileBase64Payload(fileBase64);
+  if (!buffer?.length) {
+    buffer = Buffer.from(String(fileBase64 || '').replace(/\s/g, ''), 'base64');
+  }
   const bufferText = await extractResumeTextFromUpload(fileBase64, mimeType);
   const resumeUrl = await uploadResumeForCandidate(candidateId, fileBase64, filename, mimeType);
   if (!resumeUrl) return null;
@@ -2910,10 +3494,16 @@ const processResumeUploadForCandidate = async (
     bufferTextLen: bufferText.length,
     extraTextLen: extraText.length,
     preserveFormFields: options.preserveFormFields === true,
+    unreliableText: isUnreliableResumeTextExtract(extraText),
   });
 
+  const enrichOptions = { ...options, fileName: filename || options.fileName || options.filename };
+  if (buffer?.length && isPdfUploadBuffer(buffer, mimeType)) {
+    enrichOptions.pdfBuffer = buffer;
+  }
+
   const baseCandidate = await candidateService.getById(candidateId);
-  const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', options);
+  const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', enrichOptions);
   await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, null);
   return { resumeUrl, candidate: refreshed };
 };

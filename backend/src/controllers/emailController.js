@@ -1061,19 +1061,45 @@ function notificationVisibleToViewer(record, ctx) {
   return false;
 }
 
-/** Same-client recruiters may edit screening_cv workflow fields on rows sent by a teammate. */
+/** Same-tenant staff may edit screening_cv workflow fields (aligned with list scope). */
 async function screeningCvReferralEditableByPeer(record, req) {
   const userId = req.user?.sub || req.user?.id;
   if (!userId) return false;
+
+  const me = await User.findByPk(userId, {
+    attributes: ['id', 'clientId', 'email', 'role', 'name'],
+  });
+  if (!me) return false;
+
+  const myEffective = await authService.resolveEffectiveClientIdForUser(me);
   const sid = record?.senderUserId;
-  if (!sid) return false;
-  const [me, sender] = await Promise.all([
-    User.findByPk(userId, { attributes: ['clientId'] }),
-    User.findByPk(sid, { attributes: ['clientId'] }),
-  ]);
-  const a = me?.clientId;
-  const b = sender?.clientId;
-  return Boolean(a && b && String(a) === String(b));
+
+  // Same effective client (or raw clientId) as the sender
+  if (sid) {
+    const sender = await User.findByPk(sid, {
+      attributes: ['id', 'clientId', 'email', 'role', 'name'],
+    });
+    if (sender) {
+      if (me.clientId && sender.clientId && String(me.clientId) === String(sender.clientId)) {
+        return true;
+      }
+      if (myEffective) {
+        const senderEffective = await authService.resolveEffectiveClientIdForUser(sender);
+        if (senderEffective && String(senderEffective) === String(myEffective)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  // Same gate as listScreeningCvReferrals: job company label under the viewer's tenant
+  if (!myEffective) return false;
+  const labels = await collectClientScopeLabels(myEffective);
+  if (!labels.length) return false;
+  const meta = record.metadata || {};
+  const tp = meta.taskPayload || {};
+  const clientName = String(tp.clientName || '').trim();
+  return screeningClientNameMatchesScope(clientName, labels);
 }
 
 /** True when the viewer is an intended recipient (not only the sender viewing "sent"). */

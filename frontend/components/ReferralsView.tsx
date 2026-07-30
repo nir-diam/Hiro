@@ -745,8 +745,9 @@ const ReferralsView: React.FC<{
     // Calculate Stats
     const stats = useMemo(() => {
         const total = sortedActiveReferrals.length;
-        const active = sortedActiveReferrals.filter(r => !['התקבל לעבודה', 'נדחה', 'בארכיון'].includes(r.status)).length;
-        const hired = sortedActiveReferrals.filter(r => r.status === 'התקבל לעבודה').length;
+        const hiredStatuses = ['התקבל לעבודה', 'התקבל'];
+        const active = sortedActiveReferrals.filter(r => !['התקבל לעבודה', 'התקבל', 'נדחה', 'בארכיון'].includes(r.status)).length;
+        const hired = sortedActiveReferrals.filter(r => hiredStatuses.includes(r.status)).length;
         const rejected = sortedActiveReferrals.filter(r => r.status === 'נדחה').length;
         return { total, active, hired, rejected };
     }, [sortedActiveReferrals]);

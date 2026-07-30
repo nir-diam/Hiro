@@ -48,6 +48,59 @@ const emptyMetrics = () =>
     return acc;
   }, {});
 
+/** Hired on job-candidate status events (pipeline). */
+const HIRED_EVENT_PRED = `(
+  COALESCE(e."toGroup",'') = 'hired'
+  OR COALESCE(e."toStatus",'') IN ('התקבל', 'התקבל לעבודה')
+  OR COALESCE(e."toStatus",'') ILIKE '%התקבל%'
+)`;
+
+/**
+ * Hired on screening-cv referrals (Referrals report status התקבל / התקבל לעבודה).
+ * Prefer metadata.referralWorkflowStatus; fall back to column status.
+ */
+const HIRED_SCREENING_CV_PRED = `(
+  COALESCE(nm.metadata->>'referralWorkflowStatus', '') IN ('התקבל', 'התקבל לעבודה')
+  OR (
+    COALESCE(NULLIF(TRIM(nm.metadata->>'referralWorkflowStatus'), ''), '') = ''
+    AND COALESCE(nm.status, '') IN ('התקבל', 'התקבל לעבודה')
+  )
+)`;
+
+/** When the referral was marked hired. */
+const HIRED_SCREENING_CV_AT = `COALESCE(
+  NULLIF(TRIM(nm.metadata->>'referralWorkflowUpdatedAt'), '')::timestamptz,
+  nm."updatedAt"
+)`;
+
+/**
+ * Distinct candidate|job hires from pipeline events ∪ screening-cv referrals.
+ * Avoids double-counting when both paths exist for the same pair.
+ */
+function hiresCountSql({ staffFilterEvt, clientJobs, staffFilterNotif, clientNotif }) {
+  return `SELECT COUNT(DISTINCT cand_key)::int AS count FROM (
+    SELECT (jc."candidateId"::text || '|' || COALESCE(jc."jobId"::text, '')) AS cand_key
+    FROM job_candidate_status_events e
+    INNER JOIN job_candidates jc ON jc.id = e."jobCandidateId"
+    LEFT JOIN jobs j ON j.id = jc."jobId"
+    WHERE e."changedAt" >= :startAt AND e."changedAt" < :endAt
+      AND ${HIRED_EVENT_PRED}
+      ${staffFilterEvt} ${clientJobs}
+    UNION
+    SELECT (
+      COALESCE(nm.metadata->'taskPayload'->>'candidateId', '') || '|' ||
+      COALESCE(nm.metadata->'taskPayload'->>'jobId', '')
+    ) AS cand_key
+    FROM notification_messages nm
+    WHERE nm.category = 'screening_cv'
+      AND ${HIRED_SCREENING_CV_PRED}
+      AND ${HIRED_SCREENING_CV_AT} >= :startAt
+      AND ${HIRED_SCREENING_CV_AT} < :endAt
+      ${staffFilterNotif} ${clientNotif}
+  ) u
+  WHERE cand_key IS NOT NULL AND cand_key <> '|'`;
+}
+
 const parseDayStart = (raw) => {
   const s = String(raw || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
@@ -253,13 +306,7 @@ async function computePeriodMetrics({ start, endExclusive, clientId, recruiterId
       replacements,
     ),
     scalarCount(
-      `SELECT COUNT(*)::int AS count
-       FROM job_candidate_status_events e
-       INNER JOIN job_candidates jc ON jc.id = e."jobCandidateId"
-       LEFT JOIN jobs j ON j.id = jc."jobId"
-       WHERE e."changedAt" >= :startAt AND e."changedAt" < :endAt
-         AND (COALESCE(e."toGroup",'') = 'hired' OR COALESCE(e."toStatus",'') = 'התקבל לעבודה')
-         ${staffFilterEvt} ${clientJobs}`,
+      hiresCountSql({ staffFilterEvt, clientJobs, staffFilterNotif, clientNotif }),
       replacements,
     ),
     scalarCount(
@@ -327,13 +374,23 @@ async function computePeriodMetrics({ start, endExclusive, clientId, recruiterId
       replacements,
     ),
     scalarAvg(
-      `SELECT AVG(EXTRACT(EPOCH FROM (e."changedAt" - jc."createdAt")) / 86400.0) AS avg
-       FROM job_candidate_status_events e
-       INNER JOIN job_candidates jc ON jc.id = e."jobCandidateId"
-       LEFT JOIN jobs j ON j.id = jc."jobId"
-       WHERE e."changedAt" >= :startAt AND e."changedAt" < :endAt
-         AND (COALESCE(e."toGroup",'') = 'hired' OR COALESCE(e."toStatus",'') = 'התקבל לעבודה')
-         ${staffFilterEvt} ${clientJobs}`,
+      `SELECT AVG(days)::float AS avg FROM (
+         SELECT EXTRACT(EPOCH FROM (e."changedAt" - jc."createdAt")) / 86400.0 AS days
+         FROM job_candidate_status_events e
+         INNER JOIN job_candidates jc ON jc.id = e."jobCandidateId"
+         LEFT JOIN jobs j ON j.id = jc."jobId"
+         WHERE e."changedAt" >= :startAt AND e."changedAt" < :endAt
+           AND ${HIRED_EVENT_PRED}
+           ${staffFilterEvt} ${clientJobs}
+         UNION ALL
+         SELECT EXTRACT(EPOCH FROM (${HIRED_SCREENING_CV_AT} - nm."createdAt")) / 86400.0 AS days
+         FROM notification_messages nm
+         WHERE nm.category = 'screening_cv'
+           AND ${HIRED_SCREENING_CV_PRED}
+           AND ${HIRED_SCREENING_CV_AT} >= :startAt
+           AND ${HIRED_SCREENING_CV_AT} < :endAt
+           ${staffFilterNotif} ${clientNotif}
+       ) t`,
       replacements,
     ),
     scalarCount(
@@ -587,6 +644,14 @@ async function getBiDashboard(opts = {}) {
 module.exports = {
   getBiDashboard,
   resolveDateWindow,
+  previousWindow,
+  changePct,
+  computePeriodMetrics,
+  loadRecruiters,
+  hiresCountSql,
+  HIRED_EVENT_PRED,
+  HIRED_SCREENING_CV_PRED,
+  HIRED_SCREENING_CV_AT,
   KPI_IDS,
   HEATMAP_METRIC_IDS,
 };

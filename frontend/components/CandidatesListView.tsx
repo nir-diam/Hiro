@@ -47,7 +47,7 @@ import {
 import { candidateToSonarRecord } from '../utils/sonarMatchBreakdown';
 import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
 import { ComplexQueryBuilder } from './ComplexQueryComponents';
-import { complexRulesHaveValue, serializeComplexRulesForApi, type ComplexFilterRule } from '../utils/complexQuery';
+import { serializeComplexRulesForApi, type ComplexFilterRule } from '../utils/complexQuery';
 import { fetchCandidatesListResponse } from '../utils/candidatesListApi';
 import { fetchSavedSearchBlacklist, type EnrichedBlacklistEntry } from '../services/savedSearchesApi';
 
@@ -1639,7 +1639,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         () => listViewSnapshot?.complexRules ?? [],
     );
     const skipComplexDebounceOnceRef = useRef(listViewSnapshot !== null);
-    const skipComplexFetchOnceRef = useRef(listViewSnapshot !== null);
     useEffect(() => {
         if (skipComplexDebounceOnceRef.current) {
             skipComplexDebounceOnceRef.current = false;
@@ -2034,6 +2033,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             dataIncomplete?: boolean;
             jobId?: string;
             savedSearchId?: string | number | null;
+            /** Default true. Company-filter Apply sets false for a faster list response. */
+            matchLastJobScores?: boolean;
         }) => {
             if (!apiBase) return;
             const fetchKey = JSON.stringify({
@@ -2044,6 +2045,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 dataIncomplete: !!opts.dataIncomplete,
                 jobId: String(opts.jobId || '').trim(),
                 savedSearchId: opts.savedSearchId ?? null,
+                matchLastJobScores: opts.matchLastJobScores !== false,
             });
             const now = Date.now();
             // Drop identical in-flight / back-to-back duplicate list GETs (Apply + effect race).
@@ -2066,7 +2068,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         advanced: opts.advanced,
                         dataIncomplete: opts.dataIncomplete,
                         jobId: opts.jobId,
-                        matchLastJobScores: true,
+                        matchLastJobScores: opts.matchLastJobScores !== false,
                         savedSearchId: opts.savedSearchId ?? null,
                     },
                     candidatesListFetchInit(),
@@ -2082,13 +2084,17 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 setSemanticBaselineCandidates(null);
                 setCandidates(mapped);
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
-                const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
-                if (rawRows.some(rawListRowNeedsMatchHydration)) {
-                    void hydrateMissingListMatchScores(
-                        apiBase,
-                        rawRows,
-                        listMatchHydrationInFlightRef.current,
-                    ).then((patches) => applyListMatchPatches(patches));
+                // Only hydrate via simulate when the list request asked for scores.
+                // Company-filter Apply uses matchLastJobScores=0 — do not spam simulate.
+                if (opts.matchLastJobScores !== false) {
+                    const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
+                    if (rawRows.some(rawListRowNeedsMatchHydration)) {
+                        void hydrateMissingListMatchScores(
+                            apiBase,
+                            rawRows,
+                            listMatchHydrationInFlightRef.current,
+                        ).then((patches) => applyListMatchPatches(patches));
+                    }
                 }
                 listFetchLastKeyRef.current = { key: fetchKey, at: Date.now() };
             } catch (e) {
@@ -2129,23 +2135,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const prevCompanyFiltersRef = useRef(companyFilters);
 
     const buildAdvancedWithCompanyFilters = useCallback(
-        (rules: ComplexFilterRule[], cf: CompanyFiltersState) => {
-            const hasActiveCF = companyFiltersAreActive(cf);
-            const hasPanel = appliedAdvancedFilters != null || complexRulesHaveValue(rules);
-            if (hasPanel) {
-                const base = buildAdvancedPayloadFromPanel(searchParams, languageFilters, rules);
-                if (hasActiveCF) {
-                    base.companyFilters = {
-                        industries: cf.industries,
-                        fields: cf.fields,
-                        roles: cf.roles,
-                        sizes: cf.sizes,
-                        sectors: cf.sectors,
-                    };
-                }
-                return base;
+        (_rules: ComplexFilterRule[], cf: CompanyFiltersState) => {
+            // Fetch uses the last *applied* snapshot only (set by הצג תוצאות).
+            // Never rebuild from live draft searchParams — that caused a GET on every filter tweak.
+            if (appliedAdvancedFilters != null) {
+                return { ...appliedAdvancedFilters };
             }
-            if (hasActiveCF) {
+            // Company filters from URL hydrate (no panel apply yet)
+            if (companyFiltersAreActive(cf)) {
                 return {
                     companyFilters: {
                         industries: cf.industries,
@@ -2158,7 +2155,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             }
             return null;
         },
-        [appliedAdvancedFilters, searchParams, languageFilters],
+        [appliedAdvancedFilters],
     );
 
     const resolveAdvancedPayloadForFetch = useCallback(
@@ -2186,31 +2183,54 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         selectedJobId,
     ]);
 
-    /** Single fetch on Apply — avoids stale onApply + effect + URL-hydrate duplicates. */
+    /** Explicit Apply — search once with company filters (does not use live draft panel fields). */
     const handleCompanyFiltersApply = useCallback(
         (draft: CompanyFiltersState) => {
             companyFiltersRef.current = draft;
             hasActiveCompanyFiltersRef.current = companyFiltersAreActive(draft);
-            // Preempt the companyFilters effect so it treats this update as already handled.
             prevCompanyFiltersRef.current = draft;
             skipNextCompanyFiltersFetchRef.current = true;
             suppressNextListFetchEffectRef.current = true;
+
+            let advanced: AppliedAdvancedSearchPayload | null = appliedAdvancedFilters
+                ? { ...appliedAdvancedFilters }
+                : null;
+
+            if (companyFiltersAreActive(draft)) {
+                advanced = {
+                    ...(advanced || {}),
+                    companyFilters: {
+                        industries: draft.industries,
+                        fields: draft.fields,
+                        roles: draft.roles,
+                        sizes: draft.sizes,
+                        sectors: draft.sectors,
+                    },
+                } as AppliedAdvancedSearchPayload;
+            } else if (advanced && advanced.companyFilters) {
+                const { companyFilters: _omit, ...rest } = advanced;
+                advanced = Object.keys(rest).length > 0 ? (rest as AppliedAdvancedSearchPayload) : null;
+            }
+
+            setAppliedAdvancedFilters(advanced);
             setPage(1);
             void fetchCandidatesList({
                 page: 1,
                 limit: pageSize,
                 search: debouncedSearchTerm,
-                advanced: buildAdvancedWithCompanyFilters(debouncedComplexRulesRef.current, draft),
+                advanced,
                 dataIncomplete: showIncompleteOnly,
                 jobId: selectedJobId.trim(),
                 savedSearchId: loadedSearchRef.current?.id ?? null,
+                // Skip per-row job scoring — biggest latency win for company-filter Apply.
+                matchLastJobScores: false,
             });
         },
         [
+            appliedAdvancedFilters,
             fetchCandidatesList,
             pageSize,
             debouncedSearchTerm,
-            buildAdvancedWithCompanyFilters,
             showIncompleteOnly,
             selectedJobId,
         ],
@@ -2497,40 +2517,6 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
         void fetchCandidates();
     }, [page, pageSize, fetchCandidates]);
-
-    /** Complex-query textarea: wait 1s after typing, then search with `adv` (no per-keystroke GET). */
-    useEffect(() => {
-        if (!apiBase || suspendListPolling) return;
-        if (loadedSearchRef.current) return; // saved-search mode: suppress auto re-fetch from debounce
-        if (skipComplexFetchOnceRef.current) {
-            skipComplexFetchOnceRef.current = false;
-            return;
-        }
-        if (!complexRulesHaveValue(debouncedComplexRules)) return;
-        suppressNextListFetchEffectRef.current = true;
-        if (page !== 1) {
-            setPage(1);
-        }
-        void fetchCandidatesList({
-            page: 1,
-            limit: pageSize,
-            search: debouncedSearchTerm,
-            advanced: resolveAdvancedPayloadForFetch(debouncedComplexRules),
-            dataIncomplete: showIncompleteOnly,
-            jobId: selectedJobId.trim(),
-            savedSearchId: loadedSearchRef.current?.id ?? null,
-        });
-    }, [
-        apiBase,
-        debouncedComplexRules,
-        suspendListPolling,
-        pageSize,
-        debouncedSearchTerm,
-        resolveAdvancedPayloadForFetch,
-        fetchCandidatesList,
-        showIncompleteOnly,
-        selectedJobId,
-    ]);
 
     /** Refetch with engine scores when the job filter changes (popup already scores via simulate). */
     useEffect(() => {
@@ -3510,6 +3496,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const handleShowResults = () => {
         const snapshot = buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules);
+        const cf = companyFiltersRef.current;
+        if (companyFiltersAreActive(cf)) {
+            snapshot.companyFilters = {
+                industries: cf.industries,
+                fields: cf.fields,
+                roles: cf.roles,
+                sizes: cf.sizes,
+                sectors: cf.sectors,
+            };
+        }
         skipComplexDebounceOnceRef.current = true;
         setDebouncedComplexRules(complexRules);
         debouncedComplexRulesRef.current = complexRules;
