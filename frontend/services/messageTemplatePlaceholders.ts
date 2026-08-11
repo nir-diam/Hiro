@@ -9,6 +9,7 @@ export type MessageTemplateToken =
     | 'candidate_email'
     | 'candidate_cv_link'
     | 'candidate_id'
+    | 'candidate_portal_link'
     | 'job_referrals'
     | 'company_name'
     | 'client_name'
@@ -32,6 +33,7 @@ export const MESSAGE_TEMPLATE_PLACEHOLDER_ROWS: { label: string; token: MessageT
     { label: 'מייל מועמד', token: 'candidate_email' },
     { label: 'לינק קורות חיים', token: 'candidate_cv_link' },
     { label: 'תעודת זהות מועמד', token: 'candidate_id' },
+    { label: 'קישור לאזור האישי (מג\'יק לינק)', token: 'candidate_portal_link' },
     { label: 'משרות והפניות', token: 'job_referrals' },
     { label: 'שם חברה', token: 'company_name' },
     { label: 'שם חברה (לקוח)', token: 'client_name' },

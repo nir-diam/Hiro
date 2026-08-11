@@ -2,6 +2,7 @@
 import React, { useRef } from 'react';
 import { BookmarkIcon, BookmarkIconSolid, ExclamationTriangleIcon, MapPinIcon, ClockIcon, BriefcaseIcon, SparklesIcon } from './Icons';
 import { Candidate } from './CandidatesListView';
+import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
 import { formatCandidatePoolLastActive } from '../utils/formatCandidatePoolLastActive';
 
 interface CandidateCardProps {
@@ -139,11 +140,12 @@ const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, onViewProfile,
                 <div className="flex-1 min-w-0 pr-6">
                     <div className="flex items-center gap-1.5 mb-0.5">
                         <h3 
-                            className="font-bold text-lg text-text-default hover:text-primary-600 transition-colors truncate"
+                            className="font-bold text-lg text-text-default hover:text-primary-600 transition-colors inline-flex items-center gap-1.5 min-w-0"
                             onClick={(e) => { e.stopPropagation(); onViewProfile(); }}
                             title={candidate.name}
                         >
-                            {candidate.name}
+                            <span className="truncate">{candidate.name}</span>
+                            <CandidateApprovedByCandidateBadge approved={candidate.approveByCandidate} className="w-4 h-4" />
                         </h3>
                         {hasMissingFields && (
                             <span title={`חסרים פרטים: ${missingFields.join(', ')}`} className="flex items-center text-amber-500">

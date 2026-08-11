@@ -11,6 +11,7 @@ const clientEventController = require('../controllers/clientEventController');
 const clientDocumentController = require('../controllers/clientDocumentController');
 const clientFinanceController = require('../controllers/clientFinanceController');
 const clientPipelineController = require('../controllers/clientPipelineController');
+const candidatePipelineController = require('../controllers/candidatePipelineController');
 const clientHealthRuleController = require('../controllers/clientHealthRuleController');
 const jobHealthRuleController = require('../controllers/jobHealthRuleController');
 const recruitmentStatusController = require('../controllers/recruitmentStatusController');
@@ -21,6 +22,7 @@ const router = express.Router();
 router.get('/', optionalAuth, optionalAttachDbUser, clientController.list);
 router.get('/all-contacts', authMiddleware, attachDbUser, clientContactController.listAll);
 router.get('/all-tasks', clientTaskController.listAll);
+router.get('/all-events', authMiddleware, attachDbUser, clientEventController.listAll);
 router.get('/:id/contacts', authMiddleware, attachDbUser, clientContactController.list);
 router.post('/:id/contacts', authMiddleware, attachDbUser, clientContactController.create);
 router.put('/:id/contacts/:contactId', authMiddleware, attachDbUser, clientContactController.update);
@@ -138,6 +140,25 @@ router.post(
   authMiddleware,
   attachDbUser,
   clientPipelineController.create,
+);
+
+router.get(
+  '/:id/candidate-pipelines',
+  authMiddleware,
+  attachDbUser,
+  candidatePipelineController.list,
+);
+router.put(
+  '/:id/candidate-pipelines',
+  authMiddleware,
+  attachDbUser,
+  candidatePipelineController.sync,
+);
+router.post(
+  '/:id/candidate-pipelines',
+  authMiddleware,
+  attachDbUser,
+  candidatePipelineController.create,
 );
 
 router.get(

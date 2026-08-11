@@ -7,7 +7,7 @@ import {
     BuildingOffice2Icon, ClockIcon, CalendarDaysIcon, EnvelopeIcon, PhoneIcon, 
     LanguageIcon, AcademicCapIcon, HiroLogotype, ArrowLeftIcon, 
     UserCircleIcon, BookmarkIconSolid, PaperAirplaneIcon, InboxIcon, VideoCameraIcon,
-    ExclamationTriangleIcon, TagIcon, FlagIcon, ChevronLeftIcon, ChevronRightIcon
+    ExclamationTriangleIcon, TagIcon, FlagIcon, ChevronLeftIcon, ChevronRightIcon, EyeIcon
 } from './Icons';
 import MainContent from './MainContent'; 
 import AccordionSection from './AccordionSection';
@@ -27,12 +27,26 @@ import { useLanguage } from '../context/LanguageContext';
 import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { SmartTagType, SmartTagData } from './SmartTagTypes';
 import TagRowGroup from './TagRowGroup';
+import { buildCandidateGroupedSmartTags } from '../utils/candidateGroupedSmartTags';
+import {
+    ApprovedTagRecord,
+    fetchApprovedTagsCatalog,
+    ValidatedSuggestionItem,
+} from '../services/profileSuggestionValidation';
 import { buildCandidateFullName, syncCandidateNameFields } from '../utils/candidateName';
 import { educationEntryToDisplayLine, normalizeDrivingLicensesForPrint, normalizeLanguagesForPrintRows, splitWorkExperienceForPrint } from '../utils/printableResumeFormatting';
-import { normalizeSearchTextLineBreaks } from '../utils/normalizeSearchText';
 import CityEditableField from './CityEditableField';
 import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
-import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
+import CandidateProfileVideoModal from './CandidateProfileVideoModal';
+import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
+import { startCandidatePortalRecording, stopCandidatePortalRecording } from '../utils/candidatePortalPosthog';
+import { fetchJobMatches, type JobMatchResult } from '../utils/candidateJobMatchingApi';
+import {
+    computeCandidateProfileCompleteness,
+    PROFILE_COMPLETENESS_LABELS,
+    scrollToProfileCompletenessTarget,
+    type ProfileCompletenessFieldId,
+} from '../utils/candidateProfileCompleteness';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -238,6 +252,8 @@ const normalizeCandidateData = (data: any) => {
     if (copy.salaryMin !== undefined && copy.salaryMin !== null) copy.salaryMin = Number(copy.salaryMin) || 0;
     if (copy.salaryMax !== undefined && copy.salaryMax !== null) copy.salaryMax = Number(copy.salaryMax) || 0;
     if (!copy.profileName) copy.profileName = copy.title || 'פרופיל';
+    copy.approveByCandidate = Boolean(copy.approveByCandidate);
+    copy.consentToJobOffers = Boolean(copy.consentToJobOffers);
 
     const rawAvail = String(copy.availability ?? '').trim();
     const pwIncoming =
@@ -345,6 +361,7 @@ const EMPTY_CANDIDATE_FORM: Record<string, any> = {
     phone: '',
     email: '',
     profilePicture: '',
+    profileVideoUrl: '',
     tags: [],
     desiredRoles: [],
     workExperience: [],
@@ -376,9 +393,106 @@ const EMPTY_CANDIDATE_FORM: Record<string, any> = {
     preferredWorkModels: [] as string[],
     internalNotes: '',
     candidateNotes: '',
+    approveByCandidate: false,
+    consentToJobOffers: false,
 };
 
 const cloneEmptyCandidateForm = () => JSON.parse(JSON.stringify(EMPTY_CANDIDATE_FORM));
+
+const PROFILE_DUPLICATE_SKIP_KEYS = new Set([
+    'id',
+    'backendId',
+    'createdAt',
+    'updatedAt',
+    'isDeleted',
+    'isArchived',
+    'matchScore',
+    'matchAnalysis',
+    'embedding',
+    'searchText',
+    'searchTextSavedAt',
+    'originalText',
+    'events',
+    'candidateTags',
+    'tagDetails',
+    'tags',
+    'internalNotes',
+    'lastActivity',
+    'lastActive',
+    'statusExplanation',
+    'recruitmentSourceId',
+    'recruitmentSourceCreatedAt',
+    'recruitmentSourceUpdatedAt',
+    'approveByCandidate',
+    'consentToJobOffers',
+]);
+
+const cloneProfileRows = (rows: unknown, regenIds = false): unknown[] =>
+    ensureArray(rows).map((row) => {
+        if (!row || typeof row !== 'object') return row;
+        const copy = { ...(row as Record<string, unknown>) };
+        if (regenIds && 'id' in copy) {
+            copy.id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        }
+        return copy;
+    });
+
+const buildTagEntriesFromSource = (source: Record<string, unknown>) => {
+    const details = ensureArray(source.tagDetails);
+    if (details.length) {
+        return details
+            .map((detail: any) => ({
+                tagKey: String(detail.tagKey || detail.displayNameHe || detail.displayNameEn || '').trim(),
+                displayNameHe: String(detail.displayNameHe || detail.tagKey || detail.displayNameEn || '').trim(),
+                displayNameEn: String(detail.displayNameEn || '').trim(),
+                raw_type: detail.rawType || detail.raw_type || 'skill',
+                context: detail.context,
+                confidence_score: detail.confidenceScore ?? detail.confidence_score,
+                calculated_weight: detail.calculatedWeight ?? detail.calculated_weight,
+                final_score: detail.finalScore ?? detail.final_score,
+            }))
+            .filter((entry) => entry.tagKey && entry.displayNameHe);
+    }
+    return ensureArray(source.tags)
+        .map((tag) => String(tag || '').trim())
+        .filter(Boolean)
+        .map((tag) => ({
+            tagKey: tag,
+            displayNameHe: tag,
+            displayNameEn: tag,
+            raw_type: 'skill',
+        }));
+};
+
+const buildProfileDuplicatePayload = (
+    source: Record<string, unknown>,
+    profileName: string,
+    userId: string,
+) => {
+    const clone = JSON.parse(JSON.stringify(source || {})) as Record<string, unknown>;
+    PROFILE_DUPLICATE_SKIP_KEYS.forEach((key) => {
+        delete clone[key];
+    });
+    clone.userId = userId;
+    clone.profileName = profileName;
+    clone.title = profileName;
+    clone.workExperience = cloneProfileRows(clone.workExperience, true);
+    clone.education = cloneProfileRows(clone.education, true);
+    clone.experience = cloneProfileRows(clone.experience, true);
+    clone.documents = cloneProfileRows(clone.documents, true);
+    clone.desiredRoles = cloneProfileRows(clone.desiredRoles, false);
+    clone.languages = cloneProfileRows(clone.languages, false);
+    clone.softSkills = cloneProfileRows(clone.softSkills, false);
+    clone.techSkills = cloneProfileRows(clone.techSkills, false);
+    if (clone.skills && typeof clone.skills === 'object') {
+        const skills = clone.skills as Record<string, unknown>;
+        clone.skills = {
+            soft: cloneProfileRows(skills.soft, false),
+            technical: cloneProfileRows(skills.technical, false),
+        };
+    }
+    return clone;
+};
 
 interface Message {
     role: 'user' | 'model';
@@ -613,7 +727,83 @@ const ProfileLoadingSkeleton = () => (
     </div>
 );
 
-const JobCard: React.FC<{ job: any; onApply: () => void; isFavorite: boolean; toggleFavorite: () => void }> = ({ job, onApply, isFavorite, toggleFavorite }) => {
+const AVAILABILITY_OPTIONS = [
+    { value: '', label: 'בחר זמינות למשרה' },
+    { value: '🟢 מיידי (זמין לעבודה מיד).', label: '🟢 מיידי — זמין/ה לעבודה מיד' },
+    { value: '🟡 חודש הודעה (עובד, מחפש אקטיבית).', label: '🟡 חודש הודעה — מחפש/ת אקטיבית' },
+    { value: '🟠 פסיבי (לא מחפש, אבל פתוח להצעות - Headhunting).', label: '🟠 פסיבי — פתוח/ה להצעות' },
+    { value: '🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).', label: '🔴 לא רלוונטי כרגע' },
+] as const;
+
+const CANDIDATE_MATCH_PARAM_LABELS: Partial<Record<keyof JobMatchResult['parameterMatches'], string>> = {
+    mandatory_skill: 'כישורי חובה',
+    license: 'רישיון נהיגה',
+    mobility: 'ניידות',
+    scope: 'היקף משרה',
+    work_hours: 'שעות עבודה',
+    availability: 'זמינות',
+    mandatory_language: 'שפות נדרשות',
+    salary: 'התאמת שכר',
+    age: 'טווח גיל',
+};
+
+function buildCandidateMatchTooltip(job: JobMatchResult): string {
+    const matched: string[] = [];
+    const pm = job.parameterMatches;
+    if (pm) {
+        for (const [key, label] of Object.entries(CANDIDATE_MATCH_PARAM_LABELS)) {
+            if (pm[key as keyof typeof pm] === 'match' && label) matched.push(label);
+        }
+    }
+    const bd = job.scoreBreakdown;
+    const layer = (score: unknown, text: string) => {
+        if (typeof score === 'number' && Number.isFinite(score) && score >= 70) matched.push(text);
+    };
+    layer(bd?.semanticScore ?? bd?.vector, 'התאמה מקצועית לתיאור המשרה');
+    layer(bd?.tagsScore ?? bd?.tags, 'התאמת כישורים מקצועיים');
+    layer(bd?.geoScore ?? bd?.geo, 'מיקום גיאוגרפי');
+    layer(bd?.intentScore ?? bd?.intent, 'התאמת העדפות עבודה');
+    layer(bd?.experienceScore ?? bd?.experience, 'התאמת ניסיון תעסוקתי');
+    const unique = [...new Set(matched)];
+    if (!unique.length) return 'התאמה גבוהה לפרופיל שלך ביחס לדרישות המשרה';
+    return `עמדת ב: ${unique.join(' · ')}`;
+}
+
+function mapJobMatchToPortalCard(job: JobMatchResult) {
+    const jobTypes = Array.isArray(job.jobType) ? job.jobType.filter(Boolean) : [];
+    const analyzed = job.lastAnalyzed ? new Date(job.lastAnalyzed) : null;
+    return {
+        id: job.id,
+        title: job.title || '—',
+        company: job.client || '—',
+        location: job.city || '—',
+        type: jobTypes.length ? jobTypes.join(', ') : 'משרה',
+        date:
+            analyzed && !Number.isNaN(analyzed.getTime())
+                ? analyzed.toLocaleDateString('he-IL')
+                : '—',
+        description: typeof job.description === 'string' ? job.description : '',
+        logo: null as string | null,
+        matchTooltip: buildCandidateMatchTooltip(job),
+    };
+}
+
+const JobCard: React.FC<{
+    job: {
+        id: string;
+        title: string;
+        company: string;
+        location: string;
+        type: string;
+        date: string;
+        description: string;
+        logo?: string | null;
+        matchTooltip?: string;
+    };
+    onApply: () => void;
+    isFavorite: boolean;
+    toggleFavorite: () => void;
+}> = ({ job, onApply, isFavorite, toggleFavorite }) => {
     const [isExpanded, setIsExpanded] = useState(false);
 
     return (
@@ -638,7 +828,16 @@ const JobCard: React.FC<{ job: any; onApply: () => void; isFavorite: boolean; to
                 </div>
                 
                 <h3 className="font-bold text-text-default text-lg mb-1 group-hover:text-primary-700 transition-colors leading-tight">{job.title}</h3>
-                <p className="text-sm text-text-muted mb-4 font-medium">{job.company}</p>
+                <p className="text-sm text-text-muted mb-2 font-medium">{job.company}</p>
+                {job.matchTooltip ? (
+                    <div
+                        className="inline-flex items-center gap-1.5 mb-3 text-xs font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-full cursor-help"
+                        title={job.matchTooltip}
+                    >
+                        <SparklesIcon className="w-3.5 h-3.5" />
+                        התאמה גבוהה
+                    </div>
+                ) : null}
                 
                 <div className="flex flex-wrap gap-2 mb-4 mt-auto">
                     <span className="text-xs bg-bg-subtle text-text-muted px-2.5 py-1 rounded-md border border-border-default flex items-center gap-1">
@@ -827,8 +1026,8 @@ export const PrintableResume: React.FC<{
         heading: string,
         headingMb: string,
     ) => (
-        <section className={expSectionMb}>
-            <h3 className={`${secTitle} ${headingMb}`}>{heading}</h3>
+        <section className={`printable-resume-section ${expSectionMb}`}>
+            <h3 className={`printable-resume-section-title ${secTitle} ${headingMb}`}>{heading}</h3>
             <div className={expStack}>
                 {items.map((exp: any, index: number) => {
                     const start = formatCvPrintDate(exp.startDate);
@@ -837,17 +1036,21 @@ export const PrintableResume: React.FC<{
                         (typeof exp.dateRangeLabel === 'string' && exp.dateRangeLabel.trim()) ||
                         [start, end].filter(Boolean).join(' — ');
                     return (
-                        <div key={`${heading}-${index}`} className="break-inside-avoid">
-                            <div className="flex justify-between items-baseline mb-0.5">
-                                <h4 className={expH4}>{exp.title}</h4>
-                                {dateLabel ? (
-                                    <span dir="ltr" className={expDate}>
-                                        {dateLabel}
-                                    </span>
-                                ) : null}
+                        <div key={`${heading}-${index}`} className="printable-resume-entry">
+                            <div className="printable-resume-entry-head break-inside-avoid">
+                                <div className="flex flex-wrap justify-between items-baseline gap-x-2 gap-y-0.5 mb-0.5">
+                                    <h4 className={`${expH4} min-w-0 flex-1`}>{exp.title}</h4>
+                                    {dateLabel ? (
+                                        <span dir="ltr" className={expDate}>
+                                            {dateLabel}
+                                        </span>
+                                    ) : null}
+                                </div>
+                                {exp.company ? <div className={expCompany}>{exp.company}</div> : null}
                             </div>
-                            {exp.company ? <div className={expCompany}>{exp.company}</div> : null}
-                            {exp.description ? <p className={expDesc}>{exp.description}</p> : null}
+                            {exp.description ? (
+                                <p className={`printable-resume-entry-desc ${expDesc}`}>{exp.description}</p>
+                            ) : null}
                         </div>
                     );
                 })}
@@ -857,23 +1060,55 @@ export const PrintableResume: React.FC<{
 
     return (
         <div
-            className={`bg-white text-gray-900 font-sans ${rootPad} max-w-[210mm] mx-auto shadow-none print:shadow-none ${className}`}
+            className={`printable-resume-root bg-white text-gray-900 font-sans ${rootPad} max-w-[210mm] mx-auto shadow-none print:shadow-none ${className}`}
         >
             <style>{`
                 @media print {
-                    @page { margin: 1cm; size: A4; }
-                    body { -webkit-print-color-adjust: exact; }
+                    @page { margin: 12mm; size: A4; }
+                    html, body {
+                        -webkit-print-color-adjust: exact;
+                        print-color-adjust: exact;
+                    }
+                    .printable-resume-root {
+                        width: 100% !important;
+                        max-width: none !important;
+                        margin: 0 !important;
+                        padding: 12mm !important;
+                        overflow: visible !important;
+                    }
+                    .printable-resume-root * {
+                        overflow: visible !important;
+                    }
+                    .printable-resume-section-title {
+                        break-after: avoid-page;
+                        page-break-after: avoid;
+                    }
+                    .printable-resume-entry-head {
+                        break-inside: avoid-page;
+                        page-break-inside: avoid;
+                    }
+                    .printable-resume-entry-desc {
+                        break-inside: auto;
+                        page-break-inside: auto;
+                    }
+                    .printable-resume-root p,
+                    .printable-resume-root li {
+                        orphans: 3;
+                        widows: 3;
+                    }
                 }
             `}</style>
 
             {/* Header */}
-            <div className={`border-b-2 border-gray-800 ${headerBar} flex justify-between items-start`}>
-                <div className="min-w-0 pr-2">
+            <div
+                className={`printable-resume-header border-b-2 border-gray-800 ${headerBar} flex flex-col sm:flex-row sm:justify-between sm:items-start gap-3 break-inside-avoid`}
+            >
+                <div className="min-w-0 flex-1 order-2 sm:order-1">
                     <h1 className={h1Cls}>{displayName}</h1>
-                    <h2 className={titleCls}>{data.title || ''}</h2>
+                    {data.title ? <h2 className={titleCls}>{data.title}</h2> : null}
                 </div>
-                <div className="flex flex-col items-start text-right pt-1 shrink-0">
-                    {!hideCompanyLogo && (
+                {!hideCompanyLogo ? (
+                    <div className="flex flex-col items-start text-right shrink-0 order-1 sm:order-2">
                         <div className={brandCls}>
                             <div
                                 className={`${brandMark} bg-primary-100 rounded flex items-center justify-center text-primary-700 font-serif`}
@@ -882,11 +1117,15 @@ export const PrintableResume: React.FC<{
                             </div>
                             מימד אנושי
                         </div>
-                    )}
-                    <div className={hiroCls}>
+                        <div className={hiroCls}>
+                            נוצר באמצעות <span className="font-bold text-gray-500">HIRO</span>
+                        </div>
+                    </div>
+                ) : (
+                    <div className={`${hiroCls} shrink-0 order-1 sm:order-2`}>
                         נוצר באמצעות <span className="font-bold text-gray-500">HIRO</span>
                     </div>
-                </div>
+                )}
             </div>
 
             {/* Contact Info */}
@@ -913,9 +1152,9 @@ export const PrintableResume: React.FC<{
 
             {/* Summary — always default typography */}
             {data.professionalSummary && (
-                <section className="mb-6">
-                    <h3 className={executiveSummaryHeadingCls}>תמצית מנהלים</h3>
-                    <p className={executiveSummaryBodyCls}>{data.professionalSummary}</p>
+                <section className="printable-resume-section mb-6">
+                    <h3 className={`printable-resume-section-title ${executiveSummaryHeadingCls}`}>תמצית מנהלים</h3>
+                    <p className={`printable-resume-entry-desc ${executiveSummaryBodyCls}`}>{data.professionalSummary}</p>
                 </section>
             )}
 
@@ -937,8 +1176,8 @@ export const PrintableResume: React.FC<{
 
             {/* Education */}
             {data.education && data.education.length > 0 && (
-                <section className={eduSec}>
-                    <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-4'}`}>השכלה</h3>
+                <section className={`printable-resume-section ${eduSec}`}>
+                    <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-4'}`}>השכלה</h3>
                     <ul className={eduUl}>
                         {data.education.map((edu: any, index: number) => {
                             const line = educationEntryToDisplayLine(edu);
@@ -955,8 +1194,8 @@ export const PrintableResume: React.FC<{
 
             {/* Driving licenses */}
             {printDrivingLicenses.length > 0 && (
-                <section className={compact ? 'mb-4 break-inside-avoid' : 'mb-8 break-inside-avoid'}>
-                    <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>רישיונות נהיגה</h3>
+                <section className={`printable-resume-section ${compact ? 'mb-4 break-inside-avoid' : 'mb-8 break-inside-avoid'}`}>
+                    <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>רישיונות נהיגה</h3>
                     <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
                         {printDrivingLicenses.map((license) => (
                             <span key={license} className={skillTag}>
@@ -968,11 +1207,11 @@ export const PrintableResume: React.FC<{
             )}
 
             {/* Skills & Languages Grid */}
-            {(data.tagDetails?.length > 0 || printLanguages.length > 0) && (
-                <div className={grid2}>
-                    {data.tags && (data.tagDetails?.length ?? 0) > 0 && (
-                        <section>
-                            <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>מיומנויות</h3>
+            {(printLanguages.length > 0 || (data.tagDetails?.length ?? 0) > 0) && (
+                <div className={compact ? 'space-y-4' : 'space-y-6'}>
+                    {(data.tagDetails?.length ?? 0) > 0 && (
+                        <section className="printable-resume-section">
+                            <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>מיומנויות</h3>
                             <div className={compact ? 'flex flex-wrap gap-1.5' : 'flex flex-wrap gap-2'}>
                                 {(Array.isArray(data.tagDetails) ? data.tagDetails : []).map((tag: any, index: number) => {
                                     const label =
@@ -991,8 +1230,8 @@ export const PrintableResume: React.FC<{
                     )}
 
                     {printLanguages.length > 0 && (
-                        <section>
-                            <h3 className={`${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>שפות</h3>
+                        <section className="printable-resume-section">
+                            <h3 className={`printable-resume-section-title ${secTitle} ${compact ? 'mb-2' : 'mb-3'}`}>שפות</h3>
                             <ul className={langUl}>
                                 {printLanguages.map((row, index: number) => (
                                     <li
@@ -1012,29 +1251,18 @@ export const PrintableResume: React.FC<{
     );
 };
 
-type CvFilesTab = 'original' | 'searchText';
-
 const CvFilesManagementModal: React.FC<{
     isOpen: boolean;
     onClose: () => void;
     resumeUrl?: string;
-    searchText?: string;
     candidateName?: string;
-    initialTab?: CvFilesTab;
-}> = ({ isOpen, onClose, resumeUrl, searchText, candidateName, initialTab = 'original' }) => {
-    const [tab, setTab] = useState<CvFilesTab>(initialTab);
-
-    useEffect(() => {
-        if (isOpen) setTab(initialTab);
-    }, [isOpen, initialTab]);
-
+}> = ({ isOpen, onClose, resumeUrl, candidateName }) => {
     if (!isOpen) return null;
 
     const url = String(resumeUrl ?? '').trim();
     const isDocx = /\.(doc|docx)$/i.test(url);
     const docxViewerUrl = isDocx ? `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(url)}` : '';
     const isImage = /\.(png|jpe?g|gif|webp)$/i.test(url);
-    const parsedText = normalizeSearchTextLineBreaks(searchText ?? '');
 
     return (
         <div
@@ -1046,7 +1274,7 @@ const CvFilesManagementModal: React.FC<{
                 onClick={(e) => e.stopPropagation()}
             >
                 <div className="p-4 border-b border-border-default flex justify-between items-center bg-bg-subtle/50 shrink-0">
-                    <h2 className="font-bold text-lg text-text-default">ניהול קבצים וגרסאות</h2>
+                    <h2 className="font-bold text-lg text-text-default">צפייה בקורות חיים</h2>
                     <button
                         type="button"
                         onClick={onClose}
@@ -1056,74 +1284,42 @@ const CvFilesManagementModal: React.FC<{
                     </button>
                 </div>
 
-                <div className="flex border-b border-border-default bg-bg-subtle/30 shrink-0">
-                    <button
-                        type="button"
-                        onClick={() => setTab('original')}
-                        className={`flex-1 py-3 px-4 text-sm font-bold transition border-b-2 ${
-                            tab === 'original'
-                                ? 'border-primary-500 text-primary-700 bg-bg-card'
-                                : 'border-transparent text-text-muted hover:text-text-default'
-                        }`}
-                    >
-                        מסמך מקורי
-                    </button>
-                    <button
-                        type="button"
-                        onClick={() => setTab('searchText')}
-                        className={`flex-1 py-3 px-4 text-sm font-bold transition border-b-2 ${
-                            tab === 'searchText'
-                                ? 'border-primary-500 text-primary-700 bg-bg-card'
-                                : 'border-transparent text-text-muted hover:text-text-default'
-                        }`}
-                    >
-                    </button>
-                </div>
-
                 <div className="flex-1 overflow-y-auto custom-scrollbar bg-white p-4">
-                    {tab === 'original' ? (
-                        url ? (
-                            <div className="flex flex-col gap-3 h-full min-h-[50vh]">
-                                <p className="text-xs text-text-muted text-right">
-                                    {candidateName ? `קובץ מקורי — ${candidateName}` : 'קובץ מקורי'}
-                                </p>
-                                <div className="flex-1 min-h-[50vh] border border-border-default rounded-2xl overflow-auto bg-black/5">
-                                    {isImage ? (
-                                        <img
-                                            src={url}
-                                            alt="קורות חיים מקוריים"
-                                            className="object-contain w-full h-full min-h-[50vh]"
-                                        />
-                                    ) : (
-                                        <iframe
-                                            style={{ width: '100%', minWidth: '200px', height: '100%', minHeight: '50vh' }}
-                                            src={isDocx ? docxViewerUrl : url}
-                                            title="מסמך מקורי"
-                                            className="w-full"
-                                        />
-                                    )}
-                                </div>
-                                <p className="text-center text-xs text-text-muted">
-                                    לא נטען?{' '}
-                                    <a
-                                        className="text-primary-600 font-bold underline"
-                                        href={url}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                    >
-                                        פתח / הורד את הקובץ
-                                    </a>
-                                </p>
+                    {url ? (
+                        <div className="flex flex-col gap-3 h-full min-h-[50vh]">
+                            <p className="text-xs text-text-muted text-right">
+                                {candidateName ? `קובץ מקורי — ${candidateName}` : 'קובץ מקורי'}
+                            </p>
+                            <div className="flex-1 min-h-[50vh] border border-border-default rounded-2xl overflow-auto bg-black/5">
+                                {isImage ? (
+                                    <img
+                                        src={url}
+                                        alt="קורות חיים מקוריים"
+                                        className="object-contain w-full h-full min-h-[50vh]"
+                                    />
+                                ) : (
+                                    <iframe
+                                        style={{ width: '100%', minWidth: '200px', height: '100%', minHeight: '50vh' }}
+                                        src={isDocx ? docxViewerUrl : url}
+                                        title="מסמך מקורי"
+                                        className="w-full"
+                                    />
+                                )}
                             </div>
-                        ) : (
-                            <p className="text-sm text-text-muted text-center py-16">לא הועלה קובץ מקורי.</p>
-                        )
-                    ) : parsedText ? (
-                        <pre className="text-sm text-text-default whitespace-pre-wrap break-words font-sans leading-relaxed text-right dir-rtl">
-                            {parsedText}
-                        </pre>
+                            <p className="text-center text-xs text-text-muted">
+                                לא נטען?{' '}
+                                <a
+                                    className="text-primary-600 font-bold underline"
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    פתח / הורד את הקובץ
+                                </a>
+                            </p>
+                        </div>
                     ) : (
-                        <p className="text-sm text-text-muted text-center py-16">אין טקסט מפורסר ראשוני למועמד זה.</p>
+                        <p className="text-sm text-text-muted text-center py-16">לא הועלה קובץ מקורי.</p>
                     )}
                 </div>
             </div>
@@ -1131,41 +1327,126 @@ const CvFilesManagementModal: React.FC<{
     );
 };
 
+const RESUME_PRINT_CONTAINER_ID = 'resume-print-only-container';
+
 const ResumePreviewModal: React.FC<{ isOpen: boolean; onClose: () => void; data: any }> = ({ isOpen, onClose, data }) => {
     if (!isOpen) return null;
-    
+
     const handlePrint = () => {
-        window.print();
+        const source = document.getElementById('resume-preview-print-root');
+        if (!source) return;
+
+        document.getElementById(RESUME_PRINT_CONTAINER_ID)?.remove();
+
+        const printContainer = document.createElement('div');
+        printContainer.id = RESUME_PRINT_CONTAINER_ID;
+        printContainer.setAttribute('dir', 'rtl');
+        printContainer.innerHTML = source.innerHTML;
+
+        document.body.appendChild(printContainer);
+        document.body.classList.add('resume-print-mode');
+        document.documentElement.classList.add('resume-print-mode');
+
+        const cleanup = () => {
+            document.body.classList.remove('resume-print-mode');
+            document.documentElement.classList.remove('resume-print-mode');
+            printContainer.remove();
+        };
+        window.addEventListener('afterprint', cleanup, { once: true });
+
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                window.print();
+            });
+        });
     };
 
     return (
-        <div className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm print:hidden" onClick={onClose}>
-            <div className="bg-bg-card w-full max-w-4xl h-[90vh] rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fade-in" onClick={e => e.stopPropagation()}>
-                 <div className="p-4 border-b border-border-default flex justify-between items-center bg-bg-subtle/50">
-                    <h2 className="font-bold text-lg text-text-default">תצוגת AI חכמה</h2>
-                    <div className="flex gap-2">
-                        <button 
-                            onClick={handlePrint}
-                            className="flex items-center gap-2 bg-primary-600 text-white px-4 py-2 rounded-lg hover:bg-primary-700 transition font-medium text-sm shadow-sm"
-                        >
-                            <ArrowDownTrayIcon className="w-4 h-4" />
-                            הדפס / שמור כ-PDF
-                        </button>
-                        <button onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors">
-                            <XMarkIcon className="w-6 h-6"/>
-                        </button>
+        <>
+            <style>{`
+                #${RESUME_PRINT_CONTAINER_ID} {
+                    position: fixed;
+                    left: -10000px;
+                    top: 0;
+                    width: 210mm;
+                    visibility: hidden;
+                    pointer-events: none;
+                }
+                @media print {
+                    html.resume-print-mode,
+                    html.resume-print-mode body {
+                        height: auto !important;
+                        overflow: visible !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                    }
+                    html.resume-print-mode body > *:not(#${RESUME_PRINT_CONTAINER_ID}) {
+                        display: none !important;
+                    }
+                    html.resume-print-mode #${RESUME_PRINT_CONTAINER_ID} {
+                        display: block !important;
+                        position: static !important;
+                        left: auto !important;
+                        top: auto !important;
+                        width: 100% !important;
+                        max-width: none !important;
+                        min-height: 0 !important;
+                        height: auto !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        visibility: visible !important;
+                        pointer-events: auto !important;
+                        overflow: visible !important;
+                    }
+                    html.resume-print-mode #${RESUME_PRINT_CONTAINER_ID} * {
+                        overflow: visible !important;
+                    }
+                    html.resume-print-mode #${RESUME_PRINT_CONTAINER_ID} .printable-resume-root {
+                        width: 100% !important;
+                        max-width: none !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                    }
+                }
+            `}</style>
+            <div
+                className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 backdrop-blur-sm print:static print:inset-auto print:bg-white print:p-0 print:backdrop-blur-none print:block print:h-auto print:overflow-visible"
+                onClick={onClose}
+            >
+                <div
+                    className="bg-bg-card w-full max-w-4xl h-[90vh] rounded-xl shadow-2xl overflow-hidden flex flex-col animate-fade-in print:h-auto print:max-w-none print:rounded-none print:shadow-none print:overflow-visible print:block print:min-h-0"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <div className="p-4 border-b border-border-default flex justify-between items-center bg-bg-subtle/50 print:hidden">
+                        <h2 className="font-bold text-lg text-text-default">תצוגת AI חכמה</h2>
+                        <div className="flex gap-2">
+                            <button
+                                type="button"
+                                onClick={handlePrint}
+                                className="flex items-center gap-2 bg-primary-600 text-white px-4 py-2 rounded-lg hover:bg-primary-700 transition font-medium text-sm shadow-sm"
+                            >
+                                <ArrowDownTrayIcon className="w-4 h-4" />
+                                הדפס / שמור כ-PDF
+                            </button>
+                            <button type="button" onClick={onClose} className="p-2 rounded-full hover:bg-bg-hover text-text-muted transition-colors">
+                                <XMarkIcon className="w-6 h-6" />
+                            </button>
+                        </div>
                     </div>
-                 </div>
-                 
-                 <div className="flex-1 overflow-y-auto bg-gray-100 p-8 custom-scrollbar">
-                     <div className="bg-white shadow-lg mx-auto max-w-[210mm] min-h-[297mm]">
-                        <PrintableResume data={data} className="block" />
-                     </div>
-                 </div>
+
+                    <div className="flex-1 overflow-y-auto bg-gray-100 p-8 custom-scrollbar print:p-0 print:bg-white print:overflow-visible print:h-auto print:max-h-none print:block">
+                        <div
+                            id="resume-preview-print-root"
+                            className="bg-white shadow-lg mx-auto max-w-[210mm] print:shadow-none print:mx-0 print:max-w-none print:min-h-0 print:h-auto"
+                        >
+                            <PrintableResume data={data} className="block" hideCompanyLogo density="compact" />
+                        </div>
+                    </div>
+                </div>
             </div>
-        </div>
-    )
-}
+        </>
+    );
+};
 
 // 4. Main View Component
 const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAlertModalConfig) => void }> = ({ openJobAlertModal }) => {
@@ -1183,43 +1464,59 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const [isDeletingProfileId, setIsDeletingProfileId] = useState<string | null>(null);
     const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState(false);
     const [isResumePreviewOpen, setIsResumePreviewOpen] = useState(false);
-    const [isCvFilesModalOpen, setIsCvFilesModalOpen] = useState(false);
+    const [isCvViewerOpen, setIsCvViewerOpen] = useState(false);
     const avatarInputRef = useRef<HTMLInputElement>(null);
     const resumeInputRef = useRef<HTMLInputElement>(null);
     const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [saveError, setSaveError] = useState<string | null>(null);
-    const [uploadState, setUploadState] = useState<{ inProgress: boolean; type?: 'profile' | 'resume'; message?: string }>({ inProgress: false });
+    const [uploadState, setUploadState] = useState<{ inProgress: boolean; type?: 'profile' | 'resume' | 'profile-video'; message?: string }>({ inProgress: false });
+    const [isProfileVideoModalOpen, setIsProfileVideoModalOpen] = useState(false);
+    const [completenessBannerDismissed, setCompletenessBannerDismissed] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
-    const [candidateList, setCandidateList] = useState<any[]>([]);
-    const [isCandidateListLoading, setIsCandidateListLoading] = useState(false);
     
     // --- State for Pending Tasks (Screening) ---
     const [isScreeningWizardOpen, setIsScreeningWizardOpen] = useState(false);
     const [pendingTasks, setPendingTasks] = useState<any[]>([]);
+
+    const filterVisibleProfiles = (items: any[]) => items.filter((item) => !item.isDeleted);
 
     // Derived Active Profile
     const activeProfile = useMemo(() => {
         if (!profiles.length) return undefined;
         return profiles.find((p) => p.id === activeProfileId) || profiles[0];
     }, [activeProfileId, profiles]);
+
+    /** Profile versions for the logged-in user only (same userId as active profile). */
+    const userProfiles = useMemo(() => {
+        const anchorUserId = activeProfile?.userId ?? profiles[0]?.userId;
+        if (!anchorUserId) return profiles;
+        return profiles.filter((p) => String(p.userId) === String(anchorUserId));
+    }, [profiles, activeProfile?.userId]);
+
+    const navigableProfiles = useMemo(
+        () => filterVisibleProfiles(userProfiles),
+        [userProfiles],
+    );
+
     const currentProfileIndex = useMemo(
-        () => candidateList.findIndex((p) => p.id === candidateId),
-        [candidateList, candidateId],
+        () => navigableProfiles.findIndex((p) => String(p.id) === String(activeProfileId ?? '')),
+        [navigableProfiles, activeProfileId],
     );
 
     // Data for forms (synced with active profile)
     const [formData, setFormData] = useState<any>(() => cloneEmptyCandidateForm());
-    const [recruitmentSources, setRecruitmentSources] = useState<{ id: string; name: string }[]>([]);
-    const [recruitmentSourceDraft, setRecruitmentSourceDraft] = useState('');
     
     // UI State for Header Interactions
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
-    const [joinCandidatePool, setJoinCandidatePool] = useState(true);
+    const [joinCandidatePool, setJoinCandidatePool] = useState(false);
+    const [matchedJobs, setMatchedJobs] = useState<JobMatchResult[]>([]);
+    const [matchedJobsLoading, setMatchedJobsLoading] = useState(false);
     const [expandedSections, setExpandedSections] = useState<Set<SmartTagType>>(new Set());
     const [isTagSelectorOpen, setIsTagSelectorOpen] = useState(false);
     const [tagSelectorCategory, setTagSelectorCategory] = useState<TagCategory>('role');
     const [localTagDetails, setLocalTagDetails] = useState<CandidateTagDetail[]>([]);
+    const [approvedTagsCatalog, setApprovedTagsCatalog] = useState<ApprovedTagRecord[]>([]);
     const ROW_CATEGORY_MAP: Record<string, TagCategory> = {
         roles: 'role',
         qualifications: 'role',
@@ -1227,6 +1524,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         soft: 'soft_skill',
     };
     const loadCandidateRef = useRef<(() => Promise<void>) | null>(null);
+    const initialPortalLoadFiredRef = useRef(false);
 
     const mapCategoryToRawType = (category: TagCategory): string => {
         if (category === 'soft_skill') return 'soft_skill';
@@ -1236,22 +1534,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const authHeaders = useCallback(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         return token ? { Authorization: `Bearer ${token}` } : {};
-    }, []);
-
-    useEffect(() => {
-        let cancelled = false;
-        void fetchRecruitmentSourceOptions()
-            .then((rows) => {
-                if (!cancelled) {
-                    setRecruitmentSources(rows.map((row) => ({ id: row.id, name: row.name })));
-                }
-            })
-            .catch(() => {
-                if (!cancelled) setRecruitmentSources([]);
-            });
-        return () => {
-            cancelled = true;
-        };
     }, []);
 
     const persistCandidateTag = async (tag: TagOption) => {
@@ -1291,6 +1573,59 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }
     };
 
+    const persistTagEntriesToCandidate = async (
+        entries: Array<{
+            tagKey: string;
+            displayNameHe: string;
+            displayNameEn?: string;
+            raw_type?: string;
+            context?: string | null;
+            confidence_score?: number;
+            calculated_weight?: number;
+            final_score?: number;
+        }>,
+        candidateRecordId: string,
+    ) => {
+        if (!candidateRecordId || !entries.length) return;
+        try {
+            await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ candidate_id: candidateRecordId, tags: entries }),
+            });
+        } catch (err) {
+            console.error('Failed to persist tag entries', err);
+            throw err;
+        }
+    };
+
+    const persistTagNamesToCandidate = async (tagNames: string[], candidateRecordId: string, rawType = 'skill') => {
+        if (!candidateRecordId || !tagNames.length) return;
+        await persistTagEntriesToCandidate(
+            tagNames.map((name) => ({
+                tagKey: name,
+                displayNameHe: name,
+                displayNameEn: name,
+                raw_type: rawType,
+            })),
+            candidateRecordId,
+        );
+    };
+
+    const collectExistingTagLabels = (data: any) => {
+        const labels = new Set<string>();
+        ensureArray(data?.tags).forEach((tag: any) => {
+            const value = String(typeof tag === 'string' ? tag : tag?.value || tag || '').trim();
+            if (value) labels.add(value);
+        });
+        ensureArray(data?.tagDetails).forEach((detail: any) => {
+            [detail.displayNameHe, detail.displayNameEn, detail.tagKey].forEach((key) => {
+                if (typeof key === 'string' && key.trim()) labels.add(key.trim());
+            });
+        });
+        return labels;
+    };
+
     const tagDetailLookup = useMemo(() => {
         const map = new Map<string, any>();
         const details = Array.isArray(formData.tagDetails) ? formData.tagDetails : [];
@@ -1304,110 +1639,50 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         return map;
     }, [formData.tagDetails]);
 
-    const getTagTooltip = useCallback((tag: string) => {
-        const detail = tagDetailLookup.get(tag);
-        return buildTagTooltipText(tag, detail ? {
-            rawType: detail?.rawType,
-            context: detail?.context,
-            isCurrent: detail?.isCurrent,
-            isInSummary: detail?.isInSummary,
-            confidenceScore: detail?.confidenceScore,
-            finalScore: detail?.finalScore,
-        } : undefined);
-    }, [tagDetailLookup]);
-
-    const groupedSmartTags = useMemo(() => {
-        const base = TAG_LINE_CONFIG.reduce<Record<SmartTagType, SmartTagData[]>>((acc, section) => {
-            acc[section.type] = [];
-            return acc;
-        }, {} as Record<SmartTagType, SmartTagData[]>);
-
-        const combinedDetails = [...ensureArray(formData.tagDetails), ...localTagDetails];
-        const detailEntries = combinedDetails
-            .map((detail: any) => {
-                const displayNameHe = (detail.displayNameHe ?? detail.display_name_he ?? '').toString().trim();
-                const label = displayNameHe || (detail.displayNameEn ?? detail.display_name_en ?? '').toString().trim() || (detail.tagKey ?? detail.tag_key ?? '').toString().trim();
-                if (!label) return null;
-                const type = inferSmartTagType(detail);
-                return {
-                    label: displayNameHe || label,
-                    type,
-                    isVerified: Boolean(detail?.isCurrent),
-                    isAiSuggested: false,
-                    customTooltip: buildTagTooltipText(label, { ...detail, finalScore: detail?.finalScore ?? detail?.final_score }),
-                } as SmartTagData;
+    useEffect(() => {
+        let cancelled = false;
+        void fetchApprovedTagsCatalog(apiBase || '')
+            .then((approvedTags) => {
+                if (!cancelled) setApprovedTagsCatalog(Array.isArray(approvedTags) ? approvedTags : []);
             })
-            .filter(Boolean) as SmartTagData[];
+            .catch(() => {
+                if (!cancelled) setApprovedTagsCatalog([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase]);
 
-        detailEntries.forEach((entry) => {
-            if (!base[entry.type]) base[entry.type] = [];
-            base[entry.type].push(entry);
-        });
+    const groupedSmartTags = useMemo(
+        () =>
+            buildCandidateGroupedSmartTags(
+                {
+                    tags: formData.tags,
+                    tagDetails: [...ensureArray(formData.tagDetails), ...localTagDetails],
+                    languages: formData.languages,
+                    skills: formData.skills,
+                    workExperience: formData.workExperience,
+                },
+                { approvedTags: approvedTagsCatalog },
+            ),
+        [
+            formData.tagDetails,
+            formData.tags,
+            formData.languages,
+            formData.skills,
+            formData.workExperience,
+            localTagDetails,
+            approvedTagsCatalog,
+        ],
+    );
 
-        const existingLabels = new Set(detailEntries.map((entry) => entry.label));
-        const fallbackTags = ensureArray(formData.tags)
-            .map((tag) => (tag ? tag.toString().trim() : ''))
-            .filter(Boolean)
-            .filter((tag) => !existingLabels.has(tag))
-            .map((tag) => ({
-                label: tag,
-                type: 'skill' as SmartTagType,
-                isVerified: false,
-                isAiSuggested: false,
-            }));
-
-        fallbackTags.forEach((entry) => {
-            if (!base[entry.type]) base[entry.type] = [];
-            base[entry.type].push(entry);
-        });
-
-        const softSkillEntries = ensureArray(formData.skills?.soft)
-            .map((softSkill) => {
-                const label = (typeof softSkill === 'string' ? softSkill : '').trim();
-                if (!label) return null;
-                if (existingLabels.has(label)) return null;
-                return {
-                    label,
-                    type: 'soft' as SmartTagType,
-                    isVerified: false,
-                    isAiSuggested: false,
-                } as SmartTagData;
-            })
-            .filter(Boolean) as SmartTagData[];
-
-        softSkillEntries.forEach((entry) => {
-            if (!base[entry.type]) base[entry.type] = [];
-            base[entry.type].push(entry);
-        });
-
-        const languageEntries = ensureArray(formData.languages)
-            .map((lang: any) => {
-                const label =
-                    (typeof lang === 'string'
-                        ? lang
-                        : lang?.lang || lang?.language || lang?.name || lang?.value || '').toString().trim();
-                if (!label) return null;
-                const descriptor =
-                    typeof lang === 'object'
-                        ? lang.levelText || lang.level || lang.proficiency || ''
-                        : '';
-                return {
-                    label,
-                    type: 'language' as SmartTagType,
-                    isVerified: false,
-                    isAiSuggested: false,
-                    customTooltip: descriptor ? `רמה: ${descriptor}` : undefined,
-                } as SmartTagData;
-            })
-            .filter(Boolean) as SmartTagData[];
-
-        languageEntries.forEach((entry) => {
-            if (!base[entry.type]) base[entry.type] = [];
-            base[entry.type].push(entry);
-        });
-
-        return base;
-    }, [formData.tagDetails, formData.tags, formData.languages, buildTagTooltipText]);
+    const chatContextData = useMemo(
+        () => ({
+            ...formData,
+            tagDetails: [...ensureArray(formData.tagDetails), ...localTagDetails],
+        }),
+        [formData, localTagDetails],
+    );
 
     const openTagSelectorForRow = (rowId: string) => {
         const category = ROW_CATEGORY_MAP[rowId] || 'role';
@@ -1506,10 +1781,45 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     // --- Job Search & Favorites State ---
     const [jobSearchTerm, setJobSearchTerm] = useState('');
     const [jobFilters, setJobFilters] = useState({ location: '', type: '', date: '' });
-    const [favoriteJobIds, setFavoriteJobIds] = useState<Set<number>>(new Set());
+    const [favoriteJobIds, setFavoriteJobIds] = useState<Set<string>>(new Set());
+
+    useEffect(() => {
+        setJoinCandidatePool(Boolean(formData.consentToJobOffers));
+    }, [formData.consentToJobOffers, formData.id]);
+
+    useEffect(() => {
+        setCompletenessBannerDismissed(false);
+    }, [candidateId]);
+
+    useEffect(() => {
+        if (!formData.consentToJobOffers || !candidateId) {
+            setMatchedJobs([]);
+            return;
+        }
+        let cancelled = false;
+        setMatchedJobsLoading(true);
+        void fetchJobMatches(String(candidateId), { minScore: 70, limit: 100 })
+            .then((rows) => {
+                if (!cancelled) setMatchedJobs(Array.isArray(rows) ? rows : []);
+            })
+            .catch(() => {
+                if (!cancelled) setMatchedJobs([]);
+            })
+            .finally(() => {
+                if (!cancelled) setMatchedJobsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [formData.consentToJobOffers, candidateId]);
+
+    const portalJobs = useMemo(
+        () => matchedJobs.map(mapJobMatchToPortalCard),
+        [matchedJobs],
+    );
 
     // Toggle Favorite
-    const toggleFavoriteJob = (jobId: number) => {
+    const toggleFavoriteJob = (jobId: string) => {
         setFavoriteJobIds(prev => {
             const next = new Set(prev);
             if (next.has(jobId)) next.delete(jobId);
@@ -1519,47 +1829,24 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     };
 
     // Filtered Jobs Logic
-    const filteredJobs = useMemo(() => [], [jobSearchTerm, jobFilters]);
+    const filteredJobs = useMemo(() => {
+        const term = jobSearchTerm.trim().toLowerCase();
+        return portalJobs.filter((job) => {
+            if (term) {
+                const hay = `${job.title} ${job.company} ${job.location}`.toLowerCase();
+                if (!hay.includes(term)) return false;
+            }
+            if (jobFilters.location && job.location !== jobFilters.location) return false;
+            if (jobFilters.type && job.type !== jobFilters.type) return false;
+            return true;
+        });
+    }, [portalJobs, jobSearchTerm, jobFilters]);
 
     // Favorite Jobs Logic
-    const favoriteJobsList = useMemo(() => [], [favoriteJobIds]);
-
-    const filterVisibleProfiles = (items: any[]) => items.filter((item) => !item.isDeleted);
-
-    const loadCandidateById = useCallback(async (targetId: string) => {
-        try {
-            const base = apiBase || '';
-            const res = await fetch(`${base}/api/candidates/${targetId}`, {
-                headers: { ...authHeaders() },
-            });
-            if (!res.ok) {
-                throw new Error('Failed to load candidate');
-            }
-            const data = await res.json();
-            const normalized = normalizeCandidateData(data);
-            setFormData(normalized);
-            setProfiles((prev) => {
-                const exists = prev.some((item) => item.id === normalized.id);
-                if (exists) {
-                    return prev.map((item) => (item.id === normalized.id ? normalized : item));
-                }
-                return [...prev, normalized];
-            });
-            setCandidateId(normalized.id);
-            setActiveProfileId(normalized.id);
-            setActiveView('profile');
-        } catch (err) {
-            console.error('Failed to load candidate by id', err);
-        }
-    }, [apiBase, normalizeCandidateData, authHeaders]);
-
-    const moveProfile = useCallback((offset: number) => {
-        const idx = currentProfileIndex;
-        if (idx === -1) return;
-        const target = candidateList[idx + offset];
-        if (!target) return;
-        loadCandidateById(target.id);
-    }, [currentProfileIndex, candidateList, loadCandidateById]);
+    const favoriteJobsList = useMemo(
+        () => portalJobs.filter((job) => favoriteJobIds.has(job.id)),
+        [portalJobs, favoriteJobIds],
+    );
 
     const sanitizePayload = (data: any) => {
         const copy = normalizeCandidateData(data);
@@ -1605,30 +1892,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (!decoded?.sub) return null;
         return { id: decoded.sub, email: decoded.email, role: decoded.role };
     };
-
-    const fetchCandidateList = useCallback(async () => {
-        if (!apiBase) return;
-        setIsCandidateListLoading(true);
-        try {
-            const base = apiBase || '';
-            const response = await fetch(`${base}/api/candidates?page=1&limit=250`, {
-                headers: { ...authHeaders() },
-                cache: 'reload',
-            });
-            if (!response.ok) throw new Error('Failed to fetch candidate list');
-            const payload = await response.json();
-            const list = Array.isArray(payload.data)
-                ? payload.data
-                : Array.isArray(payload)
-                    ? payload
-                    : [];
-            setCandidateList(list.map(normalizeCandidateData));
-        } catch (err) {
-            console.error('Failed to load candidate list', err);
-        } finally {
-            setIsCandidateListLoading(false);
-        }
-    }, [apiBase, normalizeCandidateData, authHeaders]);
 
     const loadCandidate = async () => {
         setLoadError(null);
@@ -1794,18 +2057,28 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         return btoa(String.fromCharCode(...bytes));
     };
 
-    const uploadToS3 = async (file: File, type: 'profile' | 'resume') => {
+    const uploadToS3 = async (file: File, type: 'profile' | 'resume' | 'profile-video') => {
         // apiBase can be empty string (same-origin), don't block uploads.
         const id = await ensureCandidateRecord();
         if (!id) return;
 
         try {
+            const uploadMessages: Record<'profile' | 'resume' | 'profile-video', string> = {
+                resume: 'מעלה קורות חיים...',
+                profile: 'מעלה תמונת פרופיל...',
+                'profile-video': 'מעלה וידאו תדמיתי...',
+            };
             setUploadState({
                 inProgress: true,
                 type,
-                message: type === 'resume' ? 'מעלה קורות חיים...' : 'מעלה תמונת פרופיל...',
+                message: uploadMessages[type],
             });
-            const folder = type === 'resume' ? 'resumes' : 'profile-pictures';
+            const folder =
+                type === 'resume'
+                    ? 'resumes'
+                    : type === 'profile-video'
+                        ? 'profile-videos'
+                        : 'profile-pictures';
             setUploadState((s) => ({ ...s, message: 'מכין העלאה...' }));
             const base = apiBase || '';
             const presignRes = await fetch(`${base}/api/candidates/${id}/upload-url`, {
@@ -1833,10 +2106,11 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             if (!putRes.ok) throw new Error('Upload to S3 failed');
 
             setUploadState((s) => ({ ...s, message: type === 'resume' ? 'מעבד קורות חיים...' : 'שומר...' }));
+            const attachType = type === 'profile-video' ? 'profile-video' : type;
             const attachRes = await fetch(`${base}/api/candidates/${id}/media`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify({ key, type, fileName: file.name }),
+                body: JSON.stringify({ key, type: attachType, fileName: file.name }),
             });
             if (!attachRes.ok) throw new Error('Failed to attach media');
             const updated = await attachRes.json();
@@ -1858,6 +2132,21 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }
     };
 
+    const handleProfileVideoSave = async (blob: Blob) => {
+        const file = new File([blob], `profile-video-${Date.now()}.webm`, {
+            type: blob.type || 'video/webm',
+        });
+        await uploadToS3(file, 'profile-video');
+    };
+
+    const handleProfileVideoDelete = async () => {
+        const merged = { ...formData, profileVideoUrl: '' };
+        const normalized = normalizeCandidateData(merged);
+        setFormData(normalized);
+        setProfiles((prev) => prev.map((p) => (p.id === activeProfileId ? normalized : p)));
+        await persistProfile(normalized);
+    };
+
     const handleResumeSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (file) {
@@ -1875,19 +2164,28 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     }, [activeProfile]);
 
     useEffect(() => {
-        setRecruitmentSourceDraft(String(formData.source || ''));
-    }, [formData.source]);
-
-    useEffect(() => {
         const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
         if (!token) {
             setLoadError('לא מחובר/ת. התחבר/י כדי לראות את הפרופיל.');
             navigate('/candidate-portal/login');
             return;
         }
+        if (initialPortalLoadFiredRef.current) return;
+        initialPortalLoadFiredRef.current = true;
         loadCandidate();
-        fetchCandidateList();
-    }, [fetchCandidateList]);
+    }, []);
+
+    useEffect(() => {
+        const user = getUser();
+        startCandidatePortalRecording({
+            candidateId: candidateId || formData.id?.toString() || null,
+            userId: user?.id ? String(user.id) : null,
+            email: user?.email ? String(user.email) : formData.email || null,
+        });
+        return () => {
+            stopCandidatePortalRecording();
+        };
+    }, [candidateId, formData.id, formData.email]);
 
     // Handlers
     const handleSwitchProfile = (id: string | number) => {
@@ -1900,24 +2198,41 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }, 800);
     };
 
+    const moveProfile = useCallback((offset: number) => {
+        const idx = currentProfileIndex;
+        if (idx === -1) return;
+        const target = navigableProfiles[idx + offset];
+        if (!target?.id) return;
+        handleSwitchProfile(target.id);
+    }, [currentProfileIndex, navigableProfiles]);
+
     const handleAddProfile = async () => {
         const name = prompt("הכנס שם לפרופיל החדש (למשל: 'משרות ניהול'):");
-        if (!name) return;
+        if (!name?.trim()) return;
+        const profileName = name.trim();
         const user = getUser();
         const userId = user?.userId || user?.id;
         if (!userId) {
             alert('צריך להיות מחובר/ת כדי ליצור פרופיל נוסף.');
             return;
         }
+
+        const source = (activeProfile ?? formData) as Record<string, unknown>;
+        const shouldDuplicate = profiles.length > 0 || Boolean(source?.id);
+
         try {
-            const baseName = profiles[0]?.fullName || formData.fullName || 'מועמד חדש';
-            const payload = sanitizePayload({
-                fullName: baseName,
-                profileName: name,
-                title: name,
-                userId,
-            });
             const base = apiBase || '';
+            const payload = shouldDuplicate
+                ? sanitizePayload(buildProfileDuplicatePayload(source, profileName, String(userId)))
+                : sanitizePayload({
+                    ...cloneEmptyCandidateForm(),
+                    fullName: profiles[0]?.fullName || formData.fullName || user?.email?.split('@')[0] || 'מועמד חדש',
+                    email: formData.email || user?.email || '',
+                    profileName,
+                    title: profileName,
+                    userId,
+                });
+
             const res = await fetch(`${base}/api/candidates`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -1928,13 +2243,40 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 throw new Error(body?.message || 'יצירת פרופיל נכשלה.');
             }
             const created = await res.json();
-            const normalized = normalizeCandidateData(created);
+            const newId = created.id;
+
+            if (shouldDuplicate && newId) {
+                const tagEntries = buildTagEntriesFromSource(source);
+                if (tagEntries.length) {
+                    await persistTagEntriesToCandidate(tagEntries, newId);
+                }
+            }
+
+            let normalized = normalizeCandidateData(created);
+            if (newId) {
+                try {
+                    const fullRes = await fetch(`${base}/api/candidates/${newId}`, {
+                        headers: { ...authHeaders() },
+                    });
+                    if (fullRes.ok) {
+                        normalized = normalizeCandidateData(await fullRes.json());
+                    }
+                } catch (reloadErr) {
+                    console.warn('Created profile reload failed', reloadErr);
+                }
+            }
+            normalized.profileName = profileName;
+            normalized.title = profileName;
+
             setProfiles((prev) => [...prev, normalized]);
             setCandidateId(normalized.id);
+            setLocalTagDetails([]);
+            setFormData(normalized);
             handleSwitchProfile(normalized.id);
-        } catch (err: any) {
+        } catch (err: unknown) {
             console.error('Failed to create profile', err);
-            alert(err?.message || 'שגיאה ביצירת פרופיל.');
+            const message = err instanceof Error ? err.message : 'שגיאה ביצירת פרופיל.';
+            alert(message);
         }
     };
 
@@ -1996,12 +2338,72 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         queueSave(normalized);
     };
 
-    const saveNow = (patch: any) => {
+    const saveNow = async (patch: any, meta?: { suggestions?: any[] }) => {
+        const id = await ensureCandidateRecord({ ...formData, ...patch });
+        if (!id) return;
+
+        if (Array.isArray(patch.tags)) {
+            const existingLabels = collectExistingTagLabels(formData);
+            const incomingTags = patch.tags
+                .map((tag: any) => (typeof tag === 'string' ? tag : String(tag?.value || tag || '')).trim())
+                .filter(Boolean);
+            const tagSuggestion = meta?.suggestions?.find((s) => s?.field === 'tags');
+            const validatedItems = Array.isArray(tagSuggestion?.validatedItems)
+                ? (tagSuggestion.validatedItems as ValidatedSuggestionItem[])
+                : [];
+
+            const newEntries = incomingTags
+                .filter((name: string) => !existingLabels.has(name))
+                .map((name: string) => {
+                    const item = validatedItems.find((v) => v.label === name);
+                    const metaTag = item?.meta || {};
+                    const tagKey = String(metaTag.tagKey || name).trim();
+                    const displayNameHe = String(metaTag.displayNameHe || name).trim();
+                    const displayNameEn = String(metaTag.displayNameEn || metaTag.displayNameHe || name).trim();
+                    return {
+                        tagKey,
+                        displayNameHe,
+                        displayNameEn,
+                        raw_type: 'skill',
+                    };
+                });
+
+            if (newEntries.length) {
+                try {
+                    await persistTagEntriesToCandidate(newEntries, id);
+                } catch (err: any) {
+                    setSaveError(err?.message || 'שמירת תגיות נכשלה');
+                    alert('שמירת התגיות נכשלה. נסה שוב.');
+                    return;
+                }
+            }
+
+            if (validatedItems.length) {
+                const existingDetails = ensureArray(formData.tagDetails);
+                const addedDetails = validatedItems
+                    .filter((item) => incomingTags.includes(item.label))
+                    .map((item) => ({
+                        id: `local-${Date.now()}-${item.meta?.tagKey || item.label}`,
+                        tagKey: String(item.meta?.tagKey || item.label),
+                        displayNameHe: String(item.meta?.displayNameHe || item.label),
+                        displayNameEn: String(item.meta?.displayNameEn || ''),
+                        rawType: 'skill',
+                        isCurrent: true,
+                        isInSummary: true,
+                    }));
+                if (addedDetails.length) {
+                    patch.tagDetails = [...existingDetails, ...addedDetails];
+                    setLocalTagDetails((prev) => [...prev, ...addedDetails]);
+                }
+            }
+        }
+
         const merged = { ...formData, ...patch };
         const normalized = normalizeCandidateData(merged);
         setFormData(normalized);
         setProfiles(prev => prev.map(p => p.id === activeProfileId ? normalized : p));
-        persistProfile(normalized);
+        await persistProfile(normalized);
+        await loadCandidateRef.current?.();
     };
 
     const persistProfile = async (data: any) => {
@@ -2020,7 +2422,11 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             });
             if (!res.ok) throw new Error('שמירה נכשלה');
             const updated = await res.json();
-            const normalizedUpdated = normalizeCandidateData(updated);
+            const normalizedUpdated = normalizeCandidateData({
+                ...updated,
+                desiredRoles: updated.desiredRoles ?? data.desiredRoles,
+                profileVideoUrl: updated.profileVideoUrl ?? data.profileVideoUrl,
+            });
             setFormData(normalizedUpdated);
             setProfiles(prev => prev.map(p => p.id === id ? normalizedUpdated : p));
             setCandidateId(updated.id || id);
@@ -2039,35 +2445,29 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         }, 800);
     };
 
-    const applyRecruitmentSourceDraft = useCallback(
-        (value: string) => {
-            const clean = String(value || '').trim();
-            const selected = recruitmentSources.find(
-                (source) => source.name.trim().toLowerCase() === clean.toLowerCase(),
-            );
-            const nextName = selected?.name || clean;
-            setRecruitmentSourceDraft(nextName);
-            handleUpdateProfileData({
-                source: nextName,
-                recruitmentSourceId: selected?.id || null,
-            });
-        },
-        [recruitmentSources, handleUpdateProfileData],
-    );
-
-
     const handleSelectRole = (selected: SelectedJobField | null) => {
         if (selected) {
-            handleUpdateProfileData({ 
-                desiredRoles: [...formData.desiredRoles, { value: selected.role, owner: 'candidate' }] 
-            });
+            const existing = Array.isArray(formData.desiredRoles) ? formData.desiredRoles : [];
+            const alreadyHas = existing.some(
+                (r: { value?: string } | string) =>
+                    (typeof r === 'string' ? r : r?.value) === selected.role,
+            );
+            if (!alreadyHas) {
+                handleUpdateProfileData({
+                    desiredRoles: [...existing, { value: selected.role, owner: 'candidate' }],
+                });
+            }
         }
         setIsJobFieldSelectorOpen(false);
     };
 
     const handleRemoveRole = (roleValue: string) => {
-        handleUpdateProfileData({ 
-            desiredRoles: formData.desiredRoles.filter((r: any) => r.value !== roleValue) 
+        const existing = Array.isArray(formData.desiredRoles) ? formData.desiredRoles : [];
+        handleUpdateProfileData({
+            desiredRoles: existing.filter(
+                (r: { value?: string } | string) =>
+                    (typeof r === 'string' ? r : r?.value) !== roleValue,
+            ),
         });
     };
 
@@ -2077,35 +2477,46 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         return createdId;
     };
 
-    const handleOpenAiSmartView = () => {
-        setIsResumePreviewOpen(true);
+    const handleApproveProfile = async () => {
+        if (formData.approveByCandidate) return;
+        await saveNow({ approveByCandidate: true });
     };
 
-    const handleOpenCvFilesModal = () => {
-        setIsCvFilesModalOpen(true);
-    };
-
-    const handleCopyCv = async () => {
-        const lines = [
-            formData.fullName,
-            formData.title,
-            formData.professionalSummary,
-            (formData.workExperience || [])
-                .map((exp: any) => `${exp.title} - ${exp.company}`)
-                .join('\n'),
-        ].filter(Boolean);
-        const text = lines.join('\n');
+    const handleToggleJobOffersConsent = async (checked: boolean) => {
+        setJoinCandidatePool(checked);
+        let id = candidateId || formData.id;
+        if (!id) {
+            id = await ensureCandidateRecord({ ...formData, consentToJobOffers: checked });
+        }
+        if (!id) {
+            setJoinCandidatePool(!checked);
+            setSaveError('לא ניתן לשמור — חסר מזהה מועמד');
+            return;
+        }
+        setIsSaving(true);
+        setSaveError(null);
         try {
-            await navigator.clipboard.writeText(text);
-            alert('קורות החיים הועתקו ללוח.');
-        } catch {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            document.body.removeChild(textarea);
-            alert('קורות החיים הועתקו ללוח.');
+            const base = apiBase || '';
+            const res = await fetch(`${base}/api/candidates/${encodeURIComponent(String(id))}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ consentToJobOffers: checked }),
+            });
+            if (!res.ok) throw new Error('שמירת ההצטרפות למאגר נכשלה');
+            const updated = await res.json();
+            const normalized = normalizeCandidateData({
+                ...formData,
+                ...updated,
+                consentToJobOffers: Boolean(updated.consentToJobOffers ?? checked),
+            });
+            setFormData(normalized);
+            setProfiles((prev) => prev.map((p) => (String(p.id) === String(id) ? normalized : p)));
+            setCandidateId(String(id));
+        } catch (err: unknown) {
+            setJoinCandidatePool(!checked);
+            setSaveError(err instanceof Error ? err.message : 'שמירה נכשלה');
+        } finally {
+            setIsSaving(false);
         }
     };
 
@@ -2210,23 +2621,23 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     const renderHeader = () => {
         const availabilityMeta = getAvailabilityMeta(formData.availability);
         return (
-        <div className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6 mb-6">
-            <div className="flex flex-col sm:flex-row items-center gap-6">
-                <div className="relative">
+        <div id="profile-header-card" className="bg-bg-card rounded-2xl shadow-sm border border-border-default p-6 mb-6">
+            <div className="flex flex-row items-start gap-4">
+                <div className="relative shrink-0">
                         {formData.profilePicture ? (
-                            <img src={formData.profilePicture} alt="" className="w-28 h-28 rounded-full object-cover ring-4 ring-bg-subtle" />
+                            <img src={formData.profilePicture} alt="" className="w-20 h-20 sm:w-24 sm:h-24 rounded-full object-cover ring-4 ring-bg-subtle" />
                         ) : (
-                            <div className="w-28 h-28 rounded-full ring-4 ring-bg-subtle bg-bg-subtle flex items-center justify-center text-text-subtle">
-                                <UserCircleIcon className="w-16 h-16" />
+                            <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-full ring-4 ring-bg-subtle bg-bg-subtle flex items-center justify-center text-text-subtle">
+                                <UserCircleIcon className="w-12 h-12 sm:w-14 sm:h-14" />
                             </div>
                         )}
                         <button
-                            className="absolute bottom-0 left-0 bg-bg-card p-2 rounded-full shadow-md border border-border-default hover:bg-bg-hover"
+                            className="absolute bottom-0 left-0 bg-bg-card p-1.5 rounded-full shadow-md border border-border-default hover:bg-bg-hover"
                             onClick={() => avatarInputRef.current?.click()}
                             disabled={uploadState.inProgress}
                             title={uploadState.inProgress ? 'מעלה...' : 'העלה תמונה'}
                         >
-                        <ArrowUpTrayIcon className="w-5 h-5 text-text-muted" />
+                        <ArrowUpTrayIcon className="w-4 h-4 text-text-muted" />
                     </button>
                         {uploadState.inProgress && uploadState.type === 'profile' && (
                             <div className="absolute inset-0 rounded-full bg-white/70 backdrop-blur-sm flex items-center justify-center">
@@ -2234,41 +2645,73 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                             </div>
                         )}
                 </div>
-                <div className="flex-1 text-center sm:text-right w-full">
-                    <div className="flex justify-between items-start mb-2">
-                            <div className="flex items-center gap-3 flex-wrap">
+                <div className="flex-1 min-w-0 text-right w-full">
+                    <div className="flex flex-wrap justify-between items-start gap-2 mb-2">
+                            <div className="flex items-center gap-2 sm:gap-3 flex-wrap min-w-0">
                         <EditableField
                             value={formData.firstName || ''}
                             onSave={(val) => handleUpdateProfileData({ firstName: val })}
-                            className="text-3xl font-extrabold text-text-default inline-block"
+                            className="text-2xl sm:text-3xl font-extrabold text-text-default inline-block"
                             placeholder="שם פרטי"
                         />
                         <EditableField
                             value={formData.lastName || ''}
                             onSave={(val) => handleUpdateProfileData({ lastName: val })}
-                            className="text-3xl font-extrabold text-text-default inline-block"
+                            className="text-2xl sm:text-3xl font-extrabold text-text-default inline-block"
                             placeholder="שם משפחה"
                         />
-                                {availabilityMeta && (
-                                    <span
-                                        className={`flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold ${availabilityMeta.badgeClass}`}
-                                    >
-                                        {availabilityMeta.display}
-                                    </span>
-                                )}
+                        <CandidateApprovedByCandidateBadge
+                            approved={Boolean(formData.consentToJobOffers)}
+                            title="הצטרפת למאגר המועמדים והסכמת לקבל הצעות עבודה"
+                            className="w-6 h-6 shrink-0 self-center"
+                        />
                             </div>
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2 shrink-0">
                                 {isSaving && <span className="text-xs text-primary-600 font-semibold">שומר...</span>}
                                 {saveError && <span className="text-xs text-red-500 font-semibold">{saveError}</span>}
-                        <button 
-                            onClick={() => setIsResumePreviewOpen(true)}
-                            className="text-text-muted hover:text-primary-600 p-2 rounded-full hover:bg-bg-subtle transition-colors flex items-center gap-2 border border-transparent hover:border-border-default"
-                            title="הורד קורות חיים"
-                        >
-                            <ArrowDownTrayIcon className="w-5 h-5" />
-                            <span className="text-xs font-semibold hidden sm:inline">הורד קו&quot;ח{activeProfile?.profileName ? ` (${activeProfile.profileName})` : ''}</span>
-                        </button>
+                                {!formData.approveByCandidate ? (
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleApproveProfile()}
+                                        disabled={isSaving}
+                                        className="flex items-center gap-2 px-4 py-2 rounded-lg transition font-medium text-sm shadow-sm border bg-primary-600 text-white border-primary-600 hover:bg-primary-700 disabled:opacity-60 disabled:cursor-not-allowed"
+                                    >
+                                        <CheckCircleIcon className="w-4 h-4" />
+                                        <span className="hidden sm:inline">אישור פרופיל</span>
+                                    </button>
+                                ) : null}
+                                <button
+                                    onClick={() => setIsResumePreviewOpen(true)}
+                                    className="text-text-muted hover:text-primary-600 p-2 rounded-lg hover:bg-bg-subtle transition-colors border border-transparent hover:border-border-default"
+                                    title={`הורד קו"ח${activeProfile?.profileName ? ` (${activeProfile.profileName})` : ''}`}
+                                    aria-label="הורד קורות חיים"
+                                >
+                                    <ArrowDownTrayIcon className="w-5 h-5" />
+                                </button>
                             </div>
+                    </div>
+
+                    <div id="job-availability" className="mb-4 rounded-xl border border-border-default bg-gradient-to-l from-bg-subtle/80 to-white p-3 shadow-sm">
+                        <label className="block text-xs font-bold text-text-muted mb-1.5">זמינות למשרה</label>
+                        <div className="flex flex-wrap items-center gap-2">
+                            <select
+                                value={formData.availability || ''}
+                                disabled={isSaving}
+                                onChange={(e) => void saveNow({ availability: e.target.value })}
+                                className="flex-1 min-w-[220px] rounded-lg border border-border-default bg-white px-3 py-2.5 text-sm font-semibold text-text-default focus:outline-none focus:ring-2 focus:ring-primary-300"
+                            >
+                                {AVAILABILITY_OPTIONS.map((opt) => (
+                                    <option key={opt.value || 'empty'} value={opt.value}>
+                                        {opt.label}
+                                    </option>
+                                ))}
+                            </select>
+                            {availabilityMeta ? (
+                                <span className={`text-xs font-bold px-2.5 py-1 rounded-full ${availabilityMeta.badgeClass}`}>
+                                    {availabilityMeta.display.split('(')[0]?.trim()}
+                                </span>
+                            ) : null}
+                        </div>
                     </div>
 
                     <div className="flex flex-col sm:flex-row items-center sm:items-start gap-2 mb-3 text-lg text-text-muted">
@@ -2285,6 +2728,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                             onSave={(val) => handleUpdateProfileData(candidateCityPatch(val))}
                             icon={<MapPinIcon className="w-5 h-5" />}
                             placeholder="עיר מגורים"
+                            validateOnMount={false}
                         />
                         <span className="hidden sm:inline text-text-subtle">•</span>
                         <EditableField
@@ -2295,38 +2739,6 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         />
                     </div>
 
-                    <div className="mb-4 max-w-md text-right">
-                        <label className="mb-1 flex items-center gap-1.5 text-xs font-bold text-text-muted">
-                            <BriefcaseIcon className="w-4 h-4 text-primary-500" />
-                            {t('profile.recruitment_source')}
-                        </label>
-                        <input
-                            type="text"
-                            list="candidate-public-recruitment-source-options"
-                            value={recruitmentSourceDraft}
-                            onChange={(e) => setRecruitmentSourceDraft(e.target.value)}
-                            onBlur={() => applyRecruitmentSourceDraft(recruitmentSourceDraft)}
-                            onKeyDown={(e) => {
-                                if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    applyRecruitmentSourceDraft(recruitmentSourceDraft);
-                                    (e.currentTarget as HTMLInputElement).blur();
-                                }
-                                if (e.key === 'Escape') {
-                                    setRecruitmentSourceDraft(String(formData.source || ''));
-                                    (e.currentTarget as HTMLInputElement).blur();
-                                }
-                            }}
-                            placeholder={t('profile.recruitment_source_placeholder')}
-                            className="w-full rounded-xl border border-border-default bg-bg-input px-3 py-2 text-sm font-semibold text-text-default shadow-inner outline-none transition focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20"
-                        />
-                        <datalist id="candidate-public-recruitment-source-options">
-                            {recruitmentSources.map((source) => (
-                                <option key={source.id} value={source.name} />
-                            ))}
-                        </datalist>
-                    </div>
-                    
                     <div className="mb-4">
                         <EditableField 
                             value={formData.professionalSummary} 
@@ -2356,126 +2768,100 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         </div>
                     </div>
 
-                 {/* Action Buttons Row */}
-                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 p-3 border-b border-border-default bg-bg-subtle/10">
-                    <div className="flex items-center gap-2">
-                        <button
-                            type="button"
-                            onClick={handleOpenAiSmartView}
-                            className="flex items-center gap-1.5 text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border bg-primary-50 text-primary-700 border-primary-200 hover:bg-primary-100"
-                        >
-                            <SparklesIcon className="w-4 h-4 shrink-0" />
-                            תצוגת AI חכמה
-                        </button>
-                        <button
-                            type="button"
-                            onClick={handleOpenCvFilesModal}
-                            className="text-sm font-semibold px-4 py-2 rounded-lg transition shadow-sm border bg-white text-text-muted border-border-default hover:bg-bg-hover hover:text-primary-600"
-                        >
-                            ניהול קבצים וגרסאות
-                        </button>
-                        <button
-                            type="button"
-                            onClick={handleCopyCv}
-                            className="flex items-center text-sm font-semibold px-4 py-2 rounded-lg transition bg-white text-text-muted border border-border-default hover:bg-bg-hover hover:text-primary-600 shadow-sm"
-                        >
-                            <span>העתק קו"ח</span>
-                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-4 h-4 mr-1.5">
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13"></path>
-                            </svg>
-                        </button>
-                    </div>
-                    {/* <div className="flex items-center gap-1">
-                        <button
-                            onClick={handleShowOriginalCv}
-                            title="הורדת קובץ"
-                            className="w-10 h-10 flex items-center justify-center rounded-lg transition-colors duration-200 shadow-sm bg-bg-card border border-border-default text-text-muted hover:bg-primary-50 hover:text-primary-600"
-                        >
-                            <ArrowDownTrayIcon className="w-5 h-5" />
-                        </button>
-                        <button
-                            onClick={() => avatarInputRef.current?.click()}
-                            title="העלאת קובץ"
-                            className="w-10 h-10 flex items-center justify-center rounded-lg transition-colors duration-200 shadow-sm bg-bg-card border border-border-default text-text-muted hover:bg-primary-50 hover:text-primary-600"
-                        >
-                            <ArrowUpTrayIcon className="w-5 h-5" />
-                        </button>
-                        <button
-                            title="נעץ קורות חיים"
-                            className="w-10 h-10 flex items-center justify-center rounded-lg transition-colors duration-200 shadow-sm bg-bg-card border border-border-default text-text-muted hover:bg-primary-50 hover:text-primary-600"
-                        >
-                            <BookmarkIcon className="w-5 h-5" />
-                        </button>
-                        <button
-                            title="עריכה"
-                            className="w-10 h-10 flex items-center justify-center rounded-lg transition-colors duration-200 shadow-sm bg-bg-card border border-border-default text-text-muted hover:bg-primary-50 hover:text-primary-600"
-                        >
-                            <PencilIcon className="w-5 h-5" />
-                        </button>
-                        <button
-                            title="מחיקה"
-                            className="w-10 h-10 flex items-center justify-center rounded-lg transition-colors duration-200 shadow-sm bg-bg-card border border-border-default text-text-muted hover:bg-primary-50 hover:text-primary-600"
-                        >
-                            <TrashIcon className="w-5 h-5" />
-                        </button>
-                    </div>*/}
-                </div>
-
-                {/* RESTORED: Tags */}
-                <div className="w-full mt-auto">
-                    <TagRowGroup
-                        groupedSmartTags={groupedSmartTags}
-                        onQualificationAdd={() => {
-                            const target = document.getElementById('education');
-                            if (target) {
-                                target.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                            }
-                        }}
-                        onRowAdd={openTagSelectorForRow}
-                        onTagRemove={handleTagRemove}
-                    />
-                    <TagSelectorModal
-                        isOpen={isTagSelectorOpen}
-                        onClose={() => setIsTagSelectorOpen(false)}
-                        onSave={handleTagSelectorSave}
-                        existingTags={Array.isArray(formData.tags) ? formData.tags : []}
-                        initialCategory={tagSelectorCategory}
-                    />
-                </div>
-
-                    {/* RESTORED: Desired Roles */}
-                    <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3 mt-2">
-                        <button 
-                            onClick={() => setIsJobFieldSelectorOpen(true)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 bg-primary-50 text-primary-700 text-xs font-bold rounded-full hover:bg-primary-100 transition-colors"
-                        >
+                    <div className="mt-4">
+                        <p className="text-sm font-semibold text-text-muted mb-2 text-right">תפקידים מבוקשים</p>
+                        <div className="flex flex-wrap items-center justify-center sm:justify-start gap-3">
+                            <button
+                                type="button"
+                                onClick={() => setIsJobFieldSelectorOpen(true)}
+                                className="flex items-center gap-1.5 px-3 py-1.5 bg-primary-50 text-primary-700 text-xs font-bold rounded-full hover:bg-primary-100 transition-colors"
+                            >
                                 <PlusIcon className="w-4 h-4" />
-                            <span>הוסף תפקיד</span>
-                        </button>
-                        
-                            {(Array.isArray(formData.desiredRoles) ? formData.desiredRoles : []).map((role: any, idx: number) => (
-                            <span key={idx} className="flex items-center gap-1 bg-purple-50 text-purple-700 border border-purple-200 px-3 py-1.5 rounded-full text-xs font-medium">
-                                {role.value}
-                                <button onClick={() => handleRemoveRole(role.value)} className="hover:text-purple-900 rounded-full">
-                                        <XMarkIcon className="w-3 h-3" />
-                                </button>
-                            </span>
-                        ))}
+                                <span>הוסף תפקיד</span>
+                            </button>
+
+                            {(Array.isArray(formData.desiredRoles) ? formData.desiredRoles : []).map(
+                                (role: { value?: string } | string, idx: number) => {
+                                    const label = typeof role === 'string' ? role : role?.value;
+                                    if (!label) return null;
+                                    return (
+                                        <span
+                                            key={`${label}-${idx}`}
+                                            className="flex items-center gap-1 bg-purple-50 text-purple-700 border border-purple-200 px-3 py-1.5 rounded-full text-xs font-medium"
+                                        >
+                                            {label}
+                                            <button
+                                                type="button"
+                                                onClick={() => handleRemoveRole(label)}
+                                                className="hover:text-purple-900 rounded-full"
+                                                aria-label={`הסר ${label}`}
+                                            >
+                                                <XMarkIcon className="w-3 h-3" />
+                                            </button>
+                                        </span>
+                                    );
+                                },
+                            )}
+                        </div>
                     </div>
 
-                     {/* RESTORED: Join Pool Toggle */}
-                     <div className="mt-6 bg-gradient-to-r from-bg-subtle to-white border border-border-default rounded-xl p-3 flex items-center justify-between shadow-sm">
+                    <div className="mt-6 border rounded-xl p-4 flex items-center justify-between shadow-sm transition-all bg-white border-border-default">
                         <div className="flex items-center gap-3">
-                            <div className="bg-white p-2 rounded-full shadow-sm text-primary-600">
-                                <SparklesIcon className="w-5 h-5" />
+                            <div className="p-3 rounded-full shadow-sm bg-primary-100 text-primary-700">
+                                <VideoCameraIcon className="w-6 h-6" />
                             </div>
                             <div className="text-right">
-                                <p className="text-sm font-bold text-primary-800">הצטרף למאגר המועמדים שלנו</p>
-                                <p className="text-xs text-text-muted">וקבל הצעות עבודה רלוונטיות ישירות למייל.</p>
+                                <p className="text-sm font-bold text-text-default">
+                                    {formData.profileVideoUrl ? 'וידאו תדמיתי הועלה בהצלחה' : 'הוסף וידאו תדמיתי אישי'}
+                                </p>
+                                <p className="text-xs text-text-muted mt-1 leading-relaxed max-w-sm">
+                                    {formData.profileVideoUrl
+                                        ? 'זמין לצפייה עבור מגייסים שאליהם הגשת קורות חיים.'
+                                        : 'הקליט היכרות קצרה — הוידאו יוצג רק למגייסים אליהם הגשת מועמדות.'}
+                                </p>
                             </div>
                         </div>
-                        <label className="relative inline-flex items-center cursor-pointer">
-                            <input type="checkbox" checked={joinCandidatePool} onChange={(e) => setJoinCandidatePool(e.target.checked)} className="sr-only peer" />
+                        <button
+                            type="button"
+                            onClick={() => setIsProfileVideoModalOpen(true)}
+                            disabled={uploadState.inProgress && uploadState.type === 'profile-video'}
+                            className="px-5 py-2.5 rounded-xl text-sm font-bold shadow-sm transition-colors bg-white text-primary-600 border border-primary-200 hover:bg-primary-50 disabled:opacity-60"
+                        >
+                            {uploadState.inProgress && uploadState.type === 'profile-video'
+                                ? 'מעלה...'
+                                : formData.profileVideoUrl
+                                    ? 'צפה / ערוך'
+                                    : 'הקליט וידאו'}
+                        </button>
+                    </div>
+
+                     <div className="mt-6 bg-gradient-to-r from-bg-subtle to-white border border-border-default rounded-xl p-4 flex items-center justify-between shadow-sm gap-4">
+                        <div className="flex items-center gap-3 min-w-0">
+                            <div className="bg-white p-2 rounded-full shadow-sm text-primary-600 shrink-0">
+                                <SparklesIcon className="w-5 h-5" />
+                            </div>
+                            <div className="text-right min-w-0">
+                                <p className="text-sm font-bold text-primary-800 inline-flex items-center gap-1.5 flex-wrap">
+                                    הצטרפ/י למאגר המועמדים שלנו
+                                    <CandidateApprovedByCandidateBadge
+                                        approved={Boolean(formData.consentToJobOffers)}
+                                        title="הצטרפת למאגר המועמדים והסכמת לקבל הצעות עבודה"
+                                        className="w-4 h-4"
+                                    />
+                                </p>
+                                <p className="text-xs text-text-muted leading-relaxed mt-0.5">
+                                    אני רוצה להתחבר להירו ולקבל הצעות עבודה מותאמות אישית ממעסיקים בפלטפורמה, ומוכן/ה לקבל מיילים והצעות עבודה.
+                                </p>
+                            </div>
+                        </div>
+                        <label className={`relative inline-flex items-center cursor-pointer shrink-0 ${isSaving ? 'opacity-60 pointer-events-none' : ''}`}>
+                            <input
+                                type="checkbox"
+                                checked={joinCandidatePool}
+                                disabled={isSaving}
+                                onChange={(e) => void handleToggleJobOffersConsent(e.target.checked)}
+                                className="sr-only peer"
+                            />
                             <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-primary-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-600"></div>
                         </label>
                     </div>
@@ -2516,6 +2902,147 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         );
     };
 
+    const profileCompleteness = useMemo(
+        () =>
+            computeCandidateProfileCompleteness({
+                firstName: formData.firstName,
+                lastName: formData.lastName,
+                fullName: formData.fullName,
+                title: formData.title,
+                professionalSummary: formData.professionalSummary,
+                phone: formData.phone,
+                email: formData.email,
+                profilePicture: formData.profilePicture,
+                cityDisplay: candidateCityDisplay(formData),
+                availability: formData.availability,
+                desiredRoles: formData.desiredRoles,
+                workExperience: formData.workExperience,
+            }),
+        [formData],
+    );
+
+    const showProfileCompletenessBanner = !completenessBannerDismissed;
+
+    const handleDismissCompletenessBanner = () => {
+        setCompletenessBannerDismissed(true);
+    };
+
+    const handleCompleteProfileNow = () => {
+        if (profileCompleteness.percent >= 100) {
+            if (formData.approveByCandidate) {
+                handleDismissCompletenessBanner();
+                return;
+            }
+            void handleApproveProfile();
+            return;
+        }
+        const target = profileCompleteness.firstMissing;
+        if (target) scrollToProfileCompletenessTarget(target);
+    };
+
+    const handleApproveProfileAsIs = async () => {
+        setCompletenessBannerDismissed(true);
+        if (!formData.approveByCandidate) {
+            await handleApproveProfile();
+        }
+    };
+
+    const scrollToCompletenessField = (fieldId: ProfileCompletenessFieldId) => {
+        scrollToProfileCompletenessTarget(fieldId);
+    };
+
+    const renderProfileCompletenessBanner = () => {
+        if (!showProfileCompletenessBanner) return null;
+
+        const { percent, missing } = profileCompleteness;
+        const isComplete = percent >= 100;
+        const isApproved = Boolean(formData.approveByCandidate);
+
+        return (
+            <div id="profile-completeness-banner" className="animate-fade-in mb-6">
+                <div className="bg-gradient-to-r from-amber-50 to-orange-50 border border-amber-200 rounded-2xl p-6 shadow-sm overflow-hidden relative">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-amber-200 rounded-full blur-3xl opacity-30 transform translate-x-1/2 -translate-y-1/2" />
+                    <div className="flex flex-col md:flex-row items-center justify-between gap-6 relative z-10">
+                        <div className="flex-1 w-full">
+                            <div className="flex justify-between items-end mb-3 gap-3">
+                                <h3 className="text-amber-900 font-extrabold text-xl flex items-center gap-2 tracking-tight">
+                                    <SparklesIcon className="w-6 h-6 text-amber-500 shrink-0" />
+                                    {isComplete
+                                        ? (isApproved ? 'הפרופיל שלך מאושר!' : 'הפרופיל שלך מושלם!')
+                                        : 'הפרופיל שלך קרוב לשלמות!'}
+                                </h3>
+                                <span className="text-amber-700 font-black text-lg bg-amber-100 px-3 py-1 rounded-lg shrink-0">
+                                    {percent}% מושלם
+                                </span>
+                            </div>
+                            <div className="w-full bg-amber-200/50 rounded-full h-4 mb-4 shadow-inner overflow-hidden">
+                                <div
+                                    className={`h-full rounded-full transition-all duration-1000 ease-out ${isComplete ? 'bg-emerald-500' : 'bg-amber-500'}`}
+                                    style={{ width: `${percent}%` }}
+                                />
+                            </div>
+                            {!isComplete && missing.length > 0 ? (
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <span className="text-sm font-bold text-amber-800">
+                                        מה חסר לך כדי להגיע ל-100%?
+                                    </span>
+                                    {missing.map((fieldId) => (
+                                        <button
+                                            key={fieldId}
+                                            type="button"
+                                            onClick={() => scrollToCompletenessField(fieldId)}
+                                            className="text-[11px] px-2.5 py-1 bg-white/80 border border-amber-200 text-amber-700 rounded-md font-bold shadow-sm hover:bg-white transition-colors"
+                                        >
+                                            {PROFILE_COMPLETENESS_LABELS[fieldId]}
+                                        </button>
+                                    ))}
+                                </div>
+                            ) : (
+                                <p className="text-sm font-semibold text-emerald-800">
+                                    {isApproved
+                                        ? 'כל השדות החשובים מולאו והפרופיל מאושר.'
+                                        : 'כל השדות החשובים מולאו. אפשר לאשר את הפרופיל ולהמשיך.'}
+                                </p>
+                            )}
+                        </div>
+                        <div className="flex flex-col gap-3 w-full md:w-auto shrink-0">
+                            {isApproved ? (
+                                <button
+                                    type="button"
+                                    onClick={handleDismissCompletenessBanner}
+                                    className="bg-primary-600 hover:bg-primary-700 text-white px-8 py-4 rounded-xl font-black text-sm transition-all shadow-lg transform hover:scale-105 active:scale-95"
+                                >
+                                    סגור
+                                </button>
+                            ) : (
+                                <>
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleCompleteProfileNow()}
+                                        disabled={isSaving}
+                                        className="bg-primary-600 hover:bg-primary-700 text-white px-8 py-4 rounded-xl font-black text-sm transition-all shadow-lg transform hover:scale-105 active:scale-95 disabled:opacity-60"
+                                    >
+                                        {isComplete ? 'אשר פרופיל' : 'השלם פרטים עכשיו'}
+                                    </button>
+                                    {!isComplete ? (
+                                        <button
+                                            type="button"
+                                            onClick={() => void handleApproveProfileAsIs()}
+                                            disabled={isSaving}
+                                            className="text-amber-700 hover:text-amber-900 text-xs font-bold underline text-center opacity-70 hover:opacity-100 transition-opacity disabled:opacity-40"
+                                        >
+                                            אני מעדיף לאשר ככה
+                                        </button>
+                                    ) : null}
+                                </>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
     const renderProfileContent = () => (
          <>
              {renderHeader()}
@@ -2542,9 +3069,21 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                     </div>
                     <div className="flex items-center gap-2">
                         <button
+                            type="button"
+                            className={`p-2 ${formData.resumeUrl ? 'text-text-muted hover:text-primary-600' : 'text-text-subtle cursor-not-allowed'}`}
+                            onClick={() => formData.resumeUrl && setIsCvViewerOpen(true)}
+                            disabled={!formData.resumeUrl}
+                            title="צפייה בקורות חיים"
+                            aria-label="צפייה בקורות חיים"
+                        >
+                            <EyeIcon className="w-5 h-5" />
+                        </button>
+                        <button
                             className={`p-2 ${formData.resumeUrl ? 'text-text-muted hover:text-primary-600' : 'text-text-subtle cursor-not-allowed'}`}
                             onClick={() => formData.resumeUrl && window.open(formData.resumeUrl, '_blank')}
                             disabled={!formData.resumeUrl}
+                            title="הורד קורות חיים"
+                            aria-label="הורד קורות חיים"
                         >
                             <ArrowDownTrayIcon className="w-5 h-5" />
                         </button>
@@ -2609,6 +3148,23 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     // Relevant Jobs View (Real Mock Data with Filters)
     const renderJobs = () => (
         <div className="space-y-6">
+            {!formData.consentToJobOffers ? (
+                <div className="rounded-2xl border border-dashed border-border-default bg-bg-subtle/40 p-8 text-center">
+                    <SparklesIcon className="w-12 h-12 mx-auto mb-3 text-primary-400 opacity-80" />
+                    <p className="font-bold text-text-default">הפעל/י את מאגר המועמדים בפרופיל</p>
+                    <p className="text-sm text-text-muted mt-2 max-w-md mx-auto">
+                        כדי לראות משרות רלוונטיות עם התאמה גבוהה, הפעל/י את המתג &quot;הצטרפ/י למאגר המועמדים&quot; בעמוד הפרופיל.
+                    </p>
+                    <button
+                        type="button"
+                        onClick={() => setActiveView('profile')}
+                        className="mt-4 text-sm font-bold text-primary-600 hover:underline"
+                    >
+                        חזרה לפרופיל
+                    </button>
+                </div>
+            ) : (
+                <>
             <JobSearchFilters 
                 searchTerm={jobSearchTerm} 
                 setSearchTerm={setJobSearchTerm}
@@ -2622,9 +3178,16 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             />
 
             <h2 className="text-xl font-bold text-text-default mb-4">
-                {filteredJobs.length > 0 ? 'משרות רלוונטיות עבורך' : 'לא נמצאו משרות מתאימות'}
+                {matchedJobsLoading
+                    ? 'טוען משרות מתאימות...'
+                    : filteredJobs.length > 0
+                        ? 'משרות רלוונטיות עבורך'
+                        : 'לא נמצאו משרות מתאימות'}
             </h2>
-            
+
+            {matchedJobsLoading ? (
+                <div className="text-center py-12 text-text-muted">מחפש משרות עם התאמה גבוהה...</div>
+            ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {filteredJobs.map((job) => (
                     <JobCard 
@@ -2636,6 +3199,9 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                     />
                 ))}
             </div>
+            )}
+                </>
+            )}
         </div>
     );
 
@@ -2668,7 +3234,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 onViewChange={handleViewChange}
                 activeProfile={activeProfile ?? formData}
                 activeProfileId={activeProfileId}
-                profiles={profiles}
+                profiles={userProfiles}
                 onSwitchProfile={handleSwitchProfile}
                 onAddProfile={handleAddProfile}
                 isOpenMobile={isSidebarOpenMobile}
@@ -2696,6 +3262,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         <ProfileLoadingSkeleton />
                     ) : (
                         <div className="animate-fade-in">
+                    {activeView === 'profile' && renderProfileCompletenessBanner()}
                     <div className="flex justify-center gap-2 mb-3">
                         <button
                             type="button"
@@ -2708,7 +3275,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         <button
                             type="button"
                             onClick={() => moveProfile(1)}
-                            disabled={currentProfileIndex === -1 || currentProfileIndex >= candidateList.length - 1}
+                            disabled={currentProfileIndex === -1 || currentProfileIndex >= navigableProfiles.length - 1}
                             className="p-2 rounded-full bg-bg-card border border-border-default text-text-muted hover:text-primary-600 transition disabled:opacity-40 disabled:cursor-not-allowed"
                         >
                             <ChevronRightIcon className="w-4 h-4"/>
@@ -2726,48 +3293,70 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 </div>
             </div>
 
-            {/* Hidden Print Component */}
-            <PrintableResume data={formData} className="hidden print:block" />
-            
              {/* PDF Preview Modal */}
             <ResumePreviewModal isOpen={isResumePreviewOpen} onClose={() => setIsResumePreviewOpen(false)} data={formData} />
             <CvFilesManagementModal
-                isOpen={isCvFilesModalOpen}
-                onClose={() => setIsCvFilesModalOpen(false)}
+                isOpen={isCvViewerOpen}
+                onClose={() => setIsCvViewerOpen(false)}
                 resumeUrl={formData.resumeUrl}
-                searchText={formData.searchText || formData.resumeText || formData.cvText}
-                candidateName={formData.fullName || buildCandidateFullName(formData)}
+                candidateName={formData.fullName}
             />
             
             {/* Modals for Tags/Roles */}
-            <JobFieldSelector onChange={handleSelectRole} isModalOpen={isJobFieldSelectorOpen} setIsModalOpen={setIsJobFieldSelectorOpen} />
+            <JobFieldSelector
+                onChange={handleSelectRole}
+                isModalOpen={isJobFieldSelectorOpen}
+                setIsModalOpen={setIsJobFieldSelectorOpen}
+            />
+            <CandidateProfileVideoModal
+                isOpen={isProfileVideoModalOpen}
+                onClose={() => setIsProfileVideoModalOpen(false)}
+                existingVideoUrl={formData.profileVideoUrl || ''}
+                onSave={handleProfileVideoSave}
+                onDelete={handleProfileVideoDelete}
+                isSaving={uploadState.inProgress && uploadState.type === 'profile-video'}
+            />
             
              <HiroAIChat
                 isOpen={isChatOpen}
                 onClose={() => setIsChatOpen(false)}
                 chatType="candidate-profile"
                 userId={candidateId || formData.id?.toString()}
-                systemPrompt={`You are Hiro, an expert AI Career Coach and Recruitment Assistant for "${formData.fullName}". 
+                systemPrompt={`You are Hiro, an expert AI Career Coach and Recruitment Assistant for "${formData.fullName}".
                 **Goal:** Help the candidate create a "winning profile" to maximize their chances of getting hired.
-                **Operational Rule (DYNAMIC UPDATES):** Whenever the user provides information about themselves (e.g., age, city, experience, skills, phone, email) or you suggest a profile improvement, you MUST ALWAYS include a JSON array at the end of your response so the user can approve the change via a popup.
-                
+                **Language:** Respond ONLY in Hebrew. Be proactive, encouraging, and professional.
+
+                **Operational Rule (DYNAMIC UPDATES):** When the user asks to change profile data OR you suggest concrete profile improvements (summary text, skills to add, work experience, salary, preferences), you MUST include a JSON array at the end of your response so the user can approve the change via a popup.
+
+                **When NOT to include JSON:** Pure coaching answers with no profile change — e.g. interview tips, mock interview Q&A, salary market overview, career advice, gap explanations, profile strength analysis. Answer thoroughly in Hebrew without JSON unless you also propose a specific profile edit.
+
+                **Query-type guidelines:**
+                1. **Profile/CV upgrade** (summary, CV improvement, skills for management roles, English CV translation): Give actionable advice based on the candidate's current profile context. When you draft or recommend specific text/skills/experience, include JSON proposals.
+                2. **Interview prep** (common questions, mock interview, questions for interviewer, employment gap): Provide detailed, role-relevant coaching. Run mock interviews interactively when asked. No JSON unless updating profile.
+                3. **Job fit & career** (profile strength for a role, salary ranges in Israeli hi-tech, alternative career paths): Analyze using profile context. Salary: give realistic monthly gross ranges in NIS for Israel hi-tech. If asked about open job listings matching their experience, explain this feature is coming soon (בקרוב) — do not invent job listings.
+                4. **Quick data updates** (add work experience, update salary expectations, change work preferences): Confirm briefly in Hebrew, then ALWAYS include JSON with exact updates.
+                   - workExperience: add ONLY the new entry as {title, company, description, startDate, endDate}. Infer reasonable dates if user gives duration (e.g. "שנה" = ~12 months ending recently).
+                   - salaryMin/salaryMax: parse formats like 25K-27K as 25000-27000 NIS monthly gross. Accept adjustments within ±2000 NIS of stated values.
+                   - preferences: array of strings e.g. ["היברידי", "מרכז", "משרות במרכז"] for hybrid/location preferences.
+
                 **JSON Format:**
                 \`\`\`json
                 [
                   { "field": "fieldName", "value": "newValue", "reason": "brief reason in Hebrew" }
                 ]
                 \`\`\`
-                
-                **Supported Fields:** 
+
+                **Supported Fields:**
                 - fullName, title, professionalSummary (Hebrew), location (City), age (Number/String), phone, email
                 - tags (Array of strings), softSkills (Array), techSkills (Array of objects: {name, level})
                 - workExperience (Array of ONLY the new/updated objects: {title, company, description, startDate, endDate}. Do not repeat existing items unless editing them.)
-                - education (Array/string describing degrees, certifications; detect keywords like השכלה, תואר, דוקטורט, תעודה, קורס)
-                - salaryMin, salaryMax, availability, desiredRoles (Array)
+                - education (Array/string describing degrees, certifications)
+                - salaryMin, salaryMax, availability, desiredRoles (Array), preferences (Array of strings), interests (Array)
+                - candidateNotes (string for CV English translation drafts or notes)
 
-                **Hebrew Conversations Only.** Be proactive, encouraging, and professional. If info is missing (like summary or age), ask for it and then suggest the update via JSON.`}
-                contextData={formData}
-                onProfileUpdate={(patch) => saveNow(patch)}
+                If info is missing (like summary or age), ask for it and then suggest the update via JSON when appropriate.`}
+                contextData={chatContextData}
+                onProfileUpdate={(patch, meta) => void saveNow(patch, meta)}
             />
 
             {/* Screening Wizard Modal */}

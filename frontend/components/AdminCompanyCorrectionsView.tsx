@@ -14,9 +14,22 @@ import {
     fetchOrgAiDecisions,
     resolveOrgAiDecision,
     approveOrgAiDecision,
+    updateOrgAiDecisionComments,
     type OrgAiDecisionDto,
+    type OrgManualApprovalStatus,
 } from '../services/organizationCorrectionsApi';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
+import DebouncedCommentsTextarea from './DebouncedCommentsTextarea';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
+import DateRangeSelector, { type DateRange } from './DateRangeSelector';
+
+function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: string } {
+    if (!range?.from && !range?.to) return {};
+    return {
+        ...(range.from ? { dateFrom: range.from } : {}),
+        ...(range.to ? { dateTo: range.to } : {}),
+    };
+}
 
 // ─── Shared Types ─────────────────────────────────────────────────────────────
 
@@ -69,7 +82,8 @@ interface AiDecision {
     needsManual: boolean;
     isAutoHandled: boolean;
     source: string;
-    manualApprovalStatus: 'pending' | 'approved';
+    manualApprovalStatus: OrgManualApprovalStatus;
+    comments?: string | null;
 }
 
 interface BlacklistEntry {
@@ -102,7 +116,7 @@ const isGenericBucketOrgName = (name?: string) => {
     return n.includes('(כללי)') || n.includes('(גנרי)');
 };
 
-const PAGE_SIZE_OPTIONS = [10, 50, 100, 200, 500] as const;
+const PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 10000] as const;
 
 /** Matches AdminTagsView pagination chrome (top + bottom of tables). */
 const PaginationBar: React.FC<{
@@ -143,7 +157,7 @@ const PaginationBar: React.FC<{
                         className="bg-white border border-border-default rounded px-2 py-1 text-xs"
                     >
                         {PAGE_SIZE_OPTIONS.map((n) => (
-                            <option key={n} value={n}>{n}</option>
+                            <option key={n} value={n}>{n.toLocaleString('en-US')}</option>
                         ))}
                     </select>
                 </label>
@@ -247,6 +261,7 @@ const mapApiEntry = (entry: OrgAiDecisionDto): AiDecision => {
         isAutoHandled: entry.reviewStatus === 'approved' || pct < 30,
         source: 'קורות חיים',
         manualApprovalStatus: entry.manualApprovalStatus ?? 'pending',
+        comments: entry.comments ?? null,
     };
 };
 
@@ -749,13 +764,13 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [blacklistLoading, setBlacklistLoading] = useState(false);
     const [aiSearchTerm, setAiSearchTerm] = useState('');
     const [aiDebouncedSearch, setAiDebouncedSearch] = useState('');
-    const [filterDate, setFilterDate] = useState('');
+    const [filterDateRange, setFilterDateRange] = useState<DateRange | null>(null);
     const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>('newest');
     const [decisionTypeFilter, setDecisionTypeFilter] = useState<'all' | DecisionType>('all');
     const [showManual, setShowManual] = useState(true);
     const [showAutoHandled, setShowAutoHandled] = useState(true);
-    const [approvalFilter, setApprovalFilter] = useState<'all' | 'pending' | 'approved'>('pending');
-    const [localOrgApprovalStatus, setLocalOrgApprovalStatus] = useState<Map<string, 'pending' | 'approved'>>(new Map());
+    const [approvalFilter, setApprovalFilter] = useState<'all' | OrgManualApprovalStatus>('pending');
+    const [localOrgApprovalStatus, setLocalOrgApprovalStatus] = useState<Map<string, OrgManualApprovalStatus>>(new Map());
     const [isMultiSelect, setIsMultiSelect] = useState(false);
     const [aiPage, setAiPage] = useState(1);
     const [aiPageSize, setAiPageSize] = useState(100);
@@ -785,7 +800,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                 limit: aiPageSize,
                 sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc',
                 decision: decisionTypeFilter === 'all' ? undefined : decisionTypeFilter,
-                date: filterDate || undefined,
+                ...dateRangeQuery(filterDateRange),
                 approvalStatus: approvalFilter,
                 search: aiDebouncedSearch || undefined,
                 showManual,
@@ -802,7 +817,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         } finally {
             setLoadingDecisions(false);
         }
-    }, [aiPage, aiPageSize, sortOrder, decisionTypeFilter, filterDate, approvalFilter, aiDebouncedSearch, showManual, showAutoHandled]);
+    }, [aiPage, aiPageSize, sortOrder, decisionTypeFilter, filterDateRange, approvalFilter, aiDebouncedSearch, showManual, showAutoHandled]);
 
     const loadBlacklist = useCallback(async () => {
         setBlacklistLoading(true);
@@ -842,7 +857,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
 
     useEffect(() => {
         setAiPage(1);
-    }, [aiDebouncedSearch, filterDate, sortOrder, decisionTypeFilter, approvalFilter, aiPageSize, showManual, showAutoHandled]);
+    }, [aiDebouncedSearch, filterDateRange, sortOrder, decisionTypeFilter, approvalFilter, aiPageSize, showManual, showAutoHandled]);
 
     useEffect(() => {
         setManualPage(1);
@@ -869,7 +884,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                     limit: pageLimit,
                     sortOrder: sortOrder === 'oldest' ? 'asc' : 'desc',
                     decision: decisionTypeFilter === 'all' ? undefined : decisionTypeFilter,
-                    date: filterDate || undefined,
+                    ...dateRangeQuery(filterDateRange),
                     approvalStatus: approvalFilter,
                     search: aiDebouncedSearch || undefined,
                     showManual,
@@ -907,10 +922,19 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                     { key: 'aiSuggestedTarget', label: 'יעד מוצע', getValue: (r) => r.aiSuggestedTarget || '' },
                     { key: 'hesitationLevel', label: 'התלבטות', getValue: (r) => r.hesitationLevel ?? '' },
                     { key: 'reviewStatus', label: 'סטטוס ביקורת', getValue: (r) => reviewLabel[r.reviewStatus] || r.reviewStatus },
-                    { key: 'manualApprovalStatus', label: 'אישור ידני', getValue: (r) => (r.manualApprovalStatus === 'approved' ? 'אושר' : 'ממתין') },
+                    {
+                        key: 'manualApprovalStatus',
+                        label: 'אישור ידני',
+                        getValue: (r) => (
+                            r.manualApprovalStatus === 'approved' ? 'אושר ידנית'
+                            : r.manualApprovalStatus === 'agent_approved' ? 'אומת ע"י סוכן'
+                            : 'ממתין לאישור'
+                        ),
+                    },
                     { key: 'actionDate', label: 'תאריך', getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : '') },
                     { key: 'aiReasoning', label: 'נימוק AI', getValue: (r) => r.aiReasoning || '' },
                     { key: 'dilemmaReasoning', label: 'נימוק התלבטות', getValue: (r) => r.dilemmaReasoning || '' },
+                    { key: 'comments', label: 'הערות', getValue: (r) => r.comments || '' },
                 ],
                 `company_ai_decisions_${stamp}.xlsx`,
             );
@@ -925,7 +949,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         exportingExcel,
         sortOrder,
         decisionTypeFilter,
-        filterDate,
+        filterDateRange,
         approvalFilter,
         aiDebouncedSearch,
         showManual,
@@ -1075,8 +1099,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             headers,
             body: JSON.stringify({ companyIds: [orgId], persist: true }),
         });
+        const errText = await enrichRes.text().catch(() => '');
         if (!enrichRes.ok) {
-            const errText = await enrichRes.text().catch(() => '');
             let msg = errText;
             try {
                 const j = JSON.parse(errText) as { message?: string };
@@ -1084,7 +1108,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             } catch { /* use raw */ }
             throw new Error(msg || 'העשרה נכשלה');
         }
-        const enrichData = await enrichRes.json() as { persistedIds?: string[] };
+        const enrichData = JSON.parse(errText) as { persistedIds?: string[] };
         const persisted = Array.isArray(enrichData?.persistedIds) && enrichData.persistedIds.includes(orgId);
         notify(
             persisted
@@ -1113,15 +1137,21 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         }
     };
 
-    const handleOrgManualApprove = async (id: string, currentStatus: 'pending' | 'approved') => {
-        const newStatus = currentStatus === 'approved' ? 'pending' : 'approved';
+    const handleOrgManualApprove = async (
+        id: string,
+        newStatus: OrgManualApprovalStatus,
+        previousStatus: OrgManualApprovalStatus,
+    ) => {
+        if (newStatus === previousStatus) return;
         setLocalOrgApprovalStatus(prev => new Map(prev).set(id, newStatus));
         try {
             await approveOrgAiDecision(id, newStatus);
             // Refresh from server so approval filter / totals stay accurate across pages.
-            void loadDecisions();
+            if (approvalFilter !== 'all' && approvalFilter !== newStatus) {
+                void loadDecisions();
+            }
         } catch (err: any) {
-            setLocalOrgApprovalStatus(prev => new Map(prev).set(id, currentStatus));
+            setLocalOrgApprovalStatus(prev => new Map(prev).set(id, previousStatus));
             notify(err.message || 'שגיאה בעדכון אישור', 'error');
         }
     };
@@ -1412,24 +1442,35 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             document.body
         ) : null;
 
-        const approvalStatus = localOrgApprovalStatus.get(d.id) ?? d.manualApprovalStatus ?? 'pending';
-        const isManuallyApproved = approvalStatus === 'approved';
+        const rawApproval = localOrgApprovalStatus.get(d.id) ?? d.manualApprovalStatus ?? 'pending';
+        const approvalStatus: OrgManualApprovalStatus =
+            rawApproval === 'approved' || rawApproval === 'agent_approved' ? rawApproval : 'pending';
+        const approvalTone =
+            approvalStatus === 'approved'
+                ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                : approvalStatus === 'agent_approved'
+                    ? 'bg-sky-50 text-sky-700 border-sky-200'
+                    : 'bg-amber-50 text-amber-700 border-amber-200';
 
         return (
             <div className="relative text-left flex flex-col gap-1.5">
-                {/* Quick manual approval button */}
-                <button
-                    type="button"
-                    onClick={() => void handleOrgManualApprove(d.id, approvalStatus as 'pending' | 'approved')}
-                    className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border shadow-sm cursor-pointer w-full ${
-                        isManuallyApproved
-                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                            : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-                    }`}
-                    title={isManuallyApproved ? 'לחץ לביטול אישור' : 'לחץ לאשר ידנית'}
+                {/* Manual / agent approval status */}
+                <select
+                    value={approvalStatus}
+                    onChange={(e) =>
+                        void handleOrgManualApprove(
+                            d.id,
+                            e.target.value as OrgManualApprovalStatus,
+                            approvalStatus,
+                        )
+                    }
+                    className={`flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors border shadow-sm cursor-pointer w-full outline-none focus:ring-2 focus:ring-orange-500 ${approvalTone}`}
+                    title="סטטוס אישור"
                 >
-                    {isManuallyApproved ? '✅ אושר ידנית' : '⏳ ממתין לאישור'}
-                </button>
+                    <option value="pending">⏳ ממתין לאישור</option>
+                    <option value="approved">✅ אושר ידנית</option>
+                    <option value="agent_approved">🤖 אומת ע"י סוכן</option>
+                </select>
                 <button
                     onClick={(e) => {
                         e.stopPropagation();
@@ -1997,9 +2038,15 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 />
                             </div>
                         </div>
-                        <div className="flex flex-wrap gap-3">
-                            <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
-                                className="bg-bg-subtle border border-border-default rounded-xl px-4 py-2 text-sm font-semibold text-text-default hover:bg-bg-hover focus:ring-2 focus:ring-orange-500 [color-scheme:light]" />
+                        <div className="flex flex-wrap gap-3 items-end">
+                            <div className="min-w-[200px]">
+                                <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">עודכן לאחרונה</label>
+                                <DateRangeSelector
+                                    value={filterDateRange}
+                                    onChange={setFilterDateRange}
+                                    placeholder="הכל"
+                                />
+                            </div>
                             <select value={sortOrder} onChange={e => setSortOrder(e.target.value as 'newest' | 'oldest')}
                                 className="bg-bg-subtle border border-border-default rounded-xl px-4 py-2 text-sm font-semibold text-text-default hover:bg-bg-hover cursor-pointer focus:ring-2 focus:ring-orange-500">
                                 <option value="newest">חדש ביותר</option>
@@ -2014,12 +2061,13 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             </select>
                             <select
                                 value={approvalFilter}
-                                onChange={e => setApprovalFilter(e.target.value as 'all' | 'pending' | 'approved')}
+                                onChange={e => setApprovalFilter(e.target.value as 'all' | OrgManualApprovalStatus)}
                                 className="bg-bg-subtle border border-border-default rounded-xl px-4 py-2 text-sm font-semibold text-text-default hover:bg-bg-hover cursor-pointer focus:ring-2 focus:ring-orange-500"
                             >
-                                <option value="all">הכל (אישור ידני)</option>
+                                <option value="all">הכל</option>
                                 <option value="pending">⏳ ממתין לאישור</option>
                                 <option value="approved">✅ אושר ידנית</option>
+                                <option value="agent_approved">🤖 אומת ע"י סוכן</option>
                             </select>
                             <button
                                 type="button"
@@ -2046,8 +2094,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                             onPageSizeChange={(size) => { setAiPageSize(size); setAiPage(1); }}
                             label="החלטות"
                         />
-                        <div className="overflow-auto flex-1 custom-scrollbar">
-                            <table className="w-full text-right border-collapse">
+                        <HorizontalScrollArea className="flex flex-col flex-1 min-h-0 min-w-0" scrollClassName="overflow-x-auto flex-1 min-h-0 min-w-0 w-full [scrollbar-width:thin]">
+                            <table className="w-full min-w-[1200px] text-right border-collapse" dir="rtl">
                                 <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
                                     <tr>
                                         <th className="p-4 w-12 text-center align-middle border-l border-border-default/50">
@@ -2064,6 +2112,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                                 {col}
                                             </th>
                                         ))}
+                                        <th className="p-4 text-xs font-bold text-text-muted uppercase text-center whitespace-nowrap min-w-[180px]">הערות</th>
                                         <th className="p-4 text-xs font-bold text-text-muted uppercase text-left whitespace-nowrap">פעולה</th>
                                     </tr>
                                 </thead>
@@ -2114,12 +2163,21 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                             <td className="p-4 align-top text-center pt-5">{renderDecisionBadge(d)}</td>
                                             <td className="p-4 align-top pt-5">{renderHesitationBox(d)}</td>
                                             <td className="p-4 align-top text-center pt-5">{renderSimilarEntities(d)}</td>
+                                            <td className="p-4 align-top pt-5">
+                                                <DebouncedCommentsTextarea
+                                                    value={d.comments}
+                                                    onSave={async (comments) => {
+                                                        const res = await updateOrgAiDecisionComments(d.id, comments);
+                                                        updateDecision(d.id, { comments: res.comments });
+                                                    }}
+                                                />
+                                            </td>
                                             <td className="p-4 align-top text-left pt-5">{renderActionDropdown(d)}</td>
                                         </tr>
                                     ))}
                                     {loadingDecisions && (
                                         <tr>
-                                            <td colSpan={8} className="p-12 text-center text-text-muted text-sm">
+                                            <td colSpan={9} className="p-12 text-center text-text-muted text-sm">
                                                 <div className="flex items-center justify-center gap-2">
                                                     <svg className="animate-spin w-4 h-4 text-orange-500" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -2132,12 +2190,12 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                     )}
                                     {!loadingDecisions && filteredDecisions.length === 0 && (
                                         <tr>
-                                            <td colSpan={8} className="p-12 text-center text-text-muted text-sm">אין נתונים להצגה</td>
+                                            <td colSpan={9} className="p-12 text-center text-text-muted text-sm">אין נתונים להצגה</td>
                                         </tr>
                                     )}
                                 </tbody>
                             </table>
-                        </div>
+                        </HorizontalScrollArea>
                         <PaginationBar
                             variant="bottom"
                             page={aiPage}
@@ -2189,8 +2247,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 onPageSizeChange={(size) => { setBlacklistPageSize(size); setBlacklistPage(1); }}
                                 label="מונחים"
                             />
-                            <div className="overflow-auto flex-1 custom-scrollbar">
-                                <table className="w-full text-right border-collapse">
+                            <HorizontalScrollArea className="flex flex-col flex-1 min-h-0 min-w-0" scrollClassName="overflow-x-auto overflow-y-auto min-w-0 w-full [scrollbar-width:thin]">
+                                <table className="w-full min-w-[900px] text-right border-collapse" dir="rtl">
                                     <thead className="bg-[#f8fafc] border-b border-border-default sticky top-0 z-10">
                                         <tr>
                                             {['מונח', 'מקור', 'מועמד', 'תאריך הוספה', 'פעולה'].map(col => (
@@ -2234,7 +2292,7 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                         ))}
                                     </tbody>
                                 </table>
-                            </div>
+                            </HorizontalScrollArea>
                             <PaginationBar
                                 variant="bottom"
                                 page={paginatedBlacklist.page}

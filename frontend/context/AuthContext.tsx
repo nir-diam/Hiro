@@ -18,7 +18,12 @@ function redirectToLogin() {
         localStorage.removeItem('user');
         sessionStorage.clear();
     } catch { /* ignore */ }
-    const isPortal = window.location.pathname.startsWith('/candidate-portal');
+    const path = window.location.pathname;
+    // Already on login — clear stale session only; avoid full reload (preserves form + error).
+    if (path === '/login' || path.startsWith('/candidate-portal/login')) {
+        return;
+    }
+    const isPortal = path.startsWith('/candidate-portal');
     window.location.replace(isPortal ? '/candidate-portal/login' : '/login');
 }
 

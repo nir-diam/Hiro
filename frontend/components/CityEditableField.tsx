@@ -15,6 +15,8 @@ type CityEditableFieldProps = {
     icon?: React.ReactNode;
     /** When true, omit pencil button (parent supplies layout). */
     compact?: boolean;
+    /** When false, skip `/api/cities/resolve` on mount (display-only / candidate portal). */
+    validateOnMount?: boolean;
 };
 
 const CityEditableField: React.FC<CityEditableFieldProps> = ({
@@ -24,6 +26,7 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
     className = '',
     icon,
     compact = false,
+    validateOnMount = true,
 }) => {
     const [isEditing, setIsEditing] = useState(false);
     const [query, setQuery] = useState('');
@@ -45,13 +48,17 @@ const CityEditableField: React.FC<CityEditableFieldProps> = ({
             setSavedInvalid(false);
             return;
         }
+        if (!validateOnMount) {
+            setSavedInvalid(false);
+            return;
+        }
         void resolveExactCityName(displayValue).then((ok) => {
             if (!cancelled) setSavedInvalid(!ok);
         });
         return () => {
             cancelled = true;
         };
-    }, [displayValue]);
+    }, [displayValue, validateOnMount]);
 
     useEffect(() => {
         if (isEditing) {

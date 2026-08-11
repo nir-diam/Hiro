@@ -1,4 +1,11 @@
+const crypto = require('crypto');
+const { Op } = require('sequelize');
 const authService = require('../services/authService');
+const candidatePortalAccessService = require('../services/candidatePortalAccessService');
+const {
+  publicAppOrigin,
+  sendStaffPasswordResetEmail,
+} = require('../services/staffUserProvisioningService');
 const User = require('../models/User');
 const Client = require('../models/Client');
 const { sequelize } = require('../config/db');
@@ -20,6 +27,13 @@ const serializeAuthUserWithUsage = async (user) => {
   return { ...base, clientId, autoDisconnect, uiPreferences };
 };
 
+const loginOtpService = require('../services/loginOtpService');
+
+const otpSentMessage = (channel) =>
+  channel === 'sms'
+    ? 'נשלח אליכם קוד ב-SMS. הזינו אותו כדי להשלים את ההתחברות.'
+    : 'נשלח אליכם קוד באימייל. הזינו אותו כדי להשלים את ההתחברות.';
+
 const login = async (req, res) => {
   const { email, password, role } = req.body;
 
@@ -33,8 +47,8 @@ const login = async (req, res) => {
       return res.json({
         twoFactorRequired: true,
         email: outcome.email,
-        message:
-          'נשלח אליכם קוד באימייל. הזינו אותו כדי להשלים את ההתחברות.',
+        twoFactorChannel: outcome.twoFactorChannel || 'email',
+        message: otpSentMessage(outcome.twoFactorChannel),
       });
     }
     return res.json({
@@ -76,10 +90,14 @@ const resendLoginCode = async (req, res) => {
   }
 
   try {
-    await authService.resendLoginCode({ email, password, role });
+    const outcome = await authService.resendLoginCode({ email, password, role });
     return res.json({
       ok: true,
-      message: 'קוד חדש נשלח לאימייל.',
+      twoFactorChannel: outcome.twoFactorChannel || 'email',
+      message:
+        outcome.twoFactorChannel === 'sms'
+          ? 'קוד חדש נשלח ב-SMS.'
+          : 'קוד חדש נשלח לאימייל.',
     });
   } catch (err) {
     const status = err?.status || 400;
@@ -144,6 +162,59 @@ const me = async (req, res) => {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+const FORGOT_PASSWORD_ROLES = ['manager', 'recruiter', 'admin', 'super_admin'];
+
+const forgotPasswordResponse = {
+  ok: true,
+  message: 'אם קיים חשבון עם כתובת זו, נשלח אליכם קישור לאיפוס סיסמה.',
+};
+
+/** Self-service staff password reset — always returns the same message (no email enumeration). */
+const forgotPassword = async (req, res) => {
+  const email = String(req.body?.email || '').trim();
+  if (!email || !email.includes('@')) {
+    return res.status(400).json({ message: 'נדרש אימייל תקין' });
+  }
+
+  try {
+    const user = await User.findOne({
+      where: {
+        email: { [Op.iLike]: email },
+        role: { [Op.in]: FORGOT_PASSWORD_ROLES },
+      },
+    });
+    if (!user) {
+      return res.json(forgotPasswordResponse);
+    }
+
+    const activationGuid = crypto.randomUUID();
+    const tempPassword = crypto.randomBytes(32).toString('hex');
+
+    let clientName = null;
+    const clientId = await authService.resolveEffectiveClientIdForUser(user);
+    if (clientId) {
+      const c = await Client.findByPk(clientId, { attributes: ['displayName', 'name'] });
+      if (c) clientName = c.displayName || c.name || null;
+    }
+
+    await user.update({
+      password: tempPassword,
+      activationGuid,
+    });
+
+    const activationUrl = `${publicAppOrigin()}/activation?guid=${activationGuid}`;
+    await sendStaffPasswordResetEmail(user, activationUrl, {
+      userRole: 'admin',
+      clientName,
+      senderEmail: null,
+    });
+  } catch (err) {
+    console.warn('[auth] forgot-password email failed', err?.message || err);
+  }
+
+  return res.json(forgotPasswordResponse);
+};
+
 /** Sets password, clears activation token, and activates inactive staff accounts. */
 const completeStaffActivation = async (user, password) => {
   await user.update({
@@ -200,14 +271,79 @@ const postActivationComplete = async (req, res) => {
   }
 };
 
+/** Exchange a one-time candidate portal magic link for a JWT session. */
+const redeemCandidatePortalMagic = async (req, res) => {
+  const token = req.query.token || req.body?.token;
+  if (!token) {
+    return res.status(400).json({ message: 'Missing magic link token' });
+  }
+
+  try {
+    const outcome = await candidatePortalAccessService.redeemMagicToken(token);
+    return res.json({
+      token: outcome.token,
+      user: await serializeAuthUserWithUsage(outcome.user),
+      candidateId: outcome.candidateId,
+    });
+  } catch (err) {
+    const status = err?.status || 401;
+    return res.status(status).json({ message: err.message || 'Invalid or expired magic link' });
+  }
+};
+
+/** Validate candidate portal magic link before password setup (does not consume token). */
+const getCandidatePortalMagicCheck = async (req, res) => {
+  const token = req.query.token || req.body?.token;
+  if (!token) {
+    return res.status(400).json({ valid: false, message: 'Missing magic link token' });
+  }
+
+  try {
+    const outcome = await candidatePortalAccessService.inspectMagicToken(token);
+    return res.json(outcome);
+  } catch (err) {
+    const status = err?.status || 401;
+    return res.status(status).json({ valid: false, message: err.message || 'Invalid or expired magic link' });
+  }
+};
+
+/** Set candidate portal password via magic link and start a session. */
+const postCandidatePortalMagicSetup = async (req, res) => {
+  const token = req.query.token || req.body?.token;
+  const { password } = req.body || {};
+  if (!token) {
+    return res.status(400).json({ message: 'Missing magic link token' });
+  }
+  if (!password || String(password).length < 6) {
+    return res.status(400).json({ message: 'Password must be at least 6 characters' });
+  }
+
+  try {
+    const outcome = await candidatePortalAccessService.setupPortalPasswordFromMagicToken(token, password);
+    return res.json({
+      ok: true,
+      token: outcome.token,
+      user: await serializeAuthUserWithUsage(outcome.user),
+      candidateId: outcome.candidateId,
+    });
+  } catch (err) {
+    const status = err?.status || 400;
+    return res.status(status).json({ message: err.message || 'Unable to set password' });
+  }
+};
+
 module.exports = {
   login,
   verifyLoginCode,
   resendLoginCode,
   loginWithGoogle,
   signup,
+  forgotPassword,
   me,
   getActivationCheck,
   postActivationComplete,
+  redeemCandidatePortalMagic,
+  getCandidatePortalMagicCheck,
+  postCandidatePortalMagicSetup,
 };
 

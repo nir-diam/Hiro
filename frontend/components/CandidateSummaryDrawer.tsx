@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useId } from 'react';
+import React, { useState, useEffect, useId, useMemo } from 'react';
 import { 
     XMarkIcon, PhoneIcon, EnvelopeIcon, LinkedInIcon, CheckBadgeIcon, ArrowLeftIcon, UserIcon,
     BriefcaseIcon, CalendarDaysIcon, DocumentTextIcon,
@@ -7,6 +7,7 @@ import {
     DocumentIcon, PhotoIcon, UserGroupIcon, BellIcon, Cog6ToothIcon, WhatsappIcon, ChatBubbleBottomCenterTextIcon, PlusIcon, BookmarkIcon, BookmarkIconSolid,
     PaperAirplaneIcon, ChevronLeftIcon, ChevronRightIcon
 } from './Icons';
+import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
 import type { Candidate } from './CandidatesListView';
 interface CandidateWithExtras extends Omit<Candidate, 'age' | 'skills' | 'tagDetails'> {
   age?: string | number;
@@ -21,6 +22,10 @@ interface CandidateWithExtras extends Omit<Candidate, 'age' | 'skills' | 'tagDet
   resumeUrl?: string;
   tagDetails?: unknown[];
   skills?: { soft?: unknown[]; technical?: unknown[] };
+  candidatePipelineName?: string;
+  pipelineStageName?: string;
+  pipelineStageColor?: string;
+  approveByCandidate?: boolean;
 }
 import ResumeViewer from './ResumeViewer';
 import { MessageModalConfig } from '../hooks/useUIState';
@@ -29,7 +34,10 @@ import { buildCandidateGroupedSmartTags } from '../utils/candidateGroupedSmartTa
 import { useNavigate } from 'react-router-dom';
 import EventsView from './EventsView';
 import DocumentsView from './DocumentsView';
-import InterestedInJobs from './InterestedInJobs';
+import CandidateProcessesPanel from './CandidateProcessesPanel';
+import { useAuth } from '../context/AuthContext';
+import { fetchCandidatePipelines, type PipelineDto } from '../services/candidatePipelinesApi';
+import type { SummaryDrawerTab } from '../hooks/useUIState';
 
 type EventType = 'ראיון' | 'פגישה' | 'תזכורת' | 'משימת מערכת';
 interface MockEvent {
@@ -142,6 +150,141 @@ const formatEdu = (edu: any) => {
   }
   return '';
 };
+
+function resolveCandidatePipelineDisplay(
+  pipelines: PipelineDto[],
+  pipelineId?: string | null,
+  stageId?: string | null,
+) {
+  if (!pipelines.length) return null;
+  const pid = String(pipelineId || '').trim();
+  const sid = String(stageId || '').trim();
+
+  let pipeline = pid ? pipelines.find((p) => p.id === pid) : null;
+  let stage =
+    sid && pipeline?.stages ? pipeline.stages.find((s) => s.id === sid) : null;
+
+  if (!stage && sid) {
+    for (const p of pipelines) {
+      const match = (p.stages || []).find((s) => s.id === sid);
+      if (match) {
+        pipeline = p;
+        stage = match;
+        break;
+      }
+    }
+  }
+
+  if (!pipeline && pipelines.length === 1) {
+    pipeline = pipelines[0];
+  }
+
+  if (!pipeline) return null;
+
+  if (!stage && (pipeline.stages || []).length > 0) {
+    stage = pipeline.stages![0];
+  }
+
+  if (!stage) {
+    return {
+      pipelineName: pipeline.name,
+      stageName: 'לא משויך לשלב',
+      stageColor: 'border-t-gray-300 bg-gray-50 text-gray-700',
+    };
+  }
+
+  return {
+    pipelineName: pipeline.name,
+    stageName: stage.name,
+    stageColor: stage.color || 'bg-gray-100 text-gray-700',
+  };
+}
+
+const CandidatePipelineBadge: React.FC<{
+  pipelineName: string;
+  stageName: string;
+  stageColor: string;
+  compact?: boolean;
+}> = ({ pipelineName, stageName, stageColor, compact }) => (
+  <div
+    className={`rounded-xl border border-border-default/60 overflow-hidden bg-white shadow-sm ${
+      compact ? '' : 'mt-2'
+    }`}
+  >
+    <div className={`px-3 py-2 border-b border-border-default/50 border-t-4 ${stageColor}`}>
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">תהליך מועמדים</p>
+      <p className={`font-bold truncate ${compact ? 'text-xs' : 'text-sm'}`} title={pipelineName}>
+        {pipelineName}
+      </p>
+    </div>
+    <div className="px-3 py-2">
+      <p className="text-[10px] font-semibold uppercase tracking-wide text-text-muted">שלב נוכחי</p>
+      <p className={`font-bold truncate ${compact ? 'text-xs' : 'text-sm'}`} title={stageName}>
+        {stageName}
+      </p>
+    </div>
+  </div>
+);
+
+function resolvePipelineDisplayFromCandidate(
+  candidate: Candidate | CandidateWithExtras | null | undefined,
+  fullCandidate: CandidateWithExtras | null | undefined,
+  pipelines: PipelineDto[],
+  pipelineId: string | null,
+  stageId: string | null,
+) {
+  const stageName = String(
+    fullCandidate?.pipelineStageName
+      ?? (candidate as CandidateWithExtras | null)?.pipelineStageName
+      ?? '',
+  ).trim();
+  const pipelineName = String(
+    fullCandidate?.candidatePipelineName
+      ?? (candidate as CandidateWithExtras | null)?.candidatePipelineName
+      ?? '',
+  ).trim();
+  const stageColor = String(
+    fullCandidate?.pipelineStageColor
+      ?? (candidate as CandidateWithExtras | null)?.pipelineStageColor
+      ?? '',
+  ).trim();
+
+  if (stageName || pipelineName) {
+    return {
+      pipelineName: pipelineName || 'תהליך מועמדים',
+      stageName: stageName || 'לא משויך לשלב',
+      stageColor: stageColor || 'bg-gray-100 text-gray-700',
+    };
+  }
+
+  return resolveCandidatePipelineDisplay(pipelines, pipelineId, stageId);
+}
+
+const CandidatePipelineSection: React.FC<{
+  pipelineDisplay: ReturnType<typeof resolveCandidatePipelineDisplay> | null;
+  pipelinesLoading: boolean;
+  loadingCandidate: boolean;
+  hasPipelineIds: boolean;
+}> = ({ pipelineDisplay, pipelinesLoading, loadingCandidate, hasPipelineIds }) => (
+  <section>
+    <h3 className="font-bold text-text-default mb-3">תהליך מועמדים (קאנבן)</h3>
+    {pipelinesLoading || loadingCandidate ? (
+      <p className="text-xs text-text-muted">טוען תהליך...</p>
+    ) : pipelineDisplay ? (
+      <CandidatePipelineBadge
+        pipelineName={pipelineDisplay.pipelineName}
+        stageName={pipelineDisplay.stageName}
+        stageColor={pipelineDisplay.stageColor}
+      />
+    ) : (
+      <p className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-3">
+        {hasPipelineIds
+          ? 'לא נמצא תהליך תואם.'
+          : 'המועמד לא משויך לתהליך מועמדים.'}
+      </p>
+    )}
+  </section>
+);
 
 
 // --- STYLES & HELPERS ---
@@ -319,6 +462,8 @@ interface CandidateSummaryDrawerProps {
   viewMode?: 'recruiter' | 'manager';
   isFavorite: boolean;
   onToggleFavorite: (id: number) => void;
+  initialTab?: SummaryDrawerTab;
+  initialManageLinkId?: string;
 }
 
 const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
@@ -331,6 +476,8 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
   viewMode = 'recruiter',
   isFavorite,
   onToggleFavorite,
+  initialTab,
+  initialManageLinkId,
 }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'events' | 'jobs' | 'documents'>('details');
   const titleId = useId();
@@ -339,13 +486,17 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
   const [candidateError, setCandidateError] = useState<string | null>(null);
   const [resumeUploadState, setResumeUploadState] = useState({ inProgress: false, message: '' });
   const [isExpanded, setIsExpanded] = useState(false);
+  const [candidatePipelines, setCandidatePipelines] = useState<PipelineDto[]>([]);
+  const [pipelinesLoading, setPipelinesLoading] = useState(false);
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const pipelinesClientId = user?.clientId ? String(user.clientId) : null;
 
   useEffect(() => {
     if (isOpen) {
-      setActiveTab('details');
+      setActiveTab(initialTab || 'details');
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   useEffect(() => {
     let isMounted = true;
@@ -380,6 +531,51 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
     load();
     return () => { isMounted = false; };
   }, [isOpen, candidate?.backendId, candidate?.id]);
+
+  useEffect(() => {
+    let active = true;
+    if (!isOpen || !pipelinesClientId) {
+      setCandidatePipelines([]);
+      setPipelinesLoading(false);
+      return;
+    }
+    setPipelinesLoading(true);
+    fetchCandidatePipelines(pipelinesClientId)
+      .then((rows) => { if (active) setCandidatePipelines(rows || []); })
+      .catch(() => { if (active) setCandidatePipelines([]); })
+      .finally(() => { if (active) setPipelinesLoading(false); });
+    return () => { active = false; };
+  }, [isOpen, pipelinesClientId]);
+
+  const candidatePipelineId = useMemo(() => {
+    if (!candidate) return null;
+    return String(fullCandidate?.candidatePipelineId ?? candidate.candidatePipelineId ?? '').trim() || null;
+  }, [candidate, fullCandidate?.candidatePipelineId, candidate?.candidatePipelineId]);
+
+  const pipelineStageId = useMemo(() => {
+    if (!candidate) return null;
+    return String(fullCandidate?.pipelineStageId ?? candidate.pipelineStageId ?? '').trim() || null;
+  }, [candidate, fullCandidate?.pipelineStageId, candidate?.pipelineStageId]);
+
+  const pipelineDisplay = useMemo(
+    () =>
+      resolvePipelineDisplayFromCandidate(
+        candidate,
+        fullCandidate,
+        candidatePipelines,
+        candidatePipelineId,
+        pipelineStageId,
+      ),
+    [
+      candidate,
+      fullCandidate,
+      candidatePipelines,
+      candidatePipelineId,
+      pipelineStageId,
+    ],
+  );
+
+  const hasPipelineIds = Boolean(candidatePipelineId || pipelineStageId);
 
   if (!isOpen || !candidate) return null;
 
@@ -426,6 +622,9 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
     phone: mergedCandidate.phone || candidate.phone || '',
     address: mergedCandidate.address || candidate.address || '',
     professionalSummary: resumeData.summary || candidate.professionalSummary || '',
+    approveByCandidate: Boolean(
+      mergedCandidate.approveByCandidate ?? candidate.approveByCandidate,
+    ),
   };
   const displayPhone = displayCandidate.phone || '';
   const displayEmail = displayCandidate.email || '';
@@ -529,8 +728,9 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
                     {displayCandidate.avatar}
                   </div>
                   <div>
-                    <h3 className="text-2xl font-extrabold text-text-default flex items-center">
-                      {displayCandidate.name} <CheckBadgeIcon className="w-6 h-6 text-secondary-500 mr-2" />
+                    <h3 className="text-2xl font-extrabold text-text-default flex items-center gap-2">
+                      {displayCandidate.name}
+                      <CandidateApprovedByCandidateBadge approved={displayCandidate.approveByCandidate} className="w-5 h-5" />
                     </h3>
                     <p className="text-text-muted">{displayCandidate.title}</p>
                   </div>
@@ -589,6 +789,15 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
                 </div>
 
                 <div className="mt-6 pt-6 border-t border-border-default">
+                  <CandidatePipelineSection
+                    pipelineDisplay={pipelineDisplay}
+                    pipelinesLoading={pipelinesLoading}
+                    loadingCandidate={loadingCandidate}
+                    hasPipelineIds={hasPipelineIds}
+                  />
+                </div>
+
+                <div className="mt-6 pt-6 border-t border-border-default">
                   <div className="w-full relative z-[1000]">
                     <TagRowGroup groupedSmartTags={groupedSmartTags} />
                   </div>
@@ -625,11 +834,32 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
         );
       case 'jobs':
         return candidateApiId ? (
-          <InterestedInJobs
-            onOpenNewTask={onOpenNewTask}
+          <CandidateProcessesPanel
             candidateId={candidateApiId}
+            candidateName={displayCandidate.name}
             candidatePhone={displayPhone || null}
             candidateEmail={displayEmail || null}
+            onOpenNewTask={onOpenNewTask}
+            clientId={pipelinesClientId}
+            candidatePipelineId={candidatePipelineId}
+            pipelineStageId={pipelineStageId}
+            initialManageLinkId={initialManageLinkId}
+            onPipelineStageChanged={() => {
+              void (async () => {
+                try {
+                  const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(candidateApiId)}`, {
+                    headers: { Accept: 'application/json', ...getAuthHeaders() },
+                    cache: 'no-store',
+                  });
+                  if (res.ok) {
+                    const data = await res.json();
+                    setFullCandidate(data);
+                  }
+                } catch {
+                  /* ignore refresh errors */
+                }
+              })();
+            }}
           />
         ) : (
           <div className="text-sm text-text-muted bg-bg-subtle/70 border border-border-default rounded-lg p-4">
@@ -684,6 +914,14 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
                 {isFavorite ? <BookmarkIconSolid className="w-5 h-5 text-primary-500" /> : <BookmarkIcon className="w-5 h-5" />}
             </button>
             <h2 id={titleId} className="text-lg font-bold text-text-default">סיכום מועמד</h2>
+            {pipelineDisplay ? (
+              <span
+                className={`hidden sm:inline text-[10px] font-bold px-2 py-1 rounded-lg border border-border-default/60 ${pipelineDisplay.stageColor}`}
+                title={`${pipelineDisplay.pipelineName} · ${pipelineDisplay.stageName}`}
+              >
+                {pipelineDisplay.stageName}
+              </span>
+            ) : null}
           </div>
           <button onClick={onClose} className="p-2 rounded-full text-text-muted hover:bg-bg-hover">
             <XMarkIcon className="w-6 h-6" />

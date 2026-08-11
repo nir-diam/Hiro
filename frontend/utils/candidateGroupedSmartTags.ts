@@ -1,4 +1,9 @@
 import { SmartTagData, SmartTagTooltipPanel, SmartTagType } from '../components/SmartTagTypes';
+import {
+    ApprovedTagRecord,
+    buildApprovedTagIndex,
+    matchApprovedTag,
+} from '../services/profileSuggestionValidation';
 
 const RAW_TYPE_LABELS: Record<string, string> = {
     Role: 'תפקיד',
@@ -208,8 +213,52 @@ export const inferSmartTagType = (detail?: CandidateTagDetail): SmartTagType => 
     return 'skill';
 };
 
-const tagDetailLabel = (detail: CandidateTagDetail, fallback = ''): string =>
-    (detail.displayNameHe || detail.displayNameEn || detail.tagKey || fallback).trim();
+const looksLikeInternalSlug = (value: string): boolean => {
+    const trimmed = String(value || '').trim();
+    return /^[a-z][a-z0-9_]*$/i.test(trimmed) && trimmed.includes('_');
+};
+
+export const resolveTagDisplayLabel = (
+    rawTag: string,
+    detail?: CandidateTagDetail,
+    approvedTagIndex?: Map<string, ApprovedTagRecord>,
+    allApprovedTags?: ApprovedTagRecord[],
+): string => {
+    const raw = String(rawTag || '').trim();
+    const he = detail?.displayNameHe?.trim();
+    const en = detail?.displayNameEn?.trim();
+    const key = detail?.tagKey?.trim() || raw;
+
+    if (he && !looksLikeInternalSlug(he)) return he;
+    if (en && !looksLikeInternalSlug(en)) return en;
+
+    if (approvedTagIndex && allApprovedTags?.length) {
+        const match =
+            matchApprovedTag(key, approvedTagIndex, allApprovedTags)
+            || (raw !== key ? matchApprovedTag(raw, approvedTagIndex, allApprovedTags) : null);
+        if (match) {
+            const label = match.tag.displayNameHe || match.tag.displayNameEn || match.matchedLabel;
+            if (label?.trim()) return label.trim();
+        }
+    }
+
+    if (he) return he;
+    if (en) return en;
+    return raw;
+};
+
+const tagDetailLabel = (
+    detail: CandidateTagDetail,
+    fallback = '',
+    approvedTagIndex?: Map<string, ApprovedTagRecord>,
+    allApprovedTags?: ApprovedTagRecord[],
+): string =>
+    resolveTagDisplayLabel(
+        fallback || detail.tagKey || '',
+        detail,
+        approvedTagIndex,
+        allApprovedTags,
+    );
 
 const pushGroupedTag = (
     base: Record<SmartTagType, SmartTagData[]>,
@@ -236,14 +285,19 @@ export const buildTagDetailLookup = (tagDetails: unknown): Map<string, Candidate
     return map;
 };
 
-export const buildCandidateGroupedSmartTags = (candidate: {
-    tags?: unknown;
-    tagDetails?: unknown;
-    languages?: unknown;
-    skills?: { soft?: unknown };
-    workExperience?: unknown;
-    experience?: unknown;
-}): Record<SmartTagType, SmartTagData[]> => {
+export const buildCandidateGroupedSmartTags = (
+    candidate: {
+        tags?: unknown;
+        tagDetails?: unknown;
+        languages?: unknown;
+        skills?: { soft?: unknown };
+        workExperience?: unknown;
+        experience?: unknown;
+    },
+    options?: { approvedTags?: ApprovedTagRecord[] },
+): Record<SmartTagType, SmartTagData[]> => {
+    const allApprovedTags = Array.isArray(options?.approvedTags) ? options.approvedTags : [];
+    const approvedTagIndex = allApprovedTags.length ? buildApprovedTagIndex(allApprovedTags) : undefined;
     const base = SMART_TAG_TYPES.reduce<Record<SmartTagType, SmartTagData[]>>((acc, type) => {
         acc[type] = [];
         return acc;
@@ -256,15 +310,19 @@ export const buildCandidateGroupedSmartTags = (candidate: {
     // Primary source: tagDetails (full candidate API). List view often has tags[] without details.
     ensureArray(candidate.tagDetails).forEach((raw) => {
         const detail = normalizeTagDetail((raw || {}) as Record<string, unknown>);
-        const label = tagDetailLabel(detail);
+        const label = tagDetailLabel(detail, detail.tagKey || '', approvedTagIndex, allApprovedTags);
         if (!label) return;
         const type = inferSmartTagType(detail);
+        const panelDetail = {
+            ...detail,
+            displayNameHe: detail.displayNameHe || label,
+        };
         pushGroupedTag(base, {
             label,
             type,
             isVerified: Boolean(detail.isCurrent),
             isAiSuggested: false,
-            tooltipPanel: buildTagTooltipPanel(label, detail, workExperience),
+            tooltipPanel: buildTagTooltipPanel(label, panelDetail, workExperience),
         }, seen);
     });
 
@@ -272,14 +330,21 @@ export const buildCandidateGroupedSmartTags = (candidate: {
     tagsList.forEach((tag) => {
         const detail = tagDetailLookup.get(tag);
         const type = inferSmartTagType(detail);
-        const displayNameHe = detail?.displayNameHe?.trim();
-        const label = (displayNameHe || tag).trim() || tag;
+        const label = resolveTagDisplayLabel(tag, detail, approvedTagIndex, allApprovedTags);
+        const panelDetail = detail
+            ? { ...detail, displayNameHe: detail.displayNameHe || label }
+            : undefined;
         pushGroupedTag(base, {
             label,
             type,
             isVerified: Boolean(detail?.isCurrent),
             isAiSuggested: false,
-            tooltipPanel: detail ? buildTagTooltipPanel(tag, detail, workExperience) : undefined,
+            tooltipPanel: panelDetail
+                ? buildTagTooltipPanel(tag, panelDetail, workExperience)
+                : {
+                      categoryLabel: getLabelCaseInsensitive(RAW_TYPE_LABELS, type) || 'מיומנות',
+                      title: label,
+                  },
         }, seen);
     });
 

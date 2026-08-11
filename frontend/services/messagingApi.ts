@@ -25,6 +25,22 @@ export type LogWhatsappOpenBody = {
     jobId?: string | null;
 };
 
+export type SendComposeSmsBody = {
+    toPhone?: string;
+    to?: string | string[];
+    message: string;
+    candidateId?: string | null;
+    candidateName?: string;
+    templateId?: string | null;
+    jobId?: string | null;
+};
+
+export type SendComposeSmsResult = {
+    ok: boolean;
+    sentCount?: number;
+    results?: { to: string; ok: boolean; provider?: string | null }[];
+};
+
 /** POST /api/messaging/log-whatsapp-open — writes audit_logs on the server */
 export async function logWhatsappComposeOpen(body: LogWhatsappOpenBody): Promise<void> {
     const base = apiBase();
@@ -39,4 +55,20 @@ export async function logWhatsappComposeOpen(body: LogWhatsappOpenBody): Promise
     if (!res.ok && res.status !== 204) {
         throw new Error(await parseErr(res));
     }
+}
+
+/** POST /api/messaging/send-sms — staff compose SMS via InforU (SendMessageModal). */
+export async function sendComposeSms(body: SendComposeSmsBody): Promise<SendComposeSmsResult> {
+    const base = apiBase();
+    if (!base) {
+        throw new Error('לא מוגדר VITE_API_BASE — לא ניתן לשלוח SMS. הגדר את כתובת ה-API ונסה שוב.');
+    }
+    const res = await fetch(`${base}/api/messaging/send-sms`, {
+        method: 'POST',
+        headers: authHeaders(),
+        credentials: 'include',
+        body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
 }

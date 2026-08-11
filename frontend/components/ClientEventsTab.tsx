@@ -834,7 +834,7 @@ const ClientEventsTab: React.FC<ClientEventsTabProps> = ({ clientId, clientName,
                                     <span className={`text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${eventStatusStyles[event.status].bg} ${eventStatusStyles[event.status].text}`}>{event.status}</span>
                                 </div>
                                 <h3 className="font-bold text-text-default my-2">{event.title}</h3>
-                                <p className={`text-xs text-text-muted mb-2 transition-all duration-300 ${expandedRowId === event.id ? '' : 'line-clamp-2'}`}>{event.description}</p>
+                                <p className={`text-xs text-text-muted mb-2 whitespace-pre-wrap transition-all duration-300 ${expandedRowId === event.id ? '' : 'line-clamp-2'}`}>{event.description}</p>
                                 <p className="text-xs text-text-muted flex items-center gap-1.5"><CalendarIcon className="w-4 h-4 text-text-subtle"/> {new Date(event.date).toLocaleString('he-IL', { dateStyle: 'short', timeStyle: 'short' })}</p>
                             </div>
                             <div className="flex justify-between items-center mt-4 pt-3 border-t border-border-default">

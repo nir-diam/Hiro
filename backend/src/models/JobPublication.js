@@ -20,6 +20,8 @@ const JobPublication = sequelize.define(
     publicationCode: DataTypes.STRING,
     heroImageUrl: DataTypes.STRING,
     videoUrl: DataTypes.STRING,
+    /** Extra user instructions injected into Nano Banana hero poster prompt. */
+    heroDesignInstructions: DataTypes.TEXT,
     contactEmail: DataTypes.STRING,
     contactPhone1: DataTypes.STRING,
     contactPhone2: DataTypes.STRING,

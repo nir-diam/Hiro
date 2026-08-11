@@ -455,7 +455,7 @@ const getHistory = async (req, res) => {
 const listPending = async (req, res) => {
   try {
     const page = Math.max(1, Number(req.query.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 25));
+    const limit = Math.min(10000, Math.max(1, Number(req.query.limit) || 25));
     const offset = (page - 1) * limit;
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
     const type = typeof req.query.type === 'string' ? req.query.type.trim() : '';
@@ -778,6 +778,8 @@ const listAiDecisions = async (req, res) => {
     const limit = Number(req.query.limit) || 25;
     const decision = req.query.decision || 'all';
     const date = req.query.date || '';
+    const dateFrom = req.query.dateFrom || '';
+    const dateTo = req.query.dateTo || '';
     const reviewStatus = req.query.reviewStatus || 'all';
     const reviewerAction = req.query.reviewerAction || '';
     const search = req.query.search || '';
@@ -790,7 +792,7 @@ const listAiDecisions = async (req, res) => {
       ? req.query.statusBuckets.split(',').filter(Boolean)
       : [];
     const approvalStatus = req.query.approvalStatus || 'all';
-    const listOpts = { page, limit, decision, date, reviewStatus, reviewerAction, search, type, hesitation, sortOrder, statusBuckets, approvalStatus };
+    const listOpts = { page, limit, decision, date, dateFrom, dateTo, reviewStatus, reviewerAction, search, type, hesitation, sortOrder, statusBuckets, approvalStatus };
 
     let payload = await tagCorrectionAgentService.listDecisions(listOpts);
     let backfill = null;
@@ -918,6 +920,17 @@ const approveAiDecision = async (req, res) => {
   }
 };
 
+const updateAiDecisionComments = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await tagCorrectionAgentService.setComments(id, req.body?.comments);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.updateAiDecisionComments]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to update comments' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -941,5 +954,6 @@ module.exports = {
   backfillAiDecisions,
   backfillAutoMerge,
   approveAiDecision,
+  updateAiDecisionComments,
 };
 

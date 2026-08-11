@@ -47,13 +47,20 @@ async function applyJobCandidateStatusChange({
 
   await jc.update(updates);
 
+  const changedByUserId =
+    req?.dbUser?.id != null
+      ? String(req.dbUser.id)
+      : req?.user?.sub
+        ? String(req.user.sub)
+        : null;
+
   await JobCandidateStatusEvent.create({
     jobCandidateId: jc.id,
     fromStatus: prevStatus,
     toStatus: newStatus,
     fromGroup,
     toGroup,
-    changedByUserId: req?.user?.sub ? String(req.user.sub) : null,
+    changedByUserId,
     source,
   });
 

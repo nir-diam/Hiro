@@ -813,20 +813,26 @@ const processEmailUpload = async (record) => {
 
     const welcomeClientId = resolvedJobClientId;
     const welcomeOnce = new Set();
-    const queueWelcome = (cand, cvText = '') => {
+    const queueWelcome = async (cand, cvText = '') => {
       if (!cand?.id) return;
-      const toEmail =
+      const fromNorm = String(fromEmail || '').trim().toLowerCase();
+      let toEmail =
         candidateRowEmail(cand) || extractCvContactEmail(cvText, emailInFirstCv);
+      // Direct application: candidate emailed their own CV; envelope From is the contact.
+      if (!toEmail && fromNorm && fromNorm.includes('@') && !matchedRecruitmentSource) {
+        toEmail = fromNorm;
+      }
       if (!toEmail) {
         console.log('[email] welcome skipped: no candidate contact email on CV', {
           candidateId: cand.id,
         });
         return;
       }
-      const fromNorm = String(fromEmail || '').trim().toLowerCase();
-      if (fromNorm && toEmail === fromNorm) {
-        console.log('[email] welcome skipped: CV contact is envelope From (not candidate)', {
+      // Agency/recruiter forwarded CV — do not welcome the envelope sender.
+      if (fromNorm && toEmail === fromNorm && matchedRecruitmentSource) {
+        console.log('[email] welcome skipped: sender is recruitment source (forwarded CV)', {
           candidateId: cand.id,
+          source: matchedRecruitmentSource.name,
         });
         return;
       }
@@ -836,12 +842,22 @@ const processEmailUpload = async (record) => {
         return;
       }
       welcomeOnce.add(k);
-      const plain =
+      let plain =
         cand.get && typeof cand.get === 'function' ? cand.get({ plain: true }) : { ...cand };
+      if (!candidateRowEmail(plain)) {
+        try {
+          await candidateService.update(cand.id, { email: k });
+          const refreshed = await candidateService.getById(cand.id);
+          if (refreshed) plain = refreshed;
+        } catch (persistErr) {
+          console.warn('[email] welcome email persist failed', cand.id, persistErr?.message || persistErr);
+        }
+      }
       try {
         messageTemplateService.queueCandidateWelcomeEmail(
           { ...plain, email: k },
           {
+            sendWelcomeEmail: true,
             clientId: welcomeClientId,
             jobId: resolvedJob?.id || null,
             inboxTo: inboxToText,
@@ -973,7 +989,7 @@ const processEmailUpload = async (record) => {
           mirrorErr?.message || mirrorErr,
         );
       }
-      queueWelcome(splitFresh, textChunks[j] || '');
+      await queueWelcome(splitFresh, textChunks[j] || '');
     }
 
     try {
@@ -992,7 +1008,7 @@ const processEmailUpload = async (record) => {
         postingCode: postingCode || null,
         splitAttachmentWelcomeCount: splitFileIndices.size,
       });
-      queueWelcome(fresh, combinedText);
+      await queueWelcome(fresh, combinedText);
     } catch (welcomeErr) {
       console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
     }

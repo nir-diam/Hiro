@@ -28,10 +28,18 @@ const DEFAULTS = {
   tagCorrectionAgentEnabled: true,
 };
 
+const normalizeDoubleAuth = (value) => {
+  const s = String(value ?? '').trim();
+  if (s === 'פעיל' || s === 'פעיל מייל') return 'פעיל מייל';
+  if (s === 'פעיל SMS') return 'פעיל SMS';
+  if (s === 'לא פעיל') return 'לא פעיל';
+  return DEFAULTS.doubleAuth;
+};
+
 const toDto = (row) => {
   const plain = row?.get ? row.get({ plain: true }) : row || {};
   return {
-    doubleAuth: plain.doubleAuth ?? DEFAULTS.doubleAuth,
+    doubleAuth: normalizeDoubleAuth(plain.doubleAuth ?? DEFAULTS.doubleAuth),
     googleLogin: plain.googleLogin ?? DEFAULTS.googleLogin,
     initialScreeningLevel: plain.initialScreeningLevel ?? DEFAULTS.initialScreeningLevel,
     returnMonths:
@@ -345,7 +353,7 @@ const upsert = async (clientId, body) => {
 
   const payload = {
     clientId,
-    doubleAuth: typeof body.doubleAuth === 'string' ? body.doubleAuth : DEFAULTS.doubleAuth,
+    doubleAuth: normalizeDoubleAuth(typeof body.doubleAuth === 'string' ? body.doubleAuth : DEFAULTS.doubleAuth),
     googleLogin: typeof body.googleLogin === 'string' ? body.googleLogin : DEFAULTS.googleLogin,
     initialScreeningLevel:
       typeof body.initialScreeningLevel === 'string'

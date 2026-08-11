@@ -1,4 +1,4 @@
-import React, { createContext, useState, useContext, ReactNode, useMemo, useCallback, useEffect } from 'react';
+import React, { createContext, useState, useContext, ReactNode, useMemo, useCallback, useEffect, useRef } from 'react';
 
 export interface PromptTemplate {
     id: string;
@@ -27,15 +27,26 @@ interface PromptContextType {
 const PromptContext = createContext<PromptContextType | undefined>(undefined);
 const apiBase = import.meta.env.VITE_API_BASE || '';
 
+const promptsFetchCache = new Map<string, Promise<PromptTemplate[]>>();
+
 const fetchPrompts = async () => {
-    const res = await fetch(`${apiBase}/api/prompts`, { cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to load prompts');
-    return res.json();
+    const cacheKey = apiBase || '_default';
+    const cached = promptsFetchCache.get(cacheKey);
+    if (cached) return cached;
+
+    const promise = (async () => {
+        const res = await fetch(`${apiBase}/api/prompts`, { cache: 'no-store' });
+        if (!res.ok) throw new Error('Failed to load prompts');
+        return res.json();
+    })();
+    promptsFetchCache.set(cacheKey, promise);
+    return promise;
 };
 
 export const PromptProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
     const [prompts, setPrompts] = useState<PromptTemplate[]>([]);
     const [isLoading, setIsLoading] = useState(true);
+    const initialLoadFiredRef = useRef(false);
 
     const loadPrompts = useCallback(async () => {
         setIsLoading(true);
@@ -56,6 +67,8 @@ export const PromptProvider: React.FC<{ children: ReactNode }> = ({ children }) 
             setIsLoading(false);
             return;
         }
+        if (initialLoadFiredRef.current) return;
+        initialLoadFiredRef.current = true;
         loadPrompts();
     }, [loadPrompts]);
 

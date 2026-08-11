@@ -1216,7 +1216,7 @@ const AdminTagsView: React.FC = () => {
     const [collisionSharedPhrases, setCollisionSharedPhrases] = useState<Record<string, string[]>>({});
     const [collisionsLoading, setCollisionsLoading] = useState(false);
     const navigate = useNavigate();
-    const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
+    const pageSizeOptions = useMemo(() => [50, 100, 200, 500, 1000, 10000], []);
     const [pageSize, setPageSize] = useState(100);
     const [page, setPage] = useState(1);
     const [totalRecords, setTotalRecords] = useState(0);
@@ -2492,7 +2492,7 @@ const AdminTagsView: React.FC = () => {
     };
 
     return (
-        <div className="h-full flex flex-col p-6 max-w-[1600px] mx-auto relative">
+        <div className="h-full flex flex-col p-6 w-full max-w-none relative">
             <div className="bg-bg-card rounded-2xl border border-border-default p-4 mb-6 space-y-4">
                 <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
                     <div className="flex items-center gap-3">
@@ -2783,7 +2783,7 @@ const AdminTagsView: React.FC = () => {
                             >
                                 {pageSizeOptions.map((option) => (
                                     <option key={option} value={option}>
-                                        {option}
+                                        {option.toLocaleString('en-US')}
                                     </option>
                                 ))}
                             </select>
@@ -2901,7 +2901,7 @@ const AdminTagsView: React.FC = () => {
                             >
                                 {pageSizeOptions.map((option) => (
                                     <option key={option} value={option}>
-                                        {option}
+                                        {option.toLocaleString('en-US')}
                                     </option>
                                 ))}
                             </select>

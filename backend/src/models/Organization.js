@@ -48,6 +48,8 @@ const Organization = sequelize.define(
     subsidiaries: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     growthIndicator: DataTypes.STRING,
     dataConfidence: DataTypes.STRING,
+    /** איכות הנתונים: נתונים מלאים | חסרים מלאים */
+    dataCompleteness: DataTypes.STRING,
     lastVerified: DataTypes.STRING,
     description: DataTypes.TEXT,
     snippet: DataTypes.TEXT,

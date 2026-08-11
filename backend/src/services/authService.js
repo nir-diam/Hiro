@@ -110,8 +110,8 @@ const login = async ({ email, password, role }) => {
   }
 
   if (loginOtpService.isDoubleAuthEnabledForUser(fullUser)) {
-    await loginOtpService.startEmailOtpForUser(fullUser);
-    return { twoFactorRequired: true, email: fullUser.email };
+    const { channel } = await loginOtpService.startOtpForUser(fullUser);
+    return { twoFactorRequired: true, email: fullUser.email, twoFactorChannel: channel };
   }
 
   const token = issueToken(fullUser);
@@ -186,8 +186,8 @@ const resendLoginCode = async ({ email, password, role }) => {
     throw error;
   }
 
-  await loginOtpService.startEmailOtpForUser(fullUser);
-  return { ok: true, email: fullUser.email };
+  const { channel } = await loginOtpService.startOtpForUser(fullUser);
+  return { ok: true, email: fullUser.email, twoFactorChannel: channel };
 };
 
 const signup = async ({ email, password, name, role }) => {
@@ -287,5 +287,7 @@ module.exports = {
   verifyLoginCode,
   resendLoginCode,
   resolveEffectiveClientIdForUser,
+  issueToken,
+  loadUserWithClientUsage,
 };
 

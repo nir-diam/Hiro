@@ -7,6 +7,7 @@ import {
     EnvelopeIcon,
     ChatBubbleBottomCenterTextIcon,
     PaperClipIcon,
+    DocumentTextIcon,
     PlusIcon,
     TrashIcon,
     ChevronDownIcon,
@@ -15,8 +16,14 @@ import {
 import { fetchMessageTemplatesForCompose, type MessageTemplateDto } from '../services/messageTemplatesApi';
 import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
 import { sendNotificationEmail } from '../services/emailSendApi';
-import { logWhatsappComposeOpen } from '../services/messagingApi';
+import { logWhatsappComposeOpen, sendComposeSms } from '../services/messagingApi';
+import { createOutboundMessageClientEvent } from '../services/clientOutboundMessageApi';
 import { applyMessageTemplatePlaceholders, loadMessagingPlaceholderValues } from '../services/messageTemplatePlaceholders';
+import {
+    applyProposalTemplatePlaceholders,
+    fetchProposalTemplates,
+    type ProposalTemplateDto,
+} from '../services/proposalsApi';
 import { useAuth } from '../context/AuthContext';
 import type { MessageRecipientOption } from '../hooks/useUIState';
 
@@ -134,6 +141,18 @@ interface SendMessageModalProps {
   candidateId?: string | null;
   recipientOptions?: MessageRecipientOption[];
   initialRecipientIds?: string[];
+  /** CRM journal context (single-recipient / contact profile). */
+  linkedClientId?: string | null;
+  linkedOrganizationId?: string | null;
+  linkedContactId?: string | null;
+}
+
+/** InforU billing: every 201 characters (or part thereof) = one SMS unit. */
+const INFORU_SMS_CHARS_PER_MESSAGE = 201;
+
+function inforuSmsBillableMessages(charCount: number): number {
+    if (charCount <= 0) return 0;
+    return Math.ceil(charCount / INFORU_SMS_CHARS_PER_MESSAGE);
 }
 
 const modalConfig = {
@@ -176,10 +195,17 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     candidateId,
     recipientOptions,
     initialRecipientIds,
+    linkedClientId,
+    linkedOrganizationId,
+    linkedContactId,
 }) => {
     const [content, setContent] = useState('');
     const [subject, setSubject] = useState('');
     const [attachments, setAttachments] = useState<string[]>(['']);
+    const [proposalAttachmentIds, setProposalAttachmentIds] = useState<string[]>(['']);
+    const [proposalTemplates, setProposalTemplates] = useState<ProposalTemplateDto[]>([]);
+    const [proposalTemplatesLoading, setProposalTemplatesLoading] = useState(false);
+    const [proposalTemplatesError, setProposalTemplatesError] = useState<string | null>(null);
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState<string | null>(null);
     const [templates, setTemplates] = useState<MessageTemplateDto[]>([]);
@@ -203,9 +229,120 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
 
     const titleId = useId();
     const config = modalConfig[mode];
+    const smsBillableCount =
+        config.channel === 'sms' ? inforuSmsBillableMessages(content.length) : 0;
     const { user } = useAuth();
+    const senderDisplayName =
+        (user as { fullName?: string; name?: string; email?: string } | null)?.fullName
+        || (user as { name?: string } | null)?.name
+        || (user as { email?: string } | null)?.email
+        || 'משתמש מערכת';
 
     const hasRecipientPicker = Array.isArray(recipientOptions) && recipientOptions.length > 0;
+
+    const crmRecipientsForLog = useMemo((): MessageRecipientOption[] => {
+        if (hasRecipientPicker && selectedRecipientIds.length > 0 && recipientOptions) {
+            const byId = new Map(recipientOptions.map((o) => [o.id, o]));
+            return selectedRecipientIds.map((id) => byId.get(id)).filter(Boolean) as MessageRecipientOption[];
+        }
+        if (linkedClientId || linkedContactId) {
+            return [{
+                id: String(linkedContactId || ''),
+                name: candidateName,
+                email: candidateEmail || '',
+                phone: candidatePhone || '',
+                clientId: linkedClientId || null,
+                organizationId: linkedOrganizationId || null,
+            }];
+        }
+        return [];
+    }, [
+        hasRecipientPicker,
+        selectedRecipientIds,
+        recipientOptions,
+        linkedClientId,
+        linkedContactId,
+        linkedOrganizationId,
+        candidateName,
+        candidateEmail,
+        candidatePhone,
+    ]);
+
+    const logCrmOutboundEvents = useCallback(async (args: {
+        channel: 'email' | 'whatsapp' | 'sms';
+        body: string;
+        subject?: string;
+        /** email → map toEmail to recipient; wa/sms → one event per CRM recipient */
+        emailResults?: { to: string; notificationMessageId?: string | null; providerMessageId?: string | null }[];
+    }) => {
+        const recipients = crmRecipientsForLog;
+        if (!recipients.length) return;
+
+        const tasks: Promise<void>[] = [];
+        if (args.channel === 'email' && args.emailResults?.length) {
+            for (const result of args.emailResults) {
+                const toNorm = String(result.to || '').trim().toLowerCase();
+                const match =
+                    recipients.find((r) => String(r.email || '').trim().toLowerCase() === toNorm)
+                    || recipients[0];
+                const clientId = String(match?.clientId || linkedClientId || '').trim();
+                if (!clientId) continue;
+                tasks.push(
+                    createOutboundMessageClientEvent({
+                        clientId,
+                        organizationId: match?.organizationId || linkedOrganizationId || null,
+                        contactId: match?.id || linkedContactId || null,
+                        contactName: match?.name || candidateName,
+                        channel: 'email',
+                        to: result.to,
+                        subject: args.subject || null,
+                        body: args.body,
+                        senderName: senderDisplayName,
+                        notificationMessageId: result.notificationMessageId || null,
+                        providerMessageId: result.providerMessageId || null,
+                        deliveryStatus: 'נשלח',
+                    }).catch((err) => {
+                        console.warn('[SendMessageModal] failed to create email journal event', err);
+                    }),
+                );
+            }
+        } else {
+            for (const match of recipients) {
+                const clientId = String(match.clientId || linkedClientId || '').trim();
+                if (!clientId) continue;
+                const to =
+                    args.channel === 'email'
+                        ? String(match.email || '').trim()
+                        : String(match.phone || '').trim();
+                tasks.push(
+                    createOutboundMessageClientEvent({
+                        clientId,
+                        organizationId: match.organizationId || linkedOrganizationId || null,
+                        contactId: match.id || linkedContactId || null,
+                        contactName: match.name || candidateName,
+                        channel: args.channel,
+                        to: to || '—',
+                        subject: args.subject || null,
+                        body: args.body,
+                        senderName: senderDisplayName,
+                        deliveryStatus: args.channel === 'whatsapp'
+                            ? 'נפתח לערוץ חיצוני'
+                            : 'נשלח',
+                    }).catch((err) => {
+                        console.warn('[SendMessageModal] failed to create journal event', err);
+                    }),
+                );
+            }
+        }
+        if (tasks.length) await Promise.all(tasks);
+    }, [
+        crmRecipientsForLog,
+        linkedClientId,
+        linkedOrganizationId,
+        linkedContactId,
+        candidateName,
+        senderDisplayName,
+    ]);
 
     const selectedRecipients = useMemo(() => {
         if (!hasRecipientPicker || !recipientOptions) return [];
@@ -234,6 +371,67 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             .filter(Boolean)
             .join(', ');
     }, [hasRecipientPicker, selectedRecipients, candidateEmail]);
+
+    const effectiveClientId = useMemo(() => {
+        const linked = String(linkedClientId || '').trim();
+        if (linked) return linked;
+        if (hasRecipientPicker && selectedRecipients.length) {
+            for (const r of selectedRecipients) {
+                const cid = String(r.clientId || '').trim();
+                if (cid) return cid;
+            }
+        }
+        const own = String(user?.clientId || '').trim();
+        return own || '';
+    }, [linkedClientId, hasRecipientPicker, selectedRecipients, user?.clientId]);
+
+    const primaryCrmRecipient = useMemo(() => {
+        if (hasRecipientPicker && selectedRecipients.length) return selectedRecipients[0];
+        if (linkedClientId || linkedContactId) {
+            return {
+                id: String(linkedContactId || ''),
+                name: candidateName,
+                email: candidateEmail,
+                phone: candidatePhone,
+                subtitle: null,
+                clientId: linkedClientId || null,
+                organizationId: linkedOrganizationId || null,
+            } satisfies MessageRecipientOption;
+        }
+        return null;
+    }, [
+        hasRecipientPicker,
+        selectedRecipients,
+        linkedClientId,
+        linkedContactId,
+        linkedOrganizationId,
+        candidateName,
+        candidateEmail,
+        candidatePhone,
+    ]);
+
+    const proposalPlaceholderContext = useMemo(
+        () => ({
+            contactName: primaryCrmRecipient?.name || effectiveName,
+            contactEmail: primaryCrmRecipient?.email || effectiveEmail || '',
+            contactPhone: primaryCrmRecipient?.phone || effectivePhone || '',
+            contactRole: primaryCrmRecipient?.subtitle || '',
+            companyName: primaryCrmRecipient?.subtitle || String(placeholderValues.client_name || ''),
+            repName: senderDisplayName,
+            repEmail: String(user?.email || ''),
+            repPhone: String(user?.phone || ''),
+        }),
+        [
+            primaryCrmRecipient,
+            effectiveName,
+            effectiveEmail,
+            effectivePhone,
+            placeholderValues.client_name,
+            senderDisplayName,
+            user?.email,
+            user?.phone,
+        ],
+    );
 
     /** Prefer prop from opener; fall back to URL e.g. #/candidates/:candidateId when modal is global. */
     const candidateRouteMatch = useMatch({ path: '/candidates/:candidateId', end: false });
@@ -307,6 +505,9 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         setContent('');
         setSubject('');
         setAttachments(['']);
+        setProposalAttachmentIds(['']);
+        setProposalTemplates([]);
+        setProposalTemplatesError(null);
         setSelectedTemplateId('');
         setSelectedJobId('');
         setJobPickerOpen(false);
@@ -362,6 +563,42 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             cancelled = true;
         };
     }, [isOpen, mode, hasRecipientPicker, recipientOptions, initialRecipientIds]);
+
+    useEffect(() => {
+        if (!isOpen || mode !== 'email' || !effectiveClientId) {
+            setProposalTemplates([]);
+            setProposalTemplatesLoading(false);
+            return;
+        }
+        let cancelled = false;
+        setProposalTemplatesLoading(true);
+        setProposalTemplatesError(null);
+        void fetchProposalTemplates(effectiveClientId)
+            .then((rows) => {
+                if (!cancelled) setProposalTemplates(Array.isArray(rows) ? rows : []);
+            })
+            .catch((e: unknown) => {
+                if (cancelled) return;
+                setProposalTemplates([]);
+                const msg = e instanceof Error ? e.message : 'טעינת תבניות הצעת מחיר נכשלה';
+                if (!isSilentComposeFetchError(msg)) setProposalTemplatesError(msg);
+            })
+            .finally(() => {
+                if (!cancelled) setProposalTemplatesLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [isOpen, mode, effectiveClientId]);
+
+    const selectedProposalTemplates = useMemo(() => {
+        const byId = new Map(proposalTemplates.map((t) => [t.id, t]));
+        return proposalAttachmentIds
+            .map((id) => String(id || '').trim())
+            .filter(Boolean)
+            .map((id) => byId.get(id))
+            .filter(Boolean) as ProposalTemplateDto[];
+    }, [proposalAttachmentIds, proposalTemplates]);
 
     const selectedJobRow = useMemo(
         () => (selectedJobId ? jobs.find((j) => j.id === selectedJobId) : undefined),
@@ -457,8 +694,10 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             footerPlainParts.push(`משרה מקושרת:\n${jobValuePlain}`);
         }
         const textOut = `${trimmedContent}`;
+        // Prefer config.channel (tied to modal UI) over mode prop to avoid channel mix-ups.
+        const outboundChannel = config.channel;
 
-        if (mode === 'whatsapp') {
+        if (outboundChannel === 'whatsapp') {
             const waPhone = toWhatsAppPhoneDigits(effectivePhone);
             if (!waPhone) {
                 setSubmitError('אין מספר טלפון תקין ל־WhatsApp (נדרש מספר עם קידומת או 0)');
@@ -466,14 +705,19 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             }
             setIsSubmitting(true);
             try {
-                await logWhatsappComposeOpen({
-                    candidateId: resolvedCandidateId,
-                    candidateName: effectiveName,
-                    phone: effectivePhone,
-                    messagePreview: textOut,
-                    templateId: selectedTemplateId || null,
-                    jobId: selectedJobId || null,
-                });
+                try {
+                    await logWhatsappComposeOpen({
+                        candidateId: resolvedCandidateId,
+                        candidateName: effectiveName,
+                        phone: effectivePhone,
+                        messagePreview: textOut,
+                        templateId: selectedTemplateId || null,
+                        jobId: selectedJobId || null,
+                    });
+                } catch (auditErr) {
+                    console.warn('[SendMessageModal] WhatsApp audit log failed', auditErr);
+                }
+                await logCrmOutboundEvents({ channel: 'whatsapp', body: textOut });
                 const url = `https://api.whatsapp.com/send?phone=${encodeURIComponent(waPhone)}&text=${encodeURIComponent(textOut)}`;
                 window.open(url, '_blank', 'noopener,noreferrer');
                 onClose();
@@ -485,7 +729,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             return;
         }
 
-        if (mode === 'sms') {
+        if (outboundChannel === 'sms') {
             const phones = String(effectivePhone || '')
                 .split(/[;,\n]+/)
                 .map((s) => s.trim())
@@ -499,19 +743,25 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             }
             setIsSubmitting(true);
             try {
-                const body = encodeURIComponent(textOut);
-                for (const digits of digitsList) {
-                    const url = `sms:${digits}?body=${body}`;
-                    window.open(url, '_blank', 'noopener,noreferrer');
-                }
+                await sendComposeSms({
+                    toPhone: phones.join(';'),
+                    message: textOut,
+                    candidateId: resolvedCandidateId,
+                    candidateName: effectiveName,
+                    templateId: selectedTemplateId || null,
+                    jobId: selectedJobId || null,
+                });
+                await logCrmOutboundEvents({ channel: 'sms', body: textOut });
                 onClose();
+            } catch (err: unknown) {
+                setSubmitError(err instanceof Error ? err.message : 'שליחת SMS נכשלה');
             } finally {
                 setIsSubmitting(false);
             }
             return;
         }
 
-        if (mode !== 'email') {
+        if (outboundChannel !== 'email') {
             setSubmitError('שליחה דרך השרת זמינה כרגע רק למייל. השתמשו בערוץ המייל.');
             return;
         }
@@ -531,6 +781,20 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         }
 
         const mainHtml = `<div dir="rtl" style="white-space:pre-wrap;font-family:sans-serif;">${escapeHtml(trimmedContent).replace(/\n/g, '<br/>')}</div>`;
+
+        const proposalHtmlBlocks = selectedProposalTemplates.map((tpl) => {
+            const rendered = applyProposalTemplatePlaceholders(tpl.content || '', proposalPlaceholderContext);
+            return (
+                `<div style="margin-top:1.25em;padding-top:1em;border-top:1px solid #ddd;">` +
+                `<div style="font-weight:700;color:#333;font-size:13px;margin-bottom:0.5em;">${escapeHtml(tpl.name)}</div>` +
+                `<div dir="rtl">${rendered}</div>` +
+                `</div>`
+            );
+        });
+        const proposalsHtml =
+            proposalHtmlBlocks.length > 0
+                ? `<div dir="rtl" style="margin-top:1.25em;font-family:sans-serif;line-height:1.55;color:#222;">${proposalHtmlBlocks.join('')}</div>`
+                : '';
 
         const footerBlocks: string[] = [];
         if (selectedTpl) {
@@ -557,12 +821,21 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
             footerBlocks.length > 0
                 ? `<div dir="rtl" style="margin-top:1.25em;padding-top:1em;border-top:1px solid #ccc;color:#444;font-size:13px;line-height:1.55;font-family:sans-serif;">${footerBlocks.join('')}</div>`
                 : '';
-        const html = `${mainHtml}${footerHtml}`;
+        const html = `${mainHtml}${proposalsHtml}${footerHtml}`;
 
         setIsSubmitting(true);
         try {
+            const emailResults: {
+                to: string;
+                notificationMessageId?: string | null;
+                providerMessageId?: string | null;
+            }[] = [];
             for (const toEmail of toEmails) {
-                await sendNotificationEmail({
+                const matchRecipient =
+                    crmRecipientsForLog.find(
+                        (r) => String(r.email || '').trim().toLowerCase() === toEmail.toLowerCase(),
+                    ) || crmRecipientsForLog[0];
+                const sendResult = await sendNotificationEmail({
                     toEmail,
                     subject: subject.trim(),
                     text: textOut,
@@ -579,9 +852,26 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                         composeScope: composeScope,
                         templateLabel: templateFooterLine || null,
                         jobLabel: jobFooterLine || null,
+                        linkedClientId: matchRecipient?.clientId || linkedClientId || null,
+                        linkedOrganizationId: matchRecipient?.organizationId || linkedOrganizationId || null,
+                        linkedContactId: matchRecipient?.id || linkedContactId || null,
+                        linkedContactName: matchRecipient?.name || effectiveName,
+                        proposalTemplateIds: selectedProposalTemplates.map((t) => t.id),
+                        proposalTemplateNames: selectedProposalTemplates.map((t) => t.name),
                     },
                 });
+                emailResults.push({
+                    to: toEmail,
+                    notificationMessageId: sendResult.notificationMessageId ?? null,
+                    providerMessageId: sendResult.messageId ?? null,
+                });
             }
+            await logCrmOutboundEvents({
+                channel: 'email',
+                body: textOut,
+                subject: subject.trim(),
+                emailResults,
+            });
             onClose();
         } catch (err: unknown) {
             setSubmitError(err instanceof Error ? err.message : 'שליחת המייל נכשלה');
@@ -610,6 +900,21 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
     const removeAttachmentRow = (index: number) => {
         const newAttachments = attachments.filter((_, i) => i !== index);
         setAttachments(newAttachments.length > 0 ? newAttachments : ['']);
+    };
+
+    const handleProposalAttachmentChange = (index: number, value: string) => {
+        const next = [...proposalAttachmentIds];
+        next[index] = value;
+        setProposalAttachmentIds(next);
+    };
+
+    const addProposalAttachmentRow = () => {
+        setProposalAttachmentIds([...proposalAttachmentIds, '']);
+    };
+
+    const removeProposalAttachmentRow = (index: number) => {
+        const next = proposalAttachmentIds.filter((_, i) => i !== index);
+        setProposalAttachmentIds(next.length > 0 ? next : ['']);
     };
 
     const scopeHint =
@@ -861,7 +1166,23 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                 rows={8}
                                 className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5"
                             ></textarea>
-                            <div className="text-xs text-text-subtle text-left mt-1">{content.length} / 5000</div>
+                            <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-xs text-text-subtle mt-1">
+                                <span>{content.length} / 5000</span>
+                                {config.channel === 'sms' && content.length > 0 ? (
+                                    <span
+                                        className={
+                                            smsBillableCount > 1
+                                                ? 'text-amber-700 font-medium'
+                                                : ''
+                                        }
+                                        title="חיוב InforU: כל 201 תווים (או חלק מהם) = הודעה אחת"
+                                    >
+                                        {smsBillableCount === 1
+                                            ? '1 הודעה'
+                                            : `${smsBillableCount} הודעות`}
+                                    </span>
+                                ) : null}
+                            </div>
                         </div>
 
                         {config.allowAttachments && (
@@ -903,6 +1224,62 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                     <PlusIcon className="w-3.5 h-3.5" />
                                     הוסף קובץ נוסף
                                 </button>
+
+                                <div className="mt-4 pt-4 border-t border-border-subtle space-y-2">
+                                    <label className="block text-sm font-semibold text-text-muted mb-1">הצעות מחיר:</label>
+                                    {!effectiveClientId && (
+                                        <p className="text-xs text-text-subtle">
+                                            לא ניתן לטעון תבניות — חסר הקשר לקוח (שליחה מאיש קשר / לקוח).
+                                        </p>
+                                    )}
+                                    {effectiveClientId && proposalTemplatesLoading && (
+                                        <p className="text-xs text-text-subtle">טוען תבניות הצעת מחיר…</p>
+                                    )}
+                                    {proposalTemplatesError && !isSilentComposeFetchError(proposalTemplatesError) && (
+                                        <p className="text-xs text-red-600">{proposalTemplatesError}</p>
+                                    )}
+                                    {effectiveClientId && !proposalTemplatesLoading && proposalTemplates.length === 0 && !proposalTemplatesError && (
+                                        <p className="text-xs text-text-subtle">
+                                            אין תבניות הצעת מחיר ללקוח זה — ניתן להגדיר בהגדרות → תבניות הצעת מחיר.
+                                        </p>
+                                    )}
+                                    {proposalAttachmentIds.map((proposalId, index) => (
+                                        <div key={`proposal-${index}`} className="flex items-center gap-2">
+                                            <DocumentTextIcon className="w-5 h-5 text-text-muted flex-shrink-0" />
+                                            <select
+                                                value={proposalId}
+                                                onChange={(e) => handleProposalAttachmentChange(index, e.target.value)}
+                                                disabled={!effectiveClientId || proposalTemplatesLoading || proposalTemplates.length === 0}
+                                                className="flex-grow bg-bg-input border border-border-default text-text-default text-sm rounded-lg p-2.5 disabled:opacity-60"
+                                            >
+                                                <option value="">בחר תבנית הצעת מחיר…</option>
+                                                {proposalTemplates.map((tpl) => (
+                                                    <option key={tpl.id} value={tpl.id}>
+                                                        {tpl.name}
+                                                    </option>
+                                                ))}
+                                            </select>
+                                            {(proposalAttachmentIds.length > 1 || proposalId !== '') && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeProposalAttachmentRow(index)}
+                                                    className="p-2 text-text-subtle hover:text-red-500 rounded-lg hover:bg-red-50 transition-colors"
+                                                >
+                                                    <TrashIcon className="w-4 h-4" />
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                    <button
+                                        type="button"
+                                        onClick={addProposalAttachmentRow}
+                                        disabled={!effectiveClientId || proposalTemplatesLoading || proposalTemplates.length === 0}
+                                        className="mt-1 flex items-center gap-1.5 text-xs font-bold text-primary-600 hover:text-primary-700 hover:bg-primary-50 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-50 disabled:pointer-events-none"
+                                    >
+                                        <PlusIcon className="w-3.5 h-3.5" />
+                                        הוספת הצעת מחיר
+                                    </button>
+                                </div>
                             </div>
                         )}
 
@@ -932,7 +1309,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
                                     : isSubmitting && mode === 'whatsapp'
                                       ? 'פותח…'
                                       : isSubmitting && mode === 'sms'
-                                        ? 'פותח…'
+                                        ? 'שולח…'
                                         : config.buttonText}
                             </span>
                         </button>

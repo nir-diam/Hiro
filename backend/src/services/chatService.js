@@ -641,7 +641,10 @@ const fetchHistory = async (chatId, limit = 30) => {
     order: [['createdAt', 'DESC']],
     limit,
   });
-  return rows.map((m) => ({ role: m.role, text: m.text }));
+  return rows
+    .slice()
+    .reverse()
+    .map((m) => ({ role: m.role, text: m.text, createdAt: m.createdAt }));
 };
 
 const fetchLatestByUser = async (userId, chatType = 'default') => {
@@ -722,7 +725,6 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       console.debug('[chatService] next reply', { reply: nextReply?.slice?.(0, 400) });
       await appendTurn(chatRow.id, message, nextReply);
       updatedHistory = await fetchHistory(chatRow.id);
-      updatedHistory.reverse();
       return { chatId: chatRow.id, messages: updatedHistory };
     }
     history = await fetchHistory(chatRow.id);
@@ -786,7 +788,6 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
       await appendTurn(chatRow.id, message, nextReply);
 
       const updatedHistory = await fetchHistory(chatRow.id);
-      updatedHistory.reverse();
       return { chatId: chatRow.id, messages: updatedHistory };
     }
     history = await fetchHistory(chatRow.id);
@@ -876,7 +877,6 @@ const chat = async ({ chatId, userId, message, tagsText, chatType, contextData, 
   }
 
   const updatedHistory = await fetchHistory(chatRow.id);
-  updatedHistory.reverse();
 
   return { chatId: chatRow.id, messages: updatedHistory };
 };

@@ -16,7 +16,11 @@ const normalizeTypes = (raw) => {
 
 const normalizeEventRow = (event) => {
   if (!event || typeof event !== 'object') return event;
-  return { ...event, type: normalizeTypes(event.type) };
+  return {
+    ...event,
+    type: normalizeTypes(event.type),
+    isActive: event.isActive !== false,
+  };
 };
 
 const list = async (req, res) => {
@@ -29,6 +33,87 @@ const list = async (req, res) => {
     rows = rows.filter((e) => String(e?.organizationId || '') === organizationId);
   }
   res.json(rows.map(normalizeEventRow));
+};
+
+/** Cross-client events journal (admin sees all; tenant sees own client only). */
+const listAll = async (req, res) => {
+  try {
+    const Client = require('../models/Client');
+    const u = req.dbUser;
+    const where = {};
+    if (u && u.role !== 'admin' && u.role !== 'super_admin') {
+      if (!u.clientId) return res.json([]);
+      where.id = u.clientId;
+    }
+    const clients = await Client.findAll({
+      where,
+      attributes: ['id', 'name', 'displayName', 'events'],
+      order: [['name', 'ASC']],
+    });
+    const out = [];
+    for (const c of clients) {
+      const plain = c.toJSON ? c.toJSON() : c;
+      const clientId = String(plain.id);
+      const clientName = String(plain.displayName || plain.name || '').trim() || 'לקוח';
+      const rows = Array.isArray(plain.events) ? plain.events : [];
+      for (const e of rows) {
+        if (!e || typeof e !== 'object') continue;
+        const linked = e.linkedTo && typeof e.linkedTo === 'object' ? e.linkedTo : null;
+        const types = normalizeTypes(e.type);
+        out.push(
+          normalizeEventRow({
+            ...e,
+            id: String(e.id || ''),
+            clientId,
+            clientName,
+            contactName: linked?.name || e.contactName || null,
+            process: e.process || types[0] || '',
+            processId: e.processId || null,
+            stage: e.stage || types[1] || '',
+            stageId: e.stageId || null,
+            creator: e.creator || e.coordinator || '',
+            dueDate: e.dueDate || (e.date ? String(e.date).slice(0, 10) : null),
+            updates: (() => {
+              const fromUpdates = Array.isArray(e.updates) ? e.updates.filter((u) => u && (u.title || u.summary)) : [];
+              const fromHistory = Array.isArray(e.history)
+                ? e.history
+                    .map((h, i) => ({
+                      id: h.id || `h-${i}`,
+                      title: h.summary || h.title || '',
+                      date: h.timestamp || h.date || '',
+                      creator: h.user || h.creator || '',
+                    }))
+                    .filter((u) => u.title)
+                : [];
+              if (fromUpdates.length) {
+                const mapped = fromUpdates.map((u, i) => ({
+                  id: u.id || `u-${i}`,
+                  title: u.title || u.summary || '',
+                  date: u.date || u.timestamp || '',
+                  creator: u.creator || u.user || '',
+                }));
+                if (!fromHistory.length) return mapped;
+                const seen = new Set(mapped.map((u) => `${u.title}|${u.date}|${u.creator}`));
+                for (const h of fromHistory) {
+                  const key = `${h.title}|${h.date}|${h.creator}`;
+                  if (!seen.has(key)) {
+                    seen.add(key);
+                    mapped.push(h);
+                  }
+                }
+                return mapped;
+              }
+              return fromHistory;
+            })(),
+          }),
+        );
+      }
+    }
+    out.sort((a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime());
+    return res.json(out);
+  } catch (err) {
+    return res.status(500).json({ message: err.message || 'Failed to list events' });
+  }
 };
 
 const create = async (req, res) => {
@@ -49,7 +134,20 @@ const create = async (req, res) => {
       linkedTo: payload.linkedTo ?? null,
       description: payload.description || '',
       history: Array.isArray(payload.history) ? payload.history : [],
+      updates: Array.isArray(payload.updates) ? payload.updates : [],
       organizationId,
+                    // Persist process/stage ids for pipeline outcome resolution
+      process: payload.process != null ? String(payload.process) : undefined,
+      processId: payload.processId != null ? String(payload.processId) : undefined,
+      stage: payload.stage != null ? String(payload.stage) : undefined,
+      stageId: payload.stageId != null ? String(payload.stageId) : undefined,
+      dueDate: payload.dueDate != null ? String(payload.dueDate).slice(0, 10) : undefined,
+      creator: payload.creator != null ? String(payload.creator) : payload.coordinator,
+      metadata:
+        payload.metadata && typeof payload.metadata === 'object' && !Array.isArray(payload.metadata)
+          ? payload.metadata
+          : undefined,
+      isActive: payload.isActive !== false,
     };
     const next = [event, ...prev];
     await clientService.update(req.params.id, { events: next });
@@ -128,5 +226,5 @@ const remove = async (req, res) => {
   }
 };
 
-module.exports = { list, create, update, remove };
+module.exports = { list, listAll, create, update, remove };
 

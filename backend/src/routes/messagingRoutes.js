@@ -6,5 +6,6 @@ const messagingController = require('../controllers/messagingController');
 const router = express.Router();
 
 router.post('/log-whatsapp-open', authMiddleware, attachDbUser, messagingController.logWhatsappOpen);
+router.post('/send-sms', authMiddleware, attachDbUser, messagingController.sendSms);
 
 module.exports = router;

@@ -1,5 +1,6 @@
 
 import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { 
     PlusIcon, PencilIcon, TrashIcon, UserGroupIcon, Cog6ToothIcon, 
     TableCellsIcon, Squares2X2Icon, PhoneIcon, EnvelopeIcon, WhatsappIcon, 
@@ -69,11 +70,19 @@ const ContactCard: React.FC<{
     contact: Contact; 
     onEdit: (c: Contact) => void; 
     onDelete: (c: Contact) => void; 
+    onViewProfile: (c: Contact) => void;
+    onOpenDrawer: (c: Contact) => void;
     onActionClick: (mode: 'email' | 'sms' | 'whatsapp', contact: Contact) => void;
     isSelected: boolean;
     onSelect: () => void;
-}> = ({ contact, onEdit, onDelete, onActionClick, isSelected, onSelect }) => (
-    <div className={`bg-bg-card rounded-lg border shadow-sm p-4 flex flex-col justify-between transition-all relative ${isSelected ? 'border-primary-500 ring-1 ring-primary-500 bg-primary-50/10' : 'border-border-default'}`}>
+}> = ({ contact, onEdit, onDelete, onViewProfile, onOpenDrawer, onActionClick, isSelected, onSelect }) => (
+    <div
+        role="button"
+        tabIndex={0}
+        onClick={() => onOpenDrawer(contact)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onOpenDrawer(contact); }}
+        className={`bg-bg-card rounded-lg border shadow-sm p-4 flex flex-col justify-between transition-all relative cursor-pointer ${isSelected ? 'border-primary-500 ring-1 ring-primary-500 bg-primary-50/10' : 'border-border-default'}`}
+    >
         <div className="absolute top-4 left-4" onClick={e => e.stopPropagation()}>
             <input 
                 type="checkbox" 
@@ -84,7 +93,13 @@ const ContactCard: React.FC<{
         </div>
         <div>
             <div className="flex justify-between items-start pr-6"> {/* Added padding right for checkbox */}
-                <button type="button" onClick={() => onEdit(contact)} className="font-semibold text-primary-700 hover:underline text-right">{contact.name}</button>
+                <button
+                    type="button"
+                    onClick={(e) => { e.stopPropagation(); onViewProfile(contact); }}
+                    className="font-semibold text-primary-700 hover:underline text-right"
+                >
+                    {contact.name}
+                </button>
                 <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${contact.isActive ? 'bg-green-100 text-green-800' : 'bg-gray-200 text-gray-700'}`}>{contact.isActive ? 'פעיל' : 'לא פעיל'}</span>
             </div>
             <p className="text-sm text-text-muted">{contact.role}</p>
@@ -94,7 +109,7 @@ const ContactCard: React.FC<{
             <p><strong>נייד:</strong> {contact.mobilePhone}</p>
             <p><strong>דוא"ל:</strong> {contact.email}</p>
         </div>
-        <div className="flex justify-between items-center mt-3 pt-3 border-t border-border-subtle">
+        <div className="flex justify-between items-center mt-3 pt-3 border-t border-border-subtle" onClick={e => e.stopPropagation()}>
             <div className="flex items-center gap-1">
                 <a href={`tel:${contact.mobilePhone || contact.phone}`} title="חייג" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><PhoneIcon className="w-5 h-5"/></a>
                 <button onClick={() => onActionClick('email', contact)} title="שלח מייל" className="p-1.5 rounded-full text-text-subtle hover:bg-bg-hover hover:text-primary-600"><EnvelopeIcon className="w-5 h-5"/></button>
@@ -119,6 +134,7 @@ interface ClientContactsTabProps {
 
 const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organizationId, onOpenMessageModal }) => {
     const { t } = useLanguage();
+    const navigate = useNavigate();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [contacts, setContacts] = useState<Contact[]>([]);
     const [groups, setGroups] = useState<ContactGroup[]>([]);
@@ -292,6 +308,11 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
         setIsDrawerOpen(true);
     };
     const handleEdit = (contact: Contact) => { setEditingContact(contact); setIsDrawerOpen(true); };
+
+    const navigateToContactProfile = (contact: Contact) => {
+        if (!clientId || !contact.id || String(contact.id).startsWith('tmp-')) return;
+        navigate(`/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`);
+    };
     const handleSave = async () => {
         if (!formData) return;
         if (!apiBase || !clientId) return;
@@ -466,7 +487,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
             case 'name': return (
                 <button
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); handleEdit(contact); }}
+                    onClick={(e) => { e.stopPropagation(); navigateToContactProfile(contact); }}
                     className="font-semibold text-primary-700 hover:underline text-right"
                 >
                     {contact.name}
@@ -583,7 +604,11 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
                         </thead>
                         <tbody className="divide-y divide-border-subtle">
                             {sortedContacts.map(contact => (
-                                <tr key={contact.id} className={`hover:bg-bg-hover group ${selectedContactIds.has(contact.id) ? 'bg-primary-50' : ''}`} onClick={() => handleSelectContact(contact.id)}>
+                                <tr
+                                    key={contact.id}
+                                    className={`hover:bg-bg-hover group cursor-pointer ${selectedContactIds.has(contact.id) ? 'bg-primary-50' : ''}`}
+                                    onClick={() => handleEdit(contact)}
+                                >
                                     <td className="p-4 text-center" onClick={e => e.stopPropagation()}>
                                          <input type="checkbox" checked={selectedContactIds.has(contact.id)} onChange={() => handleSelectContact(contact.id)} className="w-4 h-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500 cursor-pointer" />
                                     </td>
@@ -607,7 +632,9 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
                             <ContactCard 
                                 key={contact.id} 
                                 contact={contact} 
-                                onEdit={handleEdit} 
+                                onEdit={handleEdit}
+                                onOpenDrawer={handleEdit}
+                                onViewProfile={navigateToContactProfile}
                                 onDelete={handleDelete} 
                                 onActionClick={handleActionClick}
                                 isSelected={selectedContactIds.has(contact.id)}

@@ -8,6 +8,7 @@ clientRouter.use(authMiddleware, requirePagePermission('page:settings'));
 clientRouter.get('/', messageTemplateController.listClient);
 clientRouter.post('/', messageTemplateController.createClient);
 clientRouter.put('/:id', messageTemplateController.updateClient);
+clientRouter.post('/:id/attachment/upload-url', messageTemplateController.createClientAttachmentUploadUrl);
 clientRouter.delete('/:id', messageTemplateController.removeClient);
 
 const adminRouter = express.Router();

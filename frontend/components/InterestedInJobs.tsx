@@ -5,9 +5,12 @@ import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
 import FieldInterestJobPickerModal, { type FieldInterestPreviewJob } from './FieldInterestJobPickerModal';
 import UpdateStatusModal from './UpdateStatusModal';
 import JobDetailsDrawer from './JobDetailsDrawer';
+import CandidateProcessManagementModal from './CandidateProcessManagementModal';
 import { Job } from './JobsView';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 import { useScreenTablePreferences } from '../hooks/useScreenTablePreferences';
+import { type CandidateJobLink } from '../utils/candidateLinkedJobs';
 
 
 type Status = 'פעיל' | 'הוזמן לראיון' | 'לא רלוונטי' | 'מועמד משך עניין' | 'בארכיון' | 'חדש';
@@ -322,9 +325,11 @@ const JobInterestCard: React.FC<{
     job: JobInterest;
     onStatusClick: () => void;
     onTitleClick: () => void;
+    onManageProcess: () => void;
+    manageProcessLabel: string;
     matchRingTitle: string;
     lastUpdatedLabel: string;
-}> = ({ job, onStatusClick, onTitleClick, matchRingTitle, lastUpdatedLabel }) => (
+}> = ({ job, onStatusClick, onTitleClick, onManageProcess, manageProcessLabel, matchRingTitle, lastUpdatedLabel }) => (
     <div className="bg-bg-card rounded-lg border border-border-default shadow-sm p-4 hover:shadow-md transition-shadow flex flex-col justify-between">
         <div>
             <div className="flex justify-between items-start">
@@ -333,26 +338,65 @@ const JobInterestCard: React.FC<{
             </div>
             <p className="text-sm text-text-muted">{job.company}</p>
         </div>
-        <div className="mt-4 flex justify-between items-end">
+        <div className="mt-4 flex justify-between items-end gap-2">
             <StatusBadge status={job.status} onClick={onStatusClick} />
-            <p className="text-xs text-text-subtle">{lastUpdatedLabel} {job.lastUpdated}</p>
+            <div className="flex flex-col items-end gap-2">
+                <button
+                    type="button"
+                    onClick={onManageProcess}
+                    className="text-xs text-primary-600 hover:underline font-semibold bg-primary-50 hover:bg-primary-100 px-3 py-1.5 rounded-lg border border-primary-200 transition-colors whitespace-nowrap"
+                >
+                    {manageProcessLabel}
+                </button>
+                <p className="text-xs text-text-subtle">{lastUpdatedLabel} {job.lastUpdated}</p>
+            </div>
         </div>
     </div>
 );
+
+function jobInterestToLink(job: JobInterest): CandidateJobLink {
+    return {
+        linkId: job.linkId,
+        jobId: job.jobId,
+        jobTitle: job.jobTitle,
+        company: job.company,
+        location: job.location,
+        lastUpdated: job.lastUpdated,
+        status: String(job.status || 'חדש'),
+        internalNote: job.internalNote,
+        dueDate: job.dueDate,
+        dueTime: job.dueTime,
+        inviteCandidate: job.inviteCandidate,
+        inviteClient: job.inviteClient,
+    };
+}
 
 
 const InterestedInJobs: React.FC<{
     onOpenNewTask: () => void;
     candidateId?: string | null;
+    candidateName?: string;
     candidatePhone?: string | null;
     candidateEmail?: string | null;
+    clientId?: string | null;
+    candidatePipelineId?: string | null;
+    pipelineStageId?: string | null;
 }> = ({
     onOpenNewTask,
     candidateId = null,
+    candidateName = '',
     candidatePhone = null,
     candidateEmail = null,
+    clientId: clientIdProp = null,
+    candidatePipelineId = null,
+    pipelineStageId = null,
 }) => {
     const { t } = useLanguage();
+    const { user } = useAuth();
+    const clientId =
+        (clientIdProp && String(clientIdProp).trim()) ||
+        (user?.clientId && String(user.clientId).trim()) ||
+        '';
     const [jobs, setJobs] = useState<JobInterest[]>([]);
     const [linkedJobsLoading, setLinkedJobsLoading] = useState(false);
     const [linkedJobsError, setLinkedJobsError] = useState<string | null>(null);
@@ -400,6 +444,8 @@ const InterestedInJobs: React.FC<{
     const [editingInterest, setEditingInterest] = useState<JobInterest | null>(null);
     const [selectedJob, setSelectedJob] = useState<Job | null>(null);
     const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [manageJob, setManageJob] = useState<JobInterest | null>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const [jobCatalog, setJobCatalog] = useState<Job[]>([]);
     const [jobCatalogLoading, setJobCatalogLoading] = useState(false);
@@ -501,6 +547,17 @@ const InterestedInJobs: React.FC<{
         }
         return sortableItems;
     }, [jobs, sortConfig]);
+
+    const filteredJobs = useMemo(() => {
+        const q = searchQuery.trim().toLowerCase();
+        if (!q) return sortedJobs;
+        return sortedJobs.filter((job) => {
+            const haystack = [job.jobTitle, job.company, job.location, job.industry, job.role]
+                .map((v) => String(v || '').toLowerCase())
+                .join(' ');
+            return haystack.includes(q);
+        });
+    }, [sortedJobs, searchQuery]);
 
     // Column management logic
      useEffect(() => {
@@ -727,6 +784,7 @@ const InterestedInJobs: React.FC<{
                 dueTime: data.dueTime || null,
                 inviteCandidate: Boolean(data.inviteCandidate),
                 inviteClient: Boolean(data.inviteClient),
+                forceAppendStatus: true,
             }),
         });
         if (!res.ok) {
@@ -885,12 +943,20 @@ const InterestedInJobs: React.FC<{
                     </button>
                     <div className="relative">
                         <MagnifyingGlassIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                        <input type="text" placeholder={t('interested_jobs.search_placeholder')} className="w-full bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition" />
+                        <input
+                            type="text"
+                            value={searchQuery}
+                            onChange={(e) => setSearchQuery(e.target.value)}
+                            placeholder={t('interested_jobs.search_placeholder')}
+                            className="w-full min-w-[220px] bg-bg-input border border-border-default rounded-lg py-2 pl-3 pr-10 text-sm focus:ring-primary-500 focus:border-primary-300 transition"
+                        />
                     </div>
                 </div>
                 <div className="flex items-center gap-3">
                     <span className="text-sm font-semibold text-text-muted ml-3">
-                        {linkedJobsLoading ? t('interested_jobs.loading') || 'טוען…' : t('candidates.found_count', { count: jobs.length })}
+                        {linkedJobsLoading
+                            ? t('interested_jobs.loading') || 'טוען…'
+                            : t('interested_jobs.found_count', { count: filteredJobs.length })}
                     </span>
                     <div className="flex items-center bg-bg-subtle p-1 rounded-lg">
                         <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-1.5 rounded-md ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted'}`}><TableCellsIcon className="w-5 h-5"/></button>
@@ -965,7 +1031,7 @@ const InterestedInJobs: React.FC<{
                                         </th>
                                     );
                                 })}
-                                <th className="p-4 sticky left-0 bg-bg-subtle/80 w-16">
+                                <th className="p-4 sticky left-0 bg-bg-subtle/80 w-24">
                                     <div className="relative" ref={settingsRef}>
                                         <button
                                             onClick={() => setIsSettingsOpen(!isSettingsOpen)}
@@ -1004,24 +1070,34 @@ const InterestedInJobs: React.FC<{
                         <tbody className="divide-y divide-border-subtle min-h-[280px]">
                             {isTableLoading ? (
                                 <InterestTableSkeletonRows columnCount={visibleColumns.length} />
-                            ) : sortedJobs.length === 0 ? (
+                            ) : filteredJobs.length === 0 ? (
                                 <tr>
                                     <td
                                         colSpan={visibleColumns.length + 1}
                                         className="p-10 text-center text-text-muted text-sm"
                                     >
-                                        {t('interested_jobs.empty') || 'אין התעניינות במשרות'}
+                                        {searchQuery.trim()
+                                            ? 'לא נמצאו משרות התואמות לחיפוש'
+                                            : t('interested_jobs.empty') || 'אין התעניינות במשרות'}
                                     </td>
                                 </tr>
                             ) : (
-                                sortedJobs.map((job) => (
-                                    <tr key={job.linkId} className="hover:bg-bg-hover">
+                                filteredJobs.map((job) => (
+                                    <tr key={job.linkId} className="hover:bg-bg-hover group">
                                         {visibleColumns.map((colId) => (
                                             <td key={colId} className="p-4 text-text-muted">
                                                 {renderCell(job, colId)}
                                             </td>
                                         ))}
-                                        <td className="p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-16" />
+                                        <td className="p-4 sticky left-0 bg-bg-card group-hover:bg-bg-hover w-24 text-left">
+                                            <button
+                                                type="button"
+                                                onClick={() => setManageJob(job)}
+                                                className="text-xs text-primary-600 hover:underline font-semibold bg-primary-50 hover:bg-primary-100 px-3 py-1.5 rounded-lg border border-primary-200 transition-colors whitespace-nowrap"
+                                            >
+                                                {t('interested_jobs.manage_process')}
+                                            </button>
+                                        </td>
                                     </tr>
                                 ))
                             )}
@@ -1030,18 +1106,22 @@ const InterestedInJobs: React.FC<{
                 </div>
             ) : isTableLoading ? (
                 <InterestGridSkeletonCards />
-            ) : sortedJobs.length === 0 ? (
+            ) : filteredJobs.length === 0 ? (
                 <div className="p-10 text-center text-text-muted text-sm">
-                    {t('interested_jobs.empty') || 'אין התעניינות במשרות'}
+                    {searchQuery.trim()
+                        ? 'לא נמצאו משרות התואמות לחיפוש'
+                        : t('interested_jobs.empty') || 'אין התעניינות במשרות'}
                 </div>
             ) : (
                 <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {sortedJobs.map((job) => (
+                    {filteredJobs.map((job) => (
                         <JobInterestCard
                             key={job.linkId}
                             job={job}
                             onStatusClick={() => handleOpenStatusModal(job)}
                             onTitleClick={() => handleOpenJobDrawer(job.jobId)}
+                            onManageProcess={() => setManageJob(job)}
+                            manageProcessLabel={t('interested_jobs.manage_process')}
                             matchRingTitle={t('interested_jobs.match_ring_title')}
                             lastUpdatedLabel={t('interested_jobs.card_last_updated')}
                         />
@@ -1109,6 +1189,51 @@ const InterestedInJobs: React.FC<{
                 isOpen={isDrawerOpen}
                 onClose={() => setIsDrawerOpen(false)}
             />
+
+            {manageJob && candidateId ? (
+                <CandidateProcessManagementModal
+                    isOpen={Boolean(manageJob)}
+                    onClose={() => setManageJob(null)}
+                    candidateId={String(candidateId)}
+                    candidateName={candidateName || 'מועמד'}
+                    job={jobInterestToLink(manageJob)}
+                    clientId={clientId || null}
+                    candidatePipelineId={candidatePipelineId}
+                    pipelineStageId={pipelineStageId}
+                    onJobUpdated={(updated) => {
+                        setJobs((prev) =>
+                            prev.map((j) =>
+                                j.linkId === updated.linkId
+                                    ? {
+                                          ...j,
+                                          status: updated.status,
+                                          lastUpdated: updated.lastUpdated,
+                                          internalNote: updated.internalNote,
+                                          dueDate: updated.dueDate,
+                                          dueTime: updated.dueTime,
+                                          inviteCandidate: updated.inviteCandidate,
+                                          inviteClient: updated.inviteClient,
+                                      }
+                                    : j,
+                            ),
+                        );
+                        setManageJob((prev) =>
+                            prev && prev.linkId === updated.linkId
+                                ? {
+                                      ...prev,
+                                      status: updated.status,
+                                      lastUpdated: updated.lastUpdated,
+                                      internalNote: updated.internalNote,
+                                      dueDate: updated.dueDate,
+                                      dueTime: updated.dueTime,
+                                      inviteCandidate: updated.inviteCandidate,
+                                      inviteClient: updated.inviteClient,
+                                  }
+                                : prev,
+                        );
+                    }}
+                />
+            ) : null}
         </div>
     );
 };

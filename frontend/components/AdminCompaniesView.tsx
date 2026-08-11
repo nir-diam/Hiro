@@ -35,14 +35,48 @@ import { formatCompanyHistoryActionType, formatCompanyHistoryDescription, type C
 type BusinessModel = 'B2B' | 'B2C' | 'B2G' | 'משולב' | 'לא ידוע';
 type ProductType = 'מוצר (Product)' | 'שירותים (Services)' | 'פלטפורמה' | 'פרויקטים' | 'לא ידוע';
 type GrowthIndicator = 'Growing' | 'Stable' | 'Shrinking' | 'Unknown';
-type DataConfidence = 'High' | 'Medium' | 'Low' | 'Pending Review' | 'Missing';
-type CompanyQualityMode = 'needs_review' | 'verified' | 'missing';
+type DataConfidence =
+    | 'High'
+    | 'Medium'
+    | 'Low'
+    | 'Pending Review'
+    | 'Missing'
+    | 'Verified by Agent'
+    | 'Verified by User';
+type CompanyQualityMode = 'needs_review' | 'verified_agent' | 'verified_user' | 'missing';
+/** איכות הנתונים — completeness of company record fields */
+type DataCompleteness = 'נתונים מלאים' | 'חסרים מלאים';
 
-const qualityModeFromConfidence = (dc: DataConfidence): CompanyQualityMode =>
-    dc === 'High' ? 'verified' : dc === 'Missing' ? 'missing' : 'needs_review';
+const asDataCompleteness = (v: unknown): DataCompleteness | '' => {
+    const s = String(v ?? '').trim();
+    if (s === 'נתונים מלאים' || s === 'full' || s === 'complete') return 'נתונים מלאים';
+    if (s === 'חסרים מלאים' || s === 'incomplete' || s === 'missing_full' || s === 'חסרים') return 'חסרים מלאים';
+    return '';
+};
 
-const confidenceFromQualityMode = (mode: CompanyQualityMode): DataConfidence =>
-    mode === 'verified' ? 'High' : mode === 'missing' ? 'Missing' : 'Pending Review';
+const qualityModeFromConfidence = (dc: DataConfidence): CompanyQualityMode => {
+    if (dc === 'Verified by User') return 'verified_user';
+    if (dc === 'Verified by Agent' || dc === 'High') return 'verified_agent';
+    if (dc === 'Missing') return 'missing';
+    return 'needs_review';
+};
+
+const confidenceFromQualityMode = (mode: CompanyQualityMode): DataConfidence => {
+    if (mode === 'verified_user') return 'Verified by User';
+    if (mode === 'verified_agent') return 'Verified by Agent';
+    if (mode === 'missing') return 'Missing';
+    return 'Pending Review';
+};
+
+const DATA_CONFIDENCE_LABELS: Record<DataConfidence, string> = {
+    High: 'אומת על ידי סוכן',
+    'Verified by Agent': 'אומת על ידי סוכן',
+    'Verified by User': 'מאומת ע"י משתמש',
+    Medium: 'בינוני',
+    Low: 'נמוך',
+    'Pending Review': 'לביקורת',
+    Missing: 'חסר נתונים',
+};
 type CorporateStructure = 'חברה עצמאית (ללא שיוך)' | 'חברת אם (Parent/Holding)' | 'חברת בת (Subsidiary)';
 
 type CompanyId = string | number;
@@ -107,6 +141,8 @@ interface Company {
 
     // Meta
     dataConfidence: DataConfidence;
+    /** איכות הנתונים: נתונים מלאים | חסרים מלאים */
+    dataCompleteness?: DataCompleteness | '';
     lastVerified: string;
     /** Candidates linked via candidate_organizations */
     candidateCount?: number;
@@ -142,7 +178,15 @@ const BM: BusinessModel[] = ['B2B', 'B2C', 'B2G', 'משולב', 'לא ידוע']
 const PT: ProductType[] = ['מוצר (Product)', 'שירותים (Services)', 'פלטפורמה', 'פרויקטים', 'לא ידוע'];
 const GI: GrowthIndicator[] = ['Growing', 'Stable', 'Shrinking', 'Unknown'];
 const CS: CorporateStructure[] = ['חברה עצמאית (ללא שיוך)', 'חברת אם (Parent/Holding)', 'חברת בת (Subsidiary)'];
-const DC: DataConfidence[] = ['High', 'Medium', 'Low', 'Pending Review', 'Missing'];
+const DC: DataConfidence[] = [
+    'High',
+    'Medium',
+    'Low',
+    'Pending Review',
+    'Missing',
+    'Verified by Agent',
+    'Verified by User',
+];
 
 function normalizeBusinessModel(s: string): BusinessModel {
     if (BM.includes(s as BusinessModel)) return s as BusinessModel;
@@ -224,8 +268,25 @@ function normalizeClassification(s: string): string {
     return s;
 }
 function asDataConfidence(v: unknown): DataConfidence {
-    const s = String(v || '');
-    return (DC.includes(s as DataConfidence) ? s : 'Medium') as DataConfidence;
+    const s = String(v || '').trim();
+    if (!s) return 'Pending Review';
+    if (DC.includes(s as DataConfidence)) return s as DataConfidence;
+    // Hebrew / legacy aliases from enrichment & older UI
+    if (s === 'לביקורת' || s === 'ממתין לסקירה') return 'Pending Review';
+    if (s === 'אין התאמה' || s === 'חסר נתונים') return 'Missing';
+    if (s === 'מאומת ע"י משתמש' || s === "מאומת ע'י משתמש" || s === 'מאומת ע״י משתמש') {
+        return 'Verified by User';
+    }
+    if (
+        s === 'אומת על ידי סוכן' ||
+        s === 'מאומת ע"י סוכן' ||
+        s === "מאומת ע'י סוכן" ||
+        s === 'מאומת ע״י סוכן' ||
+        s === 'מאומת'
+    ) {
+        return 'Verified by Agent';
+    }
+    return 'Medium';
 }
 
 const EMPLOYEE_COUNT_BUCKETS = ['1-10', '11-50', '51-200', '201-1000', '1000+', '10000+'] as const;
@@ -339,6 +400,7 @@ function mapOrganizationApiToCompany(o: Record<string, unknown>): Company {
         tags: Array.isArray(tags) ? tags.map(String) : [],
         techTags: Array.isArray(techTags) ? techTags.map(String) : [],
         dataConfidence: asDataConfidence(o.dataConfidence),
+        dataCompleteness: asDataCompleteness(o.dataCompleteness),
         lastVerified: String(o.lastVerified ?? ''),
         activityStatus: (o.activityStatus as Company['activityStatus']) || 'לא ידוע',
         address: o.address != null && o.address !== '' ? String(o.address) : '',
@@ -386,6 +448,7 @@ function companyToOrganizationPayload(c: Company): Record<string, unknown> {
         subsidiaries: c.subsidiaries?.length ? c.subsidiaries : [],
         growthIndicator: c.growthIndicator || null,
         dataConfidence: c.dataConfidence || null,
+        dataCompleteness: c.dataCompleteness || null,
         lastVerified: c.lastVerified || null,
         tags: c.tags?.length ? c.tags : [],
         techTags: c.techTags?.length ? c.techTags : [],
@@ -1315,7 +1378,9 @@ const CompanyModal: React.FC<{
         growthIndicator: 'Unknown',
         structure: 'חברה עצמאית (ללא שיוך)', parentCompany: '', subsidiaries: [],
         tags: [], techTags: [],
-        dataConfidence: 'Pending Review', lastVerified: new Date().toISOString().split('T')[0]
+        dataConfidence: 'Pending Review',
+        dataCompleteness: '',
+        lastVerified: new Date().toISOString().split('T')[0]
     });
     
     const [tagsInput, setTagsInput] = useState('');
@@ -1372,6 +1437,7 @@ const CompanyModal: React.FC<{
                         ? company.additionalLocations
                         : [],
                     dataConfidence: confidenceFromQualityMode(qualityModeFromConfidence(company.dataConfidence)),
+                    dataCompleteness: asDataCompleteness(company.dataCompleteness),
                 });
                 setTagsInput(company.tags.join(', '));
                 setTechTagsInput(company.techTags.join(', '));
@@ -1393,7 +1459,9 @@ const CompanyModal: React.FC<{
                     growthIndicator: 'Unknown',
                     structure: 'חברה עצמאית (ללא שיוך)', parentCompany: '', subsidiaries: [],
                     tags: [], techTags: [],
-                    dataConfidence: 'Pending Review', lastVerified: new Date().toISOString().split('T')[0]
+                    dataConfidence: 'Pending Review',
+                    dataCompleteness: '',
+                    lastVerified: new Date().toISOString().split('T')[0]
                 });
                 setTagsInput('');
                 setTechTagsInput('');
@@ -1470,7 +1538,7 @@ const CompanyModal: React.FC<{
         const qualityMode = qualityModeFromConfidence(formData.dataConfidence);
         const savedConfidence = confidenceFromQualityMode(qualityMode);
         const savedLastVerified =
-            qualityMode === 'verified'
+            qualityMode === 'verified_user' || qualityMode === 'verified_agent'
                 ? new Date().toISOString().split('T')[0]
                 : formData.lastVerified;
 
@@ -2064,70 +2132,137 @@ const CompanyModal: React.FC<{
                     </div>
                 )}
 
-                <footer className="p-4 border-t border-border-default bg-bg-subtle flex justify-between items-center">
-                    <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2 text-xs font-bold text-text-muted">
-                            <ShieldCheckIcon
-                                className={`w-4 h-4 ${
-                                    qualityModeFromConfidence(formData.dataConfidence) === 'verified'
-                                        ? 'text-green-500'
-                                        : 'text-amber-500'
-                                }`}
-                            />
-                            <span>מצב איכות:</span>
+                <footer className="p-4 border-t border-border-default bg-bg-subtle flex flex-col sm:flex-row justify-between items-stretch sm:items-end gap-4">
+                    <div className="flex flex-col gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                            <div className="flex items-center gap-2 text-xs font-bold text-text-muted">
+                                <ShieldCheckIcon
+                                    className={`w-4 h-4 ${
+                                        qualityModeFromConfidence(formData.dataConfidence) === 'verified_user' ||
+                                        qualityModeFromConfidence(formData.dataConfidence) === 'verified_agent'
+                                            ? 'text-green-500'
+                                            : 'text-amber-500'
+                                    }`}
+                                />
+                                <span>מצב איכות:</span>
+                            </div>
+                            <div className="flex flex-wrap bg-bg-subtle p-0.5 rounded-lg border border-border-default">
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFormData((prev) => ({
+                                            ...prev,
+                                            dataConfidence: confidenceFromQualityMode('needs_review'),
+                                        }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                        qualityModeFromConfidence(formData.dataConfidence) === 'needs_review'
+                                            ? 'bg-amber-100 text-amber-800 border border-amber-200 shadow-sm'
+                                            : 'text-text-muted hover:text-text-default'
+                                    }`}
+                                >
+                                    לביקורת
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFormData((prev) => ({
+                                            ...prev,
+                                            dataConfidence: confidenceFromQualityMode('missing'),
+                                        }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                        qualityModeFromConfidence(formData.dataConfidence) === 'missing'
+                                            ? 'bg-gray-100 text-gray-600 border border-gray-300 shadow-sm'
+                                            : 'text-text-muted hover:text-text-default'
+                                    }`}
+                                >
+                                    חסר נתונים
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFormData((prev) => ({
+                                            ...prev,
+                                            dataConfidence: confidenceFromQualityMode('verified_agent'),
+                                        }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                        qualityModeFromConfidence(formData.dataConfidence) === 'verified_agent'
+                                            ? 'bg-sky-100 text-sky-800 border border-sky-200 shadow-sm'
+                                            : 'text-text-muted hover:text-text-default'
+                                    }`}
+                                >
+                                    אומת על ידי סוכן
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFormData((prev) => ({
+                                            ...prev,
+                                            dataConfidence: confidenceFromQualityMode('verified_user'),
+                                        }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                        qualityModeFromConfidence(formData.dataConfidence) === 'verified_user'
+                                            ? 'bg-green-100 text-green-800 border border-green-200 shadow-sm'
+                                            : 'text-text-muted hover:text-text-default'
+                                    }`}
+                                >
+                                    מאומת ע&quot;י משתמש
+                                </button>
+                            </div>
                         </div>
-                        <div className="flex bg-bg-subtle p-0.5 rounded-lg border border-border-default">
-                            <button
-                                type="button"
-                                onClick={() =>
-                                    setFormData((prev) => ({
-                                        ...prev,
-                                        dataConfidence: confidenceFromQualityMode('needs_review'),
-                                    }))
-                                }
-                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-                                    qualityModeFromConfidence(formData.dataConfidence) === 'needs_review'
-                                        ? 'bg-amber-100 text-amber-800 border border-amber-200 shadow-sm'
-                                        : 'text-text-muted hover:text-text-default'
-                                }`}
-                            >
-                                לביקורת
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() =>
-                                    setFormData((prev) => ({
-                                        ...prev,
-                                        dataConfidence: confidenceFromQualityMode('missing'),
-                                    }))
-                                }
-                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-                                    qualityModeFromConfidence(formData.dataConfidence) === 'missing'
-                                        ? 'bg-gray-100 text-gray-600 border border-gray-300 shadow-sm'
-                                        : 'text-text-muted hover:text-text-default'
-                                }`}
-                            >
-                                חסר נתונים
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() =>
-                                    setFormData((prev) => ({
-                                        ...prev,
-                                        dataConfidence: confidenceFromQualityMode('verified'),
-                                    }))
-                                }
-                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
-                                    qualityModeFromConfidence(formData.dataConfidence) === 'verified'
-                                        ? 'bg-green-100 text-green-800 border border-green-200 shadow-sm'
-                                        : 'text-text-muted hover:text-text-default'
-                                }`}
-                            >
-                                מאומת
-                            </button>
+                        <div className="flex flex-wrap items-center gap-3">
+                            <div className="flex items-center gap-2 text-xs font-bold text-text-muted">
+                                <ChartBarIcon
+                                    className={`w-4 h-4 ${
+                                        formData.dataCompleteness === 'נתונים מלאים'
+                                            ? 'text-green-500'
+                                            : formData.dataCompleteness === 'חסרים מלאים'
+                                              ? 'text-amber-500'
+                                              : 'text-text-muted'
+                                    }`}
+                                />
+                                <span>איכות הנתונים:</span>
+                            </div>
+                            <div className="flex flex-wrap bg-bg-subtle p-0.5 rounded-lg border border-border-default">
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFormData((prev) => ({
+                                            ...prev,
+                                            dataCompleteness: 'נתונים מלאים',
+                                        }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                        formData.dataCompleteness === 'נתונים מלאים'
+                                            ? 'bg-green-100 text-green-800 border border-green-200 shadow-sm'
+                                            : 'text-text-muted hover:text-text-default'
+                                    }`}
+                                >
+                                    נתונים מלאים
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        setFormData((prev) => ({
+                                            ...prev,
+                                            dataCompleteness: 'חסרים מלאים',
+                                        }))
+                                    }
+                                    className={`px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                                        formData.dataCompleteness === 'נתונים חסרים'
+                                            ? 'bg-amber-100 text-amber-800 border border-amber-200 shadow-sm'
+                                            : 'text-text-muted hover:text-text-default'
+                                    }`}
+                                >
+                                    נתונים חסרים
+                                </button>
+                            </div>
                         </div>
                     </div>
-                    <div className="flex gap-3">
+                    <div className="flex gap-3 shrink-0">
                          <button onClick={onClose} className="px-5 py-2.5 rounded-xl text-sm font-bold text-text-muted hover:bg-bg-hover transition-colors">ביטול</button>
                         <button
                             type="button"
@@ -2143,6 +2278,8 @@ const CompanyModal: React.FC<{
     );
 };
 
+const COMPANY_PAGE_SIZE_OPTIONS = [50, 100, 200, 500, 1000, 10000] as const;
+
 // ── Pagination bar shared between top and bottom ──────────────────────────
 interface CompanyPaginationBarProps {
     currentPage: number;
@@ -2150,37 +2287,54 @@ interface CompanyPaginationBarProps {
     pageSize: number;
     loading: boolean;
     onPageChange: (p: number) => void;
+    onPageSizeChange?: (size: number) => void;
     position?: 'top' | 'bottom';
 }
 const CompanyPaginationBar: React.FC<CompanyPaginationBarProps> = ({
-    currentPage, totalCount, pageSize, loading, onPageChange, position = 'bottom',
+    currentPage, totalCount, pageSize, loading, onPageChange, onPageSizeChange, position = 'bottom',
 }) => {
-    const totalPages = Math.ceil(totalCount / pageSize);
+    const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
     const from = totalCount > 0 ? (currentPage - 1) * pageSize + 1 : 0;
     const to = Math.min(currentPage * pageSize, totalCount);
     const isTop = position === 'top';
     return (
         <div className={`flex-shrink-0 flex flex-wrap items-center justify-between gap-3 px-6 py-2 ${isTop ? 'border-b' : 'border-t'} border-border-default bg-bg-card/80 backdrop-blur-sm`}>
             <span className="text-xs text-text-muted">
-                {loading ? 'טוען…' : totalCount > 0 ? `${from}–${to} מתוך ${totalCount} חברות` : 'אין חברות'}
+                {loading ? 'טוען…' : totalCount > 0 ? `${from}–${to} מתוך ${totalCount.toLocaleString()} חברות` : 'אין חברות'}
             </span>
-            {totalPages > 1 && (
-                <div className="flex items-center gap-2 text-xs text-text-muted">
-                    <button
-                        type="button"
-                        disabled={currentPage <= 1}
-                        onClick={() => onPageChange(currentPage - 1)}
-                        className="px-3 py-1 rounded-full border border-border-default text-xs bg-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-bg-subtle"
-                    >קודם</button>
-                    <span className="text-text-default font-medium">{currentPage} / {totalPages}</span>
-                    <button
-                        type="button"
-                        disabled={currentPage >= totalPages}
-                        onClick={() => onPageChange(currentPage + 1)}
-                        className="px-3 py-1 rounded-full border border-border-default text-xs bg-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-bg-subtle"
-                    >הבא</button>
-                </div>
-            )}
+            <div className="flex flex-wrap items-center gap-2 text-xs text-text-muted">
+                {onPageSizeChange ? (
+                    <label className="flex items-center gap-1 whitespace-nowrap">
+                        <span>שורות לעמוד</span>
+                        <select
+                            value={pageSize}
+                            onChange={(e) => onPageSizeChange(Number(e.target.value))}
+                            className="bg-white border border-border-default rounded px-2 py-1 text-xs"
+                        >
+                            {COMPANY_PAGE_SIZE_OPTIONS.map((n) => (
+                                <option key={n} value={n}>{n.toLocaleString('en-US')}</option>
+                            ))}
+                        </select>
+                    </label>
+                ) : null}
+                {totalPages > 1 && (
+                    <>
+                        <button
+                            type="button"
+                            disabled={currentPage <= 1}
+                            onClick={() => onPageChange(currentPage - 1)}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs bg-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-bg-subtle"
+                        >קודם</button>
+                        <span className="text-text-default font-medium">{currentPage} / {totalPages}</span>
+                        <button
+                            type="button"
+                            disabled={currentPage >= totalPages}
+                            onClick={() => onPageChange(currentPage + 1)}
+                            className="px-3 py-1 rounded-full border border-border-default text-xs bg-white disabled:opacity-40 disabled:cursor-not-allowed hover:bg-bg-subtle"
+                        >הבא</button>
+                    </>
+                )}
+            </div>
         </div>
     );
 };
@@ -2201,7 +2355,7 @@ const AdminCompaniesView: React.FC = () => {
     const [activityFrom, setActivityFrom] = useState('');
     const [activityTo, setActivityTo] = useState('');
     const [currentPage, setCurrentPage] = useState(1);
-    const PAGE_SIZE = 50;
+    const [pageSize, setPageSize] = useState(50);
     const [totalCount, setTotalCount] = useState(0);
     const [isAdvancedSearchOpen, setIsAdvancedSearchOpen] = useState(false);
     const [filters, setFilters] = useState({
@@ -2215,7 +2369,7 @@ const AdminCompaniesView: React.FC = () => {
         showPendingOnly: false,
         showMerged: false,
         activityStatus: '' as '' | 'פעילה' | 'לא פעילה' | 'בפירוק' | 'לא ידוע' | 'merged',
-        dataConfidence: '' as '' | 'High' | 'Medium' | 'Low' | 'Pending Review',
+        dataConfidence: '' as '' | DataConfidence,
         // Advanced Fields
         name: '',
         nameEn: '',
@@ -2291,7 +2445,7 @@ const AdminCompaniesView: React.FC = () => {
             const includeMerged = opts?.includeMerged ?? filters.showMerged;
             if (includeMerged) params.set('includeMerged', 'true');
             params.set('page', String(opts?.page ?? 1));
-            params.set('limit', String(PAGE_SIZE));
+            params.set('limit', String(pageSize));
             const search = opts?.search ?? debouncedSearchTerm;
             if (search) params.set('search', search);
             const from = opts?.activityFrom ?? activityFrom;
@@ -2338,7 +2492,7 @@ const AdminCompaniesView: React.FC = () => {
                     body: JSON.stringify({
                         includeMerged: includeMerged || undefined,
                         page: opts?.page ?? 1,
-                        limit: PAGE_SIZE,
+                        limit: pageSize,
                         search: search || undefined,
                         activityFrom: from || undefined,
                         activityTo: to || undefined,
@@ -2373,7 +2527,7 @@ const AdminCompaniesView: React.FC = () => {
         } finally {
             setCompaniesLoading(false);
         }
-    }, [apiBase, debouncedSearchTerm, activityFrom, activityTo, filters.showMerged, filters.locations, filters.searchAdditionalLocations, filters.mainField]);
+    }, [apiBase, debouncedSearchTerm, activityFrom, activityTo, filters.showMerged, filters.locations, filters.searchAdditionalLocations, filters.mainField, pageSize]);
 
     const listQueryKey = useMemo(
         () => JSON.stringify({
@@ -2384,9 +2538,9 @@ const AdminCompaniesView: React.FC = () => {
             locations: filters.locations.map(l => l.value),
             searchAdditionalLocations: filters.searchAdditionalLocations,
             mainField: Array.isArray(filters.mainField) ? filters.mainField : filters.mainField ? [filters.mainField] : [],
-            pageSize: PAGE_SIZE,
+            pageSize,
         }),
-        [debouncedSearchTerm, activityFrom, activityTo, filters.showMerged, filters.locations, filters.searchAdditionalLocations, filters.mainField],
+        [debouncedSearchTerm, activityFrom, activityTo, filters.showMerged, filters.locations, filters.searchAdditionalLocations, filters.mainField, pageSize],
     );
     const prevListQueryKeyRef = useRef(listQueryKey);
 
@@ -2481,7 +2635,11 @@ const AdminCompaniesView: React.FC = () => {
             const matchesPending = !filters.showPendingOnly || c.dataConfidence === 'Pending Review';
             const matchesMerged = filters.showMerged || c.activityStatus !== 'merged';
             const matchesActivityStatus = !filters.activityStatus || c.activityStatus === filters.activityStatus;
-            const matchesDataConfidence = !filters.dataConfidence || c.dataConfidence === filters.dataConfidence;
+            const matchesDataConfidence =
+                !filters.dataConfidence ||
+                c.dataConfidence === filters.dataConfidence ||
+                (filters.dataConfidence === 'Verified by Agent' && c.dataConfidence === 'High') ||
+                (filters.dataConfidence === 'High' && c.dataConfidence === 'Verified by Agent');
 
             // Advanced Filters
             const matchesName = !filters.name || c.name.includes(filters.name);
@@ -2762,6 +2920,28 @@ const AdminCompaniesView: React.FC = () => {
     };
     
     // --- AI Enrichment (Deep Dive) — server: POST /api/organizations/enrich (Gemini + SerpAPI/PDL) ---
+    const requestOrganizationEnrich = async (companyIds: string[]) => {
+        const res = await fetch(`${apiBase}/api/organizations/enrich`, {
+            method: 'POST',
+            credentials: 'include',
+            cache: 'no-store',
+            headers: organizationApiHeaders(true),
+            body: JSON.stringify({ companyIds }),
+        });
+        const errText = await res.text().catch(() => '');
+        if (!res.ok) {
+            let msg = errText;
+            try {
+                const j = JSON.parse(errText) as { message?: string };
+                if (j?.message) msg = j.message;
+            } catch {
+                /* use raw */
+            }
+            throw new Error(msg || `HTTP ${res.status}`);
+        }
+        return JSON.parse(errText) as { enrichmentMap?: Record<string, Record<string, unknown>> };
+    };
+
     const handleBulkEnrich = async () => {
         if (selectedIds.size === 0) return;
         if (!apiBase) {
@@ -2773,28 +2953,16 @@ const AdminCompaniesView: React.FC = () => {
             alert('ניתן להעמיק רק בחברות שמורות בשרת. בחר שורות עם מזהה מערכת (UUID).');
             return;
         }
+        if (companyIds.length > 1) {
+            const confirmed = window.confirm(
+                `נבחרו ${companyIds.length} חברות.\n\nהאם להריץ העשרה עמוקה (Deep Dive) על כולן?`,
+            );
+            if (!confirmed) return;
+        }
         setIsEnriching(true);
 
         try {
-            const res = await fetch(`${apiBase}/api/organizations/enrich`, {
-                method: 'POST',
-                credentials: 'include',
-                cache: 'no-store',
-                headers: organizationApiHeaders(true),
-                body: JSON.stringify({ companyIds }),
-            });
-            const errText = await res.text().catch(() => '');
-            if (!res.ok) {
-                let msg = errText;
-                try {
-                    const j = JSON.parse(errText) as { message?: string };
-                    if (j?.message) msg = j.message;
-                } catch {
-                    /* use raw */
-                }
-                throw new Error(msg || `HTTP ${res.status}`);
-            }
-            const data = JSON.parse(errText) as { enrichmentMap?: Record<string, Record<string, unknown>> };
+            const data = await requestOrganizationEnrich(companyIds);
             const enrichmentMap = data?.enrichmentMap;
             if (!enrichmentMap || typeof enrichmentMap !== 'object') {
                 throw new Error('תשובת שרת לא תקינה (חסר enrichmentMap)');
@@ -2969,7 +3137,11 @@ const AdminCompaniesView: React.FC = () => {
                 })();
                 const qualityBadge = (() => {
                     switch (company.dataConfidence) {
-                        case 'High':          return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">🛡️ מאומת</span>;
+                        case 'Verified by User':
+                            return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-50 text-green-700 border border-green-200">🛡️ מאומת ע"י משתמש</span>;
+                        case 'Verified by Agent':
+                        case 'High':
+                            return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200">🤖 אומת על ידי סוכן</span>;
                         case 'Medium':        return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-blue-50 text-blue-600 border border-blue-200">🔍 בינוני</span>;
                         case 'Low':           return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-600 border border-rose-200">⚠️ נמוך</span>;
                         case 'Pending Review': return <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-600 border border-purple-200">🔔 לביקורת</span>;
@@ -3051,14 +3223,35 @@ const AdminCompaniesView: React.FC = () => {
                 if (company.dataConfidence === 'Pending Review') {
                     return (
                         <span className="inline-flex items-center gap-1 bg-amber-100 text-amber-800 text-xs font-bold px-2 py-0.5 rounded-full border border-amber-200">
-                             <ExclamationTriangleIcon className="w-3 h-3" /> ממתין לסקירה
+                             <ExclamationTriangleIcon className="w-3 h-3" /> לביקורת
+                        </span>
+                    );
+                }
+                if (company.dataConfidence === 'Verified by User') {
+                    return (
+                        <span className="inline-flex items-center gap-1 bg-green-100 text-green-800 text-xs font-bold px-2 py-0.5 rounded-full border border-green-200">
+                            <ShieldCheckIcon className="w-3 h-3" /> מאומת ע"י משתמש
+                        </span>
+                    );
+                }
+                if (company.dataConfidence === 'Verified by Agent' || company.dataConfidence === 'High') {
+                    return (
+                        <span className="inline-flex items-center gap-1 bg-sky-100 text-sky-800 text-xs font-bold px-2 py-0.5 rounded-full border border-sky-200">
+                            <SparklesIcon className="w-3 h-3" /> אומת על ידי סוכן
+                        </span>
+                    );
+                }
+                if (company.dataConfidence === 'Missing') {
+                    return (
+                        <span className="inline-flex items-center gap-1 bg-gray-100 text-gray-600 text-xs font-bold px-2 py-0.5 rounded-full border border-gray-300">
+                            חסר נתונים
                         </span>
                     );
                 }
                 return (
-                     <div className="flex items-center gap-1.5" title={`רמת אמינות: ${company.dataConfidence}`}>
-                        <div className={`w-2.5 h-2.5 rounded-full ${company.dataConfidence === 'High' ? 'bg-green-500' : company.dataConfidence === 'Medium' ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
-                        <span className="text-xs text-text-muted">{company.dataConfidence}</span>
+                     <div className="flex items-center gap-1.5" title={`רמת אמינות: ${DATA_CONFIDENCE_LABELS[company.dataConfidence] || company.dataConfidence}`}>
+                        <div className={`w-2.5 h-2.5 rounded-full ${company.dataConfidence === 'Medium' ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
+                        <span className="text-xs text-text-muted">{DATA_CONFIDENCE_LABELS[company.dataConfidence] || company.dataConfidence}</span>
                     </div>
                 );
             case 'techTags':
@@ -3134,7 +3327,7 @@ const AdminCompaniesView: React.FC = () => {
             case 'location':
                 return company.location || '';
             case 'dataConfidence':
-                return company.dataConfidence || '';
+                return DATA_CONFIDENCE_LABELS[company.dataConfidence] || company.dataConfidence || '';
             case 'techTags':
                 return (company.techTags || []).join(', ');
             case 'candidateCount':
@@ -3194,7 +3387,7 @@ const AdminCompaniesView: React.FC = () => {
             { key: 'description',     label: 'תיאור',                getValue: (c) => c.description || '' },
             { key: 'tags',            label: 'תגיות כלליות',         getValue: (c) => (c.tags || []).join(', ') },
             { key: 'techTags',        label: 'טכנולוגיות',           getValue: (c) => (c.techTags || []).join(', ') },
-            { key: 'dataConfidence',  label: 'אמינות נתונים',        getValue: (c) => c.dataConfidence || '' },
+            { key: 'dataConfidence',  label: 'אמינות נתונים',        getValue: (c) => DATA_CONFIDENCE_LABELS[c.dataConfidence] || c.dataConfidence || '' },
             { key: 'candidateCount',  label: 'מועמדים מקושרים',      getValue: (c) => String(c.candidateCount ?? 0) },
             { key: 'lastVerified',    label: 'עודכן לאחרונה',        getValue: (c) => c.lastVerified || '' },
         ];
@@ -3273,9 +3466,10 @@ const AdminCompaniesView: React.FC = () => {
                         <CompanyPaginationBar
                             currentPage={currentPage}
                             totalCount={totalCount}
-                            pageSize={PAGE_SIZE}
+                            pageSize={pageSize}
                             loading={companiesLoading}
                             onPageChange={handlePageChange}
+                            onPageSizeChange={(size) => { setPageSize(size); setCurrentPage(1); }}
                             position="top"
                         />
                          <div className="flex flex-col md:flex-row gap-4">
@@ -3386,7 +3580,8 @@ const AdminCompaniesView: React.FC = () => {
                                         className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none"
                                     >
                                         <option value="">מצב איכות (הכל)</option>
-                                        <option value="High">🛡️ מאומת</option>
+                                        <option value="Verified by User">🛡️ מאומת ע"י משתמש</option>
+                                        <option value="Verified by Agent">🤖 אומת על ידי סוכן</option>
                                         <option value="Medium">🔍 בינוני</option>
                                         <option value="Low">⚠️ נמוך</option>
                                         <option value="Pending Review">🔔 לביקורת</option>
@@ -3830,9 +4025,10 @@ const AdminCompaniesView: React.FC = () => {
             <CompanyPaginationBar
                 currentPage={currentPage}
                 totalCount={totalCount}
-                pageSize={PAGE_SIZE}
+                pageSize={pageSize}
                 loading={companiesLoading}
                 onPageChange={handlePageChange}
+                onPageSizeChange={(size) => { setPageSize(size); setCurrentPage(1); }}
                 position="bottom"
             />
 

@@ -6,7 +6,8 @@ import {
     PencilIcon, SparklesIcon, GenderMaleIcon, GenderFemaleIcon, MapPinIcon, TrashIcon, XMarkIcon,
     BellIcon, ShareIcon, CheckCircleIcon, UserIcon, NoSymbolIcon, TagIcon, InformationCircleIcon,
     MagnifyingGlassIcon, BuildingOffice2Icon, GlobeAmericasIcon, ChevronUpIcon, ExclamationTriangleIcon, CheckIcon,
-    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon, AcademicCapIcon, WrenchScrewdriverIcon
+    PhoneIcon, ComputerDesktopIcon, VideoCameraIcon, DocumentTextIcon, AcademicCapIcon, WrenchScrewdriverIcon,
+    ClipboardDocumentIcon,
 } from './Icons';
 import { RichTextArea, normalizeValueForEditor } from './RichTextArea';
 import { SmartTagType } from './SmartTagTypes';
@@ -434,16 +435,6 @@ function jobContactsToKeys(raw: unknown): string[] | null {
     return keys.length > 0 ? keys : null;
 }
 
-const mockInternalRecruiters = [
-  
-];
-
-const mockAccountManagers = [
-    { id: 'm1', name: 'ישראל ישראלי' },
-    { id: 'm2', name: 'שרית בן חיים' },
-    { id: 'm3', name: 'גילעד בן חיים' },
-];
-
 // Recruitment sources are loaded dynamically per-client from the API (active only).
 // See the useEffect that reacts to resolvedClientId inside NewJobView.
 const availableSources: RecruitmentSource[] = [];
@@ -601,7 +592,20 @@ const TechnicalIdentifiers: React.FC<{
     orgScreeningDefaults,
 }) => {
     const [isOpen, setIsOpen] = useState(false);
+    const [uniqueEmailCopied, setUniqueEmailCopied] = useState(false);
     const { t } = useLanguage();
+
+    const handleCopyUniqueEmail = async () => {
+        const value = String(uniqueEmail || '').trim();
+        if (!value) return;
+        try {
+            await navigator.clipboard.writeText(value);
+            setUniqueEmailCopied(true);
+            window.setTimeout(() => setUniqueEmailCopied(false), 2000);
+        } catch {
+            /* ignore */
+        }
+    };
 
     return (
         <div className="mt-6 pt-4 border-t border-border-default">
@@ -619,12 +623,28 @@ const TechnicalIdentifiers: React.FC<{
                     <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                         <div className="md:col-span-2">
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.unique_email')}</label>
-                            <input 
-                                type="text" 
-                                value={uniqueEmail} 
-                                readOnly 
-                                className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg p-2.5 cursor-not-allowed"
-                            />
+                            <div className="relative">
+                                <input 
+                                    type="text" 
+                                    value={uniqueEmail} 
+                                    readOnly 
+                                    className="w-full bg-bg-subtle/50 border border-border-default text-text-muted text-sm rounded-lg py-2.5 pl-10 pr-2.5 cursor-not-allowed"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => void handleCopyUniqueEmail()}
+                                    disabled={!String(uniqueEmail || '').trim()}
+                                    title={uniqueEmailCopied ? t('new_job.copied') : t('new_job.copy_unique_email')}
+                                    aria-label={uniqueEmailCopied ? t('new_job.copied') : t('new_job.copy_unique_email')}
+                                    className="absolute left-2.5 top-1/2 -translate-y-1/2 p-1 rounded-md text-text-muted hover:text-primary-600 hover:bg-bg-hover transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:text-text-muted disabled:hover:bg-transparent"
+                                >
+                                    {uniqueEmailCopied ? (
+                                        <CheckIcon className="w-4 h-4 text-green-600" />
+                                    ) : (
+                                        <ClipboardDocumentIcon className="w-4 h-4" />
+                                    )}
+                                </button>
+                            </div>
                         </div>
                         <div>
                             <label className="block text-xs font-semibold text-text-muted mb-1">{t('new_job.posting_code')}</label>
@@ -1873,6 +1893,17 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     } | null>(null);
     const distributionPeopleRef = useRef<JobDistributionOption[]>([]);
     distributionPeopleRef.current = distributionPeople;
+    /** Job stores recruiter as display name — resolve to staff user ids once client staff loads. */
+    const pendingRecruiterNamesRef = useRef<string[]>([]);
+    const pendingAccountManagerNamesRef = useRef<string[]>([]);
+
+    const clientStaffUserOptions = useMemo(
+        () =>
+            distributionPeople
+                .filter((p) => p.kind === 'user')
+                .map((p) => ({ id: p.id, name: p.name })),
+        [distributionPeople],
+    );
 
     useEffect(() => {
         if (isJobFieldComplete(formData.jobField)) setJobFieldError(false);
@@ -2025,6 +2056,20 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                  setPastedJobText(String(sourceJob.aiRawDescription));
              }
              if (sourceJob.client) setIsClientConfirmed(true);
+             const recruiterLabel = String(sourceJob.recruitingCoordinator || sourceJob.recruiter || '').trim();
+             if (recruiterLabel) {
+                 pendingRecruiterNamesRef.current = recruiterLabel
+                     .split(/[,;|/]/)
+                     .map((part: string) => part.trim())
+                     .filter(Boolean);
+             }
+             const accountManagerLabel = String(sourceJob.accountManager || '').trim();
+             if (accountManagerLabel) {
+                 pendingAccountManagerNamesRef.current = accountManagerLabel
+                     .split(/[,;|/]/)
+                     .map((part: string) => part.trim())
+                     .filter(Boolean);
+             }
              // Restore organizationId link when editing an existing job
              if (sourceJob.organizationId) {
                  setSelectedOrg({
@@ -2351,6 +2396,9 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
             setDistributionPeople([]);
             setDistributionLoading(false);
             setDistributionFetchError(null);
+            pendingRecruiterNamesRef.current = [];
+            pendingAccountManagerNamesRef.current = [];
+            setFormData((prev) => ({ ...prev, assignedRecruiters: [], assignedAccountManagers: [] }));
             return;
         }
         setDistributionLoading(true);
@@ -2412,11 +2460,50 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                 }
                 if (cancelled) return;
                 setDistributionPeople(people);
+                const staffIds = people.filter((p) => p.kind === 'user').map((p) => p.id);
+                const normName = (value: string) => String(value || '').trim().toLowerCase();
+                const pendingRecruiterNames = pendingRecruiterNamesRef.current;
+                const matchedRecruiterIds = pendingRecruiterNames.length
+                    ? people
+                        .filter(
+                            (p) =>
+                                p.kind === 'user'
+                                && pendingRecruiterNames.some((label) => normName(label) === normName(p.name)),
+                        )
+                        .map((p) => p.id)
+                    : [];
+                if (matchedRecruiterIds.length) pendingRecruiterNamesRef.current = [];
+                const pendingManagerNames = pendingAccountManagerNamesRef.current;
+                const matchedAccountManagerIds = pendingManagerNames.length
+                    ? people
+                        .filter(
+                            (p) =>
+                                p.kind === 'user'
+                                && pendingManagerNames.some((label) => normName(label) === normName(p.name)),
+                        )
+                        .map((p) => p.id)
+                    : [];
+                if (matchedAccountManagerIds.length) pendingAccountManagerNamesRef.current = [];
                 const allKeys = people.map((p) => p.key);
                 setFormData((prev) => {
                     const valid = (prev.contacts || []).filter((k) => allKeys.includes(k));
                     const nextContacts = valid.length > 0 ? valid : allKeys;
-                    return { ...prev, contacts: nextContacts };
+                    const validRecruiters = (prev.assignedRecruiters || []).filter((id) => staffIds.includes(id));
+                    const validAccountManagers = (prev.assignedAccountManagers || []).filter((id) => staffIds.includes(id));
+                    const nextRecruiters =
+                        matchedRecruiterIds.length > 0
+                            ? matchedRecruiterIds
+                            : validRecruiters;
+                    const nextAccountManagers =
+                        matchedAccountManagerIds.length > 0
+                            ? matchedAccountManagerIds
+                            : validAccountManagers;
+                    return {
+                        ...prev,
+                        contacts: nextContacts,
+                        assignedRecruiters: nextRecruiters,
+                        assignedAccountManagers: nextAccountManagers,
+                    };
                 });
             } catch {
                 if (!cancelled) {
@@ -3208,8 +3295,18 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                     email: row.email || null,
                 };
             });
-        const recruiterName = mockInternalRecruiters.find(r => data.assignedRecruiters.includes(r.id))?.name || 'מערכת';
-        const accountManagerName = mockAccountManagers.find(m => data.assignedAccountManagers.includes(m.id))?.name || 'מערכת';
+        const recruiterName =
+            (Array.isArray(data.assignedRecruiters) ? data.assignedRecruiters : [])
+                .map((id: string) => people.find((p) => p.kind === 'user' && p.id === id)?.name)
+                .filter(Boolean)
+                .join(', ')
+            || 'מערכת';
+        const accountManagerName =
+            (Array.isArray(data.assignedAccountManagers) ? data.assignedAccountManagers : [])
+                .map((id: string) => people.find((p) => p.kind === 'user' && p.id === id)?.name)
+                .filter(Boolean)
+                .join(', ')
+            || 'מערכת';
 
         const publicDescRaw = data.publicDescription;
         const publicDescStr = typeof publicDescRaw === 'string' ? publicDescRaw.trim() : '';
@@ -3651,20 +3748,36 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                         <div className="lg:col-span-1">
                              <MultiSelect 
                                 label={t('new_job.assigned_recruiters')}
-                                options={mockInternalRecruiters} 
+                                options={clientStaffUserOptions} 
                                 selectedIds={formData.assignedRecruiters} 
                                 onChange={(ids) => setFormData(prev => ({ ...prev, assignedRecruiters: ids }))}
-                                placeholder="בחר רכזים..."
+                                placeholder={
+                                    !resolvedClientId
+                                        ? 'בחר לקוח / ארגון תחילה...'
+                                        : distributionLoading
+                                          ? 'טוען רכזים...'
+                                          : clientStaffUserOptions.length === 0
+                                            ? 'אין רכזים ללקוח זה'
+                                            : 'בחר רכזים...'
+                                }
                              />
                         </div>
 
                          <div className="lg:col-span-1">
                              <MultiSelect 
                                 label={t('new_job.account_managers')}
-                                options={mockAccountManagers} 
+                                options={clientStaffUserOptions} 
                                 selectedIds={formData.assignedAccountManagers} 
                                 onChange={(ids) => setFormData(prev => ({ ...prev, assignedAccountManagers: ids }))}
-                                placeholder="בחר מנהלי תיק..."
+                                placeholder={
+                                    !resolvedClientId
+                                        ? 'בחר לקוח / ארגון תחילה...'
+                                        : distributionLoading
+                                          ? 'טוען משתמשים...'
+                                          : clientStaffUserOptions.length === 0
+                                            ? 'אין משתמשים ללקוח זה'
+                                            : 'בחר מנהלי תיק...'
+                                }
                              />
                         </div>
 

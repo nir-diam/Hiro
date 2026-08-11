@@ -8,6 +8,75 @@ function isUuid(val) {
   return typeof val === 'string' && UUID_RE.test(val.trim());
 }
 
+function normalizeTrigger(raw) {
+  if (!raw || typeof raw !== 'object') return { type: 'none' };
+  const type = raw.type === 'system_event' ? 'system_event' : 'none';
+  const trigger = { type };
+  if (type === 'system_event' && raw.systemEventId) {
+    trigger.systemEventId = String(raw.systemEventId);
+  }
+  return trigger;
+}
+
+function normalizeAutomations(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((a, i) => {
+      if (!a || typeof a !== 'object') return null;
+      const actionType = ['send_email', 'send_sms', 'start_pipeline', 'close_event'].includes(a.actionType)
+        ? a.actionType
+        : 'send_email';
+      const scheduleType = ['immediate', 'minutes', 'hours', 'days'].includes(a.scheduleType)
+        ? a.scheduleType
+        : 'immediate';
+      const item = {
+        id: String(a.id || `auto-${Date.now()}-${i}`),
+        actionType,
+        scheduleType,
+        requireManualApproval: Boolean(a.requireManualApproval),
+      };
+      if (a.templateId) item.templateId = String(a.templateId);
+      if (a.pipelineId) item.pipelineId = String(a.pipelineId);
+      if (a.scheduleValue != null && a.scheduleValue !== '') {
+        item.scheduleValue = Math.max(0, parseInt(a.scheduleValue, 10) || 0);
+      }
+      if (a.recipients && typeof a.recipients === 'object') {
+        item.recipients = {
+          candidate: Boolean(a.recipients.candidate),
+          hiringManager: Boolean(a.recipients.hiringManager),
+          coordinator: Boolean(a.recipients.coordinator),
+          extra: String(a.recipients.extra || ''),
+        };
+      }
+      return item;
+    })
+    .filter(Boolean);
+}
+
+function normalizeOutcomes(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((o, i) => {
+      if (!o || typeof o !== 'object') return null;
+      const actionType = ['stay', 'move', 'freeze', 'close'].includes(o.actionType) ? o.actionType : 'stay';
+      const id = String(o.id || `out-${Date.now()}-${i}`).trim();
+      const name = String(o.name || '').trim() || 'תוצאה חדשה';
+      const item = {
+        id,
+        name,
+        actionType,
+        autoFollowupDays: Math.max(0, parseInt(o.autoFollowupDays, 10) || 0),
+      };
+      if (actionType === 'move' && o.targetStageId) {
+        item.targetStageId = String(o.targetStageId);
+      }
+      if (o.trigger) item.trigger = normalizeTrigger(o.trigger);
+      if (Array.isArray(o.automations)) item.automations = normalizeAutomations(o.automations);
+      return item;
+    })
+    .filter(Boolean);
+}
+
 /** Default sales + retention pipelines (seeded when a client has none). */
 const DEFAULT_PIPELINES = [
   {
@@ -42,6 +111,7 @@ function stageToDto(row) {
     color: plain.color,
     order: plain.sortIndex + 1,
     slaLimit: plain.slaLimit,
+    outcomes: normalizeOutcomes(plain.outcomes),
   };
 }
 
@@ -184,17 +254,18 @@ async function syncClientPipelines(clientId, incoming = []) {
         const slaLimit = Math.max(0, parseInt(st.slaLimit, 10) || 0);
         const orderRaw = st.order != null ? Number(st.order) : j + 1;
         const sortIndex = Number.isFinite(orderRaw) && orderRaw > 0 ? orderRaw - 1 : j;
+        const outcomes = normalizeOutcomes(st.outcomes);
 
         const sid = st.id;
         if (isUuid(sid) && stageById.has(String(sid))) {
           await ClientPipelineStage.update(
-            { name: stName, color, sortIndex, slaLimit },
+            { name: stName, color, sortIndex, slaLimit, outcomes },
             { where: { id: sid, pipelineId }, transaction },
           );
           keptStageIds.push(String(sid));
         } else {
           const created = await ClientPipelineStage.create(
-            { pipelineId, name: stName, color, sortIndex, slaLimit },
+            { pipelineId, name: stName, color, sortIndex, slaLimit, outcomes },
             { transaction },
           );
           keptStageIds.push(String(created.id));
@@ -253,4 +324,5 @@ module.exports = {
   createPipeline,
   DEFAULT_PIPELINES,
   isUuid,
+  normalizeOutcomes,
 };

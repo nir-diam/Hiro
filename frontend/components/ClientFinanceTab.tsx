@@ -7,6 +7,7 @@ import {
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import { authHeaders } from '../utils/authHeaders';
+import ContactFinanceTab from './ContactFinanceTab';
 
 interface ClientFinanceTabProps {
     clientName: string;
@@ -227,22 +228,9 @@ const ClientFinanceTab: React.FC<ClientFinanceTabProps> = ({ clientName, clientI
                 </div>
             </div>
 
-            {/* 3. History Banner */}
-            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-2xl p-5 flex flex-col sm:flex-row items-center sm:items-start gap-4 shadow-sm">
-                <div className="p-3 bg-white rounded-full text-blue-600 shadow-sm mt-1 ring-4 ring-blue-50/50">
-                    <ClockIcon className="w-6 h-6" />
-                </div>
-                <div className="flex-1 text-center sm:text-right">
-                    <h4 className="text-base font-bold text-blue-900 mb-1">היסטוריית חיובים וגבייה</h4>
-                    <p className="text-sm text-blue-800/80 leading-relaxed">
-                        ללקוח זה הופקו <span className="font-bold text-blue-900 bg-blue-100 px-1 rounded">3 חשבוניות</span> בסך כולל של <span className="font-bold text-blue-900 text-lg">45,000 ₪</span>.
-                        <br className="hidden sm:block"/>
-                        החשבונית האחרונה הופקה ב-15/10/2025 ושולמה במלואה.
-                    </p>
-                </div>
-                <button className="text-sm font-bold text-primary-600 bg-white border border-primary-200 px-5 py-2.5 rounded-xl hover:bg-primary-50 hover:border-primary-300 transition-all shadow-sm whitespace-nowrap self-center sm:self-auto">
-                    לכל המסמכים
-                </button>
+            {/* Proposals (studio UI) — live API */}
+            <div className="bg-bg-card border border-border-default rounded-2xl shadow-sm p-6">
+                <ContactFinanceTab clientId={clientId} clientName={clientName} />
             </div>
 
         </div>

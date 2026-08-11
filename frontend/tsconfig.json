@@ -25,5 +25,10 @@
     },
     "allowImportingTsExtensions": true,
     "noEmit": true
-  }
+  },
+  "exclude": [
+    "files_to_marge",
+    "node_modules",
+    "dist"
+  ]
 }

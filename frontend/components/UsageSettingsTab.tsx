@@ -56,7 +56,7 @@ const CheckboxRow: React.FC<{ label: string; name: string; checked: boolean; onC
 
 const initialSettings = {
     interfaceLanguage: 'עברית',
-    doubleAuth: 'לא פעיל',
+    doubleAuth: 'לא פעיל' as 'לא פעיל' | 'פעיל מייל' | 'פעיל SMS' | 'פעיל',
     googleLogin: 'פעיל',
     foreignPhones: 'לא נתמך',
     initialScreeningLevel: 'טלפוני',
@@ -89,13 +89,20 @@ const initialSettings = {
     tagCorrectionAgentEnabled: true,
 };
 
+function normalizeDoubleAuth(value: string | undefined): typeof initialSettings.doubleAuth {
+    const v = String(value || '').trim();
+    if (v === 'פעיל' || v === 'פעיל מייל') return 'פעיל מייל';
+    if (v === 'פעיל SMS') return 'פעיל SMS';
+    return 'לא פעיל';
+}
+
 function mergeUsageFromApi(
     prev: typeof initialSettings,
     data: ClientUsageSettingsDto,
 ): typeof initialSettings {
     return {
         ...prev,
-        doubleAuth: data.doubleAuth,
+        doubleAuth: normalizeDoubleAuth(data.doubleAuth),
         googleLogin: data.googleLogin,
         initialScreeningLevel: data.initialScreeningLevel,
         returnMonths: data.returnMonths,
@@ -243,7 +250,7 @@ const UsageSettingsTab: React.FC<{ clientId: string | null }> = ({ clientId }) =
                 <div className="bg-bg-card p-4 rounded-lg border border-border-default">
                     <h3 className="text-base font-bold mb-2">{t('company_settings.interface_settings')}</h3>
                     <div>
-                        <SettingRow label={t('company_settings.double_auth')} infoKey="2FA"><FormSelect name="doubleAuth" value={settings.doubleAuth} onChange={handleChange}><option>לא פעיל</option><option>פעיל</option></FormSelect></SettingRow>
+                        <SettingRow label={t('company_settings.double_auth')} infoKey="2FA"><FormSelect name="doubleAuth" value={normalizeDoubleAuth(settings.doubleAuth)} onChange={handleChange}><option value="לא פעיל">לא פעיל</option><option value="פעיל מייל">פעיל מייל</option><option value="פעיל SMS">פעיל SMS</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.google_login')} infoKey="google_sign_in"><FormSelect name="googleLogin" value={settings.googleLogin} onChange={handleChange}><option>פעיל</option><option>לא פעיל</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.initial_screening')}><FormSelect name="initialScreeningLevel" value={settings.initialScreeningLevel} onChange={handleChange}><option>טלפוני</option><option>פרונטלי</option></FormSelect></SettingRow>
                         <SettingRow label={t('company_settings.return_months')} infoKey="return_to_system"><FormInput name="returnMonths" value={settings.returnMonths} onChange={handleChange} type="number" /></SettingRow>

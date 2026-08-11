@@ -1,13 +1,11 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GoogleGenAI, Type } from '@google/genai';
 import { 
     CloudArrowUpIcon, DocumentTextIcon, UserIcon, ArrowRightIcon, 
     CheckCircleIcon, SparklesIcon
 } from './Icons';
 
-// Reuse helper for blob conversion
 const blobToBase64 = (blob: Blob): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -21,23 +19,56 @@ const blobToBase64 = (blob: Blob): Promise<string> => {
 };
 
 const loadingMessages = [
-    'קורא את קורות החיים...',
-    'מחלץ פרטים אישיים...',
-    'מנתח את הניסיון התעסוקתי...',
-    'מזהה מיומנויות וחוזקות...',
-    'בונה את הפרופיל שלך...'
+    'קורא את הקובץ...',
+    'מנתח ניסיון תעסוקתי...',
+    'מזהה כישורים ותגיות...',
+    'ממפה פרופיל תעשייתי...',
+    'בונה את הפרופיל הסופי...',
 ];
+
+const ACCEPTED_RESUME_TYPES = new Set([
+    'application/pdf',
+    'text/plain',
+    'application/msword',
+    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'image/png',
+    'image/jpeg',
+    'image/jpg',
+]);
+
+const ACCEPTED_RESUME_EXT = /\.(pdf|txt|doc|docx|png|jpe?g)$/i;
+
+const isAcceptedResumeFile = (file: File) =>
+    ACCEPTED_RESUME_TYPES.has(file.type) || ACCEPTED_RESUME_EXT.test(file.name);
+
+const authHeaders = (): Record<string, string> => {
+    const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+};
+
+const getLoggedInUserId = (): string | null => {
+    try {
+        const raw = localStorage.getItem('herouser') || localStorage.getItem('user');
+        if (!raw) return null;
+        const user = JSON.parse(raw);
+        const id = user?.id || user?.userId;
+        return id ? String(id) : null;
+    } catch {
+        return null;
+    }
+};
 
 const CandidateRegistrationWizard: React.FC = () => {
     const navigate = useNavigate();
+    const apiBase = import.meta.env.VITE_API_BASE || '';
     const [step, setStep] = useState<'choice' | 'upload' | 'processing' | 'success'>('choice');
     const [loadingMessage, setLoadingMessage] = useState(loadingMessages[0]);
+    const [uploadError, setUploadError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [dragActive, setDragActive] = useState(false);
 
-    // AI Processing Effect
     useEffect(() => {
-        let interval: ReturnType<typeof setInterval>;
+        let interval: ReturnType<typeof setInterval> | undefined;
         if (step === 'processing') {
             let msgIndex = 0;
             interval = setInterval(() => {
@@ -45,107 +76,95 @@ const CandidateRegistrationWizard: React.FC = () => {
                 setLoadingMessage(loadingMessages[msgIndex]);
             }, 1500);
         }
-        return () => clearInterval(interval);
+        return () => {
+            if (interval) clearInterval(interval);
+        };
     }, [step]);
 
     const processFile = async (file: File) => {
+        if (!isAcceptedResumeFile(file)) {
+            alert('קובץ לא נתמך. אפשר להעלות PDF, Word, TXT או תמונה (PNG/JPG).');
+            return;
+        }
+
+        if (!apiBase) {
+            alert('חסרה כתובת API. בדוק את ההגדרות.');
+            return;
+        }
+
+        const token = localStorage.getItem('token');
+        if (!token) {
+            alert('יש להירשם או להתחבר לפני העלאת קורות חיים.');
+            navigate('/candidate-portal/signup');
+            return;
+        }
+
+        setUploadError(null);
         setStep('processing');
-        
+
         try {
-            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            const base64Data = await blobToBase64(file);
-
-            const responseSchema = {
-                type: Type.OBJECT,
-                properties: {
-                    fullName: { type: Type.STRING },
-                    email: { type: Type.STRING },
-                    phone: { type: Type.STRING },
-                    location: { type: Type.STRING },
-                    title: { type: Type.STRING, description: "Infer current job title" },
-                    summary: { type: Type.STRING, description: "Professional summary in Hebrew" },
-                    skills: { type: Type.ARRAY, items: { type: Type.STRING } },
-                    workExperience: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                title: { type: Type.STRING },
-                                company: { type: Type.STRING },
-                                startDate: { type: Type.STRING },
-                                endDate: { type: Type.STRING },
-                                description: { type: Type.STRING }
-                            }
-                        }
-                    },
-                    education: {
-                        type: Type.ARRAY,
-                        items: {
-                            type: Type.OBJECT,
-                            properties: {
-                                degree: { type: Type.STRING },
-                                institution: { type: Type.STRING },
-                                year: { type: Type.STRING }
-                            }
-                        }
-                    },
-                    languages: {
-                        type: Type.ARRAY,
-                        items: {
-                             type: Type.OBJECT,
-                             properties: {
-                                 name: { type: Type.STRING },
-                                 level: { type: Type.STRING }
-                             }
-                        }
-                    }
-                },
-                required: ['fullName', 'email', 'title', 'summary']
+            const userId = getLoggedInUserId();
+            const payload: Record<string, unknown> = {
+                fileBase64: await blobToBase64(file),
+                sendWelcomeEmail: false,
+                profileName: 'פרופיל ראשי',
             };
+            if (file.type) payload.mimeType = file.type;
+            if (file.name) payload.fileName = file.name;
+            if (userId) payload.userId = userId;
 
-            const prompt = `Analyze this CV and extract structured data in Hebrew for a candidate profile. Infer missing fields where possible.`;
-
-            const response = await ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
-                contents: {
-                    parts: [
-                        { text: prompt },
-                        { inlineData: { mimeType: file.type, data: base64Data } }
-                    ]
-                },
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: responseSchema,
-                },
+            const response = await fetch(`${apiBase}/api/candidates/ai`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify(payload),
             });
+            const json = await response.json().catch(() => ({}));
 
-            const parsedData = JSON.parse(response.text);
-            
-            // Artificial delay to show success state
+            if (!response.ok) {
+                throw new Error(json.message || 'שגיאה בעיבוד קורות החיים.');
+            }
+
+            const candidate = json.candidate || json;
+            if (!candidate?.id) {
+                throw new Error('השרת לא החזיר מזהה מועמד.');
+            }
+
+            if (userId && String(candidate.userId || '') !== userId) {
+                await fetch(`${apiBase}/api/candidates/${candidate.id}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify({ userId, profileName: 'פרופיל ראשי' }),
+                }).catch((linkErr) => {
+                    console.warn('Failed to link candidate to portal user', linkErr);
+                });
+            }
+
             setStep('success');
             setTimeout(() => {
-                navigate('/candidate-portal/profile', { state: { candidateData: parsedData, isNewUser: true } });
+                navigate('/candidate-portal/profile');
             }, 1500);
-
-        } catch (error) {
-            console.error("Parsing failed", error);
-            alert("אירעה שגיאה בעיבוד הקובץ. אנא נסה שנית או עבור להרשמה ידנית.");
-            setStep('choice');
+        } catch (error: unknown) {
+            console.error('Resume upload failed', error);
+            const message = error instanceof Error ? error.message : 'אירעה שגיאה בעיבוד הקובץ.';
+            setUploadError(message);
+            alert(`${message}\n\nאפשר לנסות שוב או לעבור להרשמה ידנית.`);
+            setStep('upload');
+        } finally {
+            if (fileInputRef.current) fileInputRef.current.value = '';
         }
     };
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            processFile(e.target.files[0]);
-        }
+        const file = e.target.files?.[0];
+        if (file) void processFile(file);
     };
 
     const handleDrag = (e: React.DragEvent) => {
         e.preventDefault();
         e.stopPropagation();
-        if (e.type === "dragenter" || e.type === "dragover") {
+        if (e.type === 'dragenter' || e.type === 'dragover') {
             setDragActive(true);
-        } else if (e.type === "dragleave") {
+        } else if (e.type === 'dragleave') {
             setDragActive(false);
         }
     };
@@ -155,17 +174,10 @@ const CandidateRegistrationWizard: React.FC = () => {
         e.stopPropagation();
         setDragActive(false);
         const file = e.dataTransfer.files[0];
-        if (file) {
-             if (file.type === 'application/pdf' || file.type === 'text/plain') {
-                processFile(file);
-             } else {
-                 alert("קובץ לא נתמך. אנא העלה קובץ PDF או TXT.");
-             }
-        }
+        if (file) void processFile(file);
     };
 
     const handleManualEntry = () => {
-        // Redirect to the new Chat Onboarding instead of the profile
         navigate('/candidate-portal/onboarding');
     };
 
@@ -173,11 +185,10 @@ const CandidateRegistrationWizard: React.FC = () => {
         <div className="min-h-screen bg-bg-default flex flex-col items-center justify-center p-4">
             
             <div className="bg-bg-card w-full max-w-3xl rounded-3xl shadow-2xl border border-border-default overflow-hidden relative min-h-[500px] flex flex-col">
-                {/* Header */}
                 <div className="p-6 border-b border-border-default flex justify-between items-center bg-bg-subtle/30">
                     <h1 className="text-2xl font-bold text-text-default">יצירת פרופיל מועמד</h1>
                     {step !== 'choice' && step !== 'success' && (
-                        <button onClick={() => setStep('choice')} className="text-sm font-medium text-text-muted hover:text-primary-600 flex items-center gap-1">
+                        <button onClick={() => { setUploadError(null); setStep('choice'); }} className="text-sm font-medium text-text-muted hover:text-primary-600 flex items-center gap-1">
                             <ArrowRightIcon className="w-4 h-4" /> חזרה
                         </button>
                     )}
@@ -185,7 +196,6 @@ const CandidateRegistrationWizard: React.FC = () => {
 
                 <div className="flex-1 p-8 flex flex-col items-center justify-center relative">
                     
-                    {/* Step 1: Choice */}
                     {step === 'choice' && (
                         <>
                             <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-6 animate-fade-in mb-8">
@@ -232,7 +242,6 @@ const CandidateRegistrationWizard: React.FC = () => {
                         </>
                     )}
 
-                    {/* Step 2: Upload */}
                     {step === 'upload' && (
                         <div className="w-full max-w-lg animate-fade-in">
                             <div 
@@ -250,16 +259,22 @@ const CandidateRegistrationWizard: React.FC = () => {
                                     <DocumentTextIcon className="w-12 h-12" />
                                 </div>
                                 <h3 className="text-xl font-bold text-text-default mb-2">גרור קובץ לכאן</h3>
-                                <p className="text-text-muted mb-8">או לחץ לבחירה מהמחשב (PDF, TXT)</p>
+                                <p className="text-text-muted mb-4">או לחץ לבחירה מהמחשב</p>
+                                <p className="text-xs text-text-subtle mb-6">PDF, Word, TXT, PNG, JPG</p>
+
+                                {uploadError && (
+                                    <p className="text-sm text-red-600 mb-4">{uploadError}</p>
+                                )}
                                 
                                 <input 
                                     ref={fileInputRef}
                                     type="file" 
-                                    accept=".pdf,.txt"
+                                    accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                                     className="hidden"
                                     onChange={handleFileSelect}
                                 />
                                 <button 
+                                    type="button"
                                     onClick={() => fileInputRef.current?.click()}
                                     className="bg-primary-600 text-white font-bold py-3 px-8 rounded-xl hover:bg-primary-700 transition shadow-lg shadow-primary-500/30"
                                 >
@@ -269,7 +284,6 @@ const CandidateRegistrationWizard: React.FC = () => {
                         </div>
                     )}
 
-                    {/* Step 3: Processing */}
                     {step === 'processing' && (
                         <div className="text-center animate-fade-in">
                             <div className="relative w-32 h-32 mx-auto mb-8">
@@ -282,7 +296,6 @@ const CandidateRegistrationWizard: React.FC = () => {
                         </div>
                     )}
 
-                    {/* Step 4: Success */}
                     {step === 'success' && (
                         <div className="text-center animate-fade-in">
                             <div className="w-24 h-24 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-6 shadow-inner">

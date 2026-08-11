@@ -8,19 +8,25 @@ import {
     EnvelopeIcon,
     ChatBubbleBottomCenterTextIcon,
     WhatsappIcon,
+    PaperClipIcon,
+    XMarkIcon,
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
+import { authHeaders } from '../utils/authHeaders';
 import {
     fetchClientMessageTemplates,
     createClientMessageTemplate,
     updateClientMessageTemplate,
     deleteClientMessageTemplate,
+    uploadClientMessageTemplateAttachment,
     type MessageTemplateDto,
 } from '../services/messageTemplatesApi';
 import { messageTemplateParameters } from '../services/messageTemplatePlaceholders';
 
 export { messageTemplateParameters };
+
+const ADMIN_MESSAGE_TEMPLATES_CLIENT_KEY = 'hiro.admin.messageTemplates.clientId';
 interface Template {
     id: string;
     templateKey: string | null;
@@ -31,6 +37,10 @@ interface Template {
     updatedBy: string;
     channels: ('email' | 'sms' | 'whatsapp')[];
     isSystem: boolean;
+    attachmentUrl?: string | null;
+    attachmentFileName?: string | null;
+    attachmentContentType?: string | null;
+    attachmentFileSize?: number | null;
 }
 
 function dtoToTemplate(row: MessageTemplateDto): Template {
@@ -44,6 +54,10 @@ function dtoToTemplate(row: MessageTemplateDto): Template {
         updatedBy: row.updatedBy,
         channels: row.channels?.length ? row.channels : ['email'],
         isSystem: row.isSystem,
+        attachmentUrl: row.attachmentUrl ?? null,
+        attachmentFileName: row.attachmentFileName ?? null,
+        attachmentContentType: row.attachmentContentType ?? null,
+        attachmentFileSize: row.attachmentFileSize ?? null,
     };
 }
 
@@ -56,10 +70,19 @@ export function formatMessageTemplateDisplayDate(iso: string | null): string {
     }
 }
 
+const formatAttachmentSize = (bytes: number | null | undefined) => {
+    if (!bytes || bytes <= 0) return '';
+    if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
 // --- SUB-COMPONENTS ---
 const TemplateForm: React.FC<{
     template: Partial<Template> | null;
-    onSave: (template: Partial<Template>) => void | Promise<void>;
+    onSave: (
+        template: Partial<Template>,
+        opts?: { pendingFile?: File | null; removeAttachment?: boolean },
+    ) => void | Promise<void>;
     onCancel: () => void;
     saving?: boolean;
 }> = ({ template, onSave, onCancel, saving }) => {
@@ -68,9 +91,15 @@ const TemplateForm: React.FC<{
         template || { name: '', subject: '', content: '', channels: ['email'] },
     );
     const contentRef = useRef<HTMLTextAreaElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+    const [pendingFile, setPendingFile] = useState<File | null>(null);
+    const [removeAttachment, setRemoveAttachment] = useState(false);
 
     useEffect(() => {
         setFormData(template || { name: '', subject: '', content: '', channels: ['email'] });
+        setPendingFile(null);
+        setRemoveAttachment(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
     }, [template]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -106,8 +135,24 @@ const TemplateForm: React.FC<{
         e.preventDefault();
         const len = formData.content?.length ?? 0;
         if (len > 5000) return;
-        await onSave(formData);
+        await onSave(formData, { pendingFile, removeAttachment });
     };
+
+    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0] || null;
+        if (!file) return;
+        if (file.size > 15 * 1024 * 1024) {
+            window.alert('גודל הקובץ המקסימלי הוא 15MB');
+            e.target.value = '';
+            return;
+        }
+        setPendingFile(file);
+        setRemoveAttachment(false);
+    };
+
+    const hasExistingAttachment = Boolean(formData.attachmentUrl && !removeAttachment);
+    const displayAttachmentName = pendingFile?.name || formData.attachmentFileName || 'קובץ מצורף';
+    const displayAttachmentSize = pendingFile?.size ?? formData.attachmentFileSize ?? null;
 
     return (
         <form onSubmit={handleSubmit} className="space-y-6">
@@ -177,6 +222,53 @@ const TemplateForm: React.FC<{
                         {formData.content?.length || 0} / 5000
                     </div>
                 </div>
+                <div>
+                    <label className="block text-sm font-semibold text-text-muted mb-1.5">{t('templates.field_attachment')}</label>
+                    <p className="text-xs text-text-subtle mb-2">{t('templates.attachment_hint')}</p>
+                    {(hasExistingAttachment || pendingFile) && (
+                        <div className="flex items-center justify-between gap-3 p-3 mb-3 rounded-lg border border-border-default bg-bg-subtle">
+                            <div className="flex items-center gap-2 min-w-0">
+                                <PaperClipIcon className="w-4 h-4 text-primary-600 flex-shrink-0" />
+                                {hasExistingAttachment && formData.attachmentUrl && !pendingFile ? (
+                                    <a
+                                        href={formData.attachmentUrl}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="text-sm font-medium text-primary-700 hover:underline truncate"
+                                    >
+                                        {displayAttachmentName}
+                                    </a>
+                                ) : (
+                                    <span className="text-sm font-medium text-text-default truncate">{displayAttachmentName}</span>
+                                )}
+                                {displayAttachmentSize ? (
+                                    <span className="text-xs text-text-muted flex-shrink-0">
+                                        ({formatAttachmentSize(displayAttachmentSize)})
+                                    </span>
+                                ) : null}
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setPendingFile(null);
+                                    setRemoveAttachment(true);
+                                    if (fileInputRef.current) fileInputRef.current.value = '';
+                                }}
+                                className="p-1.5 rounded-full hover:bg-bg-hover text-text-muted hover:text-red-600 flex-shrink-0"
+                                title={t('templates.remove_attachment')}
+                            >
+                                <XMarkIcon className="w-4 h-4" />
+                            </button>
+                        </div>
+                    )}
+                    <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.gif,.webp,.txt,.csv,.zip"
+                        onChange={handleFileChange}
+                        className="block w-full text-sm text-text-muted file:mr-3 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-primary-50 file:text-primary-700 file:font-semibold hover:file:bg-primary-100"
+                    />
+                </div>
             </div>
 
             <div className="bg-bg-card border border-border-default rounded-lg p-6">
@@ -218,6 +310,16 @@ const TemplateForm: React.FC<{
 const MessageTemplatesView: React.FC = () => {
     const { t } = useLanguage();
     const { user, ready: authReady } = useAuth();
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const ownClientId = user?.clientId?.trim() || null;
+    const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+
+    const [adminClientId, setAdminClientId] = useState<string | null>(() => {
+        if (typeof sessionStorage === 'undefined') return null;
+        return sessionStorage.getItem(ADMIN_MESSAGE_TEMPLATES_CLIENT_KEY);
+    });
+    const [clientOptions, setClientOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [clientsLoading, setClientsLoading] = useState(false);
     const [view, setView] = useState<'list' | 'form'>('list');
     const [activeTab, setActiveTab] = useState<'saved' | 'system'>('saved');
     const [templates, setTemplates] = useState<Template[]>([]);
@@ -227,16 +329,78 @@ const MessageTemplatesView: React.FC = () => {
     const [saving, setSaving] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
 
+    const clientId = isPlatformAdmin ? adminClientId : ownClientId;
+
+    const handleAdminClientChange = useCallback((val: string) => {
+        const id = val || null;
+        setAdminClientId(id);
+        setView('list');
+        setEditingTemplate(null);
+        if (typeof sessionStorage !== 'undefined') {
+            if (id) sessionStorage.setItem(ADMIN_MESSAGE_TEMPLATES_CLIENT_KEY, id);
+            else sessionStorage.removeItem(ADMIN_MESSAGE_TEMPLATES_CLIENT_KEY);
+        }
+    }, []);
+
+    useEffect(() => {
+        if (!isPlatformAdmin || !apiBase) {
+            setClientOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setClientsLoading(true);
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            headers: authHeaders(true),
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : ((rows as { data?: unknown })?.data ?? []);
+                const opts = (Array.isArray(list) ? list : [])
+                    .map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        label: String(c.displayName || c.name || '').trim(),
+                    }))
+                    .filter((o) => o.id && o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setClientOptions(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setClientOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setClientsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, isPlatformAdmin]);
+
+    useEffect(() => {
+        if (!isPlatformAdmin || adminClientId || !clientOptions.length) return;
+        const saved =
+            typeof sessionStorage !== 'undefined'
+                ? sessionStorage.getItem(ADMIN_MESSAGE_TEMPLATES_CLIENT_KEY)
+                : null;
+        const savedValid = saved && clientOptions.some((o) => o.id === saved);
+        handleAdminClientChange(savedValid ? saved! : clientOptions[0].id);
+    }, [isPlatformAdmin, adminClientId, clientOptions, handleAdminClientChange]);
+
     const reload = useCallback(async () => {
         setLoadError(null);
         setLoading(true);
         try {
-            if (!user?.clientId) {
+            if (!clientId) {
                 setTemplates([]);
-                setLoadError('אין הקשר חברה — התבניות שייכות לחשבון חברה. לתבניות מערכת השתמש בניהול מערכת.');
+                setLoadError(
+                    isPlatformAdmin
+                        ? 'בחר לקוח מהרשימה כדי לצפות ולנהל תבניות הודעה.'
+                        : 'אין הקשר חברה — התבניות שייכות לחשבון חברה. לתבניות מערכת השתמש בניהול מערכת.',
+                );
                 return;
             }
-            const rows = await fetchClientMessageTemplates();
+            const rows = await fetchClientMessageTemplates(isPlatformAdmin ? clientId : undefined);
             setTemplates(rows.map(dtoToTemplate));
         } catch (e) {
             setLoadError(e instanceof Error ? e.message : 'שגיאת טעינה');
@@ -244,7 +408,7 @@ const MessageTemplatesView: React.FC = () => {
         } finally {
             setLoading(false);
         }
-    }, [user?.clientId]);
+    }, [clientId, isPlatformAdmin]);
 
     useEffect(() => {
         if (!authReady) return;
@@ -269,6 +433,10 @@ const MessageTemplatesView: React.FC = () => {
     };
 
     const handleCreate = () => {
+        if (!clientId) {
+            window.alert(isPlatformAdmin ? 'יש לבחור לקוח לפני יצירת תבנית' : 'אין הקשר חברה');
+            return;
+        }
         setEditingTemplate(null);
         setView('form');
     };
@@ -276,27 +444,53 @@ const MessageTemplatesView: React.FC = () => {
     const handleDelete = async (id: string) => {
         if (!window.confirm('האם למחוק את התבנית?')) return;
         try {
-            await deleteClientMessageTemplate(id);
+            await deleteClientMessageTemplate(id, isPlatformAdmin ? clientId : undefined);
             await reload();
         } catch (e) {
             window.alert(e instanceof Error ? e.message : 'מחיקה נכשלה');
         }
     };
 
-    const handleSave = async (templateData: Partial<Template>) => {
+    const handleSave = async (
+        templateData: Partial<Template>,
+        opts?: { pendingFile?: File | null; removeAttachment?: boolean },
+    ) => {
+        if (!clientId) {
+            window.alert(isPlatformAdmin ? 'יש לבחור לקוח לפני שמירת תבנית' : 'אין הקשר חברה');
+            return;
+        }
         setSaving(true);
         try {
+            const scopeClientId = isPlatformAdmin ? clientId : undefined;
             const payload = {
                 name: templateData.name ?? '',
                 subject: templateData.subject ?? '',
                 content: templateData.content ?? '',
                 channels: templateData.channels,
             };
+            let row: MessageTemplateDto;
             if (templateData.id) {
-                const row = await updateClientMessageTemplate(templateData.id, payload);
+                row = await updateClientMessageTemplate(
+                    templateData.id,
+                    {
+                        ...payload,
+                        ...(opts?.removeAttachment ? { clearAttachment: true } : {}),
+                    },
+                    scopeClientId,
+                );
+                if (opts?.pendingFile) {
+                    row = await uploadClientMessageTemplateAttachment(
+                        templateData.id,
+                        opts.pendingFile,
+                        scopeClientId,
+                    );
+                }
                 setTemplates((prev) => prev.map((x) => (x.id === row.id ? dtoToTemplate(row) : x)));
             } else {
-                const row = await createClientMessageTemplate(payload);
+                row = await createClientMessageTemplate(payload, scopeClientId);
+                if (opts?.pendingFile) {
+                    row = await uploadClientMessageTemplateAttachment(row.id, opts.pendingFile, scopeClientId);
+                }
                 setTemplates((prev) => [dtoToTemplate(row), ...prev]);
             }
             setView('list');
@@ -307,7 +501,7 @@ const MessageTemplatesView: React.FC = () => {
         }
     };
 
-    if (!authReady || (loading && templates.length === 0 && !loadError)) {
+    if (!authReady || (loading && templates.length === 0 && !loadError && (!isPlatformAdmin || !!clientId))) {
         return (
             <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-6 items-center justify-center text-text-muted min-h-[240px]">
                 טוען…
@@ -315,21 +509,37 @@ const MessageTemplatesView: React.FC = () => {
         );
     }
 
-    if (loadError && !user?.clientId) {
+    if (!isPlatformAdmin && loadError && !ownClientId) {
         return (
             <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-6 text-text-default">
                 <p className="text-text-muted mb-4">{loadError}</p>
-                {user && ['super_admin', 'admin'].includes(user.role || '') && (
-                    <p className="text-sm text-text-subtle">
-                        ניתן לערוך תבניות Hiro תחת: ניהול מערכת ← ניהול מערכת (הגדרות) ← תבניות הודעה.
-                    </p>
-                )}
             </div>
         );
     }
 
     return (
         <div className="bg-bg-card rounded-2xl shadow-sm h-full flex flex-col p-4 sm:p-6">
+            {isPlatformAdmin ? (
+                <div className="mb-4 flex items-center gap-3 flex-wrap">
+                    <label className="text-sm font-semibold text-text-muted whitespace-nowrap">לקוח:</label>
+                    <select
+                        value={adminClientId ?? ''}
+                        disabled={clientsLoading}
+                        onChange={(e) => handleAdminClientChange(e.target.value)}
+                        className="bg-bg-input border border-border-default text-sm rounded-md p-2 min-w-[220px] disabled:opacity-50"
+                    >
+                        <option value="">— בחר לקוח —</option>
+                        {clientOptions.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                                {opt.label}
+                            </option>
+                        ))}
+                    </select>
+                    {clientsLoading ? (
+                        <span className="text-xs text-text-muted">טוען לקוחות...</span>
+                    ) : null}
+                </div>
+            ) : null}
             {loadError && (
                 <div className="mb-3 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{loadError}</div>
             )}
@@ -367,7 +577,8 @@ const MessageTemplatesView: React.FC = () => {
                         <button
                             type="button"
                             onClick={handleCreate}
-                            className="w-full md:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm"
+                            disabled={!clientId}
+                            className="w-full md:w-auto flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm disabled:opacity-50"
                         >
                             <PlusIcon className="w-5 h-5" />
                             <span>{t('templates.new_template')}</span>
@@ -394,6 +605,7 @@ const MessageTemplatesView: React.FC = () => {
                                     <tr>
                                         <th className="p-4">{t('templates.col_name')}</th>
                                         <th className="p-4">{t('templates.col_content')}</th>
+                                        <th className="p-4">{t('templates.col_attachment')}</th>
                                         <th className="p-4">{t('templates.col_last_updated')}</th>
                                         <th className="p-4">{t('templates.col_updated_by')}</th>
                                         <th className="p-4">{t('templates.col_actions')}</th>
@@ -405,6 +617,22 @@ const MessageTemplatesView: React.FC = () => {
                                             <td className="p-4 font-semibold text-primary-700">{tpl.name}</td>
                                             <td className="p-4 text-text-muted max-w-sm truncate" title={tpl.content}>
                                                 {tpl.content}
+                                            </td>
+                                            <td className="p-4 text-text-muted">
+                                                {tpl.attachmentFileName ? (
+                                                    <a
+                                                        href={tpl.attachmentUrl || '#'}
+                                                        target="_blank"
+                                                        rel="noopener noreferrer"
+                                                        className="inline-flex items-center gap-1 text-primary-700 hover:underline max-w-[180px] truncate"
+                                                        title={tpl.attachmentFileName}
+                                                    >
+                                                        <PaperClipIcon className="w-4 h-4 flex-shrink-0" />
+                                                        <span className="truncate">{tpl.attachmentFileName}</span>
+                                                    </a>
+                                                ) : (
+                                                    '—'
+                                                )}
                                             </td>
                                             <td className="p-4 text-text-muted">{formatMessageTemplateDisplayDate(tpl.lastUpdated)}</td>
                                             <td className="p-4 text-text-muted">{tpl.updatedBy || '—'}</td>

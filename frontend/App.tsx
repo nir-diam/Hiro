@@ -40,7 +40,7 @@ const AppContent: React.FC = () => {
     const {
         isPreferencesOpen, openPreferences, closePreferences,
         isNewTaskOpen, openNewTask, closeNewTask,
-        isSummaryDrawerOpen, summaryCandidate, openSummaryDrawer, closeSummaryDrawer,
+        isSummaryDrawerOpen, summaryCandidate, summaryDrawerOptions, openSummaryDrawer, closeSummaryDrawer,
         isSidebarOpen, toggleSidebar,
         isMessageModalOpen, messageModalConfig, openMessageModal, closeMessageModal,
         isJobAlertModalOpen, jobAlertModalConfig, openJobAlertModal, closeJobAlertModal,
@@ -221,8 +221,7 @@ const AppContent: React.FC = () => {
         return (
             <div className="h-screen w-screen overflow-hidden bg-bg-default text-text-default" dir="rtl">
                 <div className="h-full w-full overflow-y-auto">
-                    <PromptProvider>
-                        <AppRoutes
+                    <AppRoutes
                             openSummaryDrawer={openSummaryDrawer}
                             handleSaveJob={handleSaveJob}
                             handleSaveClient={handleSaveClient}
@@ -244,7 +243,6 @@ const AppContent: React.FC = () => {
                             favorites={favorites}
                             toggleFavorite={toggleFavorite}
                         />
-                    </PromptProvider>
                 </div>
                 {isMessageModalOpen && messageModalConfig && (
                     <SendMessageModal
@@ -257,6 +255,9 @@ const AppContent: React.FC = () => {
                         candidateId={messageModalConfig.candidateId}
                         recipientOptions={messageModalConfig.recipientOptions}
                         initialRecipientIds={messageModalConfig.initialRecipientIds}
+                        linkedClientId={messageModalConfig.linkedClientId}
+                        linkedOrganizationId={messageModalConfig.linkedOrganizationId}
+                        linkedContactId={messageModalConfig.linkedContactId}
                     />
                 )}
             </div>
@@ -324,6 +325,8 @@ const AppContent: React.FC = () => {
                     isOpen={isSummaryDrawerOpen}
                     onClose={closeSummaryDrawer}
                     candidate={summaryCandidate}
+                    initialTab={summaryDrawerOptions?.initialTab}
+                    initialManageLinkId={summaryDrawerOptions?.manageLinkId}
                     onViewFullProfile={handleViewFullProfileFromDrawer}
                     onOpenMessageModal={openMessageModal}
                     onOpenNewTask={openNewTask}
@@ -341,9 +344,12 @@ const AppContent: React.FC = () => {
                         candidateId={messageModalConfig.candidateId}
                         recipientOptions={messageModalConfig.recipientOptions}
                         initialRecipientIds={messageModalConfig.initialRecipientIds}
+                        linkedClientId={messageModalConfig.linkedClientId}
+                        linkedOrganizationId={messageModalConfig.linkedOrganizationId}
+                        linkedContactId={messageModalConfig.linkedContactId}
                     />
                 )}
-                <CreateJobAlertModal 
+                <CreateJobAlertModal
                     isOpen={isJobAlertModalOpen}
                     onClose={closeJobAlertModal}
                     onSave={handleSaveAlert}

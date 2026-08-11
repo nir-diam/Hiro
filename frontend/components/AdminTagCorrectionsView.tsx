@@ -18,10 +18,22 @@ import {
     resolveTagAiDecisions,
     saveTagCorrectionAgentEnabled,
     approveTagAiDecision,
+    updateTagAiDecisionComments,
     type TagAiDecisionDto,
+    type TagManualApprovalStatus,
 } from '../services/tagCorrectionsApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import DateRangeSelector, { type DateRange } from './DateRangeSelector';
+
+function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: string } {
+    if (!range?.from && !range?.to) return {};
+    return {
+        ...(range.from ? { dateFrom: range.from } : {}),
+        ...(range.to ? { dateTo: range.to } : {}),
+    };
+}
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
+import DebouncedCommentsTextarea from './DebouncedCommentsTextarea';
 
 const TAG_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -214,8 +226,9 @@ const AdminTagCorrectionsView: React.FC = () => {
     const [aiDecisions, setAiDecisions] = useState<TagAiDecisionDto[]>([]);
     const [aiDecisionsLoading, setAiDecisionsLoading] = useState(false);
     const [statusMessage, setStatusMessage] = useState('');
+    const pageSizeOptions = [50, 100, 200, 500, 1000, 10000] as const;
     const [page, setPage] = useState(1);
-    const [pageSize] = useState(25);
+    const [pageSize, setPageSize] = useState(50);
     const [listTotal, setListTotal] = useState(0);
     const [listTotalPages, setListTotalPages] = useState(1);
     const [listLoading, setListLoading] = useState(false);
@@ -235,15 +248,15 @@ const AdminTagCorrectionsView: React.FC = () => {
     const [aiFilterDecision, setAiFilterDecision] = useState<string[]>(['all']);
     const [aiFilterHesitation, setAiFilterHesitation] = useState<string[]>(['all']);
     const [aiFilterStatus, setAiFilterStatus] = useState<string[]>(['all']);
-    const [aiFilterDate, setAiFilterDate] = useState('');
+    const [aiFilterDateRange, setAiFilterDateRange] = useState<DateRange | null>(null);
     const [aiSortOrder, setAiSortOrder] = useState<'asc' | 'desc'>('desc');
     const [aiSearchTerm, setAiSearchTerm] = useState('');
     const [aiDebouncedSearch, setAiDebouncedSearch] = useState('');
     const [aiFilterType, setAiFilterType] = useState('all');
     const [aiMinOccurrences, setAiMinOccurrences] = useState(1);
     const [aiReviewStatus, setAiReviewStatus] = useState<'pending_review' | 'approved' | 'overridden' | 'manual_queue' | 'all'>('all');
-    const [aiApprovalFilter, setAiApprovalFilter] = useState<'all' | 'pending' | 'approved'>('pending');
-    const aiPageSize = 25;
+    const [aiApprovalFilter, setAiApprovalFilter] = useState<'all' | TagManualApprovalStatus>('pending');
+    const [aiPageSize, setAiPageSize] = useState(50);
     const [aiPage, setAiPage] = useState(1);
     const [aiServerTotal, setAiServerTotal] = useState(0);
     const [aiServerTotalPages, setAiServerTotalPages] = useState(1);
@@ -267,8 +280,8 @@ const AdminTagCorrectionsView: React.FC = () => {
     // Optimistic local state for rows sent to manual queue (grayed-out with undo)
     const [manualQueuedDecisions, setManualQueuedDecisions] = useState<Map<string, Date>>(new Map());
 
-    // Optimistic local approval state (id → 'pending' | 'approved')
-    const [localApprovalStatus, setLocalApprovalStatus] = useState<Map<string, 'pending' | 'approved'>>(new Map());
+    // Optimistic local approval state (id → pending | approved | agent_approved)
+    const [localApprovalStatus, setLocalApprovalStatus] = useState<Map<string, TagManualApprovalStatus>>(new Map());
 
     // Blacklist tab state
     const [blacklistDecisions, setBlacklistDecisions] = useState<TagAiDecisionDto[]>([]);
@@ -382,7 +395,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                 page: aiPage,
                 limit: aiPageSize,
                 decision: decisionFilter,
-                date: aiFilterDate,
+                ...dateRangeQuery(aiFilterDateRange),
                 sortOrder: aiSortOrder,
                 reviewStatus: aiReviewStatus,
                 autoBackfill: isAgentOn && aiReviewStatus === 'pending_review' && aiPage === 1,
@@ -409,7 +422,7 @@ const AdminTagCorrectionsView: React.FC = () => {
         } finally {
             setAiDecisionsLoading(false);
         }
-    }, [apiBase, aiPage, aiPageSize, aiFilterDecision, aiFilterDate, aiSortOrder, aiReviewStatus, isAgentOn, aiDebouncedSearch, aiFilterType, aiFilterHesitation, aiFilterStatus, aiApprovalFilter]);
+    }, [apiBase, aiPage, aiPageSize, aiFilterDecision, aiFilterDateRange, aiSortOrder, aiReviewStatus, isAgentOn, aiDebouncedSearch, aiFilterType, aiFilterHesitation, aiFilterStatus, aiApprovalFilter]);
 
     const loadBlacklistDecisions = useCallback(async () => {
         setBlacklistLoading(true);
@@ -455,7 +468,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                     page,
                     limit: pageLimit,
                     decision: decisionFilter,
-                    date: aiFilterDate,
+                    ...dateRangeQuery(aiFilterDateRange),
                     sortOrder: aiSortOrder,
                     reviewStatus: aiReviewStatus,
                     autoBackfill: false,
@@ -491,11 +504,20 @@ const AdminTagCorrectionsView: React.FC = () => {
                     { key: 'aiSuggestedTarget', label: 'יעד מוצע', getValue: (r) => r.aiSuggestedTarget || '' },
                     { key: 'hesitationLevel', label: 'התלבטות', getValue: (r) => r.hesitationLevel ?? '' },
                     { key: 'reviewStatus', label: 'סטטוס ביקורת' },
-                    { key: 'manualApprovalStatus', label: 'אישור ידני', getValue: (r) => (r.manualApprovalStatus === 'approved' ? 'אושר' : 'ממתין') },
+                    {
+                        key: 'manualApprovalStatus',
+                        label: 'אישור ידני',
+                        getValue: (r) => (
+                            r.manualApprovalStatus === 'approved' ? 'אושר ידנית'
+                            : r.manualApprovalStatus === 'agent_approved' ? 'אושר ע"י סוכן'
+                            : 'ממתין לאישור'
+                        ),
+                    },
                     { key: 'actionDate', label: 'תאריך', getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : '') },
                     { key: 'aiReasoning', label: 'נימוק AI', getValue: (r) => r.aiReasoning || '' },
                     { key: 'dilemmaReasoning', label: 'נימוק התלבטות', getValue: (r) => r.dilemmaReasoning || '' },
                     { key: 'contextSample', label: 'הקשר', getValue: (r) => r.contextSample || '' },
+                    { key: 'comments', label: 'הערות', getValue: (r) => r.comments || '' },
                 ],
                 `tag_ai_decisions_${stamp}.xlsx`,
             );
@@ -510,7 +532,7 @@ const AdminTagCorrectionsView: React.FC = () => {
         apiBase,
         exportingExcel,
         aiFilterDecision,
-        aiFilterDate,
+        aiFilterDateRange,
         aiSortOrder,
         aiReviewStatus,
         aiDebouncedSearch,
@@ -530,7 +552,7 @@ const AdminTagCorrectionsView: React.FC = () => {
         const timer = setTimeout(() => setAiDebouncedSearch(aiSearchTerm.trim()), 350);
         return () => clearTimeout(timer);
     }, [aiSearchTerm]);
-    useEffect(() => { setAiPage(1); }, [aiDebouncedSearch, aiFilterType, aiFilterDecision, aiFilterHesitation, aiFilterStatus, aiFilterDate, aiReviewStatus, aiMinOccurrences, aiApprovalFilter]);
+    useEffect(() => { setAiPage(1); }, [aiDebouncedSearch, aiFilterType, aiFilterDecision, aiFilterHesitation, aiFilterStatus, aiFilterDateRange, aiReviewStatus, aiMinOccurrences, aiApprovalFilter]);
 
     const loadUnmatched = useCallback(async () => {
         if (!apiBase) return;
@@ -730,27 +752,31 @@ const AdminTagCorrectionsView: React.FC = () => {
         }
     };
 
-    const handleBulkAction = async (action: 'merge' | 'create' | 'delete' | 'approve' | 'pending') => {
+    const handleBulkAction = async (action: 'merge' | 'create' | 'delete' | 'approve' | 'agent_approve' | 'pending') => {
         if (selectedDecisions.size === 0) return;
         let msg = '';
         if (action === 'merge')   msg = `האם לשנות פעולה למיזוג עבור ${selectedDecisions.size} התגיות הנבחרות?`;
         if (action === 'create')  msg = `האם לשנות פעולה ליצירת תגית חדשה עבור ${selectedDecisions.size} התגיות הנבחרות?`;
         if (action === 'delete')  msg = `האם למחוק ${selectedDecisions.size} תגיות נבחרות?`;
         if (action === 'approve') msg = `האם לסמן ${selectedDecisions.size} תגיות כ"אושר ידנית"?`;
+        if (action === 'agent_approve') msg = `האם לסמן ${selectedDecisions.size} תגיות כ"אושר ע"י סוכן"?`;
         if (action === 'pending') msg = `האם לאפס ${selectedDecisions.size} תגיות ל"ממתין לאישור"?`;
         if (!window.confirm(msg)) return;
 
-        if (action === 'approve' || action === 'pending') {
-            const newStatus = action === 'approve' ? 'approved' : 'pending';
+        if (action === 'approve' || action === 'agent_approve' || action === 'pending') {
+            const newStatus: TagManualApprovalStatus =
+                action === 'approve' ? 'approved'
+                : action === 'agent_approve' ? 'agent_approved'
+                : 'pending';
             const ids = Array.from(selectedDecisions);
             // Optimistic UI
             setLocalApprovalStatus(prev => {
                 const next = new Map(prev);
-                ids.forEach(id => next.set(id, newStatus as 'approved' | 'pending'));
+                ids.forEach(id => next.set(id, newStatus));
                 return next;
             });
             try {
-                await Promise.all(ids.map(id => approveTagAiDecision(id, newStatus as 'approved' | 'pending')));
+                await Promise.all(ids.map(id => approveTagAiDecision(id, newStatus)));
                 setSelectedDecisions(new Set());
                 setIsMultiSelectMode(false);
                 flashStatus(`${ids.length} תגיות עודכנו בהצלחה.`);
@@ -777,18 +803,18 @@ const AdminTagCorrectionsView: React.FC = () => {
         }
     };
 
-    const handleTagApprove = async (decisionId: string, currentStatus: 'pending' | 'approved') => {
-        const newStatus = currentStatus === 'approved' ? 'pending' : 'approved';
+    const handleTagApprove = async (decisionId: string, newStatus: TagManualApprovalStatus, previousStatus: TagManualApprovalStatus) => {
+        if (newStatus === previousStatus) return;
         setLocalApprovalStatus(prev => new Map(prev).set(decisionId, newStatus));
         try {
             await approveTagAiDecision(decisionId, newStatus);
-            if (aiApprovalFilter !== 'all') {
+            if (aiApprovalFilter !== 'all' && aiApprovalFilter !== newStatus) {
                 // Row no longer matches filter — reload
                 void loadAiDecisions();
             }
         } catch (err) {
             // Rollback optimistic update
-            setLocalApprovalStatus(prev => new Map(prev).set(decisionId, currentStatus));
+            setLocalApprovalStatus(prev => new Map(prev).set(decisionId, previousStatus));
             flashStatus(err instanceof Error ? err.message : 'שגיאה בעדכון אישור');
         }
     };
@@ -925,7 +951,19 @@ const AdminTagCorrectionsView: React.FC = () => {
     const renderListPagination = (variant: 'top' | 'bottom') => (
         <div className={`p-3 flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted ${variant === 'top' ? 'border-b border-border-default' : 'border-t border-border-default'}`}>
             <span>{listTotal.toLocaleString()} רשומות · עמוד {page} / {listTotalPages}</span>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-1 whitespace-nowrap">
+                    <span>שורות לעמוד</span>
+                    <select
+                        value={pageSize}
+                        onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+                        className="bg-white border border-border-default rounded px-2 py-1 text-xs"
+                    >
+                        {pageSizeOptions.map((n) => (
+                            <option key={n} value={n}>{n.toLocaleString('en-US')}</option>
+                        ))}
+                    </select>
+                </label>
                 <button type="button" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))} className="px-2 py-1 rounded-lg border border-border-default disabled:opacity-40">הקודם</button>
                 <button type="button" disabled={page >= listTotalPages} onClick={() => setPage((p) => p + 1)} className="px-2 py-1 rounded-lg border border-border-default disabled:opacity-40">הבא</button>
             </div>
@@ -1254,11 +1292,13 @@ const AdminTagCorrectionsView: React.FC = () => {
                                     </select>
                                     <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                 </div>
-                                {/* Date filter */}
-                                <div className="flex items-center gap-2 bg-bg-input border border-border-default rounded-lg pl-3 pr-2 py-1.5 focus-within:ring-2 focus-within:ring-primary-500 transition-shadow flex-shrink-0">
-                                    <CalendarIcon className="w-4 h-4 text-text-muted flex-shrink-0" />
-                                    <input type="date" value={aiFilterDate} onChange={(e) => setAiFilterDate(e.target.value)} className="bg-transparent border-none focus:ring-0 text-xs text-text-default p-0 w-28" />
-                                    {aiFilterDate && <button type="button" onClick={() => setAiFilterDate('')} className="text-text-muted hover:text-text-default"><XMarkIcon className="w-3.5 h-3.5" /></button>}
+                                <div className="flex-shrink-0 min-w-[200px]">
+                                    <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">עודכן לאחרונה</label>
+                                    <DateRangeSelector
+                                        value={aiFilterDateRange}
+                                        onChange={setAiFilterDateRange}
+                                        placeholder="הכל"
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -1269,12 +1309,13 @@ const AdminTagCorrectionsView: React.FC = () => {
                             <div className="relative min-w-0">
                                 <select
                                     value={aiApprovalFilter}
-                                    onChange={e => setAiApprovalFilter(e.target.value as 'all' | 'pending' | 'approved')}
+                                    onChange={e => setAiApprovalFilter(e.target.value as 'all' | TagManualApprovalStatus)}
                                     className="w-full bg-bg-input border border-border-default rounded-lg py-2 px-2 pr-7 text-xs focus:ring-1 focus:ring-primary-500 appearance-none cursor-pointer"
                                 >
                                     <option value="all">הכל (אישור ידני)</option>
                                     <option value="pending">⏳ ממתין לאישור</option>
                                     <option value="approved">✅ אושר ידנית</option>
+                                    <option value="agent_approved">🤖 אושר ע"י סוכן</option>
                                 </select>
                                 <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                             </div>
@@ -1339,7 +1380,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                                 <select
                                     className="text-xs border border-border-default rounded flex-1 py-1 px-2 focus:ring-1 focus:ring-primary-500 outline-none"
                                     onChange={(e) => {
-                                        const action = e.target.value as 'merge' | 'create' | 'delete' | 'approve' | 'pending';
+                                        const action = e.target.value as 'merge' | 'create' | 'delete' | 'approve' | 'agent_approve' | 'pending';
                                         if (action) {
                                             void handleBulkAction(action);
                                             e.target.value = '';
@@ -1354,8 +1395,9 @@ const AdminTagCorrectionsView: React.FC = () => {
                                         <option value="delete">שנה למחיקה</option>
                                     </optgroup>
                                     <optgroup label="סטטוס אישור">
-                                        <option value="approve">✅ עדכן ל: אושר ידנית</option>
                                         <option value="pending">⏳ עדכן ל: ממתין לאישור</option>
+                                        <option value="approve">✅ עדכן ל: אושר ידנית</option>
+                                        <option value="agent_approve">🤖 עדכן ל: אושר ע"י סוכן</option>
                                     </optgroup>
                                 </select>
                             </div>
@@ -1379,16 +1421,17 @@ const AdminTagCorrectionsView: React.FC = () => {
                                     <th className="p-4 w-[9%]">תאריך פעולה</th>
                                     <th className="p-4 w-[12%]">קונטקסט</th>
                                     <th className="p-4 w-[17%]">החלטת מודל והסבר</th>
-                                    <th className="p-4 w-[16%]">מדד התלבטות AI</th>
-                                    <th className="p-4 w-[17%]">הקשר רחב בבסיס הנתונים</th>
-                                    <th className="p-4 w-[12%]">פעולה</th>
+                                    <th className="p-4 w-[14%]">מדד התלבטות AI</th>
+                                    <th className="p-4 w-[14%]">הקשר רחב בבסיס הנתונים</th>
+                                    <th className="p-4 w-[10%]">הערות</th>
+                                    <th className="p-4 w-[11%]">פעולה</th>
                                 </tr>
                             </thead>
                             <tbody className="divide-y divide-border-subtle">
                                 {aiDecisionsLoading ? (
-                                    <tr><td colSpan={isMultiSelectMode ? 8 : 7} className="p-8 text-center text-text-muted">טוען החלטות סוכן…</td></tr>
+                                    <tr><td colSpan={isMultiSelectMode ? 9 : 8} className="p-8 text-center text-text-muted">טוען החלטות סוכן…</td></tr>
                                 ) : paginatedAiDecisions.length === 0 ? (
-                                    <tr><td colSpan={isMultiSelectMode ? 8 : 7} className="p-8 text-center text-text-muted">לא נמצאו תוצאות לסינון הנוכחי.</td></tr>
+                                    <tr><td colSpan={isMultiSelectMode ? 9 : 8} className="p-8 text-center text-text-muted">לא נמצאו תוצאות לסינון הנוכחי.</td></tr>
                                 ) : (
                                     paginatedAiDecisions.map((decision) => (
                                         <tr key={decision.id} className={`hover:bg-bg-hover transition-all duration-500 ${
@@ -1561,23 +1604,47 @@ const AdminTagCorrectionsView: React.FC = () => {
                                                 </div>
                                             </td>
                                             <td className="p-4 align-top">
-                                                {/* Quick approval button */}
+                                                <DebouncedCommentsTextarea
+                                                    value={decision.comments}
+                                                    onSave={async (comments) => {
+                                                        const res = await updateTagAiDecisionComments(decision.id, comments);
+                                                        setAiDecisions((prev) =>
+                                                            prev.map((d) =>
+                                                                d.id === decision.id ? { ...d, comments: res.comments } : d,
+                                                            ),
+                                                        );
+                                                    }}
+                                                />
+                                            </td>
+                                            <td className="p-4 align-top">
+                                                {/* Approval status */}
                                                 {(() => {
-                                                    const approvalStatus = localApprovalStatus.get(decision.id) ?? (decision.manualApprovalStatus || 'pending');
-                                                    const isApproved = approvalStatus === 'approved';
+                                                    const raw = localApprovalStatus.get(decision.id) ?? (decision.manualApprovalStatus || 'pending');
+                                                    const approvalStatus: TagManualApprovalStatus =
+                                                        raw === 'approved' || raw === 'agent_approved' ? raw : 'pending';
+                                                    const tone =
+                                                        approvalStatus === 'approved'
+                                                            ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                                            : approvalStatus === 'agent_approved'
+                                                                ? 'bg-sky-50 text-sky-700 border-sky-200'
+                                                                : 'bg-amber-50 text-amber-700 border-amber-200';
                                                     return (
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => void handleTagApprove(decision.id, approvalStatus as 'pending' | 'approved')}
-                                                            className={`mb-2 w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-[11px] font-bold transition-colors border shadow-sm cursor-pointer ${
-                                                                isApproved
-                                                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
-                                                                    : 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100'
-                                                            }`}
-                                                            title={isApproved ? 'לחץ לביטול אישור' : 'לחץ לאשר ידנית'}
+                                                        <select
+                                                            value={approvalStatus}
+                                                            onChange={(e) =>
+                                                                void handleTagApprove(
+                                                                    decision.id,
+                                                                    e.target.value as TagManualApprovalStatus,
+                                                                    approvalStatus,
+                                                                )
+                                                            }
+                                                            className={`mb-2 w-full px-2 py-1.5 rounded-lg text-[11px] font-bold border shadow-sm cursor-pointer outline-none focus:ring-1 focus:ring-primary-500 ${tone}`}
+                                                            title="סטטוס אישור"
                                                         >
-                                                            {isApproved ? '✅ אושר ידנית' : '⏳ ממתין לאישור'}
-                                                        </button>
+                                                            <option value="pending">⏳ ממתין לאישור</option>
+                                                            <option value="approved">✅ אושר ידנית</option>
+                                                            <option value="agent_approved">🤖 אושר ע"י סוכן</option>
+                                                        </select>
                                                     );
                                                 })()}
                                                 {manualQueuedDecisions.has(decision.id) ? (
@@ -1653,11 +1720,23 @@ const AdminTagCorrectionsView: React.FC = () => {
 
                     {/* Pagination footer */}
                     {aiTotalFiltered > 0 && (
-                        <div className="flex items-center justify-between px-4 py-3 border-t border-border-default bg-bg-subtle/40 text-xs text-text-muted">
+                        <div className="flex items-center justify-between gap-2 flex-wrap px-4 py-3 border-t border-border-default bg-bg-subtle/40 text-xs text-text-muted">
                             <span>
                                 {aiTotalFiltered.toLocaleString()} תוצאות · עמוד {aiPage} / {aiTotalPages}
                             </span>
-                            <div className="flex items-center gap-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <label className="flex items-center gap-1 whitespace-nowrap">
+                                    <span>שורות לעמוד</span>
+                                    <select
+                                        value={aiPageSize}
+                                        onChange={(e) => { setAiPageSize(Number(e.target.value)); setAiPage(1); }}
+                                        className="bg-white border border-border-default rounded px-2 py-1 text-xs"
+                                    >
+                                        {pageSizeOptions.map((n) => (
+                                            <option key={n} value={n}>{n.toLocaleString('en-US')}</option>
+                                        ))}
+                                    </select>
+                                </label>
                                 <button
                                     type="button"
                                     disabled={aiPage <= 1}

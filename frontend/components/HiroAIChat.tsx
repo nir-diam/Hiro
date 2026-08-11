@@ -1,12 +1,37 @@
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { XMarkIcon, PaperAirplaneIcon, SparklesIcon, UserCircleIcon, ArrowPathIcon, MicrophoneIcon, StopIcon, ArrowsPointingOutIcon, ArrowsPointingInIcon } from './Icons';
+import {
+    buildProfileSuggestionPrompt,
+    enrichProfileSuggestions,
+    fetchProfileValidationCatalogs,
+    formatWorkExperienceSuggestionValue,
+    normalizeWorkExperienceIncoming,
+    parseWorkExperienceFriendlyText,
+    isDuplicateWorkExperience,
+    type ValidatedSuggestionItem,
+    type WorkExperienceEntry,
+} from '../services/profileSuggestionValidation';
 
 interface Message {
     role: 'user' | 'model';
     text: string;
+    createdAt?: string;
 }
+
+const formatMessageTimestamp = (value?: string) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return '';
+    return date.toLocaleString('he-IL', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+};
 
 interface HiroAIChatProps {
     isOpen: boolean;
@@ -18,7 +43,7 @@ interface HiroAIChatProps {
     chatType?: string; // distinguish chat contexts (e.g., candidate-profile vs admin)
     systemPrompt?: string; // override system prompt per context
     contextData?: any; // optional profile context JSON
-    onProfileUpdate?: (patch: any) => void; // optional profile updater callback
+    onProfileUpdate?: (patch: any, meta?: { suggestions?: any[] }) => void | Promise<void>; // optional profile updater callback
     allowTagCreation?: boolean;
 }
 
@@ -31,6 +56,69 @@ const isInstructionPrompt = (message: any) => {
     if (!message || message.role !== 'user' || typeof message.text !== 'string') return false;
     return INSTRUCTION_PROMPT_KEYWORDS.every(keyword => message.text.includes(keyword));
 };
+
+const getCandidateFirstName = (contextData?: any) => {
+    const fullName = String(contextData?.fullName || '').trim();
+    if (!fullName) return 'חבר';
+    return fullName.split(/\s+/)[0] || 'חבר';
+};
+
+const buildCandidateWelcomeText = (contextData?: any) => {
+    const firstName = getCandidateFirstName(contextData);
+    return `היי ${firstName}, אני הירו, הסוכן האישי שלך, איך אני יכול לעזור לך לשדרג את הפרופיל היום?`;
+};
+
+const isCandidateWelcomeMessage = (msg?: Message | null) =>
+    !!msg &&
+    msg.role === 'model' &&
+    typeof msg.text === 'string' &&
+    msg.text.includes('אני הירו, הסוכן האישי שלך');
+
+const buildCandidateWelcomeMessage = (contextData?: any, createdAt?: string): Message => ({
+    role: 'model',
+    text: buildCandidateWelcomeText(contextData),
+    createdAt: createdAt || new Date().toISOString(),
+});
+
+type SuggestedPrompt = { text: string; comingSoon?: boolean };
+
+const CANDIDATE_SUGGESTED_PROMPT_GROUPS: { title: string; prompts: SuggestedPrompt[] }[] = [
+    {
+        title: 'שדרוג הפרופיל וקורות החיים',
+        prompts: [
+            { text: 'תעזור לי לנסח פסקת תקציר אטרקטיבית לפרופיל שלי' },
+            { text: 'איך אני יכול לשפר את קורות החיים שלי כדי לבלוט יותר?' },
+            { text: 'אילו כישורים כדאי לי להוסיף לפרופיל כדי להתאים למשרות ניהול?' },
+            { text: 'תעזור לי לתרגם את קורות החיים שלי לאנגלית' },
+        ],
+    },
+    {
+        title: 'הכנה לראיונות ותהליכים',
+        prompts: [
+            { text: 'אילו שאלות נפוצות שואלים בראיונות לתפקיד מנהל שיווק?' },
+            { text: 'תעשה לי סימולציית ראיון קצרה לתפקיד הבא שלי' },
+            { text: 'מה כדאי לי לשאול את המראיין בסוף הראיון?' },
+            { text: 'איך כדאי לי להסביר פער של שנה בקורות החיים?' },
+        ],
+    },
+    {
+        title: 'התאמה למשרות וקריירה',
+        prompts: [
+            { text: 'אילו משרות פתוחות כרגע יכולות להתאים לניסיון שלי?', comingSoon: true },
+            { text: 'האם הפרופיל שלי מספיק חזק למשרת דירקטור שיווק?' },
+            { text: 'מה טווח השכר המקובל היום לתפקיד שלי בהייטק?' },
+            { text: 'לאילו תפקידים נוספים כדאי לי לכוון עם הניסיון שיש לי?' },
+        ],
+    },
+    {
+        title: 'עדכון נתונים זריז',
+        prompts: [
+            { text: 'תוסיף לפרופיל שלי שעבדתי שנה ב-Wix בתור מנהל שיווק' },
+            { text: 'תעדכן את ציפיות השכר שלי ל-25K-27K' },
+            { text: 'אני מחפש עכשיו רק משרות היברידיות במרכז, תעדכן בהעדפות' },
+        ],
+    },
+];
 
 const SimpleMarkdownRenderer: React.FC<{ text: string }> = ({ text }) => {
     const html = useMemo(() => {
@@ -84,7 +172,6 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     systemPrompt,
     contextData,
     onProfileUpdate,
-    page,
 }) => {
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Message[]>([]);
@@ -98,6 +185,31 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const chatScope = chatType || 'default';
+    const isCandidateProfileChat = chatScope === 'candidate-profile';
+
+    /** Always keep the Hiro greeting as the first bubble in candidate-profile chat (not in the input). */
+    const ensureWelcomeFirst = useCallback((msgs: Message[]) => {
+        if (!isCandidateProfileChat) return msgs;
+        const welcomeText = buildCandidateWelcomeText(contextData);
+        const rest = (msgs || []).filter((m) => !isCandidateWelcomeMessage(m));
+        const priorWelcome = (msgs || []).find(isCandidateWelcomeMessage);
+        return [
+            buildCandidateWelcomeMessage(contextData, priorWelcome?.createdAt),
+            ...rest,
+        ].map((m, i) => (i === 0 ? { ...m, text: welcomeText } : m));
+    }, [isCandidateProfileChat, contextData]);
+
+    const hasUserMessages = useMemo(
+        () => messages.some((m) => m.role === 'user'),
+        [messages],
+    );
+    const showSuggestedPrompts = isCandidateProfileChat && !hasUserMessages && !isLoading;
+
+    // Keep greeting text in sync when candidate name/context arrives after open
+    useEffect(() => {
+        if (!isOpen || !isCandidateProfileChat) return;
+        setMessages((prev) => ensureWelcomeFirst(prev));
+    }, [isOpen, isCandidateProfileChat, contextData?.fullName, ensureWelcomeFirst]);
 
     // Tag suggestions modal state
     const [tagSuggestions, setTagSuggestions] = useState<any[]>([]);
@@ -114,6 +226,37 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
     const [profileIntent, setProfileIntent] = useState<string>('');
     const [suggestionEdits, setSuggestionEdits] = useState<Record<number, string>>({});
     const [excludedSuggestionItems, setExcludedSuggestionItems] = useState<Record<number, Set<string>>>({});
+    const validationCatalogRef = useRef<{ jobFields: any[]; approvedTags: any[] } | null>(null);
+
+    const loadValidationCatalogs = useCallback(async () => {
+        if (validationCatalogRef.current) return validationCatalogRef.current;
+        const catalogs = await fetchProfileValidationCatalogs(apiBase);
+        validationCatalogRef.current = catalogs;
+        return catalogs;
+    }, [apiBase]);
+
+    const finalizeProfileSuggestions = useCallback(async (rawSuggestions: any[]) => {
+        const cleaned = rawSuggestions
+            .map((s: any) => normalizeProposalSuggestion(s))
+            .filter((s: any) => s && (s.field || s.tool) && s.value);
+
+        if (!contextData || chatScope !== 'candidate-profile') {
+            return cleaned;
+        }
+
+        const { jobFields, approvedTags } = await loadValidationCatalogs();
+        return enrichProfileSuggestions(cleaned, contextData, jobFields, approvedTags);
+    }, [contextData, chatScope, loadValidationCatalogs]);
+
+    const openProfileSuggestions = useCallback((suggestions: any[], intent = '') => {
+        if (!suggestions.length) return;
+        setProfileSuggestions(suggestions);
+        setSuggestionEdits({});
+        setExcludedSuggestionItems({});
+        setProfileIntent(intent);
+        setSelectedProfileIdx(new Set(suggestions.map((_, i) => i)));
+        setIsProfileSuggestOpen(true);
+    }, []);
 
     // Draggable & Resizable State
     const [position, setPosition] = useState<{ x: number, y: number } | null>(null);
@@ -281,10 +424,18 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             if (!isOpen) return;
             if (skipHistory) {
                 setChatId(null);
-                setMessages(initialMessage ? [{ role: 'model', text: initialMessage }] : []);
+                const seed = initialMessage
+                    ? [{ role: 'model' as const, text: initialMessage, createdAt: new Date().toISOString() }]
+                    : [];
+                setMessages(ensureWelcomeFirst(seed));
                 return;
             }
-            if (!resolvedUserId) return;
+            if (!resolvedUserId) {
+                if (isCandidateProfileChat) {
+                    setMessages(ensureWelcomeFirst([]));
+                }
+                return;
+            }
             setIsLoading(true);
             setError(null);
             try {
@@ -294,7 +445,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                     const mapped = prepareMessagesForDisplay(data.messages || []);
                     setChatId(data.chatId);
                     localStorage.setItem(`hiroChatId:${resolvedUserId}:${chatScope}`, data.chatId);
-                    setMessages(mapped);
+                    setMessages(ensureWelcomeFirst(mapped));
                     return;
                 }
                 // Fallback to stored chatId
@@ -305,11 +456,11 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                         const data2 = await res2.json();
                         const mapped2 = prepareMessagesForDisplay(data2.messages || []);
                         setChatId(saved);
-                        setMessages(mapped2);
+                        setMessages(ensureWelcomeFirst(mapped2));
                         return;
                     }
                 }
-                setMessages([]);
+                setMessages(ensureWelcomeFirst([]));
             } catch (e: any) {
                 setError(e.message || 'שגיאה בטעינת היסטוריה');
             } finally {
@@ -317,12 +468,13 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             }
         };
         loadHistory();
-    }, [isOpen, resolvedUserId, skipHistory, initialMessage, chatType]);
+    }, [isOpen, resolvedUserId, skipHistory, initialMessage, chatType, ensureWelcomeFirst]);
 
-    const handleSend = async () => {
-        if (!input.trim()) return;
+    const handleSend = async (overrideText?: string) => {
+        const textToSend = (overrideText ?? input).trim();
+        if (!textToSend) return;
         if (isListening) recognitionRef.current.stop();
-        const userMessage: Message = { role: 'user', text: input };
+        const userMessage: Message = { role: 'user', text: textToSend, createdAt: new Date().toISOString() };
         setMessages(prev => [...prev, userMessage]);
         setIsLoading(true);
         setError(null);
@@ -332,7 +484,7 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
             const res = await fetch(`${apiBase}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chatId, userId: resolvedUserId, message: input, tagsText, chatType: chatScope, contextData, systemPrompt }),
+                body: JSON.stringify({ chatId, userId: resolvedUserId, message: textToSend, tagsText, chatType: chatScope, contextData, systemPrompt }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
@@ -363,15 +515,10 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                 setIsProfileSuggestOpen(false);
             }
             if (parsedArray && parsedArray.length) {
-                const cleaned = parsedArray
-                    .map((s: any) => normalizeProposalSuggestion(s))
-                    .filter((s: any) => s && (s.field || s.tool) && s.value);
+                const cleaned = await finalizeProfileSuggestions(parsedArray);
                 if (cleaned.length) {
-                    setProfileSuggestions(cleaned);
-                    setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
-                    setIsProfileSuggestOpen(true);
-                    setProfileIntent(candidateIntent);
-                    setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.' }]);
+                    openProfileSuggestions(cleaned, candidateIntent);
+                    setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.', createdAt: new Date().toISOString() }]);
                 }
             }
             if ((!parsedArray || !parsedArray.length) && chatScope === 'company-profile' && lastModelForProposals?.text) {
@@ -387,12 +534,12 @@ const HiroAIChat: React.FC<HiroAIChatProps> = ({
                     setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
                     setIsProfileSuggestOpen(true);
                     setProfileIntent('createOrganization');
-                    setMessages(prev => [...prev, { role: 'model', text: 'הצעות לחברות חדשות מוכנות – בחר מה להוסיף.' }]);
+                    setMessages(prev => [...prev, { role: 'model', text: 'הצעות לחברות חדשות מוכנות – בחר מה להוסיף.', createdAt: new Date().toISOString() }]);
                 }
             }
 
             const cleanedMessages = prepareMessagesForDisplay(data.messages || []);
-            setMessages(cleanedMessages);
+            setMessages(ensureWelcomeFirst(cleanedMessages));
 
             // Parse AI suggestions for tags (expects JSON block with "tags": [...])
             if (allowTagCreation) {
@@ -558,9 +705,11 @@ const normalizeProposalSuggestion = (proposal: any) => {
     const prepareMessagesForDisplay = (messages: any[]) => {
         return (messages || [])
             .filter((m: any) => !isInstructionPrompt(m))
-            .map((m: any) => (
-                m.role === 'model' ? { ...m, text: sanitizeModelText(m.text) } : { role: 'user', text: m.text }
-            )) as Message[];
+            .map((m: any) => ({
+                role: m.role === 'model' ? 'model' : 'user',
+                text: m.role === 'model' ? sanitizeModelText(m.text) : m.text,
+                createdAt: m.createdAt || undefined,
+            })) as Message[];
     };
     const slugifyTagKey = (val: string) => {
         const slug = (val || '')
@@ -713,6 +862,27 @@ const normalizeProposalSuggestion = (proposal: any) => {
         setSelectedTagIdx(new Set());
         if (created.length) {
             window.dispatchEvent(new CustomEvent('hiro-tags-created', { detail: created }));
+            if (onProfileUpdate && contextData) {
+                const existing = Array.isArray(contextData.tags) ? contextData.tags : [];
+                const names = created
+                    .map((t) => t.displayNameHe || t.displayNameEn || t.tagKey || t.name)
+                    .filter(Boolean);
+                const existingDetails = Array.isArray(contextData.tagDetails) ? contextData.tagDetails : [];
+                const newDetails = created.map((t) => ({
+                    tagKey: t.tagKey || t.displayNameEn || t.displayNameHe,
+                    displayNameHe: t.displayNameHe || t.displayNameEn || t.tagKey,
+                    displayNameEn: t.displayNameEn || '',
+                    rawType: t.type || 'skill',
+                    isCurrent: true,
+                    isInSummary: true,
+                }));
+                if (names.length) {
+                    void onProfileUpdate({
+                        tags: Array.from(new Set([...existing, ...names])),
+                        tagDetails: [...existingDetails, ...newDetails],
+                    });
+                }
+            }
         }
         if (firstError) alert(firstError);
         else if (created.length) alert('Tags created successfully.');
@@ -726,6 +896,8 @@ const normalizeProposalSuggestion = (proposal: any) => {
         setIsProfileSuggestLoading(true);
         setError(null);
         try {
+            const { jobFields, approvedTags } = await loadValidationCatalogs();
+            const instructionPrompt = buildProfileSuggestionPrompt(mode, jobFields, approvedTags, contextData);
             const res = await fetch(`${apiBase}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -735,9 +907,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
                     chatType: chatScope,
                     contextData,
                     systemPrompt,
-                    message: mode === 'soft'
-                        ? `נתח את ה-JSON של פרופיל המועמד והצע עד 8 שיפורים קצרים המתמקדים במיומנויות רכות (tags), תקציר מקצועי וניסיון תעסוקתי.\nהחזר אך ורק JSON תקין, ללא טקסט נוסף, ללא Markdown, ללא bullet points.\nמבנה חובה (מערך):\n[\n  { "field": "tags|professionalSummary|workExperience", "value": "string or array", "reason": "string (<=140 chars)" }\n]\nהקפד שהתוויות tags יהיו מערך של מחרוזות. שמור על עברית ותמציתיות. אל תוסיף כלום מעבר ל-JSON.`
-                        : `נתח את ה-JSON של פרופיל המועמד והצע עד 10 שיפורים קצרים בתחומים: תפקיד/כותרת, תקציר מקצועי, ניסיון תעסוקתי, העדפות/תחומי עניין, ציפיות שכר, מיומנויות רכות, מיומנויות טכניות, הערות מועמד, תגיות.\nהחזר אך ורק JSON תקין, ללא טקסט נוסף, ללא Markdown, ללא bullet points.\nמבנה חובה (מערך):\n[\n  { "field": "title|professionalSummary|workExperience|preferences|interests|salaryMin|salaryMax|softSkills|techSkills|candidateNotes|tags|desiredRoles|location|availability", "value": "string or array", "reason": "string (<=140 chars)" }\n]\nאם value הוא מערך – החזר מערך מחרוזות; אם טקסט – מחרוזת בלבד. שמור על עברית ותמציתיות. אל תוסיף כלום מעבר ל-JSON.`
+                    message: instructionPrompt,
                 }),
             });
             if (!res.ok) throw new Error(await res.text());
@@ -753,21 +923,14 @@ const normalizeProposalSuggestion = (proposal: any) => {
                 parsedArray = extractProposalArray(candidate);
                 candidateIntent = candidate?.intent || '';
             }
-            const arr = parsedArray || [];
-            const cleaned = arr
-                .map((s: any) => normalizeProposalSuggestion(s))
-                .filter((s: any) => s && (s.field || s.tool) && s.value);
+            const cleaned = await finalizeProfileSuggestions(parsedArray || []);
             if (!cleaned.length) {
-                alert('לא נמצאו הצעות שיפור מהמודל (JSON לא זוהה).');
+                alert('לא נמצאו הצעות שיפור תקפות (תגיות/תפקידים מאומתים) מהמודל.');
                 return;
             }
-            setProfileSuggestions(cleaned);
-            setSuggestionEdits({});
-            setProfileIntent(candidateIntent);
-            setSelectedProfileIdx(new Set(cleaned.map((_, i) => i)));
-            setIsProfileSuggestOpen(true);
+            openProfileSuggestions(cleaned, candidateIntent);
             setChatId(data.chatId || chatId);
-            setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.' }]);
+            setMessages(prev => [...prev, { role: 'model', text: 'הצעות שיפור מוכנות – בחר וסמן בחלון ההצעות.', createdAt: new Date().toISOString() }]);
         } catch (e: any) {
             setError(e.message || 'שגיאה בבקשת הצעות פרופיל');
         } finally {
@@ -777,12 +940,15 @@ const normalizeProposalSuggestion = (proposal: any) => {
 
     const triggerProfileSuggestions = (emitChat = false, mode: 'default' | 'soft' = 'default') => {
         if (emitChat) {
-            setMessages(prev => [...prev, { role: 'model', text: 'בודק את הפרופיל ומכין הצעות שיפור...' }]);
+            setMessages(prev => [...prev, { role: 'model', text: 'בודק את הפרופיל ומכין הצעות שיפור...', createdAt: new Date().toISOString() }]);
         }
         requestProfileSuggestions(mode);
     };
 
-    const formatSuggestionValue = (value: any) => {
+    const formatSuggestionValue = (value: any, field?: string) => {
+        if (field === 'workExperience') {
+            return formatWorkExperienceSuggestionValue(value);
+        }
         if (Array.isArray(value) || (typeof value === 'object' && value !== null)) {
             try {
                 return JSON.stringify(value, null, 2);
@@ -821,7 +987,23 @@ const normalizeProposalSuggestion = (proposal: any) => {
         });
     };
 
-    const parseSuggestionEdit = (text: string, original: any) => {
+    const parseSuggestionEdit = (text: string, original: any, field?: string) => {
+        if (field === 'workExperience') {
+            const originalItems = normalizeWorkExperienceIncoming(original);
+            try {
+                const parsed = JSON.parse(text);
+                return normalizeWorkExperienceIncoming(parsed);
+            } catch {
+                const blocks = text.split(/\n\n+/).map((block) => block.trim()).filter(Boolean);
+                if (blocks.length > 1) {
+                    return blocks.map((block, i) =>
+                        parseWorkExperienceFriendlyText(block, originalItems[i] || originalItems[0]),
+                    );
+                }
+                const single = parseWorkExperienceFriendlyText(text, originalItems[0]);
+                return originalItems.length > 1 ? [single] : single;
+            }
+        }
         if (Array.isArray(original) || (typeof original === 'object' && original !== null)) {
             try {
                 const parsed = JSON.parse(text);
@@ -832,6 +1014,30 @@ const normalizeProposalSuggestion = (proposal: any) => {
             }
         }
         return text;
+    };
+
+    const getWorkExperienceEditItems = (idx: number, value: unknown): WorkExperienceEntry[] => {
+        const edit = suggestionEdits[idx];
+        if (edit !== undefined) {
+            const parsed = parseSuggestionEdit(edit, value, 'workExperience');
+            return normalizeWorkExperienceIncoming(parsed);
+        }
+        return normalizeWorkExperienceIncoming(value);
+    };
+
+    const updateWorkExperienceEditItem = (
+        idx: number,
+        value: unknown,
+        entryIdx: number,
+        patch: Partial<WorkExperienceEntry>,
+    ) => {
+        const items = getWorkExperienceEditItems(idx, value);
+        const next = items.map((item, i) => (i === entryIdx ? { ...item, ...patch } : item));
+        const payload = next.length === 1 ? next[0] : next;
+        setSuggestionEdits((prev) => ({
+            ...prev,
+            [idx]: JSON.stringify(payload),
+        }));
     };
 
     const toggleProfileSuggestion = (idx: number) => {
@@ -884,7 +1090,21 @@ const normalizeProposalSuggestion = (proposal: any) => {
             const field = s.field;
             const value = s.value;
             const editValue = suggestionEdits[idx];
-            const actualValue = editValue !== undefined ? parseSuggestionEdit(editValue, value) : value;
+            let actualValue = editValue !== undefined ? parseSuggestionEdit(editValue, value, field) : value;
+            if (Array.isArray(s.validatedItems) && s.validatedItems.length) {
+                const activeItems = (s.validatedItems as ValidatedSuggestionItem[]).filter(
+                    (item) => !excludedSuggestionItems[idx]?.has(item.label),
+                );
+                if (field === 'tags') {
+                    actualValue = activeItems.map((item) => item.label);
+                } else if (field === 'desiredRoles') {
+                    actualValue = activeItems.map((item) => ({
+                        ...(item.meta || {}),
+                        value: item.meta?.value || item.label,
+                        owner: 'candidate',
+                    }));
+                }
+            }
             const filteredValue = filterSuggestionValue(field, actualValue, idx);
             const normalizedValue = field && arrayFieldsWithChips.has(field) ? filteredValue : actualValue;
             if (s.tool === 'createOrganization') {
@@ -898,18 +1118,62 @@ const normalizeProposalSuggestion = (proposal: any) => {
                 case 'tags':
                 case 'softSkills':
                 case 'techSkills':
-                case 'desiredRoles':
                     mergeStringArray(field, normalizedValue);
+                    if (field === 'tags' && Array.isArray(s.validatedItems) && s.validatedItems.length) {
+                        const activeItems = (s.validatedItems as ValidatedSuggestionItem[]).filter(
+                            (item) => !excludedSuggestionItems[idx]?.has(item.label),
+                        );
+                        const existingDetails = Array.isArray(patch.tagDetails)
+                            ? patch.tagDetails
+                            : Array.isArray(current.tagDetails)
+                                ? [...current.tagDetails]
+                                : [];
+                        const newDetails = activeItems.map((item) => ({
+                            tagKey: String(item.meta?.tagKey || item.label),
+                            displayNameHe: String(item.meta?.displayNameHe || item.label),
+                            displayNameEn: String(item.meta?.displayNameEn || ''),
+                            rawType: 'skill',
+                            isCurrent: true,
+                            isInSummary: true,
+                        }));
+                        patch.tagDetails = [...existingDetails, ...newDetails];
+                    }
                     break;
+                case 'desiredRoles': {
+                    const existing = Array.isArray(current.desiredRoles) ? [...current.desiredRoles] : [];
+                    const incoming = ensureArray(normalizedValue);
+                    for (const item of incoming) {
+                        if (typeof item === 'object' && item?.value) {
+                            if (!existing.some((role: any) => role.value === item.value)) {
+                                existing.push({
+                                    value: item.value,
+                                    owner: item.owner || 'candidate',
+                                    category: item.category,
+                                    fieldType: item.fieldType,
+                                    categoryId: item.categoryId,
+                                    clusterId: item.clusterId,
+                                    roleId: item.roleId,
+                                });
+                            }
+                        } else if (typeof item === 'string' && item.trim()) {
+                            const trimmed = item.trim();
+                            if (!existing.some((role: any) => role.value === trimmed)) {
+                                existing.push({ value: trimmed, owner: 'candidate' });
+                            }
+                        }
+                    }
+                    patch.desiredRoles = existing;
+                    break;
+                }
                 case 'workExperience': {
                     const list = Array.isArray(current.workExperience) ? [...current.workExperience] : [];
-                    if (Array.isArray(actualValue)) {
-                        actualValue.forEach((v: any) => {
-                            if (v && typeof v === 'object') list.push({ ...v, id: v.id || Date.now() + Math.random() });
-                            else if (typeof v === 'string') list.push({ id: Date.now() + Math.random(), title: '', company: '', description: v, startDate: '', endDate: 'Present' });
+                    const incoming = normalizeWorkExperienceIncoming(actualValue);
+                    for (const entry of incoming) {
+                        if (isDuplicateWorkExperience(entry, list)) continue;
+                        list.push({
+                            ...entry,
+                            id: entry.id || `${Date.now()}-${Math.random()}`,
                         });
-                    } else if (typeof actualValue === 'string') {
-                        list.push({ id: Date.now() + Math.random(), title: '', company: '', description: actualValue, startDate: '', endDate: 'Present' });
                     }
                     patch.workExperience = list;
                     break;
@@ -943,7 +1207,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
             };
             onProfileUpdate(patch, { suggestions: selectedProfileSuggestions });
         }
-        creationRequests.forEach((req) => onProfileUpdate(req));
+        creationRequests.forEach((req) => onProfileUpdate?.(req));
         if (!Object.keys(patch).length && creationRequests.length === 0) {
             alert('לא נבחרה אף הצעה לשמירה.');
         } else {
@@ -953,7 +1217,6 @@ const normalizeProposalSuggestion = (proposal: any) => {
         setProfileSuggestions([]);
         setProfileIntent('');
         setSelectedProfileIdx(new Set());
-        alert('הפרופיל עודכן לפי ההצעות שנבחרו.');
     };
 
     if (!isOpen || !position) return null;
@@ -990,7 +1253,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
                     </button>
                     <button 
                         onClick={() => { 
-                            setMessages([]); 
+                            setMessages(ensureWelcomeFirst([])); 
                             setChatId(null); 
                             setError(null); 
                             if (resolvedUserId) localStorage.removeItem(`hiroChatId:${resolvedUserId}:${chatScope}`);
@@ -1006,7 +1269,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
             </header>
 
             <main className="flex-1 overflow-y-auto p-4 space-y-4 bg-bg-subtle/30 custom-scrollbar">
-                {messages.length === 0 && (
+                {messages.length === 0 && !isCandidateProfileChat && (
                     <div className="flex flex-col items-center justify-center h-full text-center text-text-muted opacity-60 select-none">
                         <SparklesIcon className="w-12 h-12 mb-2"/>
                         <p>במה אפשר לעזור לך היום?</p>
@@ -1015,12 +1278,48 @@ const normalizeProposalSuggestion = (proposal: any) => {
                 {messages.map((msg, index) => (
                     <div key={index} className={`flex items-start gap-3 ${msg.role === 'user' ? 'justify-end' : ''}`}>
                         {msg.role === 'model' && <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center bg-primary-100 rounded-full select-none"><SparklesIcon className="w-5 h-5 text-primary-600"/></div>}
-                        <div className={`max-w-[85%] p-3 rounded-2xl text-sm shadow-sm ${msg.role === 'user' ? 'bg-primary-600 text-white rounded-br-none' : 'bg-white border border-border-default text-text-default rounded-bl-none'}`}>
-                            {msg.role === 'model' ? <SimpleMarkdownRenderer text={msg.text} /> : <p className="whitespace-pre-wrap">{msg.text}</p>}
+                        <div className={`max-w-[85%] flex flex-col gap-1 ${msg.role === 'user' ? 'items-end' : 'items-start'}`}>
+                            <div className={`p-3 rounded-2xl text-sm shadow-sm ${msg.role === 'user' ? 'bg-primary-600 text-white rounded-br-none' : 'bg-white border border-border-default text-text-default rounded-bl-none'}`}>
+                                {msg.role === 'model' ? <SimpleMarkdownRenderer text={msg.text} /> : <p className="whitespace-pre-wrap">{msg.text}</p>}
+                            </div>
+                            {msg.createdAt && (
+                                <span className={`text-[10px] text-text-muted px-1 ${msg.role === 'user' ? 'text-left' : 'text-right'}`}>
+                                    {formatMessageTimestamp(msg.createdAt)}
+                                </span>
+                            )}
                         </div>
                         {msg.role === 'user' && <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center bg-bg-subtle rounded-full border border-border-default select-none"><UserCircleIcon className="w-6 h-6 text-text-muted"/></div>}
                     </div>
                 ))}
+                {showSuggestedPrompts && (
+                    <div className="space-y-3 pt-1">
+                        {CANDIDATE_SUGGESTED_PROMPT_GROUPS.map((group) => (
+                            <div key={group.title} className="space-y-2">
+                                <p className="text-xs font-semibold text-text-muted px-1">{group.title}</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {group.prompts.map((prompt) => (
+                                        <button
+                                            key={prompt.text}
+                                            type="button"
+                                            disabled={prompt.comingSoon || isLoading}
+                                            onClick={() => handleSend(prompt.text)}
+                                            className={`text-xs text-right px-3 py-2 rounded-xl border transition-colors max-w-full ${
+                                                prompt.comingSoon
+                                                    ? 'border-border-subtle bg-bg-subtle/60 text-text-muted cursor-not-allowed opacity-70'
+                                                    : 'border-primary-200 bg-white hover:bg-primary-50 hover:border-primary-300 text-text-default shadow-sm'
+                                            }`}
+                                        >
+                                            {prompt.text}
+                                            {prompt.comingSoon && (
+                                                <span className="mr-1 text-[10px] font-semibold text-primary-600">(בקרוב)</span>
+                                            )}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                )}
                 {isLoading && (
                         <div className="flex items-start gap-3">
                         <div className="w-8 h-8 flex-shrink-0 flex items-center justify-center bg-primary-100 rounded-full"><SparklesIcon className="w-5 h-5 text-primary-600"/></div>
@@ -1060,7 +1359,7 @@ const normalizeProposalSuggestion = (proposal: any) => {
                     </div>
                     <div className="flex items-end gap-2">
                     <button 
-                        onClick={handleSend} 
+                        onClick={() => handleSend()} 
                         disabled={isLoading || (!input.trim() && !isListening)} 
                         className="w-11 h-11 flex-shrink-0 flex items-center justify-center bg-primary-600 text-white rounded-full hover:bg-primary-700 transition disabled:bg-primary-300 disabled:cursor-not-allowed shadow-md mb-0.5"
                     >
@@ -1158,13 +1457,20 @@ const normalizeProposalSuggestion = (proposal: any) => {
                             const value = s.value;
                             const isArray = Array.isArray(value);
                             const isObject = !isArray && typeof value === 'object' && value !== null;
-                            const editValue = suggestionEdits[idx] ?? formatSuggestionValue(value);
+                            const editValue = suggestionEdits[idx] ?? formatSuggestionValue(value, s.field);
             const handleEditChange = (next: string) => {
                 setSuggestionEdits(prev => ({ ...prev, [idx]: next }));
             };
             const field = s.field;
             const filteredValue = filterSuggestionValue(field, value, idx);
             const showChipsOnly = field && arrayFieldsWithChips.has(field);
+            const workExperienceItems = field === 'workExperience' ? getWorkExperienceEditItems(idx, value) : [];
+            const validatedItems = Array.isArray(s.validatedItems)
+                ? (s.validatedItems as ValidatedSuggestionItem[]).filter(
+                    (item) => !excludedSuggestionItems[idx]?.has(item.label),
+                )
+                : [];
+            const showValidatedItems = validatedItems.length > 0;
             return (
                 <label key={idx} className="flex items-start gap-3 p-3 border border-border-default rounded-xl cursor-pointer">
                     <input
@@ -1173,9 +1479,96 @@ const normalizeProposalSuggestion = (proposal: any) => {
                         onChange={() => toggleProfileSuggestion(idx)}
                         className="mt-1"
                     />
-                    <div className="space-y-1">
+                    <div className="space-y-1 flex-1">
                         <div className="font-bold text-text-default">{displayLabel}</div>
-                        {showChipsOnly ? (
+                        {showValidatedItems ? (
+                            <div className="space-y-2 mt-2">
+                                {validatedItems.map((item, itemIdx) => (
+                                    <div key={`${idx}-validated-${itemIdx}`} className="rounded-lg border border-border-default p-2 bg-bg-subtle/40">
+                                        <div className="flex items-start gap-2 flex-wrap">
+                                            <span className="flex items-center gap-1 bg-primary-50 text-primary-700 text-xs font-semibold px-2 py-1 rounded-full">
+                                                {item.label}
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleExcludeSuggestionItem(idx, item.label)}
+                                                    className="text-primary-500 hover:text-primary-700"
+                                                >
+                                                    <XMarkIcon className="w-3 h-3" />
+                                                </button>
+                                            </span>
+                                            {item.validationNote && (
+                                                <span className="text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full">
+                                                    {item.validationNote}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {item.reason && (
+                                            <p className="text-xs text-text-subtle mt-1">למה: {item.reason}</p>
+                                        )}
+                                    </div>
+                                ))}
+                                {Array.isArray(s.rejectedItems) && s.rejectedItems.length > 0 && (
+                                    <div className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded-lg p-2">
+                                        לא הוצגו: {s.rejectedItems.map((item: ValidatedSuggestionItem) => item.label).join(', ')}
+                                    </div>
+                                )}
+                            </div>
+                        ) : field === 'workExperience' ? (
+                            <div className="space-y-3 mt-2">
+                                {workExperienceItems.map((entry, entryIdx) => (
+                                    <div
+                                        key={`${idx}-work-${entryIdx}`}
+                                        className="rounded-lg border border-border-default p-3 bg-bg-subtle/40 space-y-2"
+                                    >
+                                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                            <input
+                                                className="w-full bg-white border border-border-default rounded-lg px-2 py-1.5 text-xs"
+                                                placeholder="תפקיד"
+                                                value={String(entry.title || '')}
+                                                onChange={(e) =>
+                                                    updateWorkExperienceEditItem(idx, value, entryIdx, { title: e.target.value })
+                                                }
+                                            />
+                                            <input
+                                                className="w-full bg-white border border-border-default rounded-lg px-2 py-1.5 text-xs"
+                                                placeholder="חברה"
+                                                value={String(entry.company || '')}
+                                                onChange={(e) =>
+                                                    updateWorkExperienceEditItem(idx, value, entryIdx, { company: e.target.value })
+                                                }
+                                            />
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <input
+                                                className="w-full bg-white border border-border-default rounded-lg px-2 py-1.5 text-xs"
+                                                placeholder="שנת התחלה"
+                                                value={String(entry.startDate || '')}
+                                                onChange={(e) =>
+                                                    updateWorkExperienceEditItem(idx, value, entryIdx, { startDate: e.target.value })
+                                                }
+                                            />
+                                            <input
+                                                className="w-full bg-white border border-border-default rounded-lg px-2 py-1.5 text-xs"
+                                                placeholder="שנת סיום (או היום)"
+                                                value={String(entry.endDate || '')}
+                                                onChange={(e) =>
+                                                    updateWorkExperienceEditItem(idx, value, entryIdx, { endDate: e.target.value })
+                                                }
+                                            />
+                                        </div>
+                                        <textarea
+                                            className="w-full bg-white border border-border-default rounded-lg p-2 text-xs text-text-muted resize-none"
+                                            rows={3}
+                                            placeholder="תיאור התפקיד"
+                                            value={String(entry.description || '')}
+                                            onChange={(e) =>
+                                                updateWorkExperienceEditItem(idx, value, entryIdx, { description: e.target.value })
+                                            }
+                                        />
+                                    </div>
+                                ))}
+                            </div>
+                        ) : showChipsOnly ? (
                             <div className="flex flex-wrap gap-2 mt-2">
                                 {Array.isArray(filteredValue) && filteredValue.length > 0 ? (
                                     filteredValue.map((item: any, itemIdx: number) => {

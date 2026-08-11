@@ -1010,6 +1010,7 @@ const updatePublicationForJob = async (jobId, payload = {}) => {
     'contactPhone2',
     'landingLayout',
     'landingLayouts',
+    'heroDesignInstructions',
   ];
   for (const key of allowed) {
     if (payload[key] !== undefined) pubData[key] = payload[key];
@@ -1640,6 +1641,7 @@ const buildHeroPosterPrompt = ({
   contactPhone1,
   contactPhone2,
   hasLogo,
+  additionalDesignInstructions,
 }) => {
   const roleLines = splitPromptLines(description);
   const reqLines = splitPromptLines(requirements);
@@ -1696,6 +1698,9 @@ Colors: Use ${brandColor} prominently.
 Include modern graphic elements related to business and careers.
 Layout: Compose for a wide horizontal hero slot — keep key text and logo in the central safe area; avoid tall vertical stacking.
 ${hasLogo ? 'CRITICAL: Incorporate the provided company logo image into the banner design prominently and accurately.' : ''}
+${String(additionalDesignInstructions || '').trim()
+  ? `\nהנחיות נוספות:\n${String(additionalDesignInstructions).trim()}\n`
+  : ''}
 CRITICAL: The text must be highly legible, structured clearly, and well-contrasted against the background, just like a professional Photoshop template.`;
 };
 
@@ -1735,6 +1740,10 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
     ?? publication.publicJobRequirements
     ?? '';
   const layout = options.landingLayout || publication.landingLayout || 'detailed';
+  const additionalDesignInstructions = options.heroDesignInstructions
+    ?? options.additionalDesignInstructions
+    ?? publication.heroDesignInstructions
+    ?? '';
   const promptStyle = mapLayoutToPromptStyle(layout);
   const logoDataUrl = options.companyLogo || null;
   const apiKey = geminiService.resolveGeminiApiKey?.() || '';
@@ -1756,6 +1765,7 @@ const generateHeroImageForJob = async (jobId, options = {}) => {
       contactPhone1,
       contactPhone2,
       hasLogo: Boolean(logoDataUrl),
+      additionalDesignInstructions,
     });
 
     try {

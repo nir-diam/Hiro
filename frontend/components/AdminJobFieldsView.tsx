@@ -78,10 +78,11 @@ interface AdminColumnProps {
     aiTooltip?: string;
     emptyStateText: string;
     isActive?: boolean;
+    isSearching?: boolean;
 }
 
 const AdminColumn: React.FC<AdminColumnProps> = ({ 
-    title, subtitle, icon, children, onAdd, searchTerm, onSearchChange, count, aiAction, aiTooltip, emptyStateText, isActive = true 
+    title, subtitle, icon, children, onAdd, searchTerm, onSearchChange, count, aiAction, aiTooltip, emptyStateText, isActive = true, isSearching = false,
 }) => (
     <div className={`flex-1 flex flex-col min-w-0 bg-white border-l border-border-default first:border-l-0 last:rounded-l-xl first:rounded-r-xl h-full shadow-sm transition-opacity duration-200 ${isActive ? 'opacity-100' : 'opacity-50 pointer-events-none'}`}>
         {/* Header */}
@@ -121,7 +122,7 @@ const AdminColumn: React.FC<AdminColumnProps> = ({
                 <MagnifyingGlassIcon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
                 <input 
                     type="text" 
-                    placeholder="סינון..." 
+                    placeholder="חיפוש..." 
                     value={searchTerm}
                     disabled={!isActive}
                     onChange={(e) => onSearchChange(e.target.value)}
@@ -132,7 +133,11 @@ const AdminColumn: React.FC<AdminColumnProps> = ({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto p-2 space-y-1 custom-scrollbar bg-bg-subtle/10">
-            {count > 0 ? children : (
+            {isSearching ? (
+                <div className="h-full flex flex-col items-center justify-center text-text-muted text-center p-4">
+                    <p className="text-sm font-medium opacity-70 animate-pulse">מחפש...</p>
+                </div>
+            ) : count > 0 ? children : (
                 <div className="h-full flex flex-col items-center justify-center text-text-muted text-center p-4">
                     <div className="mb-2 p-3 bg-bg-subtle rounded-full opacity-50">{icon}</div>
                     <p className="text-sm font-medium opacity-70">{emptyStateText}</p>
@@ -547,6 +552,12 @@ const AdminJobFieldsView: React.FC = () => {
     const [searchCategory, setSearchCategory] = useState('');
     const [searchCluster, setSearchCluster] = useState('');
     const [searchRole, setSearchRole] = useState('');
+    const [categorySearchResults, setCategorySearchResults] = useState<JobCategory[] | null>(null);
+    const [clusterSearchResults, setClusterSearchResults] = useState<JobFieldType[] | null>(null);
+    const [roleSearchResults, setRoleSearchResults] = useState<JobRole[] | null>(null);
+    const [isSearchingCategory, setIsSearchingCategory] = useState(false);
+    const [isSearchingCluster, setIsSearchingCluster] = useState(false);
+    const [isSearchingRole, setIsSearchingRole] = useState(false);
     
     // UI Feedback
     const [aiLoading, setAiLoading] = useState<string | null>(null);
@@ -634,6 +645,116 @@ const normalizeTagOption = (tag: any): TagOption => ({
     useEffect(() => {
         loadJobFields();
     }, []);
+
+    const searchJobFields = useCallback(async (scope: 'categories' | 'clusters' | 'roles', q: string, parentId?: string) => {
+        const params = new URLSearchParams({ scope, q });
+        if (parentId) params.set('parentId', parentId);
+        const response = await fetch(`${apiBase}/api/job-fields?${params.toString()}`);
+        if (!response.ok) {
+            throw new Error('חיפוש נכשל');
+        }
+        const payload = await response.json();
+        return Array.isArray(payload?.items) ? payload.items : [];
+    }, [apiBase]);
+
+    useEffect(() => {
+        const q = searchCategory.trim();
+        if (!q) {
+            setCategorySearchResults(null);
+            setIsSearchingCategory(false);
+            return;
+        }
+
+        let canceled = false;
+        setIsSearchingCategory(true);
+        const timer = setTimeout(async () => {
+            try {
+                const items = await searchJobFields('categories', q);
+                if (!canceled) {
+                    setCategorySearchResults(items.map(normalizeCategory));
+                }
+            } catch {
+                if (!canceled) {
+                    setCategorySearchResults([]);
+                }
+            } finally {
+                if (!canceled) {
+                    setIsSearchingCategory(false);
+                }
+            }
+        }, 300);
+
+        return () => {
+            canceled = true;
+            clearTimeout(timer);
+        };
+    }, [searchCategory, searchJobFields]);
+
+    useEffect(() => {
+        const q = searchCluster.trim();
+        if (!q || !selectedCategory?.id) {
+            setClusterSearchResults(null);
+            setIsSearchingCluster(false);
+            return;
+        }
+
+        let canceled = false;
+        setIsSearchingCluster(true);
+        const timer = setTimeout(async () => {
+            try {
+                const items = await searchJobFields('clusters', q, selectedCategory.id);
+                if (!canceled) {
+                    setClusterSearchResults(items.map(normalizeCluster));
+                }
+            } catch {
+                if (!canceled) {
+                    setClusterSearchResults([]);
+                }
+            } finally {
+                if (!canceled) {
+                    setIsSearchingCluster(false);
+                }
+            }
+        }, 300);
+
+        return () => {
+            canceled = true;
+            clearTimeout(timer);
+        };
+    }, [searchCluster, selectedCategory?.id, searchJobFields]);
+
+    useEffect(() => {
+        const q = searchRole.trim();
+        if (!q || !selectedCluster?.id) {
+            setRoleSearchResults(null);
+            setIsSearchingRole(false);
+            return;
+        }
+
+        let canceled = false;
+        setIsSearchingRole(true);
+        const timer = setTimeout(async () => {
+            try {
+                const items = await searchJobFields('roles', q, selectedCluster.id);
+                if (!canceled) {
+                    setRoleSearchResults(items.map(normalizeRole));
+                }
+            } catch {
+                if (!canceled) {
+                    setRoleSearchResults([]);
+                }
+            } finally {
+                if (!canceled) {
+                    setIsSearchingRole(false);
+                }
+            }
+        }, 300);
+
+        return () => {
+            canceled = true;
+            clearTimeout(timer);
+        };
+    }, [searchRole, selectedCluster?.id, searchJobFields]);
 
     useEffect(() => {
         let canceled = false;
@@ -918,12 +1039,17 @@ const normalizeTagOption = (tag: any): TagOption => ({
     // --- HANDLERS ---
     const handleSelectCategory = (category: JobCategory) => {
         if (selectedCategory?.name === category.name) return;
-        setSelectedCategory(category);
-        setSelectedCluster(null); // Reset lower levels
+        const fullCategory = data.find((c) => c.id === category.id) || category;
+        setSelectedCategory(fullCategory);
+        setSelectedCluster(null);
+        setSearchCluster('');
+        setSearchRole('');
     };
 
     const handleSelectCluster = (cluster: JobFieldType) => {
-        setSelectedCluster(cluster);
+        const fullCluster = selectedCategory?.fieldTypes.find((c) => c.id === cluster.id) || cluster;
+        setSelectedCluster(fullCluster);
+        setSearchRole('');
     };
 
     // --- MODAL TRIGGERS ---
@@ -1208,23 +1334,17 @@ const normalizeTagOption = (tag: any): TagOption => ({
         }
     };
 
-    // --- FILTERED DATA ---
-    const filteredCategories = useMemo(() => 
-        data.filter(c => c.name.toLowerCase().includes(searchCategory.toLowerCase())),
-    [data, searchCategory]);
+    const filteredCategories = searchCategory.trim()
+        ? (categorySearchResults ?? [])
+        : data;
 
-    const filteredClusters = useMemo(() => {
-        if (!selectedCategory) return [];
-        return selectedCategory.fieldTypes.filter(c => c.name.toLowerCase().includes(searchCluster.toLowerCase()));
-    }, [selectedCategory, searchCluster]);
+    const filteredClusters = searchCluster.trim()
+        ? (clusterSearchResults ?? [])
+        : (selectedCategory?.fieldTypes ?? []);
 
-    const filteredRoles = useMemo(() => {
-        if (!selectedCluster) return [];
-        return selectedCluster.roles.filter(r => 
-            r.value.toLowerCase().includes(searchRole.toLowerCase()) ||
-            r.synonyms.some(s => s.toLowerCase().includes(searchRole.toLowerCase()))
-        );
-    }, [selectedCluster, searchRole]);
+    const filteredRoles = searchRole.trim()
+        ? (roleSearchResults ?? [])
+        : (selectedCluster?.roles ?? []);
 
     const clusterDisplayCount = filteredClusters.length || (aiLoading === 'cluster' ? 1 : 0);
     const roleDisplayCount = filteredRoles.length || (aiLoading === 'role' ? 1 : 0);
@@ -1293,6 +1413,7 @@ const normalizeTagOption = (tag: any): TagOption => ({
                         searchTerm={searchCategory}
                         onSearchChange={setSearchCategory}
                         count={filteredCategories.length}
+                        isSearching={isSearchingCategory}
                         emptyStateText="לא נמצאו קטגוריות"
                     >
                         {filteredCategories.map(cat => (
@@ -1351,6 +1472,7 @@ const normalizeTagOption = (tag: any): TagOption => ({
                         searchTerm={searchRole}
                         onSearchChange={setSearchRole}
                         count={roleDisplayCount}
+                        isSearching={isSearchingRole}
                         aiAction={handleAiSuggestRoles}
                         aiTooltip={aiLoading === 'role' ? 'חושב...' : 'השלם תפקידים חסרים לקלאסטר (AI)'}
                         emptyStateText={selectedCluster ? "אין תפקידים בקלאסטר זה. צור ידנית או השתמש ב-AI." : "בחר קלאסטר לצפייה"}

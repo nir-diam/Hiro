@@ -13,6 +13,7 @@ export function permissionForPath(pathname: string): string {
         { prefix: '/jobs', perm: 'page:jobs' },
         { prefix: '/candidates', perm: 'page:candidates' },
         { prefix: '/communications', perm: 'page:communications' },
+        { prefix: '/events-management', perm: 'page:clients' },
         { prefix: '/candidate-pool', perm: 'page:candidate_pool' },
         { prefix: '/job-board', perm: 'page:job_board' },
         { prefix: '/notifications', perm: 'page:notifications' },

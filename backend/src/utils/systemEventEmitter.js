@@ -150,6 +150,21 @@ const emit = async (req, options = {}) => {
         },
         params,
       },
+    }).then(async (logResult) => {
+      try {
+        const pipelineOutcomeService = require('../services/pipelineOutcomeService');
+        await pipelineOutcomeService.dispatchFromSystemEvent(req, {
+          systemEventRowId: row.id,
+          triggerName: row.triggerName,
+          eventName: row.eventName,
+          entityType: normalizedEntity,
+          entityId: entityId != null ? String(entityId) : null,
+          clientId: req?.dbUser?.clientId || null,
+        });
+      } catch (dispatchErr) {
+        console.error('[systemEventEmitter] pipeline dispatch failed', dispatchErr.message || dispatchErr);
+      }
+      return logResult;
     });
   } catch (err) {
     // eslint-disable-next-line no-console

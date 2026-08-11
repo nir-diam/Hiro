@@ -16,6 +16,7 @@ router.get('/ai-decisions', tagController.listAiDecisions);
 router.get('/ai-decisions/:decisionId/occurrences', tagController.getAiDecisionOccurrences);
 router.post('/ai-decisions/resolve', tagController.resolveAiDecisions);
 router.patch('/ai-decisions/:id/approve', tagController.approveAiDecision);
+router.patch('/ai-decisions/:id/comments', tagController.updateAiDecisionComments);
 router.post('/ai-decisions/backfill', tagController.backfillAiDecisions);
 router.post('/ai-decisions/backfill-auto-merge', tagController.backfillAutoMerge);
 router.get('/rebuild-embeddings', tagController.rebuildEmbeddings);

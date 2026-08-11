@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef, useMemo, useCallback, useId, useLayoutEffect } from 'react';
-import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon } from './Icons';
+import { PhoneIcon, EnvelopeIcon, LanguageIcon, AcademicCapIcon, MapPinIcon, LinkedInIcon, WhatsappIcon, MatchIcon, ClipboardDocumentListIcon, ClipboardDocumentCheckIcon, AvatarIcon, PencilIcon, BookmarkIcon, BookmarkIconSolid, BriefcaseIcon, ChevronDownIcon, ChevronUpIcon, ClockIcon, ChatBubbleBottomCenterTextIcon, BuildingOffice2Icon, TagIcon, FlagIcon, PlusIcon, SparklesIcon, CheckCircleIcon, ArrowDownTrayIcon, ArrowUpTrayIcon, TrashIcon, ChevronLeftIcon, ChevronRightIcon, MagnifyingGlassIcon, ExclamationTriangleIcon, VideoCameraIcon } from './Icons';
 import { MessageMode } from '../hooks/useUIState';
 import DevAnnotation from './DevAnnotation';
 import { useLanguage } from '../context/LanguageContext';
@@ -685,6 +685,7 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const displayFullName =
     buildCandidateFullName(candidateData.firstName, candidateData.lastName) || candidateData.fullName || '';
   const candidateInitials = getInitials(displayFullName);
+  const profileVideoUrl = String(candidateData.profileVideoUrl ?? '').trim();
 
   const displayAge = useMemo(() => {
     const a = candidateData?.age;
@@ -1385,6 +1386,29 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
   const showSaveFooter = Boolean(!hideActions && onSaveCandidate);
 
+  const renderProfileVideo = (className = '') =>
+      profileVideoUrl ? (
+          <div className={`rounded-2xl border border-border-default bg-bg-card shadow-sm overflow-hidden ${className}`}>
+              <div className="px-4 py-3 border-b border-border-subtle bg-bg-subtle/40 flex items-center gap-2">
+                  <VideoCameraIcon className="w-5 h-5 text-primary-600 shrink-0" />
+                  <h4 className="text-sm font-bold text-text-default">וידאו אישי</h4>
+              </div>
+              <div className="relative bg-black aspect-video">
+                  <video
+                      key={profileVideoUrl}
+                      src={profileVideoUrl}
+                      controls
+                      playsInline
+                      preload="metadata"
+                      className="absolute inset-0 w-full h-full object-contain bg-black"
+                  />
+              </div>
+              <p className="px-4 py-2 text-[11px] text-text-muted leading-relaxed border-t border-border-subtle">
+                  הקלטה אישית שהועלתה על ידי המועמד.
+              </p>
+          </div>
+      ) : null;
+
   return (
       <div className={`space-y-4${showSaveFooter ? ' pb-28 md:pb-32' : ''}`}>
       <div className="flex justify-center gap-2">
@@ -1852,10 +1876,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
 
                   </div>
               </div>
+
+              {renderProfileVideo('mt-4 lg:hidden w-full')}
           </div>
 
           {/* Left Side - Timeline & Analysis - Hidden on mobile */}
           <div className="w-full lg:w-5/12 flex flex-col justify-between hidden lg:flex relative z-0 h-full border-r border-border-default/50 pr-6">
+
+              {renderProfileVideo('mb-4')}
               
                {/* Recent activity — show only when backend supplies timeline entries */}
               {Array.isArray((candidateData as any).activityTimeline) && (candidateData as any).activityTimeline.length > 0 ? (

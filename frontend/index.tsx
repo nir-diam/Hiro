@@ -18,6 +18,17 @@ import { UserPreferencesProvider } from './context/UserPreferencesContext';
   const _originalFetch = window.fetch.bind(window);
   let _redirecting = false;
 
+  const isLoginRoute = () => {
+    const path = window.location.pathname;
+    return path === '/login' || path.startsWith('/candidate-portal/login');
+  };
+
+  /** Auth endpoints return 401 for expected failures (wrong password, bad OTP) — never hard-redirect. */
+  const isAuthFlowRequest = (url: string) =>
+    /\/api\/auth\/(login|verify-login-code|resend-login-code|google|register|candidate-signup|candidate-login)(\/|\?|$)/i.test(
+      url,
+    );
+
   /** Returns true if the stored JWT is genuinely expired (or absent). */
   function isTokenExpiredOrMissing(): boolean {
     try {
@@ -45,6 +56,11 @@ import { UserPreferencesProvider } from './context/UserPreferencesContext';
 
       // Only intercept our own API calls, not CDN / external resources
       if (url.includes('/api/')) {
+        // Login / OTP / signup — let the page show the error; do not reload.
+        if (isAuthFlowRequest(url) || isLoginRoute()) {
+          return response;
+        }
+
         // Guard: if the client-side token still looks valid (not expired), this 401 may
         // be transient (server restart, brief outage). Skip the redirect so a background
         // poll or minor hiccup doesn't eject the user from the session.

@@ -12,6 +12,10 @@ type HorizontalScrollAreaProps = {
  * Both scroll containers use dir="ltr" so scrollLeft is always a simple
  * 0→max value and stays in sync. The actual RTL layout lives on the
  * <table dir="rtl"> inside children — not on the scroll wrapper.
+ *
+ * Until the user scrolls horizontally, position stays pinned to the RTL
+ * start (right) — including across late layout / data load. After the
+ * user scrolls, position is preserved across re-renders (e.g. row save).
  */
 export const HorizontalScrollArea: React.FC<HorizontalScrollAreaProps> = ({
     children,
@@ -22,6 +26,8 @@ export const HorizontalScrollArea: React.FC<HorizontalScrollAreaProps> = ({
     const bodyScrollRef = useRef<HTMLDivElement>(null);
     const topSpacerRef = useRef<HTMLDivElement>(null);
     const isSyncingRef = useRef(false);
+    const isProgrammaticScrollRef = useRef(false);
+    const userHasScrolledRef = useRef(false);
 
     const syncTopSpacerWidth = useCallback(() => {
         const body = bodyScrollRef.current;
@@ -30,36 +36,70 @@ export const HorizontalScrollArea: React.FC<HorizontalScrollAreaProps> = ({
         spacer.style.width = `${body.scrollWidth}px`;
     }, []);
 
-    /** Scroll both containers all the way to the right (RTL start position). */
-    const scrollToRight = useCallback(() => {
+    const scrollToRtlStart = useCallback(() => {
         const body = bodyScrollRef.current;
         const top = topScrollRef.current;
         if (!body) return;
-        const max = body.scrollWidth - body.clientWidth;
+        const max = Math.max(0, body.scrollWidth - body.clientWidth);
+        isProgrammaticScrollRef.current = true;
         body.scrollLeft = max;
         if (top) top.scrollLeft = max;
+        requestAnimationFrame(() => {
+            isProgrammaticScrollRef.current = false;
+        });
     }, []);
 
     useEffect(() => {
-        syncTopSpacerWidth();
-        scrollToRight();
         const body = bodyScrollRef.current;
         if (!body) return;
-        const observer = new ResizeObserver(() => {
+
+        const syncLayout = () => {
             syncTopSpacerWidth();
-        });
-        observer.observe(body);
-        window.addEventListener('resize', syncTopSpacerWidth);
-        return () => {
-            observer.disconnect();
-            window.removeEventListener('resize', syncTopSpacerWidth);
+            if (!userHasScrolledRef.current) {
+                scrollToRtlStart();
+                return;
+            }
+            const max = Math.max(0, body.scrollWidth - body.clientWidth);
+            const next = Math.min(body.scrollLeft, max);
+            if (body.scrollLeft !== next) {
+                isProgrammaticScrollRef.current = true;
+                body.scrollLeft = next;
+                if (topScrollRef.current) topScrollRef.current.scrollLeft = next;
+                requestAnimationFrame(() => {
+                    isProgrammaticScrollRef.current = false;
+                });
+            } else if (topScrollRef.current) {
+                topScrollRef.current.scrollLeft = body.scrollLeft;
+            }
         };
-    }, [syncTopSpacerWidth, scrollToRight, children]);
+
+        syncLayout();
+        // Second pass after paint — fonts/table columns often settle late
+        const rafId = requestAnimationFrame(() => {
+            requestAnimationFrame(syncLayout);
+        });
+
+        const observer = new ResizeObserver(syncLayout);
+        observer.observe(body);
+        if (body.firstElementChild) observer.observe(body.firstElementChild);
+        window.addEventListener('resize', syncLayout);
+        return () => {
+            cancelAnimationFrame(rafId);
+            observer.disconnect();
+            window.removeEventListener('resize', syncLayout);
+        };
+    }, [syncTopSpacerWidth, scrollToRtlStart]);
+
+    const markUserScrolled = () => {
+        if (isProgrammaticScrollRef.current || isSyncingRef.current) return;
+        userHasScrolledRef.current = true;
+    };
 
     const handleTopScroll = () => {
         const top = topScrollRef.current;
         const body = bodyScrollRef.current;
         if (!top || !body || isSyncingRef.current) return;
+        markUserScrolled();
         isSyncingRef.current = true;
         body.scrollLeft = top.scrollLeft;
         isSyncingRef.current = false;
@@ -69,6 +109,7 @@ export const HorizontalScrollArea: React.FC<HorizontalScrollAreaProps> = ({
         const top = topScrollRef.current;
         const body = bodyScrollRef.current;
         if (!top || !body || isSyncingRef.current) return;
+        markUserScrolled();
         isSyncingRef.current = true;
         top.scrollLeft = body.scrollLeft;
         isSyncingRef.current = false;

@@ -11,6 +11,7 @@
   "dependencies": {
     "@google/genai": "^1.27.0",
     "@playwright/test": "^1.56.1",
+    "@tinymce/tinymce-react": "^6.3.0",
     "docx": "^9.6.1",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.2.1",
@@ -22,6 +23,7 @@
     "react-markdown": "^10.1.0",
     "react-quill": "^2.0.0",
     "react-router-dom": "^6.25.1",
+    "tinymce": "^8.8.2",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

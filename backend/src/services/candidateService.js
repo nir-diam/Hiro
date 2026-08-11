@@ -4,6 +4,8 @@ const redis = require('./redisService');
 const { isRedisAvailable } = require('../config/redis');
 const { invalidateCandidateOpportunities, invalidateCandidateInAllJobMatches } = require('./matchingCacheService');
 const Candidate = require('../models/Candidate');
+const CandidatePipeline = require('../models/CandidatePipeline');
+const CandidatePipelineStage = require('../models/CandidatePipelineStage');
 const RecruitmentSource = require('../models/RecruitmentSource');
 const SystemTag = require('../models/SystemTag');
 const { SYSTEM_TAG_TYPE_CANDIDATE } = require('../models/SystemTag');
@@ -787,6 +789,67 @@ const enrichMappedRowsWithOrgData = async (mappedRows) => {
   }
 };
 
+/** Resolve candidate pipeline + stage labels for list/detail drawers and Kanban. */
+const attachCandidatePipelineInfo = async (mappedRows) => {
+  if (!Array.isArray(mappedRows) || !mappedRows.length) return;
+
+  const stageIds = [
+    ...new Set(mappedRows.map((r) => String(r?.pipelineStageId || '').trim()).filter(Boolean)),
+  ];
+  const pipelineIds = [
+    ...new Set(mappedRows.map((r) => String(r?.candidatePipelineId || '').trim()).filter(Boolean)),
+  ];
+
+  const stages = stageIds.length
+    ? await CandidatePipelineStage.findAll({ where: { id: { [Op.in]: stageIds } } })
+    : [];
+  const stageById = new Map(stages.map((s) => [String(s.id), s.get({ plain: true })]));
+
+  const pipelineIdsFromStages = stages.map((s) => String(s.pipelineId)).filter(Boolean);
+  const allPipelineIds = [...new Set([...pipelineIds, ...pipelineIdsFromStages])];
+
+  const pipelines = allPipelineIds.length
+    ? await CandidatePipeline.findAll({ where: { id: { [Op.in]: allPipelineIds } } })
+    : [];
+  const pipelineById = new Map(pipelines.map((p) => [String(p.id), p.get({ plain: true })]));
+
+  const pipelinesNeedingDefaultStage = new Set();
+  for (const row of mappedRows) {
+    const sid = String(row?.pipelineStageId || '').trim();
+    const pid = String(row?.candidatePipelineId || '').trim();
+    if (!sid && pid) pipelinesNeedingDefaultStage.add(pid);
+  }
+
+  const defaultStageByPipelineId = new Map();
+  if (pipelinesNeedingDefaultStage.size) {
+    const defaults = await CandidatePipelineStage.findAll({
+      where: { pipelineId: { [Op.in]: [...pipelinesNeedingDefaultStage] } },
+      order: [['sortIndex', 'ASC']],
+    });
+    for (const st of defaults) {
+      const pid = String(st.pipelineId);
+      if (!defaultStageByPipelineId.has(pid)) {
+        defaultStageByPipelineId.set(pid, st.get({ plain: true }));
+      }
+    }
+  }
+
+  for (const row of mappedRows) {
+    const sid = String(row?.pipelineStageId || '').trim();
+    const pid = String(row?.candidatePipelineId || '').trim();
+    let stage = sid ? stageById.get(sid) : null;
+    if (!stage && pid) stage = defaultStageByPipelineId.get(pid) || null;
+
+    let pipeline = null;
+    if (stage?.pipelineId) pipeline = pipelineById.get(String(stage.pipelineId)) || null;
+    if (!pipeline && pid) pipeline = pipelineById.get(pid) || null;
+
+    if (pipeline?.name) row.candidatePipelineName = pipeline.name;
+    if (stage?.name) row.pipelineStageName = stage.name;
+    if (stage?.color) row.pipelineStageColor = stage.color;
+  }
+};
+
 const mapCandidateWithTags = (candidate, options = {}) => {
   if (!candidate) return null;
   const payload = candidate.toJSON ? candidate.toJSON() : { ...candidate };
@@ -860,6 +923,7 @@ const mapCandidateWithTags = (candidate, options = {}) => {
   if (!payload.employmentTypes.length && payload.employmentType) {
     payload.employmentTypes = [String(payload.employmentType).trim()].filter(Boolean);
   }
+  payload.desiredRoles = Array.isArray(payload.desiredRoles) ? payload.desiredRoles : [];
 
   enrichCandidateNameForRead(payload);
 
@@ -980,6 +1044,10 @@ const LIST_GRID_ATTRIBUTES = [
   'companyExperiences',
   'isArchived',
   'isDeleted',
+  'approveByCandidate',
+  'consentToJobOffers',
+  'candidatePipelineId',
+  'pipelineStageId',
   'createdAt',
   'updatedAt',
 ];
@@ -1116,7 +1184,7 @@ const expandInterestRolePhrases = (roleRaw) => {
 
 /**
  * Shared WHERE for candidate list + count (parameterized).
- * @param {string} trimmedSearch - free text (name / email / summary)
+ * @param {string} trimmedSearch - free text (name / email / phone / summary)
  * @param {object|null} advanced - JSON from GET ?adv= (frontend advanced search panel)
  */
 const buildCandidateListWhere = (trimmedSearch, advanced) => {
@@ -1125,9 +1193,20 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
 
   if (trimmedSearch) {
     const n = pushBind(binds, `%${trimmedSearch}%`);
-    fragments.push(
-      `("fullName" ILIKE $${n} OR "email" ILIKE $${n} OR "professionalSummary" ILIKE $${n})`,
-    );
+    const searchParts = [
+      `"fullName" ILIKE $${n}`,
+      `"email" ILIKE $${n}`,
+      `"phone" ILIKE $${n}`,
+      `"professionalSummary" ILIKE $${n}`,
+    ];
+    const digitsOnly = trimmedSearch.replace(/\D/g, '');
+    if (digitsOnly.length >= 3) {
+      const d = pushBind(binds, `%${digitsOnly}%`);
+      searchParts.push(
+        `regexp_replace(COALESCE("phone", ''), '[^0-9]', '', 'g') ILIKE $${d}`,
+      );
+    }
+    fragments.push(`(${searchParts.join(' OR ')})`);
   }
 
   if (advanced && typeof advanced === 'object' && !Array.isArray(advanced)) {
@@ -1685,6 +1764,12 @@ const attachLatestJobSubmissions = async (rows) => {
   return rows;
 };
 
+/** Max wall time for optional list last-job scoring (gateway-safe). */
+const LIST_MATCH_SCORE_BUDGET_MS = Math.max(
+  5000,
+  Math.min(55000, parseInt(process.env.LIST_MATCH_SCORE_BUDGET_MS || '20000', 10) || 20000),
+);
+
 /** Extra columns for engine scoring when reloading candidates for last-job matches */
 const LIST_SCORING_EXTRA_ATTRIBUTES = ['embedding', 'skills'];
 
@@ -1697,6 +1782,9 @@ const LIST_SCORING_EXTRA_ATTRIBUTES = ['embedding', 'skills'];
  */
 const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
   if (!Array.isArray(mappedRows) || mappedRows.length === 0) return mappedRows;
+
+  const scoreDeadline = Date.now() + (opts.scoreTimeBudgetMs ?? LIST_MATCH_SCORE_BUDGET_MS);
+  const overScoreBudget = () => Date.now() >= scoreDeadline;
 
   const reuseJobId = opts.reuseJobId != null ? String(opts.reuseJobId).trim() : '';
   const reuseScoreMap = opts.reuseScoreMap instanceof Map ? opts.reuseScoreMap : null;
@@ -1749,6 +1837,7 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
   const JOB_GROUP_CONCURRENCY = 5;
   const jobEntries = Array.from(byJob.entries());
   await runWithConcurrency(jobEntries, JOB_GROUP_CONCURRENCY, async ([jobKey, candIdStrs]) => {
+    if (overScoreBudget()) return;
     if (reuseJobId && String(jobKey) === reuseJobId && reuseScoreMap?.size) {
       for (const cid of candIdStrs) {
         const pkg = reuseScoreMap.get(cid);
@@ -1908,11 +1997,18 @@ const listPaginated = async ({
     rows.sort((a, b) => (orderIndex.get(String(a.id)) ?? 0) - (orderIndex.get(String(b.id)) ?? 0));
     const mappedRows = rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true }));
     await enrichMappedRowsWithOrgData(mappedRows);
+    await attachCandidatePipelineInfo(mappedRows);
     await attachLatestJobSubmissions(mappedRows);
     if (includeEngineScores) {
-      await attachLastSubmissionEngineMatchScores(mappedRows, { tenantClientId });
+      await attachLastSubmissionEngineMatchScores(mappedRows, {
+        tenantClientId,
+        scoreTimeBudgetMs: LIST_MATCH_SCORE_BUDGET_MS,
+      });
     } else if (matchLastJobScores) {
-      await attachLastSubmissionEngineMatchScores(mappedRows, { tenantClientId });
+      await attachLastSubmissionEngineMatchScores(mappedRows, {
+        tenantClientId,
+        scoreTimeBudgetMs: LIST_MATCH_SCORE_BUDGET_MS,
+      });
     }
     for (const m of mappedRows) {
       const lj = m.lastJobSubmission;
@@ -1967,6 +2063,7 @@ const listPaginated = async ({
 
   const mappedRows = rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true }));
   await enrichMappedRowsWithOrgData(mappedRows);
+  await attachCandidatePipelineInfo(mappedRows);
 
   await attachLatestJobSubmissions(mappedRows);
   if (includeEngineScores) {
@@ -1975,11 +2072,13 @@ const listPaginated = async ({
       reuseScoreMap: jid ? scoreMap : null,
       tenantClientId,
     });
-  } else if (matchLastJobScores) {
-    // Pass pre-loaded instances (already have embedding + skills + tags from initial query)
-    // so attachLastSubmissionEngineMatchScores can skip its own heavy Candidate.findAll reload.
-    await attachLastSubmissionEngineMatchScores(mappedRows, { tenantClientId, preloadedInstances: rows });
-  }
+    } else if (matchLastJobScores) {
+      await attachLastSubmissionEngineMatchScores(mappedRows, {
+        tenantClientId,
+        preloadedInstances: rows,
+        scoreTimeBudgetMs: LIST_MATCH_SCORE_BUDGET_MS,
+      });
+    }
 
   for (const m of mappedRows) {
     if (jid) {
@@ -2075,6 +2174,7 @@ const getById = async (id, opts = {}) => {
       if (cached) {
         const rows = [cached];
         await enrichMappedRowsWithOrgData(rows);
+        await attachCandidatePipelineInfo(rows);
         return rows[0];
       }
     } catch (e) {
@@ -2091,6 +2191,7 @@ const getById = async (id, opts = {}) => {
   const mapped = mapCandidateWithTags(candidate);
   const rows = [mapped];
   await enrichMappedRowsWithOrgData(rows);
+  await attachCandidatePipelineInfo(rows);
   await attachLatestJobSubmissions(rows);
   await attachLastSubmissionEngineMatchScores(rows, {
     tenantClientId: opts.tenantClientId || null,
@@ -2317,6 +2418,7 @@ const update = async (id, payload) => {
     await Candidate.findByPk(id, { include: includeCandidateTags }),
   );
   await enrichMappedRowsWithOrgData([updated]);
+  await attachCandidatePipelineInfo([updated]);
   await cacheSet(updated);
   // Profile changed → remove stale scores from every job:*:matches + wipe their opportunities
   invalidateCandidateOpportunities(id).catch(() => {});
@@ -2382,21 +2484,56 @@ const remove = async (id) => {
   return candidate.toJSON ? candidate.toJSON() : candidate;
 };
 
-const searchFree = async ({ query, limit = 50 }) => {
+const searchFree = async ({ query, limit = 50, pipelineId, stageIds, includeUnassigned = false }) => {
   const term = query?.trim();
   if (!term) return [];
 
-  return Candidate.findAll({
-    where: {
-      [Op.or]: [
-        { fullName: { [Op.iLike]: `%${term}%` } },
-        { email: { [Op.iLike]: `%${term}%` } },
-        { phone: { [Op.iLike]: `%${term}%` } },
-        { source: { [Op.iLike]: `%${term}%` } },
-      ],
-    },
-    limit,
+  const safeLimit = Math.min(Math.max(1, Number(limit) || 50), 100);
+  const textMatch = {
+    [Op.or]: [
+      { fullName: { [Op.iLike]: `%${term}%` } },
+      { title: { [Op.iLike]: `%${term}%` } },
+      { email: { [Op.iLike]: `%${term}%` } },
+      { phone: { [Op.iLike]: `%${term}%` } },
+      { source: { [Op.iLike]: `%${term}%` } },
+      { professionalSummary: { [Op.iLike]: `%${term}%` } },
+    ],
+  };
+
+  const whereParts = [{ isDeleted: false }, textMatch];
+
+  const normalizedStageIds = Array.isArray(stageIds)
+    ? [...new Set(stageIds.map((id) => String(id || '').trim()).filter(Boolean))]
+    : [];
+
+  if (pipelineId && normalizedStageIds.length) {
+    const pid = String(pipelineId).trim();
+    if (includeUnassigned) {
+      whereParts.push({
+        [Op.or]: [
+          { candidatePipelineId: pid, pipelineStageId: { [Op.in]: normalizedStageIds } },
+          {
+            pipelineStageId: null,
+            [Op.or]: [{ candidatePipelineId: null }, { candidatePipelineId: pid }],
+          },
+        ],
+      });
+    } else {
+      whereParts.push({ candidatePipelineId: pid });
+      whereParts.push({ pipelineStageId: { [Op.in]: normalizedStageIds } });
+    }
+  }
+
+  const rows = await Candidate.findAll({
+    where: { [Op.and]: whereParts },
+    attributes: LIST_GRID_ATTRIBUTES,
+    limit: safeLimit,
+    order: [['updatedAt', 'DESC']],
   });
+
+  const mappedRows = rows.map((r) => mapCandidateWithTags(r, { stripListHeavyJson: true }));
+  await enrichMappedRowsWithOrgData(mappedRows);
+  return mappedRows;
 };
 
 module.exports = {

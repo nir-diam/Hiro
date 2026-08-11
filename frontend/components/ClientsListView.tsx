@@ -22,9 +22,11 @@ import ContactDrawer from './ContactDrawer';
 import ClientDetailsDrawer from './ClientDetailsDrawer';
 import SearchableSelect from './SearchableSelect'; 
 import ClientTasksTab from './ClientTasksTab';
-import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
+import ClientsEventsJournalTab from './ClientsEventsJournalTab';
+import { fetchPipelines, syncPipelines, type PipelineDto, type StageOutcomeDto } from '../services/pipelinesApi';
 import { fetchClientHealthPulse, type OrgHealthPulseDto } from '../services/clientHealthRulesApi';
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
 
 // --- TYPES ---
 type ClientStatus = 'פעיל' | 'לא פעיל' | 'בהקפאה' | 'ליד חדש';
@@ -135,11 +137,17 @@ interface PipelineStage {
     color: string;
     bg: string;
     accent: string;
+    /** Original color token stored in DB (e.g. "bg-orange-100 text-orange-700") */
+    colorToken: string;
+    order: number;
+    slaLimit: number;
+    outcomes?: StageOutcomeDto[];
 }
 
 interface Pipeline {
     id: string;
     name: string;
+    description?: string;
     stages: PipelineStage[];
 }
 
@@ -147,6 +155,7 @@ function mapPipelineDto(d: PipelineDto): Pipeline {
     return {
         id: d.id,
         name: d.name,
+        description: d.description || '',
         stages: (d.stages || []).map((s) => {
             const parts = String(s.color || '').split(/\s+/).filter(Boolean);
             const bgToken = parts.find((p) => p.startsWith('bg-')) || 'bg-gray-100';
@@ -158,10 +167,159 @@ function mapPipelineDto(d: PipelineDto): Pipeline {
                 color: `border-${family}-500`,
                 bg: `bg-${family}-50`,
                 accent,
+                colorToken: String(s.color || 'bg-gray-100 text-gray-700'),
+                order: s.order ?? 0,
+                slaLimit: s.slaLimit ?? 0,
+                outcomes: s.outcomes || [],
             };
         }),
     };
 }
+
+function pipelinesToDto(rows: Pipeline[]): PipelineDto[] {
+    return rows.map((p) => ({
+        id: p.id,
+        name: p.name,
+        description: p.description || '',
+        stages: (p.stages || []).map((s) => ({
+            id: s.id,
+            name: s.name,
+            color: s.colorToken,
+            order: s.order,
+            slaLimit: s.slaLimit,
+            outcomes: s.outcomes || [],
+        })),
+    }));
+}
+
+/** Stages that share the same color become one Kanban column. */
+type StageColorColumn = {
+    key: string;
+    color: string;
+    accent: string;
+    stages: PipelineStage[];
+    primary: PipelineStage;
+    title: string;
+    stageIds: Set<string>;
+};
+
+function groupStagesByColor(stages: PipelineStage[]): StageColorColumn[] {
+    const order: string[] = [];
+    const map = new Map<string, PipelineStage[]>();
+    const sorted = [...(stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    for (const s of sorted) {
+        const key = s.colorToken || s.color || 'default';
+        if (!map.has(key)) {
+            order.push(key);
+            map.set(key, []);
+        }
+        map.get(key)!.push(s);
+    }
+    return order.map((key) => {
+        const group = map.get(key)!;
+        const primary = group[0];
+        return {
+            key,
+            color: primary.color,
+            accent: primary.accent,
+            stages: group,
+            primary,
+            title: group.map((s) => s.name).filter(Boolean).join(' · '),
+            stageIds: new Set(group.map((s) => s.id)),
+        };
+    });
+}
+
+/** Click stage title → inline input → save to DB on blur/Enter */
+const EditableStageTitle: React.FC<{
+    name: string;
+    accentClass: string;
+    disabled?: boolean;
+    onRename: (nextName: string) => Promise<void>;
+}> = ({ name, accentClass, disabled, onRename }) => {
+    const [editing, setEditing] = useState(false);
+    const [value, setValue] = useState(name);
+    const [saving, setSaving] = useState(false);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (!editing) setValue(name);
+    }, [name, editing]);
+
+    useEffect(() => {
+        if (editing) inputRef.current?.focus();
+    }, [editing]);
+
+    const commit = async () => {
+        const trimmed = value.trim();
+        if (!trimmed || trimmed === name) {
+            setValue(name);
+            setEditing(false);
+            return;
+        }
+        setSaving(true);
+        try {
+            await onRename(trimmed);
+            setEditing(false);
+        } catch {
+            setValue(name);
+            setEditing(false);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (editing) {
+        return (
+            <input
+                ref={inputRef}
+                type="text"
+                value={value}
+                disabled={saving}
+                onChange={(e) => setValue(e.target.value)}
+                onBlur={() => void commit()}
+                onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void commit();
+                    }
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        setValue(name);
+                        setEditing(false);
+                    }
+                }}
+                onClick={(e) => e.stopPropagation()}
+                className={`font-bold text-sm w-full min-w-0 flex-1 bg-white border border-primary-300 rounded px-1.5 py-0.5 outline-none focus:ring-2 focus:ring-primary-400 ${accentClass}`}
+                aria-label="עריכת שם שלב"
+            />
+        );
+    }
+
+    return (
+        <h3
+            role={disabled ? undefined : 'button'}
+            tabIndex={disabled ? undefined : 0}
+            title={disabled ? name : 'לחץ לעריכת שם השלב'}
+            onClick={(e) => {
+                if (disabled) return;
+                e.stopPropagation();
+                setEditing(true);
+            }}
+            onKeyDown={(e) => {
+                if (disabled) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setEditing(true);
+                }
+            }}
+            className={`font-bold text-sm truncate min-w-0 flex-1 ${accentClass} ${disabled ? '' : 'cursor-text hover:underline decoration-dotted underline-offset-2'}`}
+        >
+            {name}
+        </h3>
+    );
+};
 
 // --- RICH MOCK DATA ---
 export const clientsData: Client[] = [
@@ -629,8 +787,9 @@ const ContactGridCard: React.FC<{
     onStartProcess: (contact: Contact, pipelineId: string) => void;
     processOptions: Pipeline[];
     onViewProfile: (contact: Contact) => void;
+    onOpenDrawer: (contact: Contact) => void;
     onDelete: (contact: Contact) => void;
-}> = ({ contact, isSelected, onSelect, onAction, onStartProcess, processOptions, onViewProfile, onDelete }) => {
+}> = ({ contact, isSelected, onSelect, onAction, onStartProcess, processOptions, onViewProfile, onOpenDrawer, onDelete }) => {
     const [isMenuOpen, setIsMenuOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
@@ -646,8 +805,8 @@ const ContactGridCard: React.FC<{
 
     return (
         <div 
-            className={`bg-white border rounded-xl p-4 shadow-sm hover:shadow-md transition-all group relative ${isSelected ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'}`}
-            onClick={onSelect}
+            className={`bg-white border rounded-xl p-4 shadow-sm hover:shadow-md transition-all group relative cursor-pointer ${isSelected ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'}`}
+            onClick={() => onOpenDrawer(contact)}
         >
             <div className="absolute top-4 left-4 z-10 flex gap-2">
                 {/* 3 Dots Menu */}
@@ -922,7 +1081,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     const isTenantUser = Boolean(tenantClientId);
     
     // --- Tabs State ---
-    const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks'>('companies');
+    const [activeTab, setActiveTab] = useState<'companies' | 'contacts' | 'tasks' | 'events'>('companies');
 
     // --- Clients Data & State ---
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -990,6 +1149,26 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
             });
         return () => { active = false; };
     }, [authReady, pipelinesClientId]);
+
+    const handleRenamePipelineStage = async (stageId: string, nextName: string) => {
+        if (!pipelinesClientId) throw new Error('אין לקוח לשמירה');
+        const trimmed = nextName.trim();
+        if (!trimmed) throw new Error('שם שלב ריק');
+        const prev = pipelines;
+        const next = prev.map((p) => ({
+            ...p,
+            stages: p.stages.map((s) => (s.id === stageId ? { ...s, name: trimmed } : s)),
+        }));
+        setPipelines(next);
+        try {
+            const saved = await syncPipelines(pipelinesClientId, pipelinesToDto(next));
+            setPipelines(saved.map(mapPipelineDto));
+        } catch (e) {
+            setPipelines(prev);
+            alert(e instanceof Error ? e.message : 'שמירת שם השלב נכשלה');
+            throw e;
+        }
+    };
 
     useEffect(() => {
         if (!apiBase || !authReady || !tenantClientId) return;
@@ -1484,6 +1663,16 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     };
 
     // --- Drag & Drop Handlers (Kanban - Clients) ---
+    type KanbanStagePickPending = {
+        stages: PipelineStage[];
+        columnTitle: string;
+        itemLabel: string;
+        clientId?: string;
+        orgLinkId?: string;
+        contactId?: string;
+    };
+    const [kanbanStagePick, setKanbanStagePick] = useState<KanbanStagePickPending | null>(null);
+
     const handleKanbanDragStart = (e: React.DragEvent, clientId: string) => {
         e.dataTransfer.setData('clientId', clientId);
     };
@@ -1492,21 +1681,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         e.preventDefault();
     };
 
-    const handleKanbanDrop = async (e: React.DragEvent, stageId: string) => {
-        const clientId = String(e.dataTransfer.getData('clientId') || '');
-        const orgLinkId = String(e.dataTransfer.getData('orgLinkId') || '');
-        const contactId = String(e.dataTransfer.getData('contactId') || '');
-
-        if (orgLinkId) {
-            await handleOrgKanbanDrop(orgLinkId, stageId);
-            return;
-        }
-        if (contactId) {
-            await handleContactKanbanDrop(contactId, stageId);
-            return;
-        }
-        if (!clientId) return;
-
+    const applyClientKanbanDrop = async (clientId: string, stageId: string) => {
         const prevClient = clients.find(c => c.id === clientId);
         const prevStage = prevClient?.pipelineStage;
 
@@ -1605,6 +1780,75 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 ),
             );
         }
+    };
+
+    const applyKanbanDropToStage = async (payload: {
+        clientId?: string;
+        orgLinkId?: string;
+        contactId?: string;
+        stageId: string;
+    }) => {
+        const { clientId, orgLinkId, contactId, stageId } = payload;
+        if (orgLinkId) {
+            await handleOrgKanbanDrop(orgLinkId, stageId);
+            return;
+        }
+        if (contactId) {
+            await handleContactKanbanDrop(contactId, stageId);
+            return;
+        }
+        if (clientId) {
+            await applyClientKanbanDrop(clientId, stageId);
+        }
+    };
+
+    /** Drop on a color column; if several stages share the color, ask which stage. */
+    const handleKanbanColumnDrop = (e: React.DragEvent, column: StageColorColumn) => {
+        e.preventDefault();
+        const clientId = String(e.dataTransfer.getData('clientId') || '');
+        const orgLinkId = String(e.dataTransfer.getData('orgLinkId') || '');
+        const contactId = String(e.dataTransfer.getData('contactId') || '');
+        if (!clientId && !orgLinkId && !contactId) return;
+
+        if (column.stages.length <= 1) {
+            void applyKanbanDropToStage({
+                clientId: clientId || undefined,
+                orgLinkId: orgLinkId || undefined,
+                contactId: contactId || undefined,
+                stageId: column.primary.id,
+            });
+            return;
+        }
+
+        let itemLabel = 'הפריט';
+        if (orgLinkId) {
+            itemLabel = linkedOrganizations.find((o) => o.linkId === orgLinkId)?.name || itemLabel;
+        } else if (contactId) {
+            itemLabel = contacts.find((c) => c.id === contactId)?.name || itemLabel;
+        } else if (clientId) {
+            itemLabel = clients.find((c) => c.id === clientId)?.name || itemLabel;
+        }
+
+        setKanbanStagePick({
+            stages: column.stages,
+            columnTitle: column.title,
+            itemLabel,
+            clientId: clientId || undefined,
+            orgLinkId: orgLinkId || undefined,
+            contactId: contactId || undefined,
+        });
+    };
+
+    const confirmKanbanStagePick = (stageId: string) => {
+        const pick = kanbanStagePick;
+        if (!pick) return;
+        setKanbanStagePick(null);
+        void applyKanbanDropToStage({
+            clientId: pick.clientId,
+            orgLinkId: pick.orgLinkId,
+            contactId: pick.contactId,
+            stageId,
+        });
     };
 
     // --- Actions (Clients) ---
@@ -1856,6 +2100,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         email: c.email || '',
         phone: c.phone || '',
         subtitle: c.clientName || '',
+        clientId: c.clientId || (isTenantUser ? tenantClientId : null) || null,
+        organizationId: c.organizationId || null,
     });
 
     const handleBulkAction = (action: 'email' | 'sms' | 'whatsapp') => {
@@ -2075,11 +2321,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     };
     
     const handleSingleContactAction = (action: 'email' | 'sms' | 'whatsapp', contact: Contact) => {
+         const clientId = resolveContactClientId(contact);
          openMessageModal({
             mode: action,
             candidateName: contact.name, // Reusing candidate modal for contacts for simplicity
             candidatePhone: contact.phone,
             candidateEmail: contact.email,
+            linkedClientId: clientId,
+            linkedOrganizationId: contact.organizationId || null,
+            linkedContactId: contact.id,
+            recipientOptions: [contactToRecipientOption({ ...contact, clientId: clientId || contact.clientId })],
+            initialRecipientIds: [contact.id],
         });
     };
 
@@ -2168,6 +2420,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
         if (contact.clientId) return contact.clientId;
         const match = clients.find((c) => c.name === contact.clientName);
         return match?.id ?? null;
+    };
+
+    const navigateToContactProfile = (contact: Contact) => {
+        const clientId = resolveContactClientId(contact);
+        if (!clientId) {
+            alert('לא נמצא לקוח מקושר לאיש קשר זה');
+            return;
+        }
+        setActiveActionMenuId(null);
+        setIsContactDrawerOpen(false);
+        navigate(`/clients/${encodeURIComponent(clientId)}/contacts/${encodeURIComponent(contact.id)}`);
     };
 
     const handleDeleteContact = (contact: Contact) => {
@@ -2518,10 +2781,17 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                      <ClipboardDocumentCheckIcon className="w-5 h-5 inline-block ml-2"/>
                      תהליכים/משימות
                  </button>
+                 <button
+                    onClick={() => { setActiveTab('events'); setSelectedCompanyIds(new Set()); setSelectedContactIds(new Set()); }}
+                    className={`px-6 py-3 font-bold text-sm transition-all border-b-2 whitespace-nowrap ${activeTab === 'events' ? 'border-primary-600 text-primary-600' : 'border-transparent text-text-muted hover:text-text-default'}`}
+                 >
+                     <CalendarDaysIcon className="w-5 h-5 inline-block ml-2"/>
+                     אירועים
+                 </button>
              </div>
 
              {/* Toolbar & View Controls */}
-             {activeTab !== 'tasks' && (
+             {activeTab !== 'tasks' && activeTab !== 'events' && (
              <div className="bg-bg-card rounded-2xl border border-border-default p-4 shadow-sm flex flex-col items-center gap-4 relative z-30">
                  
                  {/* Top Row: Search */}
@@ -3030,30 +3300,45 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                             </table>
                         </div>
                         ) : viewMode === 'board' ? (
-                        <div className="overflow-x-auto overflow-y-hidden p-6 custom-scrollbar">
+                        <HorizontalScrollArea scrollClassName="overflow-x-auto overflow-y-hidden p-6 min-w-0 w-full [scrollbar-width:thin] custom-scrollbar">
                              {activePipelineId === 'all' ? (
-                                <div className="flex flex-col items-center justify-center h-full text-text-muted py-16">
+                                <div className="flex flex-col items-center justify-center h-full text-text-muted py-16" dir="rtl">
                                     <ChartBarIcon className="w-16 h-16 opacity-20 mb-4"/>
                                     <h3 className="text-xl font-bold">לא ניתן להציג לוח Kanban עבור "כל התהליכים"</h3>
                                     <p>אנא בחר תהליך ספציפי מהפילטר למעלה כדי לראות את הלוח לפי ארגונים.</p>
                                 </div>
                              ) : (
-                                <div className="flex gap-6 h-full min-w-max">
-                                    {activePipeline && activePipeline.stages.map((stage) => {
+                                <div className="flex gap-6 h-full min-w-max" dir="rtl">
+                                    {activePipeline && groupStagesByColor(activePipeline.stages).map((column) => {
+                                        const firstStageId = activePipeline.stages[0]?.id;
                                         const stageItems = filteredLinkedOrganizations.filter((o) =>
-                                            o.pipelineStage === stage.id
-                                            || (!o.pipelineStage && !o.pipelineId && stage.id === activePipeline.stages[0].id),
+                                            (o.pipelineStage && column.stageIds.has(o.pipelineStage))
+                                            || (!o.pipelineStage && !o.pipelineId && firstStageId && column.stageIds.has(firstStageId)),
                                         );
                                         return (
                                             <div
-                                                key={stage.id}
+                                                key={column.key}
                                                 className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
                                                 onDragOver={handleKanbanDragOver}
-                                                onDrop={(e) => handleKanbanDrop(e, stage.id)}
+                                                onDrop={(e) => handleKanbanColumnDrop(e, column)}
                                             >
-                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${stage.color}`}>
+                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${column.color}`}>
                                                     <div className="flex items-center gap-2 overflow-hidden">
-                                                        <h3 className={`font-bold text-sm truncate ${stage.accent}`}>{stage.name}</h3>
+                                                        {column.stages.length === 1 ? (
+                                                            <EditableStageTitle
+                                                                name={column.primary.name}
+                                                                accentClass={column.accent}
+                                                                disabled={!pipelinesClientId}
+                                                                onRename={(nextName) => handleRenamePipelineStage(column.primary.id, nextName)}
+                                                            />
+                                                        ) : (
+                                                            <h3
+                                                                title={column.title}
+                                                                className={`font-bold text-sm truncate min-w-0 flex-1 ${column.accent}`}
+                                                            >
+                                                                {column.title}
+                                                            </h3>
+                                                        )}
                                                         <span className="bg-bg-subtle px-2 py-0.5 rounded-full text-xs font-bold text-text-muted border border-border-subtle flex-shrink-0">
                                                             {stageItems.length}
                                                         </span>
@@ -3120,7 +3405,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                     })}
                                 </div>
                              )}
-                        </div>
+                        </HorizontalScrollArea>
                         ) : (
                         <div className="overflow-y-auto custom-scrollbar p-6 bg-bg-card">
                             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
@@ -3369,37 +3654,51 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                          </div>
                      ) : (
                          // KANBAN VIEW
-                         <div className="overflow-x-auto overflow-y-hidden p-6 custom-scrollbar">
+                         <HorizontalScrollArea scrollClassName="overflow-x-auto overflow-y-hidden p-6 min-w-0 w-full [scrollbar-width:thin] custom-scrollbar">
                              {activePipelineId === 'all' ? (
-                                <div className="flex flex-col items-center justify-center h-full text-text-muted">
+                                <div className="flex flex-col items-center justify-center h-full text-text-muted" dir="rtl">
                                     <ChartBarIcon className="w-16 h-16 opacity-20 mb-4"/>
                                     <h3 className="text-xl font-bold">לא ניתן להציג לוח Kanban עבור "כל התהליכים"</h3>
                                     <p>אנא בחר תהליך ספציפי (למשל: תהליך מכירה) מהפילטר למעלה כדי לראות את הלוח.</p>
                                 </div>
                              ) : (
-                                <div className="flex gap-6 h-full min-w-max">
-                                    {activePipeline && activePipeline.stages.map(stage => {
-                                        // Filter logic including Contact processes if needed
-                                        const stageItems = filteredClients.filter(c => 
-                                            c.pipelineStage === stage.id || 
-                                            (!c.pipelineStage && stage.id === activePipeline.stages[0].id)
+                                <div className="flex gap-6 h-full min-w-max" dir="rtl">
+                                    {activePipeline && groupStagesByColor(activePipeline.stages).map((column) => {
+                                        const firstStageId = activePipeline.stages[0]?.id;
+                                        const stageItems = filteredClients.filter((c) =>
+                                            (c.pipelineStage && column.stageIds.has(c.pipelineStage))
+                                            || (!c.pipelineStage && firstStageId && column.stageIds.has(firstStageId)),
                                         );
                                         return (
                                             <div 
-                                                key={stage.id} 
+                                                key={column.key} 
                                                 className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
                                                 onDragOver={handleKanbanDragOver}
-                                                onDrop={(e) => handleKanbanDrop(e, stage.id)}
+                                                onDrop={(e) => handleKanbanColumnDrop(e, column)}
                                             >
-                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${stage.color}`}>
+                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${column.color}`}>
                                                     <div className="flex items-center gap-2 overflow-hidden">
-                                                        <h3 className={`font-bold text-sm truncate ${stage.accent}`}>{stage.name}</h3>
+                                                        {column.stages.length === 1 ? (
+                                                            <EditableStageTitle
+                                                                name={column.primary.name}
+                                                                accentClass={column.accent}
+                                                                disabled={!pipelinesClientId}
+                                                                onRename={(nextName) => handleRenamePipelineStage(column.primary.id, nextName)}
+                                                            />
+                                                        ) : (
+                                                            <h3
+                                                                title={column.title}
+                                                                className={`font-bold text-sm truncate min-w-0 flex-1 ${column.accent}`}
+                                                            >
+                                                                {column.title}
+                                                            </h3>
+                                                        )}
                                                         <span className="bg-bg-subtle px-2 py-0.5 rounded-full text-xs font-bold text-text-muted border border-border-subtle flex-shrink-0">
                                                             {stageItems.length}
                                                         </span>
                                                     </div>
-                                                    <button 
-                                                        onClick={() => { setQuickAddStageId(stage.id); setIsQuickAddOpen(true); }}
+                                                    <button
+                                                        onClick={() => { setQuickAddStageId(column.primary.id); setIsQuickAddOpen(true); }}
                                                         className="p-1 rounded hover:bg-bg-hover text-text-muted hover:text-primary-600 transition"
                                                         title="הוסף לקוח לשלב זה"
                                                     >
@@ -3428,7 +3727,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                     })}
                                 </div>
                              )}
-                         </div>
+                         </HorizontalScrollArea>
                      )
                  ) : activeTab === 'contacts' ? (
                      // --- CONTACTS VIEW (API: all-contacts) ---
@@ -3504,7 +3803,7 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                 {activeActionMenuId === contact.id && (
                                                                     <div className="absolute left-0 top-full mt-1 w-48 bg-white border border-border-default rounded-lg shadow-xl z-50 overflow-hidden animate-fade-in">
                                                                         <button 
-                                                                            onClick={(e) => { e.stopPropagation(); setActiveActionMenuId(null); handleOpenContactDrawer(contact); }}
+                                                                            onClick={(e) => { e.stopPropagation(); navigateToContactProfile(contact); }}
                                                                             className="w-full text-right px-4 py-2.5 text-sm hover:bg-bg-hover text-text-default flex items-center gap-2"
                                                                         >
                                                                             <UserIcon className="w-4 h-4 text-text-subtle"/> צפה בפרופיל
@@ -3527,6 +3826,19 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                     </div>
                                                                 )}
                                                             </div>
+                                                        </td>
+                                                    );
+                                                }
+                                                if (colId === 'name') {
+                                                    return (
+                                                        <td key={colId} className="p-4 text-text-default">
+                                                            <button
+                                                                type="button"
+                                                                onClick={(e) => { e.stopPropagation(); navigateToContactProfile(contact); }}
+                                                                className="font-bold text-text-default hover:text-primary-600 hover:underline text-right"
+                                                            >
+                                                                {contact.name}
+                                                            </button>
                                                         </td>
                                                     );
                                                 }
@@ -3582,7 +3894,8 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                         onAction={(action) => handleSingleContactAction(action, contact)}
                                         onStartProcess={handleStartProcess}
                                         processOptions={pipelines}
-                                        onViewProfile={handleOpenContactDrawer}
+                                        onViewProfile={navigateToContactProfile}
+                                        onOpenDrawer={handleOpenContactDrawer}
                                         onDelete={handleDeleteContact}
                                     />
                                 ))
@@ -3591,31 +3904,49 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                          </div>
                      ) : (
                          // CONTACTS KANBAN
-                         <div className="overflow-x-auto overflow-y-hidden p-6 custom-scrollbar">
+                         <HorizontalScrollArea scrollClassName="overflow-x-auto overflow-y-hidden p-6 min-w-0 w-full [scrollbar-width:thin] custom-scrollbar">
                              {filterContactPipeline === 'all' ? (
-                                <div className="flex flex-col items-center justify-center h-full text-text-muted py-16">
+                                <div className="flex flex-col items-center justify-center h-full text-text-muted py-16" dir="rtl">
                                     <ChartBarIcon className="w-16 h-16 opacity-20 mb-4"/>
                                     <h3 className="text-xl font-bold">לא ניתן להציג לוח Kanban עבור "כל התהליכים"</h3>
                                     <p>אנא בחר תהליך ספציפי מהפילטר למעלה כדי לראות את הלוח.</p>
                                 </div>
                              ) : (
-                                <div className="flex gap-6 h-full min-w-max">
-                                    {(pipelines.find((p) => p.id === filterContactPipeline)?.stages || []).map((stage, idx) => {
+                                <div className="flex gap-6 h-full min-w-max" dir="rtl">
+                                    {(() => {
+                                        const contactStages = pipelines.find((p) => p.id === filterContactPipeline)?.stages || [];
+                                        const firstStageId = contactStages[0]?.id;
+                                        return groupStagesByColor(contactStages).map((column) => {
+                                        const isFirstColumn = !!(firstStageId && column.stageIds.has(firstStageId));
                                         const stageItems = sortedContacts.filter((c) =>
-                                            c.stageId === stage.id
-                                            || (!c.stageId && !c.pipelineId && idx === 0)
-                                            || (!c.stageId && c.pipelineId === filterContactPipeline && idx === 0),
+                                            (c.stageId && column.stageIds.has(c.stageId))
+                                            || (!c.stageId && !c.pipelineId && isFirstColumn)
+                                            || (!c.stageId && c.pipelineId === filterContactPipeline && isFirstColumn),
                                         );
                                         return (
                                             <div
-                                                key={stage.id}
+                                                key={column.key}
                                                 className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
                                                 onDragOver={handleKanbanDragOver}
-                                                onDrop={(e) => handleKanbanDrop(e, stage.id)}
+                                                onDrop={(e) => handleKanbanColumnDrop(e, column)}
                                             >
-                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${stage.color}`}>
+                                                <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${column.color}`}>
                                                     <div className="flex items-center gap-2 overflow-hidden">
-                                                        <h3 className={`font-bold text-sm truncate ${stage.accent}`}>{stage.name}</h3>
+                                                        {column.stages.length === 1 ? (
+                                                            <EditableStageTitle
+                                                                name={column.primary.name}
+                                                                accentClass={column.accent}
+                                                                disabled={!pipelinesClientId}
+                                                                onRename={(nextName) => handleRenamePipelineStage(column.primary.id, nextName)}
+                                                            />
+                                                        ) : (
+                                                            <h3
+                                                                title={column.title}
+                                                                className={`font-bold text-sm truncate min-w-0 flex-1 ${column.accent}`}
+                                                            >
+                                                                {column.title}
+                                                            </h3>
+                                                        )}
                                                         <span className="bg-bg-subtle px-2 py-0.5 rounded-full text-xs font-bold text-text-muted border border-border-subtle flex-shrink-0">
                                                             {stageItems.length}
                                                         </span>
@@ -3643,7 +3974,13 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                                     {contact.avatar || contact.name.substring(0, 2)}
                                                                 </div>
                                                                 <div className="min-w-0 flex-1">
-                                                                    <p className="font-bold text-sm text-text-default truncate">{contact.name}</p>
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={(e) => { e.stopPropagation(); navigateToContactProfile(contact); }}
+                                                                        className="font-bold text-sm text-text-default truncate text-right hover:text-primary-600 hover:underline max-w-full"
+                                                                    >
+                                                                        {contact.name}
+                                                                    </button>
                                                                     <p className="text-xs text-text-muted mt-0.5 truncate">{contact.role || '—'}</p>
                                                                     <p className="text-xs text-text-subtle mt-1 truncate flex items-center gap-1">
                                                                         <BuildingOffice2Icon className="w-3 h-3"/>
@@ -3659,11 +3996,23 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                                                 </div>
                                             </div>
                                         );
-                                    })}
+                                        });
+                                    })()}
                                 </div>
                              )}
-                         </div>
+                         </HorizontalScrollArea>
                      )
+                 ) : activeTab === 'events' ? (
+                    <ClientsEventsJournalTab
+                        clientOptions={
+                            isPlatformAdmin
+                                ? clients.map((c) => ({ id: c.id, name: c.name }))
+                                : tenantClientId
+                                  ? [{ id: tenantClientId, name: 'הלקוח שלי' }]
+                                  : []
+                        }
+                        defaultClientId={isPlatformAdmin ? clients[0]?.id || null : tenantClientId}
+                    />
                  ) : (
                     // --- TASKS VIEW: admin → all clients; tenant → orgs under tenant client ---
                     isPlatformAdmin ? (
@@ -3799,6 +4148,51 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                 pipelines={pipelines}
                 activePipelineId={getModalPipelineId()}
             />
+
+            {kanbanStagePick ? (
+                <div
+                    className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+                    dir="rtl"
+                    onClick={() => setKanbanStagePick(null)}
+                >
+                    <div
+                        className="bg-bg-card rounded-2xl shadow-2xl border border-border-default w-full max-w-md overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="px-5 py-4 border-b border-border-default">
+                            <h3 className="text-base font-bold text-text-default">בחר שלב יעד</h3>
+                            <p className="text-sm text-text-muted mt-1">
+                                לאיזה שלב להעביר את <span className="font-bold text-text-default">{kanbanStagePick.itemLabel}</span>?
+                            </p>
+                            <p className="text-xs text-text-subtle mt-1 truncate" title={kanbanStagePick.columnTitle}>
+                                עמודה: {kanbanStagePick.columnTitle}
+                            </p>
+                        </div>
+                        <div className="p-3 space-y-2 max-h-[50vh] overflow-y-auto custom-scrollbar">
+                            {kanbanStagePick.stages.map((stage) => (
+                                <button
+                                    key={stage.id}
+                                    type="button"
+                                    onClick={() => confirmKanbanStagePick(stage.id)}
+                                    className={`w-full text-right px-4 py-3 rounded-xl border border-border-default hover:border-primary-300 hover:bg-primary-50 transition flex items-center gap-3 ${stage.bg}`}
+                                >
+                                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${stage.color.replace('border-', 'bg-')}`} />
+                                    <span className={`font-bold text-sm ${stage.accent}`}>{stage.name}</span>
+                                </button>
+                            ))}
+                        </div>
+                        <div className="px-5 py-3 border-t border-border-default flex justify-end">
+                            <button
+                                type="button"
+                                onClick={() => setKanbanStagePick(null)}
+                                className="px-4 py-2 rounded-lg text-sm font-semibold text-text-muted hover:bg-bg-hover"
+                            >
+                                ביטול
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
 
             <QuickAddClientModal 
                 isOpen={isQuickAddOpen}

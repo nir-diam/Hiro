@@ -16,6 +16,28 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
 const PROMPT_ID = 'tag_correction_agent';
 
+/** Compact JSON schema — gemini-3-flash-preview thinking tokens otherwise consume maxOutputTokens. */
+const TAG_AGENT_RESPONSE_SCHEMA = {
+  type: 'object',
+  propertyOrdering: ['action', 'target_tag', 'reasoning', 'hesitation_level', 'dilemma_reasoning'],
+  properties: {
+    action: { type: 'string', enum: ['merge', 'create', 'delete'] },
+    target_tag: { type: 'string', nullable: true },
+    reasoning: { type: 'string' },
+    hesitation_level: { type: 'integer', nullable: true },
+    dilemma_reasoning: { type: 'string', nullable: true },
+  },
+  required: ['action', 'reasoning'],
+};
+
+const TAG_AGENT_GENERATION_CONFIG = {
+  temperature: 0.1,
+  maxOutputTokens: 512,
+  responseMimeType: 'application/json',
+  responseSchema: TAG_AGENT_RESPONSE_SCHEMA,
+  thinkingConfig: { thinkingBudget: 0 },
+};
+
 const TAG_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const isValidTagUuid = (id) => {
@@ -209,6 +231,28 @@ const normalizeAgentDecision = (parsed, candidateNames) => {
   };
 };
 
+/** Resolve an active catalog tag id for auto-merge (name lookup, then hybrid snapshot). */
+const resolveMergeTargetTagId = async (suggestedName, tagType, hybrid = []) => {
+  const byName = await tagHybridSearchService.resolveTargetTagIdByName(
+    suggestedName,
+    { tagType },
+  );
+  if (byName) return byName;
+
+  const targetLower = String(suggestedName || '').trim().toLowerCase();
+  if (!targetLower) return null;
+
+  const hit = hybrid.find(
+    (h) => isValidTagUuid(h?.tagId)
+      && String(h.name || '').trim().toLowerCase() === targetLower,
+  );
+  if (!hit?.tagId) return null;
+
+  const targetTag = await Tag.findByPk(hit.tagId);
+  if (!targetTag || String(targetTag.status).toLowerCase() !== 'active') return null;
+  return hit.tagId;
+};
+
 const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
   const tag = await Tag.findByPk(pendingTagId);
   if (!tag || String(tag.status).toLowerCase() !== 'pending') return null;
@@ -248,10 +292,9 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
       apiKey,
       systemPrompt: promptRow.template,
       message: JSON.stringify(userPayload),
-      responseMimeType: 'application/json',
       generationConfig: {
-        temperature: promptRow.temperature ?? 0.1,
-        maxOutputTokens: 1024,
+        ...TAG_AGENT_GENERATION_CONFIG,
+        temperature: promptRow.temperature ?? TAG_AGENT_GENERATION_CONFIG.temperature,
       },
       promptId: PROMPT_ID,
       llmInputJson: userPayload,
@@ -294,9 +337,10 @@ const runDecisionForPendingTag = async (pendingTagId, contextSample = '') => {
     (decision.hesitationLevel ?? 0) < AUTO_MERGE_THRESHOLD
   ) {
     try {
-      const targetTagId = await tagHybridSearchService.resolveTargetTagIdByName(
+      const targetTagId = await resolveMergeTargetTagId(
         decision.aiSuggestedTarget,
-        { tagType: tag.type },
+        tag.type,
+        hybrid,
       );
       if (targetTagId) {
         // Lazy require to avoid circular dependency (tagController ← tagCorrectionAgentService)
@@ -373,9 +417,13 @@ const schedulePendingIfNeeded = (pendingTagId, contextSample = '', options = {})
           (plain.hesitationLevel ?? 0) < AUTO_MERGE_THRESHOLD
         ) {
           try {
-            const targetTagId = await tagHybridSearchService.resolveTargetTagIdByName(
+            const snapshot = Array.isArray(plain.candidateTagsSnapshot)
+              ? plain.candidateTagsSnapshot
+              : [];
+            const targetTagId = await resolveMergeTargetTagId(
               plain.aiSuggestedTarget,
-              { tagType: tag.type },
+              tag.type,
+              snapshot,
             );
             if (targetTagId) {
               const { resolvePendingTags } = require('../controllers/tagController');
@@ -422,6 +470,8 @@ const listDecisions = async ({
   limit = 25,
   decision = 'all',
   date = '',
+  dateFrom = '',
+  dateTo = '',
   reviewStatus = 'pending_review',
   reviewerAction = '',
   search = '',
@@ -442,7 +492,12 @@ const listDecisions = async ({
   if (decision && decision !== 'all') {
     where.aiDecision = decision;
   }
-  if (date) {
+  if (dateFrom || dateTo) {
+    const cond = {};
+    if (dateFrom) cond[Op.gte] = new Date(`${dateFrom}T00:00:00.000Z`);
+    if (dateTo) cond[Op.lte] = new Date(`${dateTo}T23:59:59.999Z`);
+    where.createdAt = cond;
+  } else if (date) {
     where.createdAt = {
       [Op.gte]: new Date(`${date}T00:00:00.000Z`),
       [Op.lt]: new Date(`${date}T23:59:59.999Z`),
@@ -490,7 +545,7 @@ const listDecisions = async ({
     where.manualApprovalStatus = approvalStatus;
   }
 
-  const safeLimit = Math.min(500, Math.max(1, Number(limit) || 25));
+  const safeLimit = Math.min(10000, Math.max(1, Number(limit) || 25));
   const safePage = Math.max(1, Number(page) || 1);
   const offset = (safePage - 1) * safeLimit;
   const sortDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
@@ -576,6 +631,7 @@ const listDecisions = async ({
         hesitationLevel: typeof plain.hesitationLevel === 'number' ? plain.hesitationLevel : null,
         dilemmaReasoning: plain.dilemmaReasoning ?? null,
         manualApprovalStatus: plain.manualApprovalStatus ?? 'pending',
+        comments: plain.comments ?? null,
       };
     }),
     total: count,
@@ -653,9 +709,13 @@ const backfillAutoMergeDecisions = async (threshold = 30, limit = 200) => {
 
     try {
       const tagType = plain.pendingTag?.type || undefined;
-      const targetTagId = await tagHybridSearchService.resolveTargetTagIdByName(
+      const snapshot = Array.isArray(plain.candidateTagsSnapshot)
+        ? plain.candidateTagsSnapshot
+        : [];
+      const targetTagId = await resolveMergeTargetTagId(
         plain.aiSuggestedTarget,
-        { tagType },
+        tagType,
+        snapshot,
       );
       if (!targetTagId) {
         console.warn(`[tagCorrectionAgent] backfillAutoMerge: no target found for "${plain.aiSuggestedTarget}" (decision ${plain.id})`);
@@ -693,11 +753,25 @@ const backfillAutoMergeDecisions = async (threshold = 30, limit = 200) => {
   return { applied, skipped, total: rows.length, errors };
 };
 
+const APPROVAL_STATUSES = new Set(['pending', 'approved', 'agent_approved']);
+
 const setApprovalStatus = async (id, status = 'approved') => {
+  const next = String(status || 'approved');
+  if (!APPROVAL_STATUSES.has(next)) {
+    throw Object.assign(new Error('Invalid approval status'), { status: 400 });
+  }
   const decision = await TagAiDecision.findByPk(id);
   if (!decision) throw Object.assign(new Error('Decision not found'), { status: 404 });
-  await decision.update({ manualApprovalStatus: status });
-  return { id, manualApprovalStatus: status };
+  await decision.update({ manualApprovalStatus: next });
+  return { id, manualApprovalStatus: next };
+};
+
+const setComments = async (id, comments) => {
+  const decision = await TagAiDecision.findByPk(id);
+  if (!decision) throw Object.assign(new Error('Decision not found'), { status: 404 });
+  const value = comments == null || comments === '' ? null : String(comments);
+  await decision.update({ comments: value });
+  return { id, comments: decision.comments ?? null };
 };
 
 module.exports = {
@@ -714,4 +788,5 @@ module.exports = {
   backfillAutoMergeDecisions,
   resolveOccurrencesTagId,
   setApprovalStatus,
+  setComments,
 };

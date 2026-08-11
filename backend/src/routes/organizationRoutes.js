@@ -14,7 +14,7 @@ router.post('/query', organizationController.listQuery);
 router.use('/tmp', organizationTmpRoutes);
 router.get('/rebuild-embeddings', organizationController.rebuildEmbeddings);
 router.post('/logo/upload-url', organizationController.createLogoUploadUrl);
-router.post('/enrich', organizationController.enrich);
+router.post('/enrich', optionalAuth, optionalAttachDbUser, organizationController.enrich);
 
 // AI decision review endpoints
 router.get('/ai-decisions/stats', organizationAiDecisionController.stats);
@@ -22,6 +22,7 @@ router.get('/ai-decisions', organizationAiDecisionController.list);
 router.put('/ai-decisions/bulk-resolve', organizationAiDecisionController.bulkResolve);
 router.put('/ai-decisions/:id/resolve', organizationAiDecisionController.resolve);
 router.patch('/ai-decisions/:id/approve', organizationAiDecisionController.approve);
+router.patch('/ai-decisions/:id/comments', organizationAiDecisionController.updateComments);
 
 router.get('/:id/history', organizationController.getHistory);
 router.get('/:id/primary-client', organizationController.getPrimaryClient);

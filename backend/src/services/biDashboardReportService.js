@@ -252,7 +252,7 @@ async function computePeriodMetrics({ start, endExclusive, clientId, recruiterId
   const staffFilterCand = hasStaff ? `AND c."userId" IN (:staffIds)` : '';
   const staffFilterNotif = hasStaff ? `AND nm."senderUserId" IN (:staffIds)` : '';
   const staffFilterEvt = hasStaff ? `AND e."changedByUserId" IN (:staffIds)` : '';
-  const staffFilterLog = hasStaff ? `AND al."userId" IN (:staffIds)` : '';
+  const staffFilterLog = hasStaff ? `AND al.user_id IN (:staffIds)` : '';
   const clientJobs = clientId ? `AND j.client_id = :clientId::uuid` : '';
   const clientCand = clientId
     ? `
@@ -270,7 +270,7 @@ async function computePeriodMetrics({ start, endExclusive, clientId, recruiterId
     ? `AND nm."senderUserId" IN (SELECT id FROM users WHERE "clientId" = :clientId::uuid)`
     : '';
   const clientLog = clientId
-    ? `AND al."userId" IN (SELECT id FROM users WHERE "clientId" = :clientId::uuid)`
+    ? `AND al.user_id IN (SELECT id FROM users WHERE "clientId" = :clientId::uuid)`
     : '';
 
   const [

@@ -365,7 +365,7 @@ async function getHomeDashboard(opts = {}) {
       replacements,
     ),
     queryRows(
-      `SELECT j.id, j.title, j.company, j."clientName", j.status, j."updatedAt"
+      `SELECT j.id, j.title, j.client, j.status, j."updatedAt"
        FROM jobs j
        WHERE j.status = 'פתוחה'
          ${clientJobs(clientId)}
@@ -535,7 +535,7 @@ async function getHomeDashboard(opts = {}) {
   const openJobs = (openJobsRows || []).map((j) => ({
     id: j.id,
     main: String(j.title || 'משרה'),
-    sub: String(j.company || j.clientName || '').trim() || undefined,
+    sub: String(j.client || '').trim() || undefined,
   }));
 
   const recentUpdates = (recentUpdatesRows || []).map((u) => ({

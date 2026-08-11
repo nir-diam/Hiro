@@ -44,6 +44,8 @@ const Candidate = sequelize.define(
     title: DataTypes.STRING,
     professionalSummary: DataTypes.TEXT,
     profilePicture: DataTypes.STRING,
+    /** Short promotional self-intro video for recruiters. */
+    profileVideoUrl: DataTypes.STRING,
     resumeUrl: DataTypes.STRING,
     /** When resumeUrl was last set (file upload); not updated on parsed-text edits. */
     resumeUploadedAt: { type: DataTypes.DATE, allowNull: true },
@@ -87,6 +89,19 @@ const Candidate = sequelize.define(
     isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     documents: { type: DataTypes.JSONB, defaultValue: [] },
     events: { type: DataTypes.JSONB, defaultValue: [] },
+    /** Job roles the candidate is interested in — from managed job-field taxonomy. */
+    desiredRoles: { type: DataTypes.JSONB, defaultValue: [] },
+    /** One-time magic link token for candidate portal login (cleared after use). */
+    portalAccessToken: { type: DataTypes.UUID, allowNull: true },
+    portalAccessTokenExpiresAt: { type: DataTypes.DATE, allowNull: true },
+    /** Candidate confirmed their portal profile is accurate and ready for recruiters. */
+    approveByCandidate: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    /** Candidate opted in to platform job offers and marketing email. */
+    consentToJobOffers: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    /** Active candidate lifecycle pipeline (tenant-scoped). */
+    candidatePipelineId: { type: DataTypes.UUID, allowNull: true },
+    /** Current stage within candidatePipelineId. */
+    pipelineStageId: { type: DataTypes.UUID, allowNull: true },
   },
   {
     tableName: 'candidates',

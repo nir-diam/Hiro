@@ -35,6 +35,11 @@ const ClientPipelineStage = sequelize.define(
       allowNull: false,
       defaultValue: 0,
     },
+    outcomes: {
+      type: DataTypes.JSONB,
+      allowNull: false,
+      defaultValue: [],
+    },
   },
   {
     tableName: 'client_pipeline_stages',

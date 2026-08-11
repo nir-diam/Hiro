@@ -22,6 +22,7 @@ const resources = {
         'nav.clients': 'לקוחות',
         'nav.reports': 'דוחות',
         'nav.communications': 'מרכז תקשורת',
+        'nav.events_management': 'ניהול אירועים',
         'nav.settings': 'הגדרות',
         'nav.misc': 'שונות',
         'nav.login': 'מסך לוגין',
@@ -141,6 +142,10 @@ const resources = {
         'templates.field_name': 'שם התבנית',
         'templates.field_subject': 'נושא הודעה',
         'templates.field_content': 'תוכן ההודעה',
+        'templates.field_attachment': 'קובץ מצורף',
+        'templates.attachment_hint': 'PDF, Word, Excel, תמונה ועוד (עד 15MB) — יצורף למיילים שנשלחים מהתבנית.',
+        'templates.remove_attachment': 'הסר קובץ',
+        'templates.col_attachment': 'קובץ',
         'templates.channels': 'ערוצים:',
         'templates.params_title': 'פרמטרים (לחץ להוספה לתוכן)',
 
@@ -210,7 +215,7 @@ const resources = {
         'questionnaires.save_btn': 'שמור שאלון',
         
         // Candidates List (Existing)
-        'candidates.search_placeholder': 'חיפוש מועמד...',
+        'candidates.search_placeholder': 'חיפוש לפי שם, דוא״ל או טלפון...',
         'candidates.new_candidate_btn': 'מועמד חדש',
         'candidates.filter_btn': 'סינון',
         'candidates.employment_background_btn': 'רקע תעסוקתי',
@@ -348,6 +353,9 @@ const resources = {
         'col.salary_expectation': 'ציפיות שכר',
         'col.languages': 'שפות',
         'col.last_submission_match': 'התאמה להגשה אחרונה',
+        'col.approve_by_candidate': 'אישור מועמד',
+        'col.approve_by_candidate_yes': 'אושר על ידי המועמד',
+        'col.approve_by_candidate_no': 'לא אושר על ידי המועמד',
 
         // Actions
         'actions.selected_count': '{{count}} נבחרו',
@@ -442,7 +450,7 @@ const resources = {
 
         // --- Candidate Navigation (Sub-Menu) ---
         'candidate_nav.details': 'פרטי המועמד',
-        'candidate_nav.jobs': 'ניהול הגשות',
+        'candidate_nav.jobs': 'ניהול תהליכים והגשות',
         'candidate_nav.referrals': 'הפניות',
         'candidate_nav.events': 'אירועים',
         'candidate_nav.documents': 'מסמכים',
@@ -778,6 +786,8 @@ const resources = {
         'new_job.cancel': 'ביטול',
         'new_job.toggle_tech_ids': 'הגדרות מתקדמות ומזהים טכניים',
         'new_job.unique_email': 'מייל ייחודי',
+        'new_job.copy_unique_email': 'העתק',
+        'new_job.copied': 'הועתק!',
         'new_job.posting_code': 'קוד לפרסום',
         'new_job.job_id': 'מס׳ משרה',
         'new_job.creation_date': 'תאריך יצירה',
@@ -1088,12 +1098,14 @@ const resources = {
         // InterestedInJobs (Jobs Tab)
         'interested_jobs.title': 'התעניינות במשרות',
         'interested_jobs.loading': 'טוען התעניינות…',
-        'interested_jobs.add_button': 'הוסף התעניינות',
+        'interested_jobs.add_button': 'הוספת תפקיד',
+        'interested_jobs.found_count': 'נמצאו {{count}} משרות',
+        'interested_jobs.manage_process': 'ניהול תהליך',
         'interested_jobs.saving_field': 'שומר תחום…',
         'interested_jobs.no_candidate': 'לא נבחר מועמד',
         'interested_jobs.load_error': 'טעינת התעניינות במשרות נכשלה',
         'interested_jobs.empty': 'אין התעניינות במשרות',
-        'interested_jobs.search_placeholder': 'חיפוש משרה...',
+        'interested_jobs.search_placeholder': 'חיפוש משרה או חברה...',
         'interested_jobs.col_jobTitle': 'כותרת משרה',
         'interested_jobs.col_company': 'חברה',
         'interested_jobs.col_location': 'מיקום',
@@ -1516,6 +1528,7 @@ const resources = {
         'nav.clients': 'Clients',
         'nav.reports': 'Reports',
         'nav.communications': 'Comms Center',
+        'nav.events_management': 'Events Management',
         'nav.settings': 'Settings',
         'nav.misc': 'Misc',
         'nav.login': 'Login Screen',
@@ -1635,6 +1648,10 @@ const resources = {
         'templates.field_name': 'Template Name',
         'templates.field_subject': 'Subject',
         'templates.field_content': 'Content',
+        'templates.field_attachment': 'Attachment',
+        'templates.attachment_hint': 'PDF, Word, Excel, image, etc. (max 15MB) — attached to emails sent from this template.',
+        'templates.remove_attachment': 'Remove file',
+        'templates.col_attachment': 'File',
         'templates.channels': 'Channels:',
         'templates.params_title': 'Parameters (Click to add)',
 
@@ -1704,7 +1721,7 @@ const resources = {
         'questionnaires.save_btn': 'Save Questionnaire',
 
         // Candidates List
-        'candidates.search_placeholder': 'Search candidate...',
+        'candidates.search_placeholder': 'Search by name, email or phone...',
         'candidates.new_candidate_btn': 'New Candidate',
         'candidates.filter_btn': 'Filter',
         'candidates.employment_background_btn': 'Background',
@@ -1844,6 +1861,9 @@ const resources = {
         'col.salary_expectation': 'Salary expectation',
         'col.languages': 'Languages',
         'col.last_submission_match': 'Match on last submission',
+        'col.approve_by_candidate': 'Approved by candidate',
+        'col.approve_by_candidate_yes': 'Approved by candidate',
+        'col.approve_by_candidate_no': 'Not approved by candidate',
 
          // Actions
         'actions.selected_count': '{{count}} Selected',
@@ -1938,7 +1958,7 @@ const resources = {
 
          // --- Candidate Navigation (Sub-Menu) ---
         'candidate_nav.details': 'Details',
-        'candidate_nav.jobs': 'Jobs',
+        'candidate_nav.jobs': 'Processes & submissions',
         'candidate_nav.referrals': 'Referrals',
         'candidate_nav.events': 'Events',
         'candidate_nav.documents': 'Documents',
@@ -2299,6 +2319,8 @@ const resources = {
         'new_job.cancel': 'Cancel',
         'new_job.toggle_tech_ids': 'Show/Hide Tech IDs',
         'new_job.unique_email': 'Unique Email',
+        'new_job.copy_unique_email': 'Copy',
+        'new_job.copied': 'Copied!',
         'new_job.posting_code': 'Posting Code',
         'new_job.job_id': 'Job ID',
         'new_job.creation_date': 'Creation Date',
@@ -2604,7 +2626,9 @@ const resources = {
 
         'interested_jobs.title': 'Job interest',
         'interested_jobs.loading': 'Loading interests…',
-        'interested_jobs.add_button': 'Add interest',
+        'interested_jobs.add_button': 'Add role',
+        'interested_jobs.found_count': '{{count}} jobs found',
+        'interested_jobs.manage_process': 'Manage process',
         'interested_jobs.saving_field': 'Saving field…',
         'interested_jobs.no_candidate': 'No candidate selected',
         'interested_jobs.load_error': 'Failed to load job interests',

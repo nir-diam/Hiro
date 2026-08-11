@@ -51,6 +51,13 @@ const normalizeCandidateTagType = (rawType) => {
   return CANDIDATE_ALLOWED_TAG_TYPES.includes(raw) ? raw : null;
 };
 
+const catalogTypesEquivalent = (a, b) => {
+  const left = normalizeCandidateTagType(a) || String(a || '').toLowerCase().trim();
+  const right = normalizeCandidateTagType(b) || String(b || '').toLowerCase().trim();
+  if (!left || !right) return false;
+  return left === right;
+};
+
 const looksLikeProfessionalCertificate = (payload = {}) => {
   const text = [
     payload.name,
@@ -552,7 +559,7 @@ const ensureTagRecord = async (tagKey, defaults = {}) => {
       if (String(catalogTag.status).toLowerCase() === 'deprecated') return null;
       if (
         normalizedIncoming &&
-        String(catalogTag.type || '').toLowerCase() !== normalizedIncoming
+        !catalogTypesEquivalent(catalogTag.type, normalizedIncoming)
       ) {
         console.warn('[ensureTagRecord] catalog reuse type mismatch', {
           tagId: catalogTag.id,

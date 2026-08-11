@@ -11,6 +11,7 @@ import {
     ChatBubbleBottomCenterTextIcon, TableCellsIcon, Squares2X2Icon, Cog6ToothIcon, CircleStackIcon,
     ChevronLeftIcon, ChevronRightIcon, ArrowPathIcon
 } from './Icons';
+import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
 import LocationSelector, { LocationItem } from './LocationSelector';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import WorkedAtCompanyFilterPopover, { WorkedAtCompanyFilters } from './WorkedAtCompanyFilterPopover';
@@ -177,6 +178,8 @@ interface AdminCandidate {
     age?: number;
     matchedTerms?: string[];
     matchReasons?: { field: string; term: string; source?: string; snippet?: string }[];
+    approveByCandidate?: boolean;
+    consentToJobOffers?: boolean;
 }
 
 const jobScopeOptions = ['משרה מלאה', 'משרה חלקית', 'משמרות', 'פרילנס', 'היברידי'];
@@ -870,6 +873,8 @@ const AdminCandidatesView: React.FC = () => {
         age: c.age ? Number(c.age) : undefined,
         matchedTerms: Array.isArray(c.matchedTerms) ? c.matchedTerms.map(String) : undefined,
         matchReasons: Array.isArray(c.matchReasons) ? c.matchReasons : undefined,
+        approveByCandidate: Boolean(c.approveByCandidate ?? c.approve_by_candidate),
+        consentToJobOffers: Boolean(c.consentToJobOffers ?? c.consent_to_job_offers),
     }), []);
 
     const buildAdminAdvPayload = useCallback((rules: ComplexFilterRule[]) => {
@@ -1443,7 +1448,20 @@ const AdminCandidatesView: React.FC = () => {
                      <div className="flex items-center gap-3">
                         <AvatarIcon initials={candidate.avatar} size={40} fontSize={16} bgClassName="fill-primary-100" textClassName="fill-primary-700 font-bold" />
                         <div>
-                            <p className="font-bold text-text-default text-base">{candidate.name}</p>
+                            <p className="font-bold text-text-default text-base inline-flex items-center gap-1.5">
+                                {candidate.name}
+                                <CandidateApprovedByCandidateBadge
+                                    approved={candidate.consentToJobOffers || candidate.approveByCandidate}
+                                    title={
+                                        candidate.consentToJobOffers
+                                            ? 'המועמד הצטרף למאגר המועמדים והסכים לקבל הצעות עבודה'
+                                            : candidate.approveByCandidate
+                                              ? 'המועמד אישר את הפרופיל'
+                                              : ''
+                                    }
+                                    className="w-4 h-4"
+                                />
+                            </p>
                             <p className="text-xs text-text-muted">{candidate.title}</p>
                             {candidate.matchReasons && candidate.matchReasons.length > 0 && (
                                 <p className="text-[10px] text-red-700 mt-0.5 font-medium line-clamp-1">
@@ -1984,7 +2002,20 @@ const AdminCandidatesView: React.FC = () => {
                                         {candidate.avatar}
                                     </div>
                                     
-                                    <h3 className="text-lg font-bold text-text-default mb-1">{candidate.name}</h3>
+                                    <h3 className="text-lg font-bold text-text-default mb-1 inline-flex items-center justify-center gap-1.5">
+                                        {candidate.name}
+                                        <CandidateApprovedByCandidateBadge
+                                            approved={candidate.consentToJobOffers || candidate.approveByCandidate}
+                                            title={
+                                                candidate.consentToJobOffers
+                                                    ? 'המועמד הצטרף למאגר המועמדים והסכים לקבל הצעות עבודה'
+                                                    : candidate.approveByCandidate
+                                                      ? 'המועמד אישר את הפרופיל'
+                                                      : ''
+                                            }
+                                            className="w-4 h-4"
+                                        />
+                                    </h3>
                                     <p className="text-sm text-text-muted mb-4">{candidate.title}</p>
                                     
                                     <div className="w-full mb-4">

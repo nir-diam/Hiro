@@ -352,6 +352,8 @@ export type GenerateHeroImagePayload = {
   contactEmail?: string;
   contactPhone1?: string;
   contactPhone2?: string;
+  /** Extra design instructions injected into the Nano Banana prompt. */
+  heroDesignInstructions?: string;
 };
 
 export async function generateHeroImage(

@@ -352,6 +352,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     });
     const [videoUrl, setVideoUrl] = useState('');
     const [heroImageUrl, setHeroImageUrl] = useState('');
+    const [heroDesignInstructions, setHeroDesignInstructions] = useState('');
     const [heroGallery, setHeroGallery] = useState<CompanyCreatedImage[]>([]);
     const [heroGalleryLoading, setHeroGalleryLoading] = useState(false);
     const [clientLogoUrl, setClientLogoUrl] = useState<string | null>(null);
@@ -509,6 +510,9 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 }
                 if (pub.videoUrl != null) setVideoUrl(pub.videoUrl || '');
                 if (pub.heroImageUrl != null) setHeroImageUrl(pub.heroImageUrl || '');
+                if (pub.heroDesignInstructions != null) {
+                    setHeroDesignInstructions(pub.heroDesignInstructions || '');
+                }
                 if (Array.isArray(pub.landingPageFields) && pub.landingPageFields.length) {
                     setLandingPageFields(pub.landingPageFields);
                 }
@@ -595,6 +599,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                 contactEmail: landingContact.contactEmail,
                 contactPhone1: landingContact.contactPhone1,
                 contactPhone2: landingContact.contactPhone2,
+                heroDesignInstructions: heroDesignInstructions.trim() || undefined,
             });
             setHeroImageUrl(result.heroImageUrl || result.url);
             setHeroFeedback('המודעה נוצרה ב-Nano Banana ונשמרה');
@@ -725,6 +730,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             landingLayouts: updatedLayouts,
             videoUrl: videoUrl.trim() || null,
             heroImageUrl: heroImageUrl.trim() || null,
+            heroDesignInstructions: heroDesignInstructions.trim() || null,
             landingPageFields,
             screeningQuestions,
             trackingLinks: trackingLinksToPayload(linksOverride ?? trackingLinks),
@@ -1093,6 +1099,19 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
                             className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
                             dir="ltr"
                         />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-semibold text-text-default mb-1">הנחיות נוספות</label>
+                        <input
+                            type="text"
+                            value={heroDesignInstructions}
+                            onChange={(e) => setHeroDesignInstructions(e.target.value)}
+                            placeholder='למשל: רקע כהה, דגש על תמונת צוות, בלי אייקונים...'
+                            className="w-full bg-bg-input border border-border-default text-text-default text-sm rounded-lg focus:ring-primary-500 focus:border-primary-500 block p-2.5 transition shadow-sm"
+                        />
+                        <p className="text-xs text-text-muted mt-1">
+                            הנחיות אלה יישלחו ל-Nano Banana בכל יצירת תמונה, תחת &quot;הנחיות נוספות&quot; בפרומפט.
+                        </p>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <button

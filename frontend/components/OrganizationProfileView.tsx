@@ -1,5 +1,5 @@
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import {
     BuildingOffice2Icon,
@@ -136,6 +136,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
 
     const clientId = client?.id ? String(client.id) : null;
     const displayName = String(org?.name || client?.displayName || client?.name || '');
+    const noopMessageModal = useCallback((_config: MessageModalConfig) => {}, []);
 
     const tabs: { id: Tab; label: string; icon: React.ReactElement }[] = [
         { id: 'details', label: t('client_profile.tab_details'), icon: <BuildingOffice2Icon className="w-5 h-5" /> },
@@ -200,7 +201,7 @@ const OrganizationProfileView: React.FC<OrganizationProfileViewProps> = ({ openM
                         clientId={clientId}
                         // Admin: all client contacts. Tenant: only this organization's contacts.
                         organizationId={isPlatformAdmin ? undefined : organizationId}
-                        onOpenMessageModal={openMessageModal || (() => {})}
+                        onOpenMessageModal={openMessageModal || noopMessageModal}
                     />
                 ) : noClientMsg;
             case 'jobs':

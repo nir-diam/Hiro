@@ -158,6 +158,16 @@ export function sortDrivingLicensePicklistRows(rows: PicklistValueRow[]): Pickli
     });
 }
 
+/** מגדר (מועמד) — `PicklistCategory.key`. */
+export const GENDER_PICKLIST_KEY = 'gender';
+
+/** When picklist `gender` is empty. */
+export const GENDER_FALLBACK: PicklistValueRow[] = [
+    { id: '_fb_g_m', label: 'זכר', value: 'זכר', displayName: null },
+    { id: '_fb_g_f', label: 'נקבה', value: 'נקבה', displayName: null },
+    { id: '_fb_g_any', label: 'לא משנה', value: 'לא משנה', displayName: null },
+];
+
 /** When picklist `mobility` is empty — aligns with legacy boolean `mobility`. */
 export const MOBILITY_FALLBACK: PicklistValueRow[] = [
     { id: '_fb_mob_na', label: 'לא חשוב', value: 'לא חשוב', displayName: null },
@@ -341,6 +351,8 @@ export function drivingLicenseDisplayLabel(
     return '';
 }
 
+const picklistValuesByKeyCache = new Map<string, Promise<PicklistValueRow[]>>();
+
 export async function fetchPicklistValuesByKey(
     apiBase: string,
     categoryKey: string,
@@ -348,19 +360,27 @@ export async function fetchPicklistValuesByKey(
     const key = String(categoryKey || '').trim();
     if (!key) return [];
     const root = (apiBase || '').replace(/\/$/, '');
+    const cacheKey = `${root}::${key}`;
+    const cached = picklistValuesByKeyCache.get(cacheKey);
+    if (cached) return cached;
+
     const url = `${root}/api/picklists/categories/by-key/${encodeURIComponent(key)}/values`;
-    try {
-        const res = await fetch(url, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
-        if (!res.ok) return [];
-        const data: unknown = await res.json();
-        if (!Array.isArray(data)) return [];
-        return data.map((row: Record<string, unknown>) => ({
-            id: String(row.id ?? ''),
-            label: String(row.label ?? ''),
-            value: String(row.value ?? ''),
-            displayName: row.displayName != null ? String(row.displayName) : null,
-        }));
-    } catch {
-        return [];
-    }
+    const request = (async () => {
+        try {
+            const res = await fetch(url, { credentials: 'include', cache: 'no-store', headers: { Accept: 'application/json' } });
+            if (!res.ok) return [];
+            const data: unknown = await res.json();
+            if (!Array.isArray(data)) return [];
+            return data.map((row: Record<string, unknown>) => ({
+                id: String(row.id ?? ''),
+                label: String(row.label ?? ''),
+                value: String(row.value ?? ''),
+                displayName: row.displayName != null ? String(row.displayName) : null,
+            }));
+        } catch {
+            return [];
+        }
+    })();
+    picklistValuesByKeyCache.set(cacheKey, request);
+    return request;
 }

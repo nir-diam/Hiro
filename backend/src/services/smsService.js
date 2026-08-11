@@ -34,15 +34,21 @@ const normalizeIsraeliMsisdn = (phone) => {
   return d;
 };
 
+/** Israeli mobile only — 05XXXXXXXX. Returns '' for extensions/landlines. */
+const normalizeIsraeliMobileMsisdn = (phone) => {
+  const normalized = normalizeIsraeliMsisdn(phone);
+  return /^05[0-9]{8}$/.test(normalized) ? normalized : '';
+};
+
 const buildRecipientsString = (to) => {
   if (Array.isArray(to)) {
-    return to.map(normalizeIsraeliMsisdn).filter(Boolean).join(';');
+    return to.map(normalizeIsraeliMobileMsisdn).filter(Boolean).join(';');
   }
   const raw = String(to || '').trim();
   if (!raw) return '';
   return raw
     .split(/[;,]+/)
-    .map((x) => normalizeIsraeliMsisdn(x.trim()))
+    .map((x) => normalizeIsraeliMobileMsisdn(x.trim()))
     .filter(Boolean)
     .join(';');
 };
@@ -61,11 +67,28 @@ const buildSoapEnvelope = ({ userName, apiToken, message, recipients, senderName
   </soap:Body>
 </soap:Envelope>`;
 
+const decodeXmlEntities = (s) =>
+  String(s ?? '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"');
+
 const parseSendSmsResult = (xml) => {
-  const m = String(xml).match(/<SendSmsResult[^>]*>([\s\S]*?)<\/SendSmsResult>/i);
-  if (!m) return { code: null, raw: String(xml).slice(0, 500) };
-  const code = m[1].trim();
-  return { code, raw: code };
+  const raw = String(xml);
+  const wrapped = raw.match(/<SendSmsResult[^>]*>([\s\S]*?)<\/SendSmsResult>/i);
+  const inner = wrapped ? decodeXmlEntities(wrapped[1].trim()) : raw;
+  const statusMatch = inner.match(/<Status>([^<]+)<\/Status>/i);
+  const descMatch = inner.match(/<Description>([^<]+)<\/Description>/i);
+  if (statusMatch) {
+    return {
+      status: statusMatch[1].trim(),
+      description: descMatch ? descMatch[1].trim() : '',
+      raw: inner.slice(0, 500),
+    };
+  }
+  const code = inner.trim();
+  return { status: code, description: '', raw: code.slice(0, 500) };
 };
 
 const parseSoapFaultString = (xml) => {
@@ -144,23 +167,37 @@ const sendSms = async (opts) => {
     throw err;
   }
 
-  const { code } = parseSendSmsResult(xml);
+  const parsed = parseSendSmsResult(xml);
+  const { status, description } = parsed;
 
   if (res.status < 200 || res.status >= 300) {
-    const err = new Error(`InforU HTTP ${res.status}: ${code || xml.slice(0, 200)}`);
+    const err = new Error(`InforU HTTP ${res.status}: ${description || status || xml.slice(0, 200)}`);
     err.status = 502;
-    err.resultCode = code;
+    err.resultCode = status;
     throw err;
   }
 
-  const ok = code === '1' || code === 'true' || /^ok$/i.test(code || '');
-  return { ok, resultCode: code, raw: code || undefined };
+  const ok = status === '1' || status === 'true' || /^ok$/i.test(status || '');
+  if (!ok) {
+    const hint =
+      status === '-2'
+        ? ' Verify INFORU_SMS_USER_NAME and INFORU_SMS_API_TOKEN in InforU → Account Details → API Token (not login password).'
+        : '';
+    const err = new Error(`InforU SMS failed (Status ${status}): ${description || 'unknown error'}.${hint}`);
+    err.status = status === '-2' ? 401 : 502;
+    err.resultCode = status;
+    err.inforuDescription = description;
+    throw err;
+  }
+
+  return { ok: true, resultCode: status, raw: description || status };
 };
 
 module.exports = {
   isConfigured,
   sendSms,
   normalizeIsraeliMsisdn,
+  normalizeIsraeliMobileMsisdn,
   /**
    * .env (backend)
    *

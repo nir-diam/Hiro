@@ -16,6 +16,8 @@ async function parseErr(res: Response): Promise<string> {
     }
 }
 
+export type OrgManualApprovalStatus = 'pending' | 'approved' | 'agent_approved';
+
 export type OrgAiDecisionDto = {
     id: string;
     originalTerm: string;
@@ -34,7 +36,8 @@ export type OrgAiDecisionDto = {
     reviewerAction: string | null;
     resolvedAt: string | null;
     organizationTmpId: string | null;
-    manualApprovalStatus: 'pending' | 'approved';
+    manualApprovalStatus: OrgManualApprovalStatus;
+    comments?: string | null;
 };
 
 export async function fetchOrgAiDecisions(params: {
@@ -42,9 +45,11 @@ export async function fetchOrgAiDecisions(params: {
     limit?: number;
     decision?: string;
     date?: string;
+    dateFrom?: string;
+    dateTo?: string;
     sortOrder?: 'asc' | 'desc';
     reviewStatus?: string;
-    approvalStatus?: 'all' | 'pending' | 'approved';
+    approvalStatus?: 'all' | OrgManualApprovalStatus;
     search?: string;
     reviewerAction?: string;
     /** When false, exclude “נדרש ידנית” rows (manual status or high hesitation). */
@@ -62,6 +67,8 @@ export async function fetchOrgAiDecisions(params: {
     if (params.limit) q.set('limit', String(params.limit));
     if (params.decision && params.decision !== 'all') q.set('decision', params.decision);
     if (params.date) q.set('date', params.date);
+    if (params.dateFrom) q.set('dateFrom', params.dateFrom);
+    if (params.dateTo) q.set('dateTo', params.dateTo);
     if (params.reviewStatus) q.set('reviewStatus', params.reviewStatus);
     if (params.sortOrder) q.set('sortOrder', params.sortOrder);
     if (params.approvalStatus && params.approvalStatus !== 'all') q.set('approvalStatus', params.approvalStatus);
@@ -80,11 +87,21 @@ export async function fetchOrgAiDecisions(params: {
     return res.json();
 }
 
-export async function approveOrgAiDecision(id: string, status: 'approved' | 'pending' = 'approved'): Promise<{ id: string; manualApprovalStatus: string }> {
+export async function approveOrgAiDecision(id: string, status: OrgManualApprovalStatus = 'approved'): Promise<{ id: string; manualApprovalStatus: string }> {
     const res = await fetch(`${apiBase()}/api/organizations/ai-decisions/${encodeURIComponent(id)}/approve`, {
         method: 'PATCH',
         headers: authHeaders(),
         body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
+export async function updateOrgAiDecisionComments(id: string, comments: string): Promise<{ id: string; comments: string | null }> {
+    const res = await fetch(`${apiBase()}/api/organizations/ai-decisions/${encodeURIComponent(id)}/comments`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ comments }),
     });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();

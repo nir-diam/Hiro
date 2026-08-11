@@ -498,6 +498,11 @@ const TaskCard: React.FC<{
     );
 };
 
+type PickerOption = { id: string; name: string };
+
+/** Stable defaults — inline `= []` would create a new array every render and retrigger effects. */
+const EMPTY_PICKER_OPTIONS: PickerOption[] = [];
+
 interface ClientTasksTabProps {
     showPipeline?: boolean;
     /** Omit to load and manage tasks for all clients (admin list view). */
@@ -505,17 +510,17 @@ interface ClientTasksTabProps {
     /** When set, list/create tasks for this organization only (tenant org profile). */
     organizationId?: string;
     /** Used when `clientId` is omitted — required to create new tasks (pick target client). */
-    clientPickerOptions?: { id: string; name: string }[];
+    clientPickerOptions?: PickerOption[];
     /** Used with tenant `clientId` — pick target org when creating tasks across linked orgs. */
-    organizationPickerOptions?: { id: string; name: string }[];
+    organizationPickerOptions?: PickerOption[];
 }
 
 const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
     showPipeline = true,
     clientId,
     organizationId,
-    clientPickerOptions = [],
-    organizationPickerOptions = [],
+    clientPickerOptions = EMPTY_PICKER_OPTIONS,
+    organizationPickerOptions = EMPTY_PICKER_OPTIONS,
 }) => {
     const { user } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
@@ -527,11 +532,14 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
 
     const aggregateMode = !clientId;
     const orgPickerMode = Boolean(clientId && !organizationId && organizationPickerOptions.length > 0);
+    // Content key (not array identity) — parents often pass inline `.map()` arrays each render.
+    const orgPickerKey = organizationPickerOptions.map((o) => `${o.id}\0${o.name}`).join('\n');
     const orgNameById = useMemo(() => {
         const map = new Map<string, string>();
         for (const o of organizationPickerOptions) map.set(o.id, o.name);
         return map;
-    }, [organizationPickerOptions]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed by orgPickerKey content
+    }, [orgPickerKey]);
     const pipelinesClientId = clientId
         || (user?.clientId ? String(user.clientId) : null)
         || clientPickerOptions[0]?.id
@@ -637,7 +645,7 @@ const ClientTasksTab: React.FC<ClientTasksTabProps> = ({
         return () => {
             active = false;
         };
-    }, [apiBase, clientId, organizationId, aggregateMode, orgNameById]);
+    }, [apiBase, clientId, organizationId, aggregateMode, orgPickerKey, orgNameById]);
     
     // Filters State
     const [searchTerm, setSearchTerm] = useState('');

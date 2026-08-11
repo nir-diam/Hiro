@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { UserGroupIcon, BriefcaseIcon, ChartPieIcon,BanknotesIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
+import { UserGroupIcon, BriefcaseIcon, ChartPieIcon,BanknotesIcon, Cog6ToothIcon, HiroLogoIcon, ChevronDownIcon, SquaresPlusIcon, HiroLogotype, BuildingOffice2Icon, CircleStackIcon, BookmarkIcon, PencilIcon, TrashIcon, LockClosedIcon, WrenchScrewdriverIcon, ChartBarIcon, GlobeAmericasIcon, ArrowTopRightOnSquareIcon, ChatBubbleBottomCenterTextIcon, CalendarDaysIcon, ArrowLeftIcon, ArrowRightIcon, DocumentTextIcon, ChevronLeftIcon, ChevronRightIcon } from './Icons';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { useLanguage } from '../context/LanguageContext';
 import { useAuth } from '../context/AuthContext';
@@ -225,6 +225,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
     const isMiscActive = pathname.startsWith('/login') || pathname.startsWith('/p/');
     const isSettingsActive = pathname.startsWith('/settings') || pathname.startsWith('/admin');
     const isCommunicationsActive = pathname.startsWith('/communications');
+    const isEventsManagementActive = pathname.startsWith('/events-management');
 
     // ... (Keep handleParentClick) ...
     const handleParentClick = (
@@ -381,6 +382,17 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                             isActive={isCommunicationsActive} 
                             onClick={() => handleNavigation('/communications')}
                             isOpen={isOpen} 
+                        />
+                        )}
+
+                        {canPage('page:clients') && (
+                        <NavItem
+                            to="/events-management"
+                            label={t('nav.events_management')}
+                            icon={<CalendarDaysIcon />}
+                            isActive={isEventsManagementActive}
+                            onClick={() => handleNavigation('/events-management')}
+                            isOpen={isOpen}
                         />
                         )}
                          

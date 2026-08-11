@@ -24,6 +24,10 @@ import {
     EMPLOYMENT_TYPE_PICKLIST_KEY,
     EMPLOYMENT_TYPE_FALLBACK,
     JOB_SCOPE_MULTI_FALLBACK,
+    DRIVING_LICENSE_FALLBACK,
+    GENDER_PICKLIST_KEY,
+    GENDER_FALLBACK,
+    MOBILITY_FALLBACK,
     picklistRowLabel,
     type PicklistValueRow,
 } from '../services/picklistValuesApi';
@@ -151,7 +155,6 @@ const HEBREW_MONTH_LABELS = [
 ];
 
 const DRIVING_LICENSE_PICKLIST_KEY = 'driving_license';
-const GENDER_PICKLIST_KEY = 'gender';
 const MOBILITY_PICKLIST_KEY = 'mobility';
 
 type PicklistRow = PicklistValueRow;
@@ -168,15 +171,28 @@ const MainContent: React.FC<MainContentProps> = ({
     const recruiterNotesId = useId();
     const candidateNotesId = useId();
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const [drivingLicenseOptions, setDrivingLicenseOptions] = useState<PicklistRow[]>([]);
-    const [genderOptions, setGenderOptions] = useState<PicklistRow[]>([]);
-    const [mobilityOptions, setMobilityOptions] = useState<PicklistRow[]>([]);
-    const [jobScopePicklistRaw, setJobScopePicklistRaw] = useState<PicklistRow[]>([]);
-    const [workModelPicklistRaw, setWorkModelPicklistRaw] = useState<PicklistRow[]>([]);
-    const [employmentTypePicklistRaw, setEmploymentTypePicklistRaw] = useState<PicklistRow[]>([]);
+    const useStaticPicklists = viewMode === 'candidate';
+    const [drivingLicenseOptions, setDrivingLicenseOptions] = useState<PicklistRow[]>(() =>
+        useStaticPicklists ? DRIVING_LICENSE_FALLBACK : [],
+    );
+    const [genderOptions, setGenderOptions] = useState<PicklistRow[]>(() =>
+        useStaticPicklists ? GENDER_FALLBACK : [],
+    );
+    const [mobilityOptions, setMobilityOptions] = useState<PicklistRow[]>(() =>
+        useStaticPicklists ? MOBILITY_FALLBACK : [],
+    );
+    const [jobScopePicklistRaw, setJobScopePicklistRaw] = useState<PicklistRow[]>(() =>
+        useStaticPicklists ? JOB_SCOPE_MULTI_FALLBACK : [],
+    );
+    const [workModelPicklistRaw, setWorkModelPicklistRaw] = useState<PicklistRow[]>(() =>
+        useStaticPicklists ? WORK_MODEL_PREFERRED_FALLBACK : [],
+    );
+    const [employmentTypePicklistRaw, setEmploymentTypePicklistRaw] = useState<PicklistRow[]>(() =>
+        useStaticPicklists ? EMPLOYMENT_TYPE_FALLBACK : [],
+    );
 
     useEffect(() => {
-        if (!apiBase) return;
+        if (useStaticPicklists || !apiBase) return;
         let cancelled = false;
         void (async () => {
             const [dl, g, mob, js, wm, et] = await Promise.all([
@@ -188,9 +204,9 @@ const MainContent: React.FC<MainContentProps> = ({
                 fetchPicklistValuesByKey(apiBase, EMPLOYMENT_TYPE_PICKLIST_KEY),
             ]);
             if (cancelled) return;
-            setDrivingLicenseOptions(dl);
-            setGenderOptions(g);
-            setMobilityOptions(mob);
+            setDrivingLicenseOptions(dl.length > 0 ? dl : DRIVING_LICENSE_FALLBACK);
+            setGenderOptions(g.length > 0 ? g : GENDER_FALLBACK);
+            setMobilityOptions(mob.length > 0 ? mob : MOBILITY_FALLBACK);
             setJobScopePicklistRaw(js);
             setWorkModelPicklistRaw(wm);
             setEmploymentTypePicklistRaw(et);
@@ -198,7 +214,7 @@ const MainContent: React.FC<MainContentProps> = ({
         return () => {
             cancelled = true;
         };
-    }, [apiBase]);
+    }, [apiBase, useStaticPicklists]);
 
     const jobScopeMultiRows = useMemo(
         () => (jobScopePicklistRaw.length > 0 ? jobScopePicklistRaw : JOB_SCOPE_MULTI_FALLBACK),
@@ -687,6 +703,7 @@ const MainContent: React.FC<MainContentProps> = ({
                         />
 
                         <div id="preferences">
+                            {viewMode !== 'candidate' ? (
                             <FormSelect
                                 label={t('form.availability')}
                                 name="availability"
@@ -705,6 +722,7 @@ const MainContent: React.FC<MainContentProps> = ({
                                     🔴 לא רלוונטי (התקבל לעבודה / הקפיא תהליכים).
                                 </option>
                             </FormSelect>
+                            ) : null}
                         </div>
 
                         <div className="w-full max-w-lg">

@@ -4,6 +4,13 @@ import { JobAlertModalConfig } from '../components/CreateJobAlertModal';
 
 export type MessageMode = 'whatsapp' | 'sms' | 'email';
 
+export type SummaryDrawerTab = 'details' | 'events' | 'jobs' | 'documents';
+
+export type SummaryDrawerOptions = {
+    initialTab?: SummaryDrawerTab;
+    manageLinkId?: string;
+};
+
 /** Optional picker entries (e.g. client contacts) so the user can choose who to send to. */
 export interface MessageRecipientOption {
     id: string;
@@ -12,6 +19,10 @@ export interface MessageRecipientOption {
     phone?: string | null;
     /** e.g. company / org name shown under the contact */
     subtitle?: string | null;
+    /** CRM client UUID — used to write journal events after send */
+    clientId?: string | null;
+    /** Linked organization UUID (company) for org-scoped journal filter */
+    organizationId?: string | null;
 }
 
 export interface MessageModalConfig {
@@ -26,6 +37,10 @@ export interface MessageModalConfig {
     recipientOptions?: MessageRecipientOption[];
     /** Pre-selected option ids (defaults to options that already have email/phone for the mode). */
     initialRecipientIds?: string[];
+    /** CRM context when sending without recipientOptions (single contact / profile). */
+    linkedClientId?: string | null;
+    linkedOrganizationId?: string | null;
+    linkedContactId?: string | null;
 }
 
 export const useUIState = () => {
@@ -33,10 +48,10 @@ export const useUIState = () => {
     const [isNewTaskOpen, setIsNewTaskOpen] = useState(false);
     const [isSummaryDrawerOpen, setIsSummaryDrawerOpen] = useState(false);
     const [summaryCandidate, setSummaryCandidate] = useState<Candidate | null>(null);
+    const [summaryDrawerOptions, setSummaryDrawerOptions] = useState<SummaryDrawerOptions | null>(null);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [isMessageModalOpen, setIsMessageModalOpen] = useState(false);
     const [messageModalConfig, setMessageModalConfig] = useState<MessageModalConfig | null>(null);
-    // New state for Job Alert Modal
     const [isJobAlertModalOpen, setIsJobAlertModalOpen] = useState(false);
     const [jobAlertModalConfig, setJobAlertModalConfig] = useState<JobAlertModalConfig | null>(null);
 
@@ -64,15 +79,20 @@ export const useUIState = () => {
         email: '',
     });
 
-    const openSummaryDrawer = (candidateInput: Candidate | number) => {
+    const openSummaryDrawer = (
+        candidateInput: Candidate | number,
+        options?: SummaryDrawerOptions,
+    ) => {
         const candidate = typeof candidateInput === 'number' ? createPlaceholderCandidate(candidateInput) : candidateInput;
         setSummaryCandidate(candidate);
+        setSummaryDrawerOptions(options || null);
         setIsSummaryDrawerOpen(true);
     };
 
     const closeSummaryDrawer = () => {
         setIsSummaryDrawerOpen(false);
         setSummaryCandidate(null);
+        setSummaryDrawerOptions(null);
     };
 
     const openMessageModal = (config: MessageModalConfig) => {
@@ -82,11 +102,9 @@ export const useUIState = () => {
 
     const closeMessageModal = () => {
         setIsMessageModalOpen(false);
-        // A small delay to allow for fade out animation before clearing data
         setTimeout(() => setMessageModalConfig(null), 300);
     };
 
-    // New functions for Job Alert Modal
     const openJobAlertModal = (config: JobAlertModalConfig) => {
         setJobAlertModalConfig(config);
         setIsJobAlertModalOpen(true);
@@ -97,7 +115,6 @@ export const useUIState = () => {
         setTimeout(() => setJobAlertModalConfig(null), 300);
     };
 
-
     return {
         isPreferencesOpen,
         openPreferences,
@@ -107,6 +124,7 @@ export const useUIState = () => {
         closeNewTask,
         isSummaryDrawerOpen,
         summaryCandidate,
+        summaryDrawerOptions,
         openSummaryDrawer,
         closeSummaryDrawer,
         isSidebarOpen,

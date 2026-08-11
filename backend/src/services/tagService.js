@@ -231,7 +231,7 @@ const list = async (options = {}) => {
 
   const hasLimit = typeof limit !== 'undefined' && limit !== null;
   const normalizedLimit =
-    hasLimit ? Math.max(1, Math.min(Number(limit) || 100, 500)) : null;
+    hasLimit ? Math.max(1, Math.min(Number(limit) || 100, 10000)) : null;
   const normalizedPage = Math.max(1, Number(page) || 1);
   const offset = hasLimit ? (normalizedPage - 1) * normalizedLimit : 0;
 

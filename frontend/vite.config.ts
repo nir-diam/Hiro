@@ -6,7 +6,7 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', '');
     return {
       optimizeDeps: {
-        include: ['quill'],
+        include: ['quill', 'tinymce', '@tinymce/tinymce-react'],
       },
       server: {
         port: 3000,

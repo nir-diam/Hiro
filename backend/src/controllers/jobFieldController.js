@@ -1,9 +1,32 @@
 const jobFieldService = require('../services/jobFieldService');
 const jobFieldEmbeddingService = require('../services/jobFieldEmbeddingService');
 
-const list = async (_req, res) => {
-  const data = await jobFieldService.list();
-  res.json(data);
+const list = async (req, res) => {
+  try {
+    const scope = String(req.query.scope || '').trim();
+    const q = String(req.query.q || '').trim();
+    const parentId = String(req.query.parentId || '').trim();
+
+    if (scope && q) {
+      let items;
+      if (scope === 'categories') {
+        items = await jobFieldService.searchCategories(q);
+      } else if (scope === 'clusters' && parentId) {
+        items = await jobFieldService.searchClusters(parentId, q);
+      } else if (scope === 'roles' && parentId) {
+        items = await jobFieldService.searchRoles(parentId, q);
+      } else {
+        return res.status(400).json({ message: 'Invalid search parameters' });
+      }
+      return res.json({ scope, items });
+    }
+
+    const data = await jobFieldService.list();
+    res.json(data);
+  } catch (err) {
+    console.error('[jobFieldController.list]', err);
+    res.status(500).json({ message: 'Failed to load job fields' });
+  }
 };
 
 const createCategory = async (req, res) => {

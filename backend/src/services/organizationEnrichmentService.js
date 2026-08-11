@@ -818,7 +818,17 @@ const buildOrganizationUpdates = (item) => {
   setStr('structure', str(item.structure));
   setStr('parentCompany', str(item.parentCompany));
   setStr('growthTrend', str(item.growthTrend));
-  setStr('dataConfidence', str(item.dataConfidence));
+  const confidenceRaw = str(item.dataConfidence);
+  if (confidenceRaw) {
+    const c = confidenceRaw.toLowerCase();
+    if (c === 'high' || confidenceRaw === 'Verified by Agent' || confidenceRaw.includes('סוכן')) {
+      updates.dataConfidence = 'Verified by Agent';
+    } else if (confidenceRaw === 'Verified by User' || confidenceRaw.includes('משתמש')) {
+      updates.dataConfidence = 'Verified by User';
+    } else {
+      setStr('dataConfidence', confidenceRaw);
+    }
+  }
   setStr('relation', str(item.relation));
   setStr('email', str(item.email));
   setStr('phone', str(item.phone));

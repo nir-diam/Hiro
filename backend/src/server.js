@@ -84,6 +84,7 @@ app.use('/api/event-types', eventTypeRoutes);
 app.use('/api/system-events', systemEventRoutes);
 app.use('/api/audit-logs', auditLogRoutes);
 app.use('/api/admin/logs', appLogRoutes);
+app.use('/api/inforu', require('./routes/inforuRoutes'));
 app.use('/api/messaging', messagingRoutes);
 app.use('/api/reference-info', referenceInfoRoutes);
 app.use('/api/recruitment-sources', recruitmentSourceRoutes);
@@ -91,8 +92,10 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/dashboard', require('./routes/dashboardRoutes'));
 app.use('/api/message-templates', messageTemplateClientRoutes);
 app.use('/api/admin/message-templates', messageTemplateAdminRoutes);
+app.use('/api/proposals', require('./routes/proposalRoutes'));
 app.use('/api/admin/matching-engine', matchingEngineRoutes);
 app.use('/api/saved-searches', savedSearchRoutes);
+app.use('/api/pipeline-outcomes', require('./routes/pipelineOutcomeRoutes'));
 
 const start = async () => {
   try {

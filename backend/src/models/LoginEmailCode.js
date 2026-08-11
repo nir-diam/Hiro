@@ -2,7 +2,7 @@ const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/db');
 
 /**
- * Email-delivered OTP for client-scoped double auth (ClientUsageSetting.doubleAuth === 'פעיל').
+ * OTP challenges for client-scoped double auth (email or SMS via ClientUsageSetting.doubleAuth).
  */
 const LoginEmailCode = sequelize.define(
   'LoginEmailCode',
@@ -50,6 +50,12 @@ const LoginEmailCode = sequelize.define(
       references: { model: 'clients', key: 'id' },
       onDelete: 'SET NULL',
       onUpdate: 'CASCADE',
+    },
+    deliveryChannel: {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      defaultValue: 'email',
+      field: 'delivery_channel',
     },
   },
   {

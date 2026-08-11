@@ -9,7 +9,9 @@ const { attachDbUser } = require('../middleware/permissionMiddleware');
 const router = express.Router();
 
 router.get('/screening-rejections', authMiddleware, candidateController.listScreeningRejections);
-router.patch('/linked-jobs/:jobCandidateId/status', authMiddleware, candidateController.patchJobLinkStatus);
+router.get('/linked-jobs/:jobCandidateId/process-journal', authMiddleware, attachDbUser, candidateController.getJobLinkProcessJournal);
+router.patch('/linked-jobs/:jobCandidateId/process-journal/:entryId', authMiddleware, attachDbUser, candidateController.patchJobLinkProcessJournalEntry);
+router.patch('/linked-jobs/:jobCandidateId/status', authMiddleware, attachDbUser, candidateController.patchJobLinkStatus);
 
 router.get('/', optionalAuth, candidateController.list);
 router.get('/by-worked-at-company', candidateController.listByWorkedAtCompany);
@@ -34,6 +36,7 @@ router.post('/:id/linked-jobs', authMiddleware, candidateController.linkCandidat
 router.post('/:id/field-interest', authMiddleware, candidateController.addFieldInterest);
 router.get('/:id/screening-data', candidateController.getScreeningData);
 router.put('/:id/screening-data', candidateController.saveScreeningData);
+router.patch('/:id/pipeline-stage', authMiddleware, candidateController.patchPipelineStage);
 router.patch('/:id/parsed-text', authMiddleware, candidateController.saveParsedText);
 router.post(
   '/:id/approve-data-corrections',

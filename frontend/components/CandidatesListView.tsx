@@ -7,11 +7,12 @@ import {
     AcademicCapIcon, LanguageIcon, XMarkIcon, MapPinIcon, TableCellsIcon, Squares2X2Icon, ExclamationTriangleIcon,
     ChevronUpIcon, BookmarkIcon, CheckCircleIcon, DocumentTextIcon, ArrowTopRightOnSquareIcon, FolderIcon, ArchiveBoxIcon, ChatBubbleBottomCenterTextIcon, EnvelopeIcon, WhatsappIcon,
     BookmarkIconSolid, CheckIcon, AdjustmentsHorizontalIcon, BuildingOffice2Icon, MinusIcon, SparklesIcon, FunnelIcon,
-    DocumentArrowDownIcon
+    DocumentArrowDownIcon, ChartBarIcon
 } from './Icons';
 import { SavedSearch, useSavedSearches } from '../context/SavedSearchesContext';
 import CompanyFilterPopover from './CompanyFilterPopover';
 import CandidateCard from './CandidateCard';
+import CandidateApprovedByCandidateBadge from './CandidateApprovedByCandidateBadge';
 import CandidateRow from './CandidateRow';
 import DevAnnotation from './DevAnnotation';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -49,9 +50,111 @@ import { clampCenteredPopoverX } from '../utils/clampPopoverPosition';
 import { ComplexQueryBuilder } from './ComplexQueryComponents';
 import { serializeComplexRulesForApi, type ComplexFilterRule } from '../utils/complexQuery';
 import { fetchCandidatesListResponse } from '../utils/candidatesListApi';
+import { authHeaders } from '../utils/authHeaders';
 import { fetchSavedSearchBlacklist, type EnrichedBlacklistEntry } from '../services/savedSearchesApi';
+import { HorizontalScrollArea } from './HorizontalScrollArea';
+import type { SummaryDrawerOptions } from '../hooks/useUIState';
+import {
+    fetchCandidatePipelines,
+    patchCandidatePipelineStage,
+    type PipelineDto,
+} from '../services/candidatePipelinesApi';
+import JobDetailsDrawer from './JobDetailsDrawer';
+import { type Job as JobDetailsJob } from './JobsView';
 
 const MATCH_POPUP_WIDTH = 288;
+
+const JOB_DRAWER_STATUSES = new Set(['פתוחה', 'מוקפאת', 'מאוישת', 'טיוטה']);
+
+function buildFallbackJobForDrawer(jobId: string, jobTitle: string): JobDetailsJob {
+    return {
+        id: jobId as unknown as JobDetailsJob['id'],
+        title: jobTitle || 'משרה',
+        client: '',
+        field: '',
+        role: '',
+        priority: 'רגילה',
+        clientType: 'כללי',
+        city: '',
+        region: 'לא צויין',
+        gender: 'לא משנה',
+        mobility: false,
+        licenseType: 'לא צויין',
+        postingCode: jobId,
+        validityDays: 30,
+        recruitingCoordinator: 'מערכת',
+        accountManager: 'מערכת',
+        salaryMin: 0,
+        salaryMax: 0,
+        ageMin: 18,
+        ageMax: 65,
+        openPositions: 1,
+        status: 'טיוטה',
+        associatedCandidates: 0,
+        waitingForScreening: 0,
+        activeProcess: 0,
+        openDate: new Date().toISOString(),
+        recruiter: 'מערכת',
+        location: 'לא צויין',
+        jobType: 'לא צויין',
+        description: '',
+        requirements: [],
+        rating: 0,
+        healthProfile: 'standard',
+    };
+}
+
+function mapApiRecordToJobDetailsJob(
+    raw: Record<string, unknown>,
+    fallback?: { jobId: string; jobTitle: string },
+): JobDetailsJob {
+    const statusRaw = String(raw.status || 'טיוטה');
+    const status = JOB_DRAWER_STATUSES.has(statusRaw) ? (statusRaw as JobDetailsJob['status']) : 'טיוטה';
+    const requirements = Array.isArray(raw.requirements)
+        ? raw.requirements.map((r) => String(r || '').trim()).filter(Boolean)
+        : [];
+    const jobType = Array.isArray(raw.jobType)
+        ? raw.jobType.map((v) => String(v))
+        : raw.jobType != null && String(raw.jobType).trim()
+          ? [String(raw.jobType)]
+          : ['מלאה'];
+    const rawId = raw.id != null ? raw.id : fallback?.jobId;
+    return {
+        id: (typeof rawId === 'number' ? rawId : String(rawId || fallback?.jobId || 0)) as JobDetailsJob['id'],
+        title: String(raw.title || raw.publicJobTitle || fallback?.jobTitle || 'משרה'),
+        client: String(raw.client || ''),
+        field: String(raw.field || ''),
+        role: String(raw.role || ''),
+        priority: (raw.priority as JobDetailsJob['priority']) || 'רגילה',
+        clientType: String(raw.clientType || 'כללי'),
+        city: String(raw.city || ''),
+        region: String(raw.region || 'לא צויין'),
+        gender: (raw.gender as JobDetailsJob['gender']) || 'לא משנה',
+        mobility: Boolean(raw.mobility),
+        licenseType: String(raw.licenseType || 'לא צויין'),
+        postingCode: String(raw.postingCode || raw.id || fallback?.jobId || ''),
+        validityDays: Number(raw.validityDays) || 30,
+        recruitingCoordinator: String(raw.recruitingCoordinator || raw.recruiter || 'מערכת'),
+        accountManager: String(raw.accountManager || 'מערכת'),
+        salaryMin: Number(raw.salaryMin) || 0,
+        salaryMax: Number(raw.salaryMax) || 0,
+        ageMin: Number(raw.ageMin) || 18,
+        ageMax: Number(raw.ageMax) || 65,
+        openPositions: Number(raw.openPositions) || 1,
+        status,
+        associatedCandidates: Number(raw.associatedCandidates) || 0,
+        waitingForScreening: Number(raw.waitingForScreening) || 0,
+        activeProcess: Number(raw.activeProcess) || 0,
+        openDate: String(raw.openDate || raw.createdAt || new Date().toISOString()),
+        recruiter: String(raw.recruiter || raw.recruitingCoordinator || 'מערכת'),
+        location: String(raw.location || raw.city || 'לא צויין'),
+        jobType,
+        description: String(raw.description || raw.PublicDescription || raw.publicDescription || ''),
+        requirements,
+        rating: Number(raw.rating) || 0,
+        healthProfile: (raw.healthProfile as JobDetailsJob['healthProfile']) || 'standard',
+    };
+}
 
 /** Match API max page size for candidate list export. */
 const CANDIDATES_EXPORT_PAGE_SIZE = 500;
@@ -132,6 +235,59 @@ const sameCompanyFilters = (a: CompanyFiltersState, b: CompanyFiltersState) =>
 const companyFiltersAreActive = (cf: CompanyFiltersState) =>
     !!(cf.industries?.length || cf.fields?.length || cf.roles?.length || cf.sizes?.length || cf.sectors?.length);
 
+type CandidatePipelineStage = {
+    id: string;
+    name: string;
+    color: string;
+    order: number;
+    slaLimit: number;
+};
+
+type CandidateStageColorColumn = {
+    key: string;
+    color: string;
+    stages: CandidatePipelineStage[];
+    primary: CandidatePipelineStage;
+    title: string;
+    stageIds: Set<string>;
+};
+
+function groupCandidateStagesByColor(stages: CandidatePipelineStage[]): CandidateStageColorColumn[] {
+    const order: string[] = [];
+    const map = new Map<string, CandidatePipelineStage[]>();
+    const sorted = [...(stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    for (const s of sorted) {
+        const key = s.color || 'default';
+        if (!map.has(key)) {
+            order.push(key);
+            map.set(key, []);
+        }
+        map.get(key)!.push(s);
+    }
+    return order.map((key) => {
+        const group = map.get(key)!;
+        const primary = group[0];
+        return {
+            key,
+            color: primary.color,
+            stages: group,
+            primary,
+            title: group.map((s) => s.name).filter(Boolean).join(' · '),
+            stageIds: new Set(group.map((s) => s.id)),
+        };
+    });
+}
+
+function pipelineDtoToStages(p: PipelineDto | undefined): CandidatePipelineStage[] {
+    return (p?.stages || []).map((s) => ({
+        id: s.id,
+        name: s.name,
+        color: s.color,
+        order: s.order,
+        slaLimit: s.slaLimit,
+    }));
+}
+
 export interface Candidate {
   id: number; // local numeric id for UI
   backendId?: string; // actual id from backend
@@ -193,6 +349,15 @@ export interface Candidate {
   availability?: string;
   /** Preferred daily hours (`WorkingHoursInput`), maps to API `preferredWorkingHours`. */
   preferredWorkingHours?: string;
+  /** True when the candidate approved their portal profile. */
+  approveByCandidate?: boolean;
+  consentToJobOffers?: boolean;
+  /** Tenant candidate pipeline assignment. */
+  candidatePipelineId?: string;
+  pipelineStageId?: string;
+  candidatePipelineName?: string;
+  pipelineStageName?: string;
+  pipelineStageColor?: string;
   /** Latest explicit job_candidates row (by activity); enriched by list API for grid. */
   lastJobSubmission?: {
     jobId: string;
@@ -707,7 +872,7 @@ function isJobScopesDefaultSelection(scopes: string[]): boolean {
 }
 
 interface CandidatesListViewProps {
-    openSummaryDrawer: (candidate: Candidate | number) => void;
+    openSummaryDrawer: (candidate: Candidate | number, options?: SummaryDrawerOptions) => void;
     favorites: Set<number>;
     toggleFavorite: (id: number) => void;
     openMessageModal: (config: MessageModalConfig) => void;
@@ -1545,6 +1710,25 @@ function mergeCandidatesPreservingMatchScores(prev: Candidate[], mapped: Candida
     });
 }
 
+/** Merge Kanban column free-search hits into list state (update existing + append new). */
+function mergeKanbanSearchCandidates(prev: Candidate[], mapped: Candidate[]): Candidate[] {
+    const prevKeys = new Set(prev.map((c) => c.backendId || String(c.id)));
+    const mergedByKey = new Map(prev.map((c) => [c.backendId || String(c.id), c]));
+    for (const c of mapped) {
+        const key = c.backendId || String(c.id);
+        const old = mergedByKey.get(key);
+        mergedByKey.set(key, old ? { ...old, ...c } : c);
+    }
+    const next = prev.map((c) => mergedByKey.get(c.backendId || String(c.id)) || c);
+    for (const c of mapped) {
+        const key = c.backendId || String(c.id);
+        if (!prevKeys.has(key)) next.push(c);
+    }
+    return next;
+}
+
+const KANBAN_COLUMN_SEARCH_MIN_LEN = 2;
+
 const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDrawer, favorites, toggleFavorite, openMessageModal }) => {
     /** Fresh read on each mount so returning from a candidate profile restores session-backed filters. */
     const listViewSnapshot = useMemo(() => loadListViewSnapshotFromSession(), []);
@@ -1564,6 +1748,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [jobs, setJobs] = useState<{ id: string; title: string; client?: string; status?: string }[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
     const [jobsError, setJobsError] = useState<string | null>(null);
+    const [selectedJobForDrawer, setSelectedJobForDrawer] = useState<JobDetailsJob | null>(null);
+    const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
     const [selectedJobId, setSelectedJobId] = useState('');
 
     const navigate = useNavigate();
@@ -1615,12 +1801,38 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         defaultVisibleColumns: globalPoolDefaultCols,
         allColumnIds: globalPoolAllColumnIds,
     });
+    /** Kanban is session-only — table/grid stay persisted so users aren't stuck on board after refresh. */
+    const [boardViewActive, setBoardViewActive] = useState(false);
+    const boardPrefResetRef = useRef(false);
+    useEffect(() => {
+        if (boardPrefResetRef.current) return;
+        if (viewMode === 'board') {
+            boardPrefResetRef.current = true;
+            setViewMode('table');
+        }
+    }, [viewMode, setViewMode]);
+    const effectiveViewMode: 'table' | 'grid' | 'board' = boardViewActive ? 'board' : viewMode === 'grid' ? 'grid' : 'table';
 
     useEffect(() => {
         if (!isSettingsOpen) persistColumnsNow();
     }, [isSettingsOpen, persistColumnsNow]);
     const [page, setPage] = useState(() => listViewSnapshot?.page ?? 1);
     const [pageSize, setPageSize] = useState(() => listViewSnapshot?.pageSize ?? 100);
+    const [candidatePipelines, setCandidatePipelines] = useState<PipelineDto[]>([]);
+    const [activeCandidatePipelineId, setActiveCandidatePipelineId] = useState<string>('');
+    const [kanbanStagePick, setKanbanStagePick] = useState<{
+        candidateBackendId: string;
+        itemLabel: string;
+        columnTitle: string;
+        pipelineId: string;
+        stages: CandidatePipelineStage[];
+    } | null>(null);
+    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const ownPipelineClientId = user?.clientId ? String(user.clientId) : null;
+    const [adminPipelineClientId, setAdminPipelineClientId] = useState<string | null>(null);
+    const [pipelineClientOptions, setPipelineClientOptions] = useState<Array<{ id: string; label: string }>>([]);
+    const [pipelineClientsLoading, setPipelineClientsLoading] = useState(false);
+    const pipelinesClientId = isPlatformAdmin ? adminPipelineClientId : ownPipelineClientId;
     const [totalCandidates, setTotalCandidates] = useState(() =>
         listViewSnapshot != null ? listViewSnapshot.totalCandidates : 0,
     );
@@ -1628,6 +1840,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [debouncedSearchTerm, setDebouncedSearchTerm] = useState(() => listViewSnapshot?.debouncedSearchTerm ?? '');
     const pageSizeOptions = useMemo(() => [10, 50, 100, 200, 500], []);
     const dragItemIndex = useRef<number | null>(null);
+    const kanbanDraggedCandidateIdRef = useRef<string | null>(null);
+    const kanbanDidDragRef = useRef(false);
+    const kanbanColumnSearchTimersRef = useRef<Record<string, number>>({});
+    const [kanbanColumnQueries, setKanbanColumnQueries] = useState<Record<string, string>>({});
+    const [kanbanColumnResults, setKanbanColumnResults] = useState<Record<string, Candidate[]>>({});
+    const [kanbanColumnLoading, setKanbanColumnLoading] = useState<Record<string, boolean>>({});
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     
     const [isJobFieldSelectorOpen, setIsJobFieldSelectorOpen] = useState(false);
@@ -1998,6 +2216,22 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             c.preferredWorkingHours != null && String(c.preferredWorkingHours).trim() !== ''
                 ? String(c.preferredWorkingHours).trim()
                 : '',
+        approveByCandidate: Boolean(c.approveByCandidate ?? c.approve_by_candidate),
+        consentToJobOffers: Boolean(c.consentToJobOffers ?? c.consent_to_job_offers),
+        candidatePipelineId: c.candidatePipelineId != null ? String(c.candidatePipelineId) : undefined,
+        pipelineStageId: c.pipelineStageId != null ? String(c.pipelineStageId) : undefined,
+        candidatePipelineName:
+            c.candidatePipelineName != null && String(c.candidatePipelineName).trim()
+                ? String(c.candidatePipelineName).trim()
+                : undefined,
+        pipelineStageName:
+            c.pipelineStageName != null && String(c.pipelineStageName).trim()
+                ? String(c.pipelineStageName).trim()
+                : undefined,
+        pipelineStageColor:
+            c.pipelineStageColor != null && String(c.pipelineStageColor).trim()
+                ? String(c.pipelineStageColor).trim()
+                : undefined,
         matchedTerms: Array.isArray(c.matchedTerms) ? c.matchedTerms.map(String) : undefined,
         matchReasons: Array.isArray(c.matchReasons) ? c.matchReasons : undefined,
         lastJobSubmission: ljCandidate
@@ -2033,7 +2267,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             dataIncomplete?: boolean;
             jobId?: string;
             savedSearchId?: string | number | null;
-            /** Default true. Company-filter Apply sets false for a faster list response. */
+            /** Default false — server-side last-job scoring causes gateway 504 on large pages. */
             matchLastJobScores?: boolean;
         }) => {
             if (!apiBase) return;
@@ -2045,7 +2279,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 dataIncomplete: !!opts.dataIncomplete,
                 jobId: String(opts.jobId || '').trim(),
                 savedSearchId: opts.savedSearchId ?? null,
-                matchLastJobScores: opts.matchLastJobScores !== false,
+                matchLastJobScores: opts.matchLastJobScores === true,
             });
             const now = Date.now();
             // Drop identical in-flight / back-to-back duplicate list GETs (Apply + effect race).
@@ -2068,7 +2302,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         advanced: opts.advanced,
                         dataIncomplete: opts.dataIncomplete,
                         jobId: opts.jobId,
-                        matchLastJobScores: opts.matchLastJobScores !== false,
+                        matchLastJobScores: opts.matchLastJobScores === true,
                         savedSearchId: opts.savedSearchId ?? null,
                     },
                     candidatesListFetchInit(),
@@ -2084,17 +2318,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 setSemanticBaselineCandidates(null);
                 setCandidates(mapped);
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
-                // Only hydrate via simulate when the list request asked for scores.
-                // Company-filter Apply uses matchLastJobScores=0 — do not spam simulate.
-                if (opts.matchLastJobScores !== false) {
-                    const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
-                    if (rawRows.some(rawListRowNeedsMatchHydration)) {
-                        void hydrateMissingListMatchScores(
-                            apiBase,
-                            rawRows,
-                            listMatchHydrationInFlightRef.current,
-                        ).then((patches) => applyListMatchPatches(patches));
-                    }
+                // Hydrate match % client-side (fast list GET + background simulate per row).
+                const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
+                if (rawRows.some(rawListRowNeedsMatchHydration)) {
+                    void hydrateMissingListMatchScores(
+                        apiBase,
+                        rawRows,
+                        listMatchHydrationInFlightRef.current,
+                    ).then((patches) => applyListMatchPatches(patches));
                 }
                 listFetchLastKeyRef.current = { key: fetchKey, at: Date.now() };
             } catch (e) {
@@ -2112,6 +2343,72 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         },
         [apiBase, mapCandidate, applyListMatchPatches, setLoadingSearchId],
     );
+
+    useEffect(() => {
+        if (!isPlatformAdmin || !apiBase) {
+            setPipelineClientOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setPipelineClientsLoading(true);
+        fetch(`${apiBase}/api/clients?activeOnly=true`, {
+            headers: authHeaders(true),
+            cache: 'no-store',
+        })
+            .then((res) => (res.ok ? res.json() : []))
+            .then((rows: unknown) => {
+                if (cancelled) return;
+                const list = Array.isArray(rows) ? rows : ((rows as { data?: unknown })?.data ?? []);
+                const opts = (Array.isArray(list) ? list : [])
+                    .map((c: Record<string, unknown>) => ({
+                        id: String(c.id ?? ''),
+                        label: String(c.displayName || c.name || '').trim(),
+                    }))
+                    .filter((o) => o.id && o.label)
+                    .sort((a, b) => a.label.localeCompare(b.label, 'he'));
+                setPipelineClientOptions(opts);
+            })
+            .catch(() => {
+                if (!cancelled) setPipelineClientOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setPipelineClientsLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, isPlatformAdmin]);
+
+    useEffect(() => {
+        if (!isPlatformAdmin || adminPipelineClientId || !pipelineClientOptions.length) return;
+        setAdminPipelineClientId(pipelineClientOptions[0].id);
+    }, [isPlatformAdmin, adminPipelineClientId, pipelineClientOptions]);
+
+    useEffect(() => {
+        if (!pipelinesClientId) {
+            setCandidatePipelines([]);
+            setActiveCandidatePipelineId('');
+            return;
+        }
+        let cancelled = false;
+        void fetchCandidatePipelines(pipelinesClientId)
+            .then((rows) => {
+                if (cancelled) return;
+                setCandidatePipelines(rows);
+                setActiveCandidatePipelineId((prev) =>
+                    prev && rows.some((p) => p.id === prev) ? prev : rows[0]?.id || '',
+                );
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setCandidatePipelines([]);
+                    setActiveCandidatePipelineId('');
+                }
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [pipelinesClientId]);
 
     // Ref keeps companyFilters readable inside callbacks without adding it to dep arrays.
     // This prevents resolveAdvancedPayloadForFetch (and therefore fetchCandidates) from
@@ -2439,7 +2736,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         advanced: resolveAdvancedPayloadForFetch(debouncedComplexRules),
                         dataIncomplete: showIncompleteOnly,
                         jobId: selectedJobId.trim(),
-                        matchLastJobScores: true,
+                        matchLastJobScores: false,
                         savedSearchId: loadedSearchRef.current?.id ?? null,
                     },
                     candidatesListFetchInit(),
@@ -2656,6 +2953,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         if (src >= 0) next.splice(src + 1, 0, 'lastSubmissionMatch');
         else next.push('lastSubmissionMatch');
         setVisibleColumnIds(next);
+    }, [visibleColumnIds, setVisibleColumnIds]);
+
+    useEffect(() => {
+        if (!visibleColumnIds.includes('approveByCandidate')) return;
+        setVisibleColumnIds(visibleColumnIds.filter((id) => id !== 'approveByCandidate'));
     }, [visibleColumnIds, setVisibleColumnIds]);
 
     // ... (Keep existing sorting/filtering logic and handlers) ...
@@ -3242,6 +3544,33 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         }
     }, [apiBase, jobs.length]);
 
+    const openLastSubmissionJobDrawer = useCallback(
+        async (jobId: string, jobTitle: string) => {
+            const trimmedId = String(jobId || '').trim();
+            if (!trimmedId) return;
+            const title = String(jobTitle || '').trim() || 'משרה';
+            setSelectedJobForDrawer(buildFallbackJobForDrawer(trimmedId, title));
+            setIsJobDrawerOpen(true);
+
+            if (!apiBase) return;
+            try {
+                const res = await fetch(`${apiBase}/api/jobs/${encodeURIComponent(trimmedId)}`, {
+                    headers: authHeaders(),
+                    cache: 'no-store',
+                });
+                if (!res.ok) return;
+                const data = await res.json();
+                const raw = (data?.job ?? data) as Record<string, unknown>;
+                if (raw && typeof raw === 'object') {
+                    setSelectedJobForDrawer(mapApiRecordToJobDetailsJob(raw, { jobId: trimmedId, jobTitle: title }));
+                }
+            } catch {
+                /* keep fallback job in drawer */
+            }
+        },
+        [apiBase],
+    );
+
     // Removed eager useEffect — jobs are loaded lazily when SmartSearchPanel opens (see isSmartSearchOpen toggle)
 
     const handleSliderChange = (name: string, value: number) => {
@@ -3438,6 +3767,214 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const paginatedCandidates = useMemo(() => {
         return processedCandidates;
     }, [processedCandidates]);
+
+    const activeCandidatePipeline = useMemo(
+        () => candidatePipelines.find((p) => p.id === activeCandidatePipelineId),
+        [candidatePipelines, activeCandidatePipelineId],
+    );
+
+    const boardCandidates = useMemo(() => {
+        if (!activeCandidatePipelineId) return paginatedCandidates;
+        return paginatedCandidates.filter(
+            (c) =>
+                !c.candidatePipelineId ||
+                c.candidatePipelineId === activeCandidatePipelineId,
+        );
+    }, [paginatedCandidates, activeCandidatePipelineId]);
+
+    const findCandidateByDragId = useCallback(
+        (dragId: string) =>
+            candidates.find(
+                (c) =>
+                    (c.backendId && c.backendId === dragId) || String(c.id) === dragId,
+            ),
+        [candidates],
+    );
+
+    const resolveKanbanDragCandidateId = (e: React.DragEvent) =>
+        e.dataTransfer.getData('candidateId')
+        || e.dataTransfer.getData('text/plain')
+        || kanbanDraggedCandidateIdRef.current
+        || '';
+
+    const handleKanbanDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+    };
+
+    const handleCandidateKanbanDragStart = (e: React.DragEvent, candidate: Candidate) => {
+        const dragId = getCandidateRouteId(candidate);
+        kanbanDraggedCandidateIdRef.current = dragId;
+        kanbanDidDragRef.current = true;
+        e.dataTransfer.setData('text/plain', dragId);
+        e.dataTransfer.setData('candidateId', dragId);
+        e.dataTransfer.effectAllowed = 'move';
+    };
+
+    const handleCandidateKanbanDragEnd = () => {
+        kanbanDraggedCandidateIdRef.current = null;
+        window.setTimeout(() => {
+            kanbanDidDragRef.current = false;
+        }, 0);
+    };
+
+    const applyCandidateKanbanDrop = async (
+        candidateBackendId: string,
+        stageId: string,
+        pipelineId: string,
+    ) => {
+        const prev = findCandidateByDragId(candidateBackendId);
+        const prevPipelineId = prev?.candidatePipelineId;
+        const prevStageId = prev?.pipelineStageId;
+        const matchesDragId = (c: Candidate) =>
+            c.backendId === candidateBackendId || String(c.id) === candidateBackendId;
+        setCandidates((prevList) =>
+            prevList.map((c) =>
+                matchesDragId(c)
+                    ? { ...c, candidatePipelineId: pipelineId, pipelineStageId: stageId }
+                    : c,
+            ),
+        );
+        try {
+            await patchCandidatePipelineStage(candidateBackendId, { pipelineId, stageId });
+        } catch {
+            setCandidates((prevList) =>
+                prevList.map((c) =>
+                    matchesDragId(c)
+                        ? {
+                              ...c,
+                              candidatePipelineId: prevPipelineId,
+                              pipelineStageId: prevStageId,
+                          }
+                        : c,
+                ),
+            );
+        }
+    };
+
+    const handleCandidateKanbanColumnDrop = (
+        e: React.DragEvent,
+        column: CandidateStageColorColumn,
+        pipelineId: string,
+    ) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const candidateBackendId = resolveKanbanDragCandidateId(e);
+        if (!candidateBackendId || !pipelineId) return;
+        if (column.stages.length <= 1) {
+            const stageId = column.stages[0]?.id || column.primary.id;
+            if (!stageId) return;
+            void applyCandidateKanbanDrop(candidateBackendId, stageId, pipelineId);
+            return;
+        }
+        const candidate = findCandidateByDragId(candidateBackendId);
+        setKanbanStagePick({
+            candidateBackendId,
+            itemLabel: candidate?.name || 'מועמד',
+            columnTitle: column.title,
+            pipelineId,
+            stages: column.stages,
+        });
+    };
+
+    const confirmKanbanStagePick = (stageId: string) => {
+        const pick = kanbanStagePick;
+        if (!pick) return;
+        setKanbanStagePick(null);
+        void applyCandidateKanbanDrop(pick.candidateBackendId, stageId, pick.pipelineId);
+    };
+
+    const clearKanbanColumnSearch = useCallback((columnKey: string) => {
+        if (kanbanColumnSearchTimersRef.current[columnKey]) {
+            window.clearTimeout(kanbanColumnSearchTimersRef.current[columnKey]);
+            delete kanbanColumnSearchTimersRef.current[columnKey];
+        }
+        setKanbanColumnQueries((prev) => {
+            const next = { ...prev };
+            delete next[columnKey];
+            return next;
+        });
+        setKanbanColumnResults((prev) => {
+            const next = { ...prev };
+            delete next[columnKey];
+            return next;
+        });
+        setKanbanColumnLoading((prev) => ({ ...prev, [columnKey]: false }));
+    }, []);
+
+    const runKanbanColumnSearch = useCallback(
+        async (
+            columnKey: string,
+            query: string,
+            stageIds: string[],
+            includeUnassigned: boolean,
+        ) => {
+            if (!apiBase || !activeCandidatePipelineId || stageIds.length === 0) return;
+            setKanbanColumnLoading((prev) => ({ ...prev, [columnKey]: true }));
+            try {
+                const res = await fetch(`${apiBase}/api/candidates/search/free`, {
+                    method: 'POST',
+                    headers: authHeaders(true),
+                    body: JSON.stringify({
+                        query,
+                        limit: 50,
+                        pipelineId: activeCandidatePipelineId,
+                        stageIds,
+                        includeUnassigned,
+                    }),
+                });
+                if (!res.ok) throw new Error('Search failed');
+                const data = await res.json();
+                const mapped = (Array.isArray(data) ? data : []).map((row: unknown, idx: number) =>
+                    mapCandidate(row, idx),
+                );
+                setKanbanColumnResults((prev) => ({ ...prev, [columnKey]: mapped }));
+                setCandidates((prev) => mergeKanbanSearchCandidates(prev, mapped));
+            } catch {
+                setKanbanColumnResults((prev) => ({ ...prev, [columnKey]: [] }));
+            } finally {
+                setKanbanColumnLoading((prev) => ({ ...prev, [columnKey]: false }));
+            }
+        },
+        [apiBase, activeCandidatePipelineId, mapCandidate],
+    );
+
+    const handleKanbanColumnQueryChange = useCallback(
+        (
+            columnKey: string,
+            query: string,
+            stageIds: string[],
+            includeUnassigned: boolean,
+        ) => {
+            setKanbanColumnQueries((prev) => ({ ...prev, [columnKey]: query }));
+            if (kanbanColumnSearchTimersRef.current[columnKey]) {
+                window.clearTimeout(kanbanColumnSearchTimersRef.current[columnKey]);
+            }
+            const trimmed = query.trim();
+            if (trimmed.length < KANBAN_COLUMN_SEARCH_MIN_LEN) {
+                setKanbanColumnResults((prev) => {
+                    const next = { ...prev };
+                    delete next[columnKey];
+                    return next;
+                });
+                setKanbanColumnLoading((prev) => ({ ...prev, [columnKey]: false }));
+                return;
+            }
+            setKanbanColumnLoading((prev) => ({ ...prev, [columnKey]: true }));
+            kanbanColumnSearchTimersRef.current[columnKey] = window.setTimeout(() => {
+                void runKanbanColumnSearch(columnKey, trimmed, stageIds, includeUnassigned);
+            }, 400);
+        },
+        [runKanbanColumnSearch],
+    );
+
+    useEffect(() => {
+        setKanbanColumnQueries({});
+        setKanbanColumnResults({});
+        setKanbanColumnLoading({});
+        Object.values(kanbanColumnSearchTimersRef.current).forEach((timerId) => window.clearTimeout(timerId));
+        kanbanColumnSearchTimersRef.current = {};
+    }, [activeCandidatePipelineId, boardViewActive]);
 
     const areAllVisibleSelected = useMemo(() => {
         if (paginatedCandidates.length === 0) return false;
@@ -3745,9 +4282,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                              <div className="flex flex-col">
                                  <span 
                                     onClick={(e) => handleNameClick(e, candidate)}
-                                     className="font-bold text-text-default hover:text-primary-600 cursor-pointer transition-colors text-base"
+                                     className="font-bold text-text-default hover:text-primary-600 cursor-pointer transition-colors text-base inline-flex items-center gap-1.5"
                                  >
                                      {candidate.name}
+                                     <CandidateApprovedByCandidateBadge
+                                         approved={Boolean(candidate.consentToJobOffers || candidate.approveByCandidate)}
+                                         className="w-4 h-4"
+                                     />
                                  </span>
                                  <div className="flex items-center gap-2 mt-0.5">
                                     {hasMissingFields && (
@@ -3887,7 +4428,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                 handleSelect(candidate.id);
                                 return;
                             }
-                            navigate(`/jobs/edit/${sub.jobId}`);
+                            void openLastSubmissionJobDrawer(sub.jobId, sub.jobTitle);
                         }}
                         title={sub.jobTitle}
                     >
@@ -4088,9 +4629,40 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         <div className="w-px h-8 bg-border-default mx-1 hidden sm:block flex-shrink-0"></div>
 
                          <div className="flex items-center bg-bg-subtle p-1.5 rounded-xl border border-border-default flex-shrink-0 ml-2 sm:ms-0">
-                            <button onClick={() => setViewMode('grid')} title={t('candidates.view_grid')} className={`p-2 rounded-lg transition-colors ${viewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
-                            <button onClick={() => setViewMode('table')} title={t('candidates.view_list')} className={`p-2 rounded-lg transition-colors ${viewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                            <button onClick={() => { setBoardViewActive(false); setViewMode('grid'); }} title={t('candidates.view_grid')} className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'grid' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><Squares2X2Icon className="w-5 h-5"/></button>
+                            <button onClick={() => { setBoardViewActive(false); setViewMode('table'); }} title={t('candidates.view_list')} className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'table' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><TableCellsIcon className="w-5 h-5"/></button>
+                            <button onClick={() => setBoardViewActive(true)} title="תצוגת לוח (Kanban)" className={`p-2 rounded-lg transition-colors ${effectiveViewMode === 'board' ? 'bg-bg-card shadow-sm text-primary-600' : 'text-text-muted hover:text-text-default'}`}><ChartBarIcon className="w-5 h-5 transform rotate-90"/></button>
                         </div>
+                        {effectiveViewMode === 'board' && isPlatformAdmin && (
+                            <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] flex-shrink-0">
+                                <label className="text-xs font-semibold text-text-muted whitespace-nowrap ml-2">לקוח:</label>
+                                <select
+                                    value={adminPipelineClientId ?? ''}
+                                    disabled={pipelineClientsLoading}
+                                    onChange={(e) => setAdminPipelineClientId(e.target.value || null)}
+                                    className="bg-transparent text-sm font-bold text-text-default outline-none cursor-pointer min-w-[140px] disabled:opacity-50"
+                                >
+                                    <option value="">— בחר לקוח —</option>
+                                    {pipelineClientOptions.map((opt) => (
+                                        <option key={opt.id} value={opt.id}>{opt.label}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
+                        {effectiveViewMode === 'board' && candidatePipelines.length > 0 && (
+                            <div className="relative flex items-center bg-white border border-border-default rounded-lg px-3 py-1.5 h-[42px] flex-shrink-0">
+                                <FunnelIcon className="w-4 h-4 text-text-subtle ml-2 flex-shrink-0" />
+                                <select
+                                    value={activeCandidatePipelineId}
+                                    onChange={(e) => setActiveCandidatePipelineId(e.target.value)}
+                                    className="bg-transparent text-sm font-bold text-text-default outline-none cursor-pointer min-w-[140px]"
+                                >
+                                    {candidatePipelines.map((p) => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
                     </div>
                 </div>
             </header>
@@ -4358,7 +4930,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         <ArrowPathIcon className="w-10 h-10 text-primary-500 animate-spin" aria-hidden />
                         <p className="text-sm font-medium text-text-muted">{ 'טוען מועמדים...'}</p>
                     </div>
-                ) : viewMode === 'table' ? (
+                ) : effectiveViewMode === 'table' ? (
                     <>
                         <div className="px-4 py-3 border-b border-border-default bg-bg-subtle">
                             <TablePaginationControls
@@ -4531,6 +5103,171 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                             />
                         </div>
                     </>
+                ) : effectiveViewMode === 'board' ? (
+                    !activeCandidatePipeline ? (
+                        <div className="flex flex-col items-center justify-center min-h-[320px] gap-4 p-8 text-text-muted">
+                            <ChartBarIcon className="w-16 h-16 opacity-20" />
+                            <h3 className="text-xl font-bold text-text-default">אין תהליך מועמדים מוגדר</h3>
+                            {isPlatformAdmin ? (
+                                <div className="flex flex-col items-center gap-3">
+                                    <p className="text-sm">
+                                        {pipelinesClientId
+                                            ? 'לא נמצאו תהליכים ללקוח זה. הגדר תהליכים בהגדרות → תהליכי מועמדים.'
+                                            : 'בחר לקוח כדי לטעון תהליכי מועמדים.'}
+                                    </p>
+                                    <div className="flex items-center gap-3 flex-wrap justify-center">
+                                        <label className="text-sm font-semibold text-text-muted whitespace-nowrap">לקוח:</label>
+                                        <select
+                                            value={adminPipelineClientId ?? ''}
+                                            disabled={pipelineClientsLoading}
+                                            onChange={(e) => setAdminPipelineClientId(e.target.value || null)}
+                                            className="bg-bg-input border border-border-default text-sm rounded-lg p-2 min-w-[220px] disabled:opacity-50"
+                                        >
+                                            <option value="">— בחר לקוח —</option>
+                                            {pipelineClientOptions.map((opt) => (
+                                                <option key={opt.id} value={opt.id}>{opt.label}</option>
+                                            ))}
+                                        </select>
+                                        {pipelineClientsLoading ? (
+                                            <span className="text-xs text-text-muted">טוען לקוחות...</span>
+                                        ) : null}
+                                    </div>
+                                </div>
+                            ) : (
+                                <p className="text-sm">הגדר תהליכים בהגדרות → תהליכי מועמדים</p>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => setBoardViewActive(false)}
+                                className="mt-2 text-sm font-semibold text-primary-600 hover:text-primary-700 underline"
+                            >
+                                חזור לתצוגת רשימה
+                            </button>
+                        </div>
+                    ) : (
+                        <HorizontalScrollArea scrollClassName="overflow-x-auto overflow-y-hidden p-6 min-w-0 w-full [scrollbar-width:thin] custom-scrollbar">
+                            <div className="flex gap-6 h-full min-w-max" dir="rtl">
+                                {groupCandidateStagesByColor(pipelineDtoToStages(activeCandidatePipeline)).map((column) => {
+                                    const firstStageId = activeCandidatePipeline.stages[0]?.id;
+                                    const includeUnassigned = !!(firstStageId && column.stageIds.has(firstStageId));
+                                    const stageIds = Array.from(column.stageIds);
+                                    const columnQuery = kanbanColumnQueries[column.key]?.trim() ?? '';
+                                    const columnSearchActive = columnQuery.length >= KANBAN_COLUMN_SEARCH_MIN_LEN;
+                                    const columnLoading = Boolean(kanbanColumnLoading[column.key]);
+                                    const stageItems = boardCandidates.filter((c) => {
+                                        if (c.pipelineStageId && column.stageIds.has(c.pipelineStageId)) return true;
+                                        if (!c.pipelineStageId && firstStageId && column.stageIds.has(firstStageId)) {
+                                            return !c.candidatePipelineId || c.candidatePipelineId === activeCandidatePipelineId;
+                                        }
+                                        return false;
+                                    });
+                                    const displayItems = columnSearchActive
+                                        ? (kanbanColumnResults[column.key] ?? [])
+                                        : stageItems;
+                                    return (
+                                        <div
+                                            key={column.key}
+                                            className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
+                                            onDragOver={handleKanbanDragOver}
+                                            onDragOverCapture={handleKanbanDragOver}
+                                            onDrop={(e) => handleCandidateKanbanColumnDrop(e, column, activeCandidatePipeline.id)}
+                                        >
+                                            <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${column.color}`}>
+                                                <h3 className="font-bold text-sm truncate min-w-0 flex-1" title={column.title}>
+                                                    {column.title}
+                                                </h3>
+                                                <span className="bg-bg-subtle px-2 py-0.5 rounded-full text-xs font-bold text-text-muted border border-border-subtle flex-shrink-0">
+                                                    {columnSearchActive ? displayItems.length : stageItems.length}
+                                                </span>
+                                            </div>
+                                            <div className="px-3 py-2 bg-white border-b border-border-default/50">
+                                                <div className="relative">
+                                                    <MagnifyingGlassIcon className="w-3.5 h-3.5 text-text-muted absolute start-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                                                    <input
+                                                        type="text"
+                                                        value={kanbanColumnQueries[column.key] ?? ''}
+                                                        onChange={(e) =>
+                                                            handleKanbanColumnQueryChange(
+                                                                column.key,
+                                                                e.target.value,
+                                                                stageIds,
+                                                                includeUnassigned,
+                                                            )
+                                                        }
+                                                        onClick={(e) => e.stopPropagation()}
+                                                        onMouseDown={(e) => e.stopPropagation()}
+                                                        placeholder="חיפוש חופשי בעמודה..."
+                                                        className="w-full text-xs rounded-lg border border-border-default py-1.5 ps-7 pe-7 bg-bg-subtle/40 focus:ring-1 focus:ring-primary-400 focus:border-primary-300"
+                                                    />
+                                                    {columnLoading ? (
+                                                        <ArrowPathIcon className="w-3.5 h-3.5 text-text-muted absolute end-2 top-1/2 -translate-y-1/2 animate-spin" />
+                                                    ) : kanbanColumnQueries[column.key]?.trim() ? (
+                                                        <button
+                                                            type="button"
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                clearKanbanColumnSearch(column.key);
+                                                            }}
+                                                            className="absolute end-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-text-muted hover:text-text-default hover:bg-bg-subtle"
+                                                            title="נקה חיפוש"
+                                                        >
+                                                            <XMarkIcon className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    ) : null}
+                                                </div>
+                                            </div>
+                                            <div
+                                                className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar max-h-[60vh] min-h-[120px]"
+                                                onDragOver={handleKanbanDragOver}
+                                                onDrop={(e) => handleCandidateKanbanColumnDrop(e, column, activeCandidatePipeline.id)}
+                                            >
+                                                {columnSearchActive && !columnLoading && displayItems.length === 0 ? (
+                                                    <p className="text-xs text-text-muted text-center py-6">לא נמצאו מועמדים</p>
+                                                ) : null}
+                                                {displayItems.map((candidate) => (
+                                                    <div
+                                                        key={candidate.id}
+                                                        draggable
+                                                        onDragStart={(e) => handleCandidateKanbanDragStart(e, candidate)}
+                                                        onDragEnd={handleCandidateKanbanDragEnd}
+                                                        onDragOver={handleKanbanDragOver}
+                                                        onClick={() => {
+                                                            if (kanbanDidDragRef.current) return;
+                                                            if (selectionMode) {
+                                                                handleSelect(candidate.id);
+                                                                return;
+                                                            }
+                                                            const search = location.search || '';
+                                                            navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`);
+                                                        }}
+                                                        className={`bg-white border rounded-xl p-3 shadow-sm hover:border-primary-300 cursor-grab active:cursor-grabbing transition ${
+                                                            selectedIds.has(candidate.id) ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-2 mb-2">
+                                                            <div className="w-8 h-8 rounded-full bg-bg-subtle border border-border-default flex items-center justify-center text-xs font-bold text-text-muted shrink-0">
+                                                                {candidate.avatar}
+                                                            </div>
+                                                            <div className="min-w-0">
+                                                                <h4 className="font-bold text-sm text-text-default truncate inline-flex items-center gap-1.5 max-w-full">
+                                                                    <span className="truncate">{candidate.name}</span>
+                                                                    <CandidateApprovedByCandidateBadge
+                                                                        approved={Boolean(candidate.consentToJobOffers || candidate.approveByCandidate)}
+                                                                        className="w-3.5 h-3.5"
+                                                                    />
+                                                                </h4>
+                                                                <p className="text-xs text-text-muted truncate">{candidate.title || '—'}</p>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </HorizontalScrollArea>
+                    )
                 ) : (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 p-4">
                         {paginatedCandidates.map(candidate => {
@@ -4812,11 +5549,53 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 context="candidate"
             />
 
+            {kanbanStagePick ? (
+                <div
+                    className="fixed inset-0 z-[120] flex items-center justify-center bg-black/40 p-4"
+                    onClick={() => setKanbanStagePick(null)}
+                >
+                    <div
+                        className="bg-bg-card rounded-2xl shadow-xl border border-border-default p-6 w-full max-w-md"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <h3 className="text-lg font-bold text-text-default mb-1">בחר שלב</h3>
+                        <p className="text-sm text-text-muted mb-4">
+                            לאיזה שלב להעביר את <span className="font-bold">{kanbanStagePick.itemLabel}</span>?
+                        </p>
+                        <div className="space-y-2">
+                            {kanbanStagePick.stages.map((stage) => (
+                                <button
+                                    key={stage.id}
+                                    type="button"
+                                    onClick={() => confirmKanbanStagePick(stage.id)}
+                                    className="w-full text-right p-3 rounded-xl border border-border-default hover:border-primary-300 hover:bg-primary-50 transition font-semibold text-sm"
+                                >
+                                    {stage.name}
+                                </button>
+                            ))}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setKanbanStagePick(null)}
+                            className="mt-4 w-full py-2 text-sm font-semibold text-text-muted hover:bg-bg-subtle rounded-lg"
+                        >
+                            ביטול
+                        </button>
+                    </div>
+                </div>
+            ) : null}
+
             <JobFieldSelector
                 value={selectedJobFieldForAdvancedSearch}
                 onChange={handleJobFieldSelect}
                 isModalOpen={isJobFieldSelectorOpen}
                 setIsModalOpen={setIsJobFieldSelectorOpen}
+            />
+
+            <JobDetailsDrawer
+                job={selectedJobForDrawer}
+                isOpen={isJobDrawerOpen}
+                onClose={() => setIsJobDrawerOpen(false)}
             />
         </div>
         </div>

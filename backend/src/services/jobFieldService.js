@@ -1,7 +1,9 @@
+const { Op } = require('sequelize');
 const JobCategory = require('../models/JobCategory');
 const JobCluster = require('../models/JobCluster');
 const JobRole = require('../models/JobRole');
 const Tag = require('../models/Tag');
+const { sequelize } = require('../config/db');
 const { sendChat } = require('./geminiService');
 const promptService = require('./promptService');
 const jobFieldEmbeddingService = require('./jobFieldEmbeddingService');
@@ -11,6 +13,30 @@ const ROLE_TAG_INCLUDE = {
   as: 'tags',
   through: { attributes: [] },
 };
+
+const mapRole = (r) => ({
+  id: r.id,
+  value: r.value,
+  synonyms: r.synonyms || [],
+  tags: (r.tags || []).map((t) => ({
+    id: t.id,
+    tagKey: t.tagKey,
+    displayNameHe: t.displayNameHe,
+    displayNameEn: t.displayNameEn,
+  })),
+});
+
+const mapCluster = (cl) => ({
+  id: cl.id,
+  name: cl.name,
+  roles: (cl.roles || []).map(mapRole),
+});
+
+const mapCategory = (c) => ({
+  id: c.id,
+  name: c.name,
+  fieldTypes: (c.clusters || []).map(mapCluster),
+});
 
 const list = async () => {
   const categories = await JobCategory.findAll({
@@ -28,25 +54,86 @@ const list = async () => {
     }],
   });
 
+  return categories.map(mapCategory);
+};
+
+const searchCategories = async (q) => {
+  const term = String(q || '').trim();
+  if (!term) return [];
+
+  const categories = await JobCategory.findAll({
+    where: { name: { [Op.iLike]: `%${term}%` } },
+    order: [['name', 'ASC']],
+    include: [{
+      model: JobCluster,
+      as: 'clusters',
+      attributes: ['id', 'name'],
+    }],
+  });
+
   return categories.map((c) => ({
     id: c.id,
     name: c.name,
     fieldTypes: (c.clusters || []).map((cl) => ({
       id: cl.id,
       name: cl.name,
-      roles: (cl.roles || []).map((r) => ({
-        id: r.id,
-        value: r.value,
-        synonyms: r.synonyms || [],
-        tags: (r.tags || []).map((t) => ({
-          id: t.id,
-          tagKey: t.tagKey,
-          displayNameHe: t.displayNameHe,
-          displayNameEn: t.displayNameEn,
-        })),
-      })),
+      roles: [],
     })),
   }));
+};
+
+const searchClusters = async (categoryId, q) => {
+  const term = String(q || '').trim();
+  const parentId = String(categoryId || '').trim();
+  if (!term || !parentId) return [];
+
+  const clusters = await JobCluster.findAll({
+    where: {
+      categoryId: parentId,
+      name: { [Op.iLike]: `%${term}%` },
+    },
+    order: [['name', 'ASC']],
+    include: [{
+      model: JobRole,
+      as: 'roles',
+      attributes: ['id'],
+    }],
+  });
+
+  return clusters.map((cl) => ({
+    id: cl.id,
+    name: cl.name,
+    roles: (cl.roles || []).map((r) => ({
+      id: r.id,
+      value: '',
+      synonyms: [],
+      tags: [],
+    })),
+  }));
+};
+
+const searchRoles = async (clusterId, q) => {
+  const term = String(q || '').trim();
+  const parentId = String(clusterId || '').trim();
+  if (!term || !parentId) return [];
+
+  const pattern = `%${term}%`;
+  const roles = await JobRole.findAll({
+    where: {
+      clusterId: parentId,
+      [Op.or]: [
+        { value: { [Op.iLike]: pattern } },
+        sequelize.where(
+          sequelize.fn('array_to_string', sequelize.col('JobRole.synonyms'), ' '),
+          { [Op.iLike]: pattern },
+        ),
+      ],
+    },
+    order: [['value', 'ASC']],
+    include: [ROLE_TAG_INCLUDE],
+  });
+
+  return roles.map(mapRole);
 };
 
 const createCategory = async (name) => {
@@ -432,6 +519,9 @@ const generateRoleSynonyms = async (roleId) => {
 
 module.exports = {
   list,
+  searchCategories,
+  searchClusters,
+  searchRoles,
   createCategory,
   updateCategory,
   deleteCategory,

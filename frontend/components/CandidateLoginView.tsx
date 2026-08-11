@@ -1,6 +1,6 @@
 
-import React, { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { EnvelopeIcon, LockClosedIcon, HiroLogotype } from './Icons';
 
@@ -11,7 +11,25 @@ const CandidateLoginView: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
     const { refreshUser } = useAuth();
+
+    const persistSession = async (data: { token?: string; user?: Record<string, unknown> }) => {
+        if (!data.token) throw new Error('Missing token from server');
+        localStorage.setItem('token', data.token);
+        if (data.user) {
+            localStorage.setItem('herouser', JSON.stringify(data.user));
+            localStorage.setItem('user', JSON.stringify(data.user));
+        }
+        await refreshUser();
+        navigate('/candidate-portal/profile', { replace: true });
+    };
+
+    useEffect(() => {
+        const magic = searchParams.get('magic');
+        if (!magic) return;
+        navigate(`/candidate-portal/set-password?magic=${encodeURIComponent(magic)}`, { replace: true });
+    }, [navigate, searchParams]);
 
     const handleLogin = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -21,28 +39,20 @@ const CandidateLoginView: React.FC = () => {
             const res = await fetch(`${apiBase}/api/auth/login`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password }),
+                body: JSON.stringify({ email, password, role: 'candidate' }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));
                 throw new Error(body.message || 'Login failed');
             }
             const data = await res.json();
-            if (!data.token) throw new Error('Missing token from server');
-            localStorage.setItem('token', data.token);
-            if (data.user) {
-                localStorage.setItem('herouser', JSON.stringify(data.user));
-                localStorage.setItem('user', JSON.stringify(data.user)); // for existing consumers
+            if (data.twoFactorRequired) {
+                throw new Error('התחברות עם קוד אימייל אינה זמינה באזור המועמדים. השתמש/י בקישור מהמייל.');
             }
-            await refreshUser();
-            const role = (data.user?.role || '').toLowerCase();
-            if (role === 'candidate') {
-                navigate('/candidate-portal/profile');
-            } else {
-                navigate('/dashboard');
-            }
-        } catch (err: any) {
-            setError(err.message || 'Login failed');
+            await persistSession(data);
+        } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : 'Login failed';
+            setError(message);
         } finally {
             setLoading(false);
         }
@@ -55,7 +65,9 @@ const CandidateLoginView: React.FC = () => {
                     <div className="text-center mb-8">
                          <HiroLogotype className="text-5xl mx-auto mb-4" />
                         <h2 className="text-2xl font-extrabold text-text-default">אזור אישי למועמדים</h2>
-                        <p className="text-text-muted mt-2">התחבר/י כדי לצפות ולעדכן את הפרופיל שלך.</p>
+                        <p className="text-text-muted mt-2">
+                            התחבר/י כדי לצפות ולעדכן את הפרופיל שלך.
+                        </p>
                     </div>
 
                     <form onSubmit={handleLogin} className="space-y-4">

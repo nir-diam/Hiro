@@ -17,6 +17,10 @@ export type MessageTemplateDto = {
     isSystem: boolean;
     lastUpdated: string | null;
     updatedBy: string;
+    attachmentUrl?: string | null;
+    attachmentFileName?: string | null;
+    attachmentContentType?: string | null;
+    attachmentFileSize?: number | null;
 };
 
 /** Super-admin catalog row: Hiro templates + all tenants */
@@ -50,8 +54,14 @@ export async function fetchMessageTemplatesForCompose(): Promise<MessageTemplate
     return res.json();
 }
 
-export async function fetchClientMessageTemplates(): Promise<MessageTemplateDto[]> {
-    const res = await fetch(`${apiBase()}/api/message-templates`, {
+function withClientId(url: string, clientId?: string | null): string {
+    if (!clientId) return url;
+    const sep = url.includes('?') ? '&' : '?';
+    return `${url}${sep}clientId=${encodeURIComponent(clientId)}`;
+}
+
+export async function fetchClientMessageTemplates(clientId?: string | null): Promise<MessageTemplateDto[]> {
+    const res = await fetch(withClientId(`${apiBase()}/api/message-templates`, clientId), {
         headers: authHeaders(),
         cache: 'no-store',
     });
@@ -68,17 +78,20 @@ export async function fetchAdminMessageTemplates(): Promise<MessageTemplateDto[]
     return res.json();
 }
 
-export async function createClientMessageTemplate(body: {
-    name: string;
-    subject: string;
-    content: string;
-    channels?: ('email' | 'sms' | 'whatsapp')[];
-    templateKey?: string | null;
-}): Promise<MessageTemplateDto> {
-    const res = await fetch(`${apiBase()}/api/message-templates`, {
+export async function createClientMessageTemplate(
+    body: {
+        name: string;
+        subject: string;
+        content: string;
+        channels?: ('email' | 'sms' | 'whatsapp')[];
+        templateKey?: string | null;
+    },
+    clientId?: string | null,
+): Promise<MessageTemplateDto> {
+    const res = await fetch(withClientId(`${apiBase()}/api/message-templates`, clientId), {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify(body),
+        body: JSON.stringify(clientId ? { ...body, clientId } : body),
     });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();
@@ -102,13 +115,28 @@ export async function createAdminMessageTemplate(body: {
 
 export async function updateClientMessageTemplate(
     id: string,
-    body: Partial<{ name: string; subject: string; content: string; channels: ('email' | 'sms' | 'whatsapp')[]; templateKey: string | null }>,
+    body: Partial<{
+        name: string;
+        subject: string;
+        content: string;
+        channels: ('email' | 'sms' | 'whatsapp')[];
+        templateKey: string | null;
+        attachmentUrl: string | null;
+        attachmentFileName: string | null;
+        attachmentContentType: string | null;
+        attachmentFileSize: number | null;
+        clearAttachment: boolean;
+    }>,
+    clientId?: string | null,
 ): Promise<MessageTemplateDto> {
-    const res = await fetch(`${apiBase()}/api/message-templates/${encodeURIComponent(id)}`, {
-        method: 'PUT',
-        headers: authHeaders(),
-        body: JSON.stringify(body),
-    });
+    const res = await fetch(
+        withClientId(`${apiBase()}/api/message-templates/${encodeURIComponent(id)}`, clientId),
+        {
+            method: 'PUT',
+            headers: authHeaders(),
+            body: JSON.stringify(clientId ? { ...body, clientId } : body),
+        },
+    );
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();
 }
@@ -126,11 +154,14 @@ export async function updateAdminMessageTemplate(
     return res.json();
 }
 
-export async function deleteClientMessageTemplate(id: string): Promise<void> {
-    const res = await fetch(`${apiBase()}/api/message-templates/${encodeURIComponent(id)}`, {
-        method: 'DELETE',
-        headers: authHeaders(),
-    });
+export async function deleteClientMessageTemplate(id: string, clientId?: string | null): Promise<void> {
+    const res = await fetch(
+        withClientId(`${apiBase()}/api/message-templates/${encodeURIComponent(id)}`, clientId),
+        {
+            method: 'DELETE',
+            headers: authHeaders(),
+        },
+    );
     if (!res.ok) throw new Error(await parseErr(res));
 }
 
@@ -188,4 +219,52 @@ export async function deleteMessageTemplateCatalog(id: string): Promise<void> {
         headers: authHeaders(),
     });
     if (!res.ok) throw new Error(await parseErr(res));
+}
+
+const ATTACHMENT_MAX_BYTES = 15 * 1024 * 1024;
+
+export async function uploadClientMessageTemplateAttachment(
+    templateId: string,
+    file: File,
+    clientId?: string | null,
+): Promise<MessageTemplateDto> {
+    if (file.size > ATTACHMENT_MAX_BYTES) {
+        throw new Error('גודל הקובץ המקסימלי הוא 15MB');
+    }
+    const presignRes = await fetch(
+        withClientId(
+            `${apiBase()}/api/message-templates/${encodeURIComponent(templateId)}/attachment/upload-url`,
+            clientId,
+        ),
+        {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({
+                fileName: file.name,
+                contentType: file.type || 'application/octet-stream',
+                fileSize: file.size,
+                ...(clientId ? { clientId } : {}),
+            }),
+        },
+    );
+    if (!presignRes.ok) throw new Error(await parseErr(presignRes));
+    const { uploadUrl, publicUrl } = await presignRes.json() as { uploadUrl: string; publicUrl: string };
+
+    const putRes = await fetch(uploadUrl, {
+        method: 'PUT',
+        body: file,
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+    });
+    if (!putRes.ok) throw new Error('העלאת הקובץ נכשלה');
+
+    return updateClientMessageTemplate(
+        templateId,
+        {
+            attachmentUrl: publicUrl,
+            attachmentFileName: file.name,
+            attachmentContentType: file.type || 'application/octet-stream',
+            attachmentFileSize: file.size,
+        },
+        clientId,
+    );
 }

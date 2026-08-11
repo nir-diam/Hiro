@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const { PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const candidateService = require('../services/candidateService');
+const authService = require('../services/authService');
 const { embedCandidateAndSave, searchCandidates, buildSearchDocument, cosineSimilarity, normalizeEmbedding } = require('../services/vectorSearchService');
 const { embedText } = require('../services/embeddingService');
 const { sendChat, sendSingleTurnChat } = require('../services/geminiService');
@@ -15,12 +16,14 @@ const User = require('../models/User');
 const jobCandidateService = require('../services/jobCandidateService');
 const jobService = require('../services/jobService');
 const jobCandidateStatusService = require('../services/jobCandidateStatusService');
+const jobCandidateProcessJournalService = require('../services/jobCandidateProcessJournalService');
 const screeningInclusionService = require('../services/screeningInclusionService');
 const candidateJobMatchingService = require('../services/candidateJobMatchingService');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
+const { mergeProfileApprovalEvent } = require('../utils/candidateProfileApprovalEvent');
 
 const isMissing = (v) => v === undefined || v === null || v === '';
 
@@ -668,23 +671,26 @@ function welcomePlaceholderContextFromRequest(req) {
  * `queueCandidateWelcomeEmail` uses the admin template catalog (see messageTemplateService).
  */
 const getStaffClientIdFromRequest = async (req) => {
+  const resolveForUserId = async (uid) => {
+    if (!uid) return null;
+    try {
+      const user = await User.findByPk(uid);
+      return authService.resolveEffectiveClientIdForUser(user);
+    } catch (err) {
+      return null;
+    }
+  };
+
   const userId = req.user?.sub;
   if (userId) {
-    try {
-      const user = await User.findByPk(userId, { attributes: ['clientId'] });
-      if (user?.clientId) return String(user.clientId);
-    } catch (err) {
-      /* fall through to Bearer parse */
-    }
+    const resolved = await resolveForUserId(userId);
+    if (resolved) return resolved;
   }
   const token = getBearerTokenFromRequest(req);
   if (!token) return null;
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'change_me');
-    const uid = decoded.sub;
-    if (!uid) return null;
-    const user = await User.findByPk(uid, { attributes: ['clientId'] });
-    return user?.clientId ? String(user.clientId) : null;
+    return resolveForUserId(decoded.sub);
   } catch (err) {
     return null;
   }
@@ -2190,13 +2196,13 @@ const parseCandidateListParams = (req) => {
     matchLastJobScoresRaw === '0' ||
     matchLastJobScoresRaw === 0 ||
     String(matchLastJobScoresRaw || '').toLowerCase() === 'false';
-  /** Default on so list column matches simulate popup; pass `matchLastJobScores=0` for lightweight poll. */
+  /** Default off — engine scoring 100 rows exceeds gateway timeout; pass matchLastJobScores=1 only when needed. */
   const matchLastJobScores = matchLastJobScoresExplicit
     ? !matchLastJobScoresDisabled &&
       (matchLastJobScoresRaw === '1' ||
         matchLastJobScoresRaw === 1 ||
         String(matchLastJobScoresRaw || '').toLowerCase() === 'true')
-    : true;
+    : false;
 
   const savedSearchIdRaw = src.savedSearchId ?? src.saved_search_id;
   const savedSearchId =
@@ -2226,9 +2232,16 @@ const runCandidateList = async (req, res) => {
     matchJobId,
     filterTagId,
     includeEngineScores,
-    matchLastJobScores,
+    matchLastJobScores: requestedMatchLastJobScores,
     savedSearchId,
   } = parseCandidateListParams(req);
+
+  // Sync last-job scoring for a full page exceeds gateway time/memory (502/504).
+  // Match % is hydrated client-side via /api/admin/matching-engine/simulate.
+  const matchLastJobScores = false;
+  if (requestedMatchLastJobScores) {
+    console.warn('[candidateController.list] ignoring matchLastJobScores=1 (list sync scoring disabled)');
+  }
 
   // Load blacklist for this saved search so we can exclude by email/phone server-side.
   let blacklistedEmails = [];
@@ -2436,6 +2449,7 @@ const create = async (req, res) => {
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, {
+        sendWelcomeEmail: true,
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
@@ -2620,6 +2634,11 @@ const createFromAi = async (req, res) => {
       source: strOrNull(aiResult.source) || 'ai-upload',
     };
 
+    const portalUserId = req.body?.userId != null ? String(req.body.userId).trim() : '';
+    if (portalUserId) candidatePayload.userId = portalUserId;
+    const portalProfileName = req.body?.profileName != null ? String(req.body.profileName).trim() : '';
+    if (portalProfileName) candidatePayload.title = portalProfileName;
+
     // Keep first/last/full consistent (never let first+last drop a middle name from fullName).
     {
       const bestFull =
@@ -2719,6 +2738,7 @@ const createFromAi = async (req, res) => {
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     if (sendWelcome) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, {
+        sendWelcomeEmail: true,
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
@@ -2760,7 +2780,10 @@ const update = async (req, res) => {
       previous = null;
     }
 
-    const candidate = await candidateService.update(req.params.id, req.body);
+    const body = req.body || {};
+    const updatePayload = mergeProfileApprovalEvent(previous, body, req);
+
+    const candidate = await candidateService.update(req.params.id, updatePayload);
     const embedText = [
       candidate.fullName,
       candidate.professionalSummary,
@@ -2774,7 +2797,6 @@ const update = async (req, res) => {
     }
     const enrichedCandidate = await candidateService.getById(candidate.id);
 
-    const body = req.body || {};
     const candidateLabel = enrichedCandidate.fullName || candidate.fullName;
 
     // Audit: 'הגדרת מקור גיוס' — only when value actually changed
@@ -3007,6 +3029,7 @@ const createUploadUrl = async (req, res) => {
         const candidateRow = await candidateService.getById(req.params.id);
         const welcomeClientId = await getStaffClientIdFromRequest(req);
         messageTemplateService.queueCandidateWelcomeEmail(candidateRow, {
+          sendWelcomeEmail: true,
           onlyIfNoResume: true,
           clientId: welcomeClientId,
           ...welcomePlaceholderContextFromRequest(req),
@@ -3028,7 +3051,12 @@ const attachMedia = async (req, res) => {
   }
 
   try {
-    const field = type === 'resume' ? 'resumeUrl' : 'profilePicture';
+    const field =
+      type === 'resume'
+        ? 'resumeUrl'
+        : type === 'profile-video'
+          ? 'profileVideoUrl'
+          : 'profilePicture';
     const url = buildPublicUrl(key);
     console.log('[attachMedia] candidate', req.params.id, { key, type, field, url });
     const attachUpdates = { [field]: url };
@@ -3913,11 +3941,17 @@ const semanticSearch = async (req, res) => {
 // Lightweight free-text search on name / title / source only
 const freeSearch = async (req, res) => {
   try {
-    const { query, limit } = req.body || {};
+    const { query, limit, pipelineId, stageIds, includeUnassigned } = req.body || {};
     if (!query || !query.trim()) {
       return res.status(400).json({ message: 'query is required' });
     }
-    const results = await candidateService.searchFree({ query, limit: limit || 50 });
+    const results = await candidateService.searchFree({
+      query,
+      limit: limit || 50,
+      pipelineId: pipelineId != null && String(pipelineId).trim() ? String(pipelineId).trim() : null,
+      stageIds: Array.isArray(stageIds) ? stageIds : undefined,
+      includeUnassigned: Boolean(includeUnassigned),
+    });
     res.json(results);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Free search failed' });
@@ -4116,6 +4150,38 @@ const listLinkedJobs = async (req, res) => {
   }
 };
 
+/** Process journal for a job–candidate link (status history + notes). */
+const getJobLinkProcessJournal = async (req, res) => {
+  try {
+    const { jobCandidateId } = req.params;
+    const data = await jobCandidateProcessJournalService.getProcessJournal(jobCandidateId);
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    console.error('[getJobLinkProcessJournal]', err.message || err);
+    return res.status(err.status || 500).json({ message: err.message || 'Failed to load process journal' });
+  }
+};
+
+const patchJobLinkProcessJournalEntry = async (req, res) => {
+  try {
+    const { jobCandidateId, entryId } = req.params;
+    const body = req.body || {};
+    const actorName = jobCandidateProcessJournalService.displayNameFromUser(req.dbUser);
+    const data = await jobCandidateProcessJournalService.patchJournalEntry(
+      jobCandidateId,
+      entryId,
+      body,
+      actorName,
+    );
+    res.set('Cache-Control', 'private, no-store');
+    return res.json(data);
+  } catch (err) {
+    console.error('[patchJobLinkProcessJournalEntry]', err.message || err);
+    return res.status(err.status || 500).json({ message: err.message || 'Failed to update journal entry' });
+  }
+};
+
 /** Update status on a job_candidates row (e.g. from InterestedInJobs modal). */
 const patchJobLinkStatus = async (req, res) => {
   try {
@@ -4129,10 +4195,7 @@ const patchJobLinkStatus = async (req, res) => {
     if (!jc) {
       return res.status(404).json({ message: 'Job link not found' });
     }
-    const prevMeta =
-      jc.workflowMeta && typeof jc.workflowMeta === 'object' && !Array.isArray(jc.workflowMeta)
-        ? { ...jc.workflowMeta }
-        : {};
+    let prevMeta = await jobCandidateProcessJournalService.materializeStatusJournalForPatch(jc);
     if (internalNote !== undefined) {
       prevMeta.internalNote =
         internalNote === null || internalNote === '' ? null : String(internalNote).trim();
@@ -4152,10 +4215,32 @@ const patchJobLinkStatus = async (req, res) => {
     const prevStatus = jc.status;
     prevMeta.workflowUpdatedAt = new Date().toISOString();
     const newStatus = String(status).trim();
+    const prevInternalNote =
+      jc.workflowMeta &&
+      typeof jc.workflowMeta === 'object' &&
+      !Array.isArray(jc.workflowMeta) &&
+      jc.workflowMeta.internalNote != null
+        ? String(jc.workflowMeta.internalNote).trim()
+        : '';
+    const nextInternalNote =
+      prevMeta.internalNote != null ? String(prevMeta.internalNote).trim() : '';
+    const actorName = jobCandidateProcessJournalService.displayNameFromUser(req.dbUser);
+    const forceAppendStatus = body.forceAppendStatus === true;
+    const journalMeta = jobCandidateProcessJournalService.applyJournalOnStatusPatch({
+      workflowMeta: prevMeta,
+      prevStatus,
+      newStatus,
+      actor: actorName,
+      internalNoteChanged: internalNote !== undefined && nextInternalNote !== prevInternalNote,
+      internalNote: nextInternalNote,
+      dueDate: prevMeta.dueDate || null,
+      dueTime: prevMeta.dueTime || null,
+      forceAppendStatus,
+    });
     const updated = await jobCandidateStatusService.applyJobCandidateStatusChange({
       jobCandidateId,
       newStatus,
-      workflowMeta: prevMeta,
+      workflowMeta: journalMeta,
       req,
       source: 'patch',
     });
@@ -4870,6 +4955,29 @@ const patchWorkExperienceOrganization = async (req, res) => {
   }
 };
 
+const patchPipelineStage = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const patch = {};
+    if (Object.prototype.hasOwnProperty.call(body, 'candidatePipelineId')) {
+      patch.candidatePipelineId = body.candidatePipelineId || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'pipelineId')) {
+      patch.candidatePipelineId = body.pipelineId || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'pipelineStageId')) {
+      patch.pipelineStageId = body.pipelineStageId || null;
+    }
+    if (Object.prototype.hasOwnProperty.call(body, 'stageId')) {
+      patch.pipelineStageId = body.stageId || null;
+    }
+    const candidate = await candidateService.update(req.params.id, patch);
+    return res.json(candidate);
+  } catch (err) {
+    return res.status(err.status || 500).json({ message: err.message || 'Update failed' });
+  }
+};
+
 module.exports = {
   list,
   listPost,
@@ -4879,6 +4987,7 @@ module.exports = {
   create,
   createFromAi,
   update,
+  patchPipelineStage,
   saveParsedText,
   approveDataCorrections,
   remove,
@@ -4904,6 +5013,8 @@ module.exports = {
   addFieldInterest,
   listLinkedJobs,
   patchJobLinkStatus,
+  getJobLinkProcessJournal,
+  patchJobLinkProcessJournalEntry,
   getScreeningData,
   saveScreeningData,
   listScreeningRejections,

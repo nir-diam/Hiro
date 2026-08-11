@@ -40,10 +40,13 @@ const LoginScreen: React.FC = () => {
     const [password, setPassword] = useState('');
     const [loginCode, setLoginCode] = useState('');
     const [pending2FA, setPending2FA] = useState(false);
+    const [twoFactorChannel, setTwoFactorChannel] = useState<'email' | 'sms'>('email');
     const [info, setInfo] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
     const [googleLoading, setGoogleLoading] = useState(false);
     const [resendLoading, setResendLoading] = useState(false);
+    const [forgotMode, setForgotMode] = useState(false);
+    const [forgotLoading, setForgotLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined)?.trim() || '';
@@ -174,11 +177,44 @@ const LoginScreen: React.FC = () => {
                 throw new Error(body.message || 'שליחת קוד נכשלה');
             }
             setLoginCode('');
-            setInfo(body.message || 'קוד חדש נשלח לאימייל.');
+            setInfo(body.message || (body.twoFactorChannel === 'sms' ? 'קוד חדש נשלח ב-SMS.' : 'קוד חדש נשלח לאימייל.'));
+            if (body.twoFactorChannel === 'sms' || body.twoFactorChannel === 'email') {
+                setTwoFactorChannel(body.twoFactorChannel);
+            }
         } catch (err: unknown) {
             setError(err instanceof Error ? err.message : 'שליחת קוד נכשלה');
         } finally {
             setResendLoading(false);
+        }
+    };
+
+    const handleForgotPassword = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        setInfo(null);
+        if (!email.trim()) {
+            setError('הזינו את כתובת האימייל שלכם.');
+            return;
+        }
+        setForgotLoading(true);
+        try {
+            const res = await fetch(`${apiBase}/api/auth/forgot-password`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: email.trim() }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.message || 'שליחת קישור לאיפוס סיסמה נכשלה');
+            }
+            setInfo(
+                data.message ||
+                    'אם קיים חשבון עם כתובת זו, נשלח אליכם קישור לאיפוס סיסמה.',
+            );
+        } catch (err: unknown) {
+            setError(err instanceof Error ? err.message : 'שליחת קישור לאיפוס סיסמה נכשלה');
+        } finally {
+            setForgotLoading(false);
         }
     };
 
@@ -191,7 +227,11 @@ const LoginScreen: React.FC = () => {
             if (pending2FA) {
                 const code = loginCode.trim();
                 if (!/^\d{6}$/.test(code)) {
-                    throw new Error('הזינו קוד בן 6 ספרות שנשלח לאימייל.');
+                    throw new Error(
+                        twoFactorChannel === 'sms'
+                            ? 'הזינו קוד בן 6 ספרות שנשלח ב-SMS.'
+                            : 'הזינו קוד בן 6 ספרות שנשלח לאימייל.',
+                    );
                 }
                 const res = await fetch(`${apiBase}/api/auth/verify-login-code`, {
                     method: 'POST',
@@ -217,8 +257,14 @@ const LoginScreen: React.FC = () => {
             }
             if (data.twoFactorRequired) {
                 setPending2FA(true);
+                setTwoFactorChannel(data.twoFactorChannel === 'sms' ? 'sms' : 'email');
                 setLoginCode('');
-                setInfo(data.message || 'נשלח קוד לאימייל. הזינו אותו למטה.');
+                setInfo(
+                    data.message ||
+                        (data.twoFactorChannel === 'sms'
+                            ? 'נשלח קוד ב-SMS. הזינו אותו למטה.'
+                            : 'נשלח קוד לאימייל. הזינו אותו למטה.'),
+                );
                 return;
             }
             await completeAuthSession(data);
@@ -273,7 +319,7 @@ const LoginScreen: React.FC = () => {
                         <div className="flex-grow border-t border-border-default"></div>
                     </div>
 
-                    <form onSubmit={handleLogin} className="space-y-4">
+                    <form onSubmit={forgotMode ? handleForgotPassword : handleLogin} className="space-y-4">
                         <div>
                             <label className="block text-sm font-semibold text-text-muted mb-1.5 text-right">כתובת אימייל</label>
                             <div className="relative">
@@ -285,6 +331,7 @@ const LoginScreen: React.FC = () => {
                                         setEmail(e.target.value);
                                         if (pending2FA) {
                                             setPending2FA(false);
+                                            setTwoFactorChannel('email');
                                             setLoginCode('');
                                             setInfo(null);
                                         }
@@ -295,10 +342,23 @@ const LoginScreen: React.FC = () => {
                                 />
                             </div>
                         </div>
+                        {!forgotMode ? (
                         <div>
                             <div className="flex justify-between items-center mb-1.5">
                                 <label className="block text-sm font-semibold text-text-muted">סיסמה</label>
-                                <a href="#" className="text-sm font-semibold text-primary-600 hover:underline">שכחת סיסמה?</a>
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setForgotMode(true);
+                                        setError(null);
+                                        setInfo(null);
+                                        setPending2FA(false);
+                                        setLoginCode('');
+                                    }}
+                                    className="text-sm font-semibold text-primary-600 hover:underline"
+                                >
+                                    שכחת סיסמה?
+                                </button>
                             </div>
                              <div className="relative">
                                 <LockClosedIcon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
@@ -312,11 +372,16 @@ const LoginScreen: React.FC = () => {
                                 />
                             </div>
                         </div>
+                        ) : (
+                            <p className="text-sm text-text-muted text-right leading-relaxed">
+                                נשלח אליכם קישור חד-פעמי לדוא&quot;ל להגדרת סיסמה חדשה.
+                            </p>
+                        )}
 
-                        {pending2FA && (
+                        {pending2FA && !forgotMode && (
                             <div>
                                 <label className="block text-sm font-semibold text-text-muted mb-1.5 text-right">
-                                    קוד אימות מהאימייל
+                                    {twoFactorChannel === 'sms' ? 'קוד אימות מ-SMS' : 'קוד אימות מהאימייל'}
                                 </label>
                                 <input
                                     type="text"
@@ -353,17 +418,35 @@ const LoginScreen: React.FC = () => {
 
                         <button 
                             type="submit" 
-                            disabled={loading}
+                            disabled={forgotMode ? forgotLoading : loading}
                             className="w-full bg-primary-600 text-white font-bold py-3 rounded-lg hover:bg-primary-700 transition-transform transform hover:scale-105 shadow-lg shadow-primary-500/40 disabled:opacity-70 disabled:cursor-not-allowed"
                         >
-                            {loading
-                                ? pending2FA
-                                    ? 'מאמת...'
-                                    : 'מתחבר...'
-                                : pending2FA
-                                  ? 'אשר והתחבר'
-                                  : 'התחברות'}
+                            {forgotMode
+                                ? forgotLoading
+                                    ? 'שולח...'
+                                    : 'שלח קישור לאיפוס סיסמה'
+                                : loading
+                                  ? pending2FA
+                                      ? 'מאמת...'
+                                      : 'מתחבר...'
+                                  : pending2FA
+                                    ? 'אשר והתחבר'
+                                    : 'התחברות'}
                         </button>
+
+                        {forgotMode && (
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setForgotMode(false);
+                                    setError(null);
+                                    setInfo(null);
+                                }}
+                                className="w-full text-sm font-semibold text-primary-600 hover:underline"
+                            >
+                                חזרה להתחברות
+                            </button>
+                        )}
                     </form>
 
                   

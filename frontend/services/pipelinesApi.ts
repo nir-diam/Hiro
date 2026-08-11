@@ -16,12 +16,51 @@ async function parseErr(res: Response): Promise<string> {
     }
 }
 
+export type OutcomeTriggerType = 'none' | 'system_event';
+
+export type OutcomeTrigger = {
+    type: OutcomeTriggerType;
+    systemEventId?: string;
+};
+
+export type AutomationActionType = 'send_email' | 'send_sms' | 'start_pipeline' | 'close_event';
+export type AutomationScheduleType = 'immediate' | 'minutes' | 'hours' | 'days';
+
+export type OutcomeAutomationRecipients = {
+    candidate?: boolean;
+    hiringManager?: boolean;
+    coordinator?: boolean;
+    extra?: string;
+};
+
+export type OutcomeAutomation = {
+    id: string;
+    actionType: AutomationActionType;
+    templateId?: string;
+    pipelineId?: string;
+    scheduleType: AutomationScheduleType;
+    scheduleValue?: number;
+    requireManualApproval?: boolean;
+    recipients?: OutcomeAutomationRecipients;
+};
+
+export type StageOutcomeDto = {
+    id: string;
+    name: string;
+    actionType: 'stay' | 'move' | 'freeze' | 'close';
+    targetStageId?: string;
+    autoFollowupDays?: number;
+    trigger?: OutcomeTrigger;
+    automations?: OutcomeAutomation[];
+};
+
 export type PipelineStageDto = {
     id: string;
     name: string;
     color: string;
     order: number;
     slaLimit: number;
+    outcomes?: StageOutcomeDto[];
 };
 
 export type PipelineDto = {
@@ -58,6 +97,7 @@ export async function syncPipelines(clientId: string, pipelines: PipelineDto[]):
                     color: s.color,
                     order: s.order,
                     slaLimit: s.slaLimit,
+                    outcomes: Array.isArray(s.outcomes) ? s.outcomes : [],
                 })),
             })),
         }),

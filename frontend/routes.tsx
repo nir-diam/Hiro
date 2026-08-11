@@ -37,8 +37,11 @@ import QuestionnaireBuilderView from './components/QuestionnaireBuilderView';
 import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
 import { syncCandidateNameFields } from './utils/candidateName';
 import PipelineSettingsView from './components/PipelineSettingsView';
+import CandidatePipelineSettingsView from './components/CandidatePipelineSettingsView';
 import StatusSettingsView from './components/StatusSettingsView';
 import DocumentTemplatesView from './components/DocumentTemplatesView';
+import ProposalTemplatesView from './components/ProposalTemplatesView';
+import ProposalsView from './components/ProposalsView';
 import CandidatePoolView from './components/CandidatePoolView';
 import ReferralsReportView from './components/ReferralsReportView';
 import PublicationsReportView from './components/PublicationsReportView';
@@ -53,6 +56,7 @@ import { generateExperienceSummaryForCandidate } from './services/experienceSumm
 import ContactProfileView from './components/ContactProfileView';
 import CandidatePortalLayout from './components/CandidatePortalLayout';
 import CandidateLoginView from './components/CandidateLoginView';
+import CandidateSetPasswordView from './components/CandidateSetPasswordView';
 import CandidateSignup from './components/CandidateSignup';
 import CandidatePublicProfileView from './components/CandidatePublicProfileView';
 import CandidateRegistrationWizard from './components/CandidateRegistrationWizard'; 
@@ -60,6 +64,7 @@ import CandidateOnboardingChat from './components/CandidateOnboardingChat';
 import DashboardView from './components/DashboardView';
 import ExternalJobPostView from './components/ExternalJobPostView';
 import CommunicationCenterView from './components/CommunicationCenterView';
+import ClientEventsManagementView from './components/ClientEventsManagementView';
 
 // Finance Components
 import FinanceLayout from './components/FinanceLayout';
@@ -153,7 +158,7 @@ const upsertWorkExperienceFunctionDeclaration: FunctionDeclaration = {
 };
 
 interface AppRoutesProps {
-    openSummaryDrawer: (candidate: Candidate | number) => void;
+    openSummaryDrawer: (candidate: Candidate | number, options?: import('../hooks/useUIState').SummaryDrawerOptions) => void;
     handleSaveJob: (jobData: any) => void;
     handleSaveClient: (clientData: any) => void;
     setActiveView: (view: string) => void;
@@ -793,8 +798,19 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                     <InterestedInJobs
                         onOpenNewTask={props.onOpenNewTask}
                         candidateId={formData.backendId || formData.id}
+                        candidateName={
+                            formData.fullName
+                            || [formData.firstName, formData.lastName].filter(Boolean).join(' ')
+                            || ''
+                        }
                         candidatePhone={formData.phone}
                         candidateEmail={formData.email}
+                        candidatePipelineId={
+                            (formData as { candidatePipelineId?: string }).candidatePipelineId ?? null
+                        }
+                        pipelineStageId={
+                            (formData as { pipelineStageId?: string }).pipelineStageId ?? null
+                        }
                     />
                 );
             case 'referrals':
@@ -924,6 +940,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
         { path: '/clients/:clientId/contacts/:contactId', element: <ContactProfileView openMessageModal={props.openMessageModal} /> },
         { path: '/notifications', element: <NotificationCenter onOpenCandidateSummary={props.openSummaryDrawer} /> },
         { path: '/communications', element: <CommunicationCenterView onOpenCandidateSummary={props.openSummaryDrawer} /> },
+        { path: '/events-management', element: <ClientEventsManagementView /> },
         
         // --- FINANCE ROUTES ---
         { 
@@ -933,6 +950,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                 { index: true, element: <Navigate to="dashboard" replace /> },
                 { path: 'dashboard', element: <FinanceDashboard /> },
                 { path: 'invoices', element: <InvoicesView /> },
+                { path: 'proposals', element: <ProposalsView /> },
                 { path: 'commissions', element: <CommissionsView /> },
             ] 
         },
@@ -948,7 +966,9 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                  { path: 'company-images', element: <CompanyImagesSettingsView /> },
                  { path: 'statuses', element: <StatusSettingsView /> },
                  { path: 'pipelines', element: <PipelineSettingsView /> },
+                 { path: 'candidate-pipelines', element: <CandidatePipelineSettingsView /> },
                  { path: 'documents', element: <DocumentTemplatesView /> },
+                 { path: 'proposal-templates', element: <ProposalTemplatesView /> },
                  { path: 'coordinators', element: <CoordinatorsSettingsView /> },
                  { path: 'coordinators/:coordinatorId', element: <CoordinatorProfileView /> },
                  { path: 'agreements', element: <AgreementTypesSettingsView /> }, // New Route
@@ -1032,6 +1052,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
             children: [
                  { index: true, element: <Navigate to="login" replace /> },
                  { path: 'login', element: <CandidateLoginView /> },
+                 { path: 'set-password', element: <CandidateSetPasswordView /> },
                  { path: 'signup', element: <CandidateSignup /> }, 
                  { path: 'profile', element: <CandidatePublicProfileView openJobAlertModal={props.openJobAlertModal} /> },
                  { path: 'register', element: <CandidateRegistrationWizard /> },

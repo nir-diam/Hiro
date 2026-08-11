@@ -34,10 +34,14 @@ const connectDb = async () => {
   require('../models/Client');
   require('../models/ClientOrganizationLink');
   require('../models/ClientContact');
+  require('../models/ProposalTemplate');
+  require('../models/Proposal');
   require('../models/ClientContactGroup');
   require('../models/ClientTask');
   require('../models/ClientPipeline');
   require('../models/ClientPipelineStage');
+  require('../models/CandidatePipeline');
+  require('../models/CandidatePipelineStage');
   require('../models/ClientHealthRule');
   require('../models/JobHealthRule');
   require('../models/JobHealthSetting');
@@ -71,6 +75,9 @@ const connectDb = async () => {
   require('../models/TagAiDecision');
   require('../models/TagCorrectionPlatformSettings');
   require('../models/AppLog');
+  require('../models/SmsRsvpRequest');
+  require('../models/SmsRsvpInboundLog');
+  require('../models/SmsRsvpDeliveryLog');
 
   const User = require('../models/User');
   const Client = require('../models/Client');
@@ -98,6 +105,11 @@ const connectDb = async () => {
   ClientPipeline.hasMany(ClientPipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
   ClientPipelineStage.belongsTo(ClientPipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
 
+  const CandidatePipeline = require('../models/CandidatePipeline');
+  const CandidatePipelineStage = require('../models/CandidatePipelineStage');
+  CandidatePipeline.hasMany(CandidatePipelineStage, { foreignKey: 'pipelineId', as: 'stages', onDelete: 'CASCADE' });
+  CandidatePipelineStage.belongsTo(CandidatePipeline, { foreignKey: 'pipelineId', as: 'pipeline' });
+
   await sequelize.sync();
 
   // users table has legacy is_active + duplicate "isActive" from sync — keep them aligned (false wins).
@@ -118,6 +130,32 @@ const connectDb = async () => {
       ADD COLUMN IF NOT EXISTS resolved_target_tag_id UUID NULL REFERENCES tags(id) ON DELETE SET NULL;
   `).catch(() => {});
 
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "desiredRoles" JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "profileVideoUrl" VARCHAR(2048);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "portalAccessToken" UUID NULL,
+      ADD COLUMN IF NOT EXISTS "portalAccessTokenExpiresAt" TIMESTAMPTZ NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "approveByCandidate" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "consentToJobOffers" BOOLEAN NOT NULL DEFAULT false;
+  `).catch(() => {});
+
   // Safe additive columns for job_publications (sync does not alter existing tables).
   await sequelize.query(`
     ALTER TABLE job_publications
@@ -129,7 +167,8 @@ const connectDb = async () => {
       ADD COLUMN IF NOT EXISTS "contactPhone1" VARCHAR(64),
       ADD COLUMN IF NOT EXISTS "contactPhone2" VARCHAR(64),
       ADD COLUMN IF NOT EXISTS "landingLayout" VARCHAR(32) DEFAULT 'detailed',
-      ADD COLUMN IF NOT EXISTS "landingLayouts" JSONB NOT NULL DEFAULT '{}'::jsonb;
+      ADD COLUMN IF NOT EXISTS "landingLayouts" JSONB NOT NULL DEFAULT '{}'::jsonb,
+      ADD COLUMN IF NOT EXISTS "heroDesignInstructions" TEXT;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -197,14 +236,62 @@ const connectDb = async () => {
       color VARCHAR(120) NOT NULL DEFAULT 'bg-gray-100 text-gray-700',
       sort_index INTEGER NOT NULL DEFAULT 0,
       sla_limit INTEGER NOT NULL DEFAULT 0,
+      outcomes JSONB NOT NULL DEFAULT '[]'::jsonb,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE client_pipeline_stages
+      ADD COLUMN IF NOT EXISTS outcomes JSONB NOT NULL DEFAULT '[]'::jsonb;
+  `).catch(() => {});
+
+  await sequelize.query(`
     CREATE INDEX IF NOT EXISTS idx_client_pipeline_stages_pipeline
       ON client_pipeline_stages (pipeline_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS candidate_pipelines (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_candidate_pipelines_client
+      ON candidate_pipelines (client_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS candidate_pipeline_stages (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      pipeline_id UUID NOT NULL REFERENCES candidate_pipelines(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      color VARCHAR(120) NOT NULL DEFAULT 'bg-gray-100 text-gray-700',
+      sort_index INTEGER NOT NULL DEFAULT 0,
+      sla_limit INTEGER NOT NULL DEFAULT 0,
+      outcomes JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_candidate_pipeline_stages_pipeline
+      ON candidate_pipeline_stages (pipeline_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "candidatePipelineId" UUID NULL,
+      ADD COLUMN IF NOT EXISTS "pipelineStageId" UUID NULL;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -272,6 +359,60 @@ const connectDb = async () => {
   await sequelize.query(`
     CREATE INDEX IF NOT EXISTS idx_organization_contacts_org
       ON organization_contacts (organization_id, sort_index);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS proposal_templates (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      name VARCHAR(255) NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
+      updated_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+      updated_by_name VARCHAR(255) NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_proposal_templates_client
+      ON proposal_templates (client_id, updated_at DESC);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS proposals (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      client_id UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+      contact_id UUID NULL REFERENCES client_contacts(id) ON DELETE SET NULL,
+      template_id UUID NULL REFERENCES proposal_templates(id) ON DELETE SET NULL,
+      number VARCHAR(64) NOT NULL,
+      date DATE NOT NULL DEFAULT CURRENT_DATE,
+      valid_until DATE NULL,
+      currency VARCHAR(8) NOT NULL DEFAULT 'ILS',
+      amount NUMERIC(14, 2) NOT NULL DEFAULT 0,
+      vat_rate NUMERIC(5, 2) NOT NULL DEFAULT 17,
+      include_vat BOOLEAN NOT NULL DEFAULT true,
+      close_probability INTEGER NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'draft',
+      notes TEXT NULL DEFAULT '',
+      content_html TEXT NULL DEFAULT '',
+      created_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+      created_by_name VARCHAR(255) NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (client_id, number)
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_proposals_client
+      ON proposals (client_id, date DESC);
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_proposals_contact
+      ON proposals (contact_id, date DESC)
+      WHERE contact_id IS NOT NULL;
   `).catch(() => {});
 
   await sequelize.query(`
@@ -416,6 +557,14 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE message_templates
+      ADD COLUMN IF NOT EXISTS attachment_url VARCHAR(2048) NULL,
+      ADD COLUMN IF NOT EXISTS attachment_file_name VARCHAR(512) NULL,
+      ADD COLUMN IF NOT EXISTS attachment_content_type VARCHAR(128) NULL,
+      ADD COLUMN IF NOT EXISTS attachment_file_size INTEGER NULL;
+  `).catch(() => {});
+
+  await sequelize.query(`
     UPDATE jobs j
     SET client_id = c.id
     FROM clients c
@@ -424,6 +573,77 @@ const connectDb = async () => {
         LOWER(TRIM(j.client)) = LOWER(TRIM(c.name))
         OR LOWER(TRIM(j.client)) = LOWER(TRIM(c."displayName"))
       );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS sms_rsvp_requests (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      candidate_id UUID NOT NULL REFERENCES candidates(id) ON DELETE CASCADE,
+      job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+      client_id UUID NULL REFERENCES clients(id) ON DELETE SET NULL,
+      phone VARCHAR(32) NOT NULL,
+      phone_digits VARCHAR(32) NOT NULL,
+      status VARCHAR(32) NOT NULL DEFAULT 'pending',
+      rsvp_response VARCHAR(48) NULL,
+      outbound_message TEXT NULL,
+      outbound_sent_at TIMESTAMPTZ NULL,
+      inforu_customer_message_id VARCHAR(128) NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      answered_at TIMESTAMPTZ NULL,
+      inbound_message_raw TEXT NULL,
+      inbound_keyword VARCHAR(64) NULL,
+      reminder_sent_at TIMESTAMPTZ NULL,
+      delivery_status VARCHAR(64) NULL,
+      delivery_status_at TIMESTAMPTZ NULL,
+      created_by_user_id UUID NULL REFERENCES users(id) ON DELETE SET NULL,
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE INDEX IF NOT EXISTS idx_sms_rsvp_requests_phone_pending
+      ON sms_rsvp_requests (phone_digits, expires_at DESC)
+      WHERE status = 'pending';
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_sms_rsvp_requests_one_pending_per_candidate
+      ON sms_rsvp_requests (candidate_id)
+      WHERE status = 'pending';
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS sms_rsvp_inbound_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      phone VARCHAR(32) NOT NULL,
+      phone_digits VARCHAR(32) NOT NULL,
+      message TEXT NULL,
+      keyword VARCHAR(64) NULL,
+      short_code VARCHAR(32) NULL,
+      parse_result VARCHAR(48) NULL,
+      matched_request_id UUID NULL REFERENCES sms_rsvp_requests(id) ON DELETE SET NULL,
+      raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    CREATE TABLE IF NOT EXISTS sms_rsvp_delivery_log (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      request_id UUID NULL REFERENCES sms_rsvp_requests(id) ON DELETE SET NULL,
+      phone VARCHAR(32) NULL,
+      phone_digits VARCHAR(32) NULL,
+      delivery_status VARCHAR(64) NOT NULL,
+      raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE login_email_codes
+      ADD COLUMN IF NOT EXISTS delivery_channel VARCHAR(16) NOT NULL DEFAULT 'email';
   `).catch(() => {});
 
   console.log('PostgreSQL connected & models synced');

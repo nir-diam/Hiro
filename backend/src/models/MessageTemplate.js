@@ -45,6 +45,26 @@ const MessageTemplate = sequelize.define(
       onDelete: 'SET NULL',
     },
     updatedByName: { type: DataTypes.STRING, allowNull: true },
+    attachmentUrl: {
+      type: DataTypes.STRING(2048),
+      allowNull: true,
+      field: 'attachment_url',
+    },
+    attachmentFileName: {
+      type: DataTypes.STRING(512),
+      allowNull: true,
+      field: 'attachment_file_name',
+    },
+    attachmentContentType: {
+      type: DataTypes.STRING(128),
+      allowNull: true,
+      field: 'attachment_content_type',
+    },
+    attachmentFileSize: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+      field: 'attachment_file_size',
+    },
   },
   {
     tableName: 'message_templates',

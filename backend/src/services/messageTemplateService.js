@@ -5,6 +5,7 @@ const Job = require('../models/Job');
 const emailService = require('./emailService');
 const jobCandidateService = require('./jobCandidateService');
 const clientUsageSettingService = require('./clientUsageSettingService');
+const candidatePortalAccessService = require('./candidatePortalAccessService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
@@ -29,6 +30,10 @@ const toRow = (t) => {
     isSystem: !!plain.isSystem,
     lastUpdated: plain.updatedAt ? new Date(plain.updatedAt).toISOString() : null,
     updatedBy: plain.updatedByName || '',
+    attachmentUrl: plain.attachmentUrl || null,
+    attachmentFileName: plain.attachmentFileName || null,
+    attachmentContentType: plain.attachmentContentType || null,
+    attachmentFileSize: plain.attachmentFileSize ?? null,
   };
 };
 
@@ -151,6 +156,34 @@ const removeByIdAny = async (id) => {
   return remove(id, scope, clientId);
 };
 
+const normalizeAttachmentPayload = (payload) => {
+  const out = {};
+  if (payload.attachmentUrl !== undefined) {
+    out.attachmentUrl = payload.attachmentUrl ? String(payload.attachmentUrl).trim().slice(0, 2048) : null;
+  }
+  if (payload.attachmentFileName !== undefined) {
+    out.attachmentFileName = payload.attachmentFileName
+      ? String(payload.attachmentFileName).trim().slice(0, 512)
+      : null;
+  }
+  if (payload.attachmentContentType !== undefined) {
+    out.attachmentContentType = payload.attachmentContentType
+      ? String(payload.attachmentContentType).trim().slice(0, 128)
+      : null;
+  }
+  if (payload.attachmentFileSize !== undefined) {
+    const size = Number(payload.attachmentFileSize);
+    out.attachmentFileSize = Number.isFinite(size) && size > 0 ? Math.round(size) : null;
+  }
+  if (payload.clearAttachment === true) {
+    out.attachmentUrl = null;
+    out.attachmentFileName = null;
+    out.attachmentContentType = null;
+    out.attachmentFileSize = null;
+  }
+  return out;
+};
+
 const createAdmin = async (payload, user) => {
   const { name, subject, content, body, channels, templateKey } = payload;
   const text = content ?? body;
@@ -170,6 +203,7 @@ const createAdmin = async (payload, user) => {
     isSystem: false,
     updatedByUserId: user.id,
     updatedByName: user.name || user.email || null,
+    ...normalizeAttachmentPayload(payload),
   });
   return toRow(row);
 };
@@ -193,6 +227,7 @@ const createClient = async (clientId, payload, user) => {
     isSystem: false,
     updatedByUserId: user.id,
     updatedByName: user.name || user.email || null,
+    ...normalizeAttachmentPayload(payload),
   });
   return toRow(row);
 };
@@ -214,6 +249,7 @@ const update = async (id, scope, clientId, payload, user) => {
   if (templateKey !== undefined && !row.isSystem) {
     updates.templateKey = templateKey ? String(templateKey).trim().slice(0, 128) : null;
   }
+  Object.assign(updates, normalizeAttachmentPayload(payload));
   updates.updatedByUserId = user.id;
   updates.updatedByName = user.name || user.email || null;
   await row.update(updates);
@@ -275,6 +311,7 @@ const MESSAGE_TEMPLATE_NAMED_KEYS = [
   'candidate_email',
   'candidate_cv_link',
   'candidate_id',
+  'candidate_portal_link',
   'job_referrals',
   'company_name',
   'client_name',
@@ -331,12 +368,14 @@ const escapeHtmlAttr = (s) =>
 /** Tokens rendered as `<a href>` in HTML bodies when URL is http(s). */
 const LINK_PLACEHOLDER_KEYS = new Set([
   'candidate_cv_link',
+  'candidate_portal_link',
   'privacy_policy_link',
   'thank_you_page_link',
 ]);
 
 const LINK_LABEL_HE = {
   candidate_cv_link: 'קורות חיים',
+  candidate_portal_link: 'כניסה לאזור האישי',
   privacy_policy_link: 'מדיניות פרטיות',
   thank_you_page_link: 'דף תודה',
 };
@@ -643,6 +682,34 @@ const sendScopedTemplateEmail = async ({
   let bodyHtml = applyNumberedPlaceholdersHtml(plain.body, placeholderValues);
   bodyHtml = applyNamedPlaceholdersHtml(bodyHtml, namedMap);
 
+  const portalUrl = String(namedMap.candidate_portal_link || '').trim();
+  const templateMentionsPortal = /\{\s*candidate_portal_link\s*\}/.test(String(plain.body || ''));
+  if (portalUrl && !templateMentionsPortal && !body.includes(portalUrl)) {
+    const footerText = `\n\nלהיכנס לאזור האישי שלך וליצור סיסמה:\n${portalUrl}`;
+    body += footerText;
+    bodyHtml += `<br/><br/>${escapeHtml('להיכנס לאזור האישי שלך וליצור סיסמה:')}<br/><a href="${escapeHtmlAttr(portalUrl)}">${LINK_LABEL_HE.candidate_portal_link}</a>`;
+  }
+
+  let attachments = null;
+  if (plain.attachmentUrl) {
+    try {
+      const resp = await fetch(String(plain.attachmentUrl));
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        const buffer = Buffer.from(arrayBuf);
+        if (buffer.length) {
+          attachments = [{
+            filename: plain.attachmentFileName || 'attachment',
+            content: buffer,
+            contentType: plain.attachmentContentType || 'application/octet-stream',
+          }];
+        }
+      }
+    } catch (attachErr) {
+      console.warn('[message-templates] attachment fetch failed:', attachErr?.message || attachErr);
+    }
+  }
+
   const scopeTag = plain.scope === 'client' ? `client:${plain.clientId}` : 'admin';
   console.log(`[message-templates] send ${scopeTag} key="${key}" → ${toEmail} subject="${subject.slice(0, 60)}…"`);
 
@@ -657,6 +724,7 @@ const sendScopedTemplateEmail = async ({
     fromEmail: fromEmail || undefined,
     userRole: 'admin',
     clientName: null,
+    attachments,
   });
 
   console.log(`[message-templates] sent key="${key}" providerMessageId=${result?.messageId || result?.id || 'n/a'}`);
@@ -701,9 +769,11 @@ const sendAdminTemplateEmailOptional = async (opts) =>
  * Gating order:
  *   1. `options.sendWelcomeEmail === false` (per-request) → skip.
  *   2. Missing record / email / onlyIfNoResume guards → skip.
- *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) — default off:
+ *   3. Client Usage "מייל התחברות" (`autoThanksEmail`) — default off — unless
+ *      `options.sendWelcomeEmail === true` (staff explicitly checked "send welcome" in UI):
  *        • resolve client from `options.clientId` or linked `options.jobId` (Job.client → Client)
- *        • send only when setting is explicitly `true` for that client
+ *        • send when setting is `true` for that client, or when step-3 bypass applies
+ *        • unresolved client → admin welcome template catalog
  *
  * @param {{ onlyIfNoResume?: boolean; clientId?: string | null; sendWelcomeEmail?: boolean; jobId?: string | null; inboxTo?: string | null; recruiter?: object }} options
  */
@@ -750,12 +820,14 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
       jobId: jobIdOpt,
       inboxTo: options.inboxTo,
     });
-    const enabled = await clientUsageSettingService.getAutoThanksEmailForClient(clientId);
+    const explicitSend = options.sendWelcomeEmail === true;
+    const enabled = explicitSend || (await clientUsageSettingService.getAutoThanksEmailForClient(clientId));
     if (!enabled) {
       console.log('[message-templates] welcome skipped: autoThanksEmail disabled or client unresolved', {
         candidateId: id,
         clientId: clientId || null,
         jobId: jobIdOpt,
+        explicitSend,
       });
       return;
     }
@@ -768,11 +840,25 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
     });
 
     try {
+      let portalLink = '';
+      try {
+        portalLink = await candidatePortalAccessService.createMagicLinkForCandidate(record);
+      } catch (linkErr) {
+        console.warn('[message-templates] candidate portal magic link failed:', linkErr?.message || linkErr);
+      }
+
+      if (!portalLink) {
+        console.warn('[message-templates] welcome email sent without candidate portal magic link', {
+          candidateId: id,
+        });
+      }
+
       await sendScopedTemplateEmailOptional({
         name: welcomeKey,
         toEmail: String(email).trim(),
         placeholderValues: [displayName, dateStr],
         candidateRecord: record,
+        namedPlaceholders: portalLink ? { candidate_portal_link: portalLink } : null,
         placeholderContext: {
           jobId: jobIdOpt,
           recruiter:
@@ -803,6 +889,7 @@ module.exports = {
   remove,
   removeByIdAny,
   findByPkWithClient,
+  findScoped,
   getByKeyOrFail,
   applyNumberedPlaceholders,
   applyNamedPlaceholders,

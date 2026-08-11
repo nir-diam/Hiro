@@ -30,6 +30,7 @@ import {
 import { authHeaders } from '../utils/authHeaders';
 
 const API_BASE = import.meta.env.VITE_API_BASE || '';
+const ADMIN_COMPANY_SETTINGS_CLIENT_KEY = 'hiro.admin.companySettings.clientId';
 
 type ClientOption = { id: string; name: string; displayName?: string };
 
@@ -176,7 +177,21 @@ const renderField = (label: string, name: string, value: string, onChange: (e: R
     );
 };
 
-const ClientBrandingSection: React.FC<{ clientId: string | null }> = ({ clientId }) => {
+const ClientBrandingSection: React.FC<{
+    clientId: string | null;
+    isPlatformAdmin?: boolean;
+    clientOptions?: Array<{ id: string; label: string }>;
+    adminClientId?: string | null;
+    onAdminClientChange?: (id: string | null) => void;
+    clientsListLoading?: boolean;
+}> = ({
+    clientId,
+    isPlatformAdmin = false,
+    clientOptions = [],
+    adminClientId = null,
+    onAdminClientChange,
+    clientsListLoading = false,
+}) => {
     const { t } = useLanguage();
     const [branding, setBranding] = useState<ClientBranding>({ logoUrl: null, primaryColor: '#1e293b' });
     const [savedBranding, setSavedBranding] = useState<ClientBranding>({ logoUrl: null, primaryColor: '#1e293b' });
@@ -274,7 +289,27 @@ const ClientBrandingSection: React.FC<{ clientId: string | null }> = ({ clientId
                 </p>
             </div>
             {!clientId ? (
-                <p className="text-sm text-text-muted">{t('company_settings.usage_no_client')}</p>
+                isPlatformAdmin ? (
+                    <div className="max-w-md space-y-2">
+                        <label className="block text-sm font-semibold text-text-muted">לקוח</label>
+                        <SearchableSelect
+                            options={clientOptions}
+                            value={adminClientId}
+                            onChange={(val) => onAdminClientChange?.(val ? String(val) : null)}
+                            placeholder="בחרו לקוח"
+                            className="w-full"
+                            icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}
+                            disabled={clientsListLoading}
+                        />
+                        <p className="text-xs text-text-muted">
+                            {clientsListLoading
+                                ? 'טוען רשימת לקוחות...'
+                                : 'בחרו לקוח כדי לערוך לוגו וצבע מותג.'}
+                        </p>
+                    </div>
+                ) : (
+                    <p className="text-sm text-text-muted">{t('company_settings.usage_no_client')}</p>
+                )
             ) : brandingLoading ? (
                 <p className="text-sm text-text-muted">טוען...</p>
             ) : (
@@ -745,10 +780,22 @@ const CompanySettingsView: React.FC = () => {
     const { user } = useAuth();
     const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
     const tenantClientId = user?.clientId?.trim() || null;
-    const [adminClientId, setAdminClientId] = useState<string | null>(null);
+    const [adminClientId, setAdminClientId] = useState<string | null>(() => {
+        if (typeof sessionStorage === 'undefined') return null;
+        return sessionStorage.getItem(ADMIN_COMPANY_SETTINGS_CLIENT_KEY);
+    });
     const [clientOptions, setClientOptions] = useState<ClientOption[]>([]);
     const [clientsListLoading, setClientsListLoading] = useState(false);
     const usageClientId = isPlatformAdmin ? adminClientId : tenantClientId;
+
+    const handleAdminClientChange = useCallback((val: string | number | null) => {
+        const id = val ? String(val) : null;
+        setAdminClientId(id);
+        if (typeof sessionStorage !== 'undefined') {
+            if (id) sessionStorage.setItem(ADMIN_COMPANY_SETTINGS_CLIENT_KEY, id);
+            else sessionStorage.removeItem(ADMIN_COMPANY_SETTINGS_CLIENT_KEY);
+        }
+    }, []);
     const [clientDetails, setClientDetails] = useState<ClientDetailsRow | null>(null);
     const [clientDetailsLoading, setClientDetailsLoading] = useState(false);
     const [clientDetailsError, setClientDetailsError] = useState<string | null>(null);
@@ -942,6 +989,16 @@ const CompanySettingsView: React.FC = () => {
     }, []);
 
     useEffect(() => {
+        if (!isPlatformAdmin || adminClientId || !clientOptions.length) return;
+        const saved =
+            typeof sessionStorage !== 'undefined'
+                ? sessionStorage.getItem(ADMIN_COMPANY_SETTINGS_CLIENT_KEY)
+                : null;
+        const savedValid = saved && clientOptions.some((c) => c.id === saved);
+        handleAdminClientChange(savedValid ? saved! : clientOptions[0].id);
+    }, [isPlatformAdmin, adminClientId, clientOptions, handleAdminClientChange]);
+
+    useEffect(() => {
         if (!usageClientId || !API_BASE) {
             setClientDetails(null);
             setClientDetailsError(null);
@@ -1027,7 +1084,17 @@ const CompanySettingsView: React.FC = () => {
                             />
                         </div>
 
-                        <ClientBrandingSection clientId={usageClientId} />
+                        <ClientBrandingSection
+                            clientId={usageClientId}
+                            isPlatformAdmin={isPlatformAdmin}
+                            clientOptions={clientOptions.map((c) => ({
+                                id: c.id,
+                                label: c.displayName || c.name,
+                            }))}
+                            adminClientId={adminClientId}
+                            onAdminClientChange={handleAdminClientChange}
+                            clientsListLoading={clientsListLoading}
+                        />
                         
                         {/* Matching Engine — preset cards + selection stored in client_usage_settings.matching_engine_preset_id */}
                         <div className="bg-white p-6 rounded-2xl border border-border-subtle shadow-sm mt-6">
@@ -1366,7 +1433,7 @@ const CompanySettingsView: React.FC = () => {
                                     label: c.displayName || c.name,
                                 }))}
                                 value={adminClientId}
-                                onChange={(val) => setAdminClientId(val ? String(val) : null)}
+                                onChange={handleAdminClientChange}
                                 placeholder="בחרו לקוח"
                                 className="w-full"
                                 icon={<BuildingOffice2Icon className="w-4 h-4 text-text-subtle" />}

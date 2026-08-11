@@ -40,8 +40,11 @@ export type TagAiDecisionDto = {
     reviewerAction?: string | null;
     hesitationLevel?: number | null;
     dilemmaReasoning?: string | null;
-    manualApprovalStatus: 'pending' | 'approved';
+    manualApprovalStatus: 'pending' | 'approved' | 'agent_approved';
+    comments?: string | null;
 };
+
+export type TagManualApprovalStatus = 'pending' | 'approved' | 'agent_approved';
 
 export async function fetchTagCorrectionAgentEnabled(): Promise<boolean> {
     const res = await fetch(`${apiBase()}/api/tags/corrections/agent-settings`, {
@@ -79,6 +82,8 @@ export async function fetchTagAiDecisions(params: {
     limit?: number;
     decision?: string;
     date?: string;
+    dateFrom?: string;
+    dateTo?: string;
     sortOrder?: 'asc' | 'desc';
     reviewStatus?: string;
     reviewerAction?: string;
@@ -88,7 +93,7 @@ export async function fetchTagAiDecisions(params: {
     type?: string;
     hesitation?: string[];
     statusBuckets?: string[];
-    approvalStatus?: 'all' | 'pending' | 'approved';
+    approvalStatus?: 'all' | TagManualApprovalStatus;
 }): Promise<{
     data: TagAiDecisionDto[];
     total: number;
@@ -101,6 +106,8 @@ export async function fetchTagAiDecisions(params: {
     if (params.limit) q.set('limit', String(params.limit));
     if (params.decision && params.decision !== 'all') q.set('decision', params.decision);
     if (params.date) q.set('date', params.date);
+    if (params.dateFrom) q.set('dateFrom', params.dateFrom);
+    if (params.dateTo) q.set('dateTo', params.dateTo);
     q.set('reviewStatus', params.reviewStatus || 'all');
     if (params.reviewerAction) q.set('reviewerAction', params.reviewerAction);
     if (params.autoBackfill) {
@@ -135,11 +142,24 @@ export async function fetchTagAiDecisions(params: {
     };
 }
 
-export async function approveTagAiDecision(id: string, status: 'approved' | 'pending' = 'approved'): Promise<{ id: string; manualApprovalStatus: string }> {
+export async function approveTagAiDecision(
+    id: string,
+    status: TagManualApprovalStatus = 'approved',
+): Promise<{ id: string; manualApprovalStatus: string }> {
     const res = await fetch(`${apiBase()}/api/tags/ai-decisions/${encodeURIComponent(id)}/approve`, {
         method: 'PATCH',
         headers: authHeaders(),
         body: JSON.stringify({ status }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
+export async function updateTagAiDecisionComments(id: string, comments: string): Promise<{ id: string; comments: string | null }> {
+    const res = await fetch(`${apiBase()}/api/tags/ai-decisions/${encodeURIComponent(id)}/comments`, {
+        method: 'PATCH',
+        headers: authHeaders(),
+        body: JSON.stringify({ comments }),
     });
     if (!res.ok) throw new Error(await parseErr(res));
     return res.json();

@@ -16,6 +16,8 @@ const list = async (req, res) => {
       limit = 50,
       decision,
       date,
+      dateFrom,
+      dateTo,
       sortOrder = 'desc',
       reviewStatus,
       approvalStatus,
@@ -41,7 +43,11 @@ const list = async (req, res) => {
       andParts.push({ aiDecision: decision });
     }
 
-    if (date) {
+    if (dateFrom || dateTo) {
+      const start = dateFrom ? new Date(`${dateFrom}T00:00:00.000Z`) : new Date(0);
+      const end = dateTo ? new Date(`${dateTo}T23:59:59.999Z`) : new Date();
+      andParts.push({ createdAt: { [Op.between]: [start, end] } });
+    } else if (date) {
       const start = new Date(date);
       start.setHours(0, 0, 0, 0);
       const end = new Date(date);
@@ -106,7 +112,7 @@ const list = async (req, res) => {
 
     const where = andParts.length ? { [Op.and]: andParts } : {};
 
-    const safeLimit = Math.min(500, Math.max(1, Number(limit) || 50));
+    const safeLimit = Math.min(10000, Math.max(1, Number(limit) || 50));
     const safePage = Math.max(1, Number(page) || 1);
     const offset = (safePage - 1) * safeLimit;
     const order = [['created_at', sortOrder === 'asc' ? 'ASC' : 'DESC']];
@@ -163,6 +169,7 @@ const list = async (req, res) => {
         resolvedAt: r.resolvedAt,
         organizationTmpId: r.organizationTmpId,
         manualApprovalStatus: r.manualApprovalStatus ?? 'pending',
+        comments: r.comments ?? null,
       };
     });
 
@@ -434,12 +441,17 @@ const stats = async (req, res) => {
 
 /**
  * PATCH /api/organizations/ai-decisions/:id/approve
- * Toggle manualApprovalStatus for one decision.
+ * Set manualApprovalStatus for one decision.
  */
+const APPROVAL_STATUSES = new Set(['pending', 'approved', 'agent_approved']);
+
 const approve = async (req, res) => {
   try {
     const { id } = req.params;
     const status = req.body?.status || 'approved';
+    if (!APPROVAL_STATUSES.has(status)) {
+      return res.status(400).json({ message: `Invalid status. Allowed: ${[...APPROVAL_STATUSES].join(', ')}` });
+    }
     const decision = await OrganizationAiDecision.findByPk(id);
     if (!decision) return res.status(404).json({ message: 'Decision not found' });
     await decision.update({ manualApprovalStatus: status });
@@ -450,4 +462,23 @@ const approve = async (req, res) => {
   }
 };
 
-module.exports = { list, resolve, bulkResolve, stats, approve };
+/**
+ * PATCH /api/organizations/ai-decisions/:id/comments
+ * Persist free-text comments (does not change review/approval status).
+ */
+const updateComments = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const comments =
+      req.body?.comments == null ? null : String(req.body.comments);
+    const decision = await OrganizationAiDecision.findByPk(id);
+    if (!decision) return res.status(404).json({ message: 'Decision not found' });
+    await decision.update({ comments: comments === '' ? null : comments });
+    return res.json({ id, comments: decision.comments ?? null });
+  } catch (err) {
+    console.error('[orgAiDecision] updateComments error:', err);
+    return res.status(500).json({ message: err.message });
+  }
+};
+
+module.exports = { list, resolve, bulkResolve, stats, approve, updateComments };

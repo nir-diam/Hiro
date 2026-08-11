@@ -21,6 +21,7 @@ const {
   searchSnippet,
   searchRegistrationNumber,
 } = require('../services/organizationEnrichmentService');
+const organizationEnrichUsageService = require('../services/organizationEnrichUsageService');
 const promptService = require('../services/promptService');
 const picklistService = require('../services/picklistService');
 const { createS3Client, buildPublicUrl } = require('../services/s3Service');
@@ -198,7 +199,7 @@ function parseOrganizationListParams(req) {
 
   const includeMerged = String(pick('includeMerged') || '').toLowerCase() === 'true';
   const page = Math.max(1, parseInt(String(pick('page') ?? '1'), 10) || 1);
-  const limit = Math.min(500, Math.max(1, parseInt(String(pick('limit') ?? '50'), 10) || 50));
+  const limit = Math.min(10000, Math.max(1, parseInt(String(pick('limit') ?? '50'), 10) || 50));
   const search = typeof pick('search') === 'string' ? pick('search').trim() : '';
   const includeAdditionalLocations =
     String(pick('includeAdditionalLocations') || '').toLowerCase() === 'true' ||
@@ -464,6 +465,9 @@ const enrich = async (req, res) => {
   }
 
   try {
+    const identity = organizationEnrichUsageService.resolveIdentity(req);
+    await organizationEnrichUsageService.recordUsage(identity, { companyIds });
+
     const companies = await organizationService.getByIds(companyIds);
     if (!companies.length) {
       return res.status(404).json({ message: 'No companies found to enrich' });
@@ -722,7 +726,11 @@ const enrich = async (req, res) => {
       persistedIds = await persistEnrichmentResults(suggestions);
     }
 
-    res.json({ suggestions, enrichmentMap, persistedIds });
+    res.json({
+      suggestions,
+      enrichmentMap,
+      persistedIds,
+    });
   } catch (err) {
     console.error('[organization-enrich-error]', err);
     res.status(err.status || 500).json({ message: err.message || 'AI enrichment failed' });
