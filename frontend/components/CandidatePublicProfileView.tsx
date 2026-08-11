@@ -2236,7 +2236,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             const res = await fetch(`${base}/api/candidates`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
-                body: JSON.stringify(payload),
+                body: JSON.stringify({ ...payload, allowProfileVersion: true }),
             });
             if (!res.ok) {
                 const body = await res.json().catch(() => ({}));

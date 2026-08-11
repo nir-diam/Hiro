@@ -23,6 +23,21 @@ const normalizeEventRow = (event) => {
   };
 };
 
+const {
+  appendClientEventActivity,
+  EVENT_CLOSED_SUMMARY,
+  EVENT_REOPENED_SUMMARY,
+} = require('../utils/clientEventHistory');
+
+const displayNameFromUser = (u) => {
+  if (!u) return 'מערכת';
+  const n = u.name && String(u.name).trim();
+  if (n) return n;
+  const e = u.email && String(u.email).trim();
+  if (e) return e;
+  return 'משתמש';
+};
+
 const list = async (req, res) => {
   const client = await clientService.getById(req.params.id);
   const organizationId = req.query?.organizationId
@@ -199,11 +214,54 @@ const update = async (req, res) => {
     const prev = Array.isArray(client.events) ? client.events : [];
     const eventId = String(req.params.eventId);
     const payload = req.body || {};
+    const prevEvent = prev.find((e) => String(e.id) === eventId);
+    if (!prevEvent) return res.status(404).json({ message: 'Event not found' });
+
     const merged = { ...payload };
     if (Object.prototype.hasOwnProperty.call(payload, 'type')) {
       merged.type = normalizeTypes(payload.type);
     }
-    const next = prev.map((e) => (String(e.id) === eventId ? { ...e, ...merged, id: e.id } : e));
+
+    if (Object.prototype.hasOwnProperty.call(payload, 'isActive')) {
+      const wasActive = prevEvent.isActive !== false;
+      const willActive = payload.isActive !== false;
+      if (wasActive !== willActive) {
+        const actor =
+          (payload.creator != null && String(payload.creator).trim()) ||
+          (payload.coordinator != null && String(payload.coordinator).trim()) ||
+          displayNameFromUser(req.dbUser);
+        const summary = willActive ? EVENT_REOPENED_SUMMARY : EVENT_CLOSED_SUMMARY;
+        const clientSentUpdates = Object.prototype.hasOwnProperty.call(payload, 'updates');
+        const alreadyLogged =
+          clientSentUpdates &&
+          (Array.isArray(payload.updates) ? payload.updates : []).some(
+            (u) =>
+              u &&
+              (u.title === summary ||
+                u.title === EVENT_REOPENED_SUMMARY ||
+                u.title === EVENT_CLOSED_SUMMARY ||
+                u.title === 'הופעל מחדש'),
+          );
+        if (!alreadyLogged) {
+          const baseForHistory = { ...prevEvent, ...merged };
+          if (clientSentUpdates) {
+            baseForHistory.updates = Array.isArray(payload.updates) ? payload.updates : prevEvent.updates;
+          }
+          if (Object.prototype.hasOwnProperty.call(payload, 'history')) {
+            baseForHistory.history = Array.isArray(payload.history)
+              ? payload.history
+              : prevEvent.history;
+          }
+          const withActivity = appendClientEventActivity(baseForHistory, { summary, actor });
+          merged.updates = withActivity.updates;
+          merged.history = withActivity.history;
+        }
+      }
+    }
+
+    const next = prev.map((e) =>
+      String(e.id) === eventId ? { ...e, ...merged, id: e.id } : e,
+    );
     await clientService.update(req.params.id, { events: next });
     const updatedEvent = next.find((e) => String(e.id) === eventId);
     if (!updatedEvent) return res.status(404).json({ message: 'Event not found' });

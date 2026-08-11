@@ -156,6 +156,11 @@ const connectDb = async () => {
       ADD COLUMN IF NOT EXISTS "consentToJobOffers" BOOLEAN NOT NULL DEFAULT false;
   `).catch(() => {});
 
+  await sequelize.query(`
+    ALTER TABLE candidates
+      ADD COLUMN IF NOT EXISTS "canonicalCandidateId" UUID NULL;
+  `).catch(() => {});
+
   // Safe additive columns for job_publications (sync does not alter existing tables).
   await sequelize.query(`
     ALTER TABLE job_publications

@@ -17,6 +17,14 @@ const JobCandidate = require('../models/JobCandidate');
 const { resolveEngineConfigForJob } = require('./matchingEngineService');
 const cityService = require('./cityService');
 const { normalizeOriginalTextHistory } = require('../utils/parsedTextHistory');
+const {
+  LIST_IDENTITY_PARTITION_SQL,
+  buildMergePlan,
+  findExistingByIdentity,
+  normalizeEmail,
+  resolvePrimaryCandidateId,
+  resolvePrimaryCandidateIdDeep,
+} = require('./candidateIdentityService');
 /** Lazy-require matchingScoreService + vectorSearchService inside scoring helpers to avoid circular load:
  * vectorSearchService → candidateService → matchingScoreService → vectorSearchService */
 
@@ -1007,6 +1015,7 @@ const LIST_GRID_ATTRIBUTES = [
   'drivingLicenses',
   'mobility',
   'userId',
+  'canonicalCandidateId',
   'employmentType',
   'employmentTypes',
   'jobScope',
@@ -1056,6 +1065,49 @@ const pushBind = (binds, val) => {
   binds.push(val);
   return binds.length;
 };
+
+/** One visible row per identity group (userId / canonical link / email / phone / tz). */
+const buildDedupedListIdSql = (whereSql, limitPlaceholder, offsetPlaceholder) => `
+  WITH filtered AS (
+    SELECT id, "updatedAt", "canonicalCandidateId", ${LIST_IDENTITY_PARTITION_SQL} AS identity_key
+    FROM candidates
+    WHERE ${whereSql}
+  ),
+  ranked AS (
+    SELECT id, "updatedAt",
+      ROW_NUMBER() OVER (
+        PARTITION BY identity_key
+        ORDER BY
+          CASE WHEN "canonicalCandidateId" IS NULL THEN 0 ELSE 1 END,
+          "updatedAt" DESC NULLS LAST,
+          id DESC
+      ) AS rn
+    FROM filtered
+  )
+  SELECT id FROM ranked WHERE rn = 1
+  ORDER BY "updatedAt" DESC NULLS LAST, id DESC
+  LIMIT $${limitPlaceholder} OFFSET $${offsetPlaceholder}
+`;
+
+const buildDedupedListCountSql = (whereSql) => `
+  WITH filtered AS (
+    SELECT id, "updatedAt", "canonicalCandidateId", ${LIST_IDENTITY_PARTITION_SQL} AS identity_key
+    FROM candidates
+    WHERE ${whereSql}
+  ),
+  ranked AS (
+    SELECT id,
+      ROW_NUMBER() OVER (
+        PARTITION BY identity_key
+        ORDER BY
+          CASE WHEN "canonicalCandidateId" IS NULL THEN 0 ELSE 1 END,
+          "updatedAt" DESC NULLS LAST,
+          id DESC
+      ) AS rn
+    FROM filtered
+  )
+  SELECT COUNT(*)::int AS c FROM ranked WHERE rn = 1
+`;
 
 /** Persist daily-hours preference (גמיש / ללא אילוצי שעות / HH:mm-HH:mm) on `preferredWorkingHours`. */
 const normalizePreferredWorkingHoursInPayload = (payload) => {
@@ -1188,7 +1240,7 @@ const expandInterestRolePhrases = (roleRaw) => {
  * @param {object|null} advanced - JSON from GET ?adv= (frontend advanced search panel)
  */
 const buildCandidateListWhere = (trimmedSearch, advanced) => {
-  const fragments = ['"isDeleted" = false'];
+  const fragments = ['"isDeleted" = false', '"canonicalCandidateId" IS NULL'];
   const binds = [];
 
   if (trimmedSearch) {
@@ -1975,8 +2027,8 @@ const listPaginated = async ({
       WHERE tag_id = $${n}::uuid AND type = 'candidate' AND is_active = true
     )`;
     const combinedWhere = `${whereSql} AND ${tagClause}`;
-    const countSql = `SELECT COUNT(*)::int AS c FROM candidates WHERE ${combinedWhere}`;
-    const idSql = `SELECT id FROM candidates WHERE ${combinedWhere} ORDER BY "updatedAt" DESC NULLS LAST LIMIT $${binds.length + 1} OFFSET $${binds.length + 2}`;
+    const countSql = buildDedupedListCountSql(combinedWhere);
+    const idSql = buildDedupedListIdSql(combinedWhere, binds.length + 1, binds.length + 2);
     const idBinds = [...binds, safeLimit, offset];
 
     const [countRows, idQueryRows] = await Promise.all([
@@ -2022,8 +2074,8 @@ const listPaginated = async ({
   }
   const li = binds.length + 1;
   const oi = binds.length + 2;
-  const countSql = `SELECT COUNT(*)::int AS c FROM candidates WHERE ${whereSql}`;
-  const idSql = `SELECT id FROM candidates WHERE ${whereSql} ORDER BY "updatedAt" DESC NULLS LAST LIMIT $${li} OFFSET $${oi}`;
+  const countSql = buildDedupedListCountSql(whereSql);
+  const idSql = buildDedupedListIdSql(whereSql, li, oi);
   const idBinds = [...binds, safeLimit, offset];
 
   const [countRows, idQueryRows] = await Promise.all([
@@ -2209,8 +2261,19 @@ const getById = async (id, opts = {}) => {
 };
 
 const findByEmail = async (email) => {
-  if (!email) return null;
-  return Candidate.findOne({ where: { email } });
+  const norm = normalizeEmail(email);
+  if (!norm) return null;
+  return Candidate.findOne({
+    where: {
+      isDeleted: false,
+      [Op.and]: [
+        sequelize.where(
+          sequelize.fn('LOWER', sequelize.fn('TRIM', sequelize.col('email'))),
+          norm,
+        ),
+      ],
+    },
+  });
 };
 
 /** Match envelope sender after `email` was updated from the CV (e.g. gilad@) — set on email-ingest create. */
@@ -2233,28 +2296,141 @@ const fetchInstanceById = async (id) => {
 
 const getByUserId = async (userId) =>
   mapCandidateWithTags(
-    await Candidate.findOne({ where: { userId }, include: includeCandidateTags }),
-  );
-const listByUserId = async (userId) =>
-  (await Candidate.findAll({ where: { userId }, include: includeCandidateTags })).map((r) =>
-    mapCandidateWithTags(r),
+    await Candidate.findOne({ where: { userId, isDeleted: false }, include: includeCandidateTags }),
   );
 
-const create = async (payload) => {
+/** All portal profiles for a user: primary rows and linked versions (canonicalCandidateId). */
+const listByUserId = async (userId) => {
+  const uid = String(userId || '').trim();
+  if (!uid) return [];
+
+  const primaries = await Candidate.findAll({
+    where: { userId: uid, isDeleted: false },
+    attributes: ['id'],
+    raw: true,
+  });
+  const primaryIds = primaries.map((r) => r.id);
+  if (!primaryIds.length) return [];
+
+  const rows = await Candidate.findAll({
+    where: {
+      isDeleted: false,
+      [Op.or]: [{ userId: uid }, { canonicalCandidateId: { [Op.in]: primaryIds } }],
+    },
+    include: includeCandidateTags,
+    order: [['createdAt', 'ASC']],
+  });
+  return rows.map((r) => mapCandidateWithTags(r));
+};
+
+/** Fix orphans / partial links: attach to portal primary, set canonicalCandidateId, clear magic-link tokens. */
+const repairPartialIdentityLink = async (candidateId) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) return { candidateId: cid, repaired: false };
+
+  const row = await Candidate.findByPk(cid);
+  if (!row || row.isDeleted) return { candidateId: cid, repaired: false };
+
+  const plain = row.toJSON ? row.toJSON() : { ...row };
+  const patch = {};
+
+  let primaryId = null;
+  let portalUserId = plain.userId || null;
+
+  if (plain.canonicalCandidateId) {
+    primaryId = await resolvePrimaryCandidateIdDeep(plain.canonicalCandidateId);
+    if (primaryId && String(primaryId) !== cid) {
+      if (String(primaryId) !== String(plain.canonicalCandidateId)) {
+        patch.canonicalCandidateId = primaryId;
+      }
+      const primary = await Candidate.findByPk(primaryId, {
+        attributes: ['id', 'userId'],
+        raw: true,
+      });
+      if (primary?.userId && String(primary.userId) !== String(portalUserId || '')) {
+        portalUserId = primary.userId;
+        patch.userId = portalUserId;
+      }
+    } else if (String(primaryId) === cid) {
+      primaryId = null;
+      patch.canonicalCandidateId = null;
+    }
+  }
+
+  if (!primaryId || String(primaryId) === cid) {
+    primaryId = null;
+    portalUserId = patch.userId || plain.userId || null;
+
+    if (portalUserId) {
+      const primary = await Candidate.findOne({
+        where: {
+          userId: portalUserId,
+          isDeleted: false,
+          id: { [Op.ne]: cid },
+          canonicalCandidateId: null,
+        },
+        order: [['createdAt', 'ASC']],
+      });
+      if (primary) primaryId = primary.id;
+    } else {
+      const existing = await findExistingByIdentity({
+        email: plain.email,
+        phone: plain.phone,
+        idNumber: plain.idNumber,
+        excludeId: cid,
+      });
+      if (existing) {
+        primaryId = await resolvePrimaryCandidateIdDeep(existing);
+        if (existing.userId) {
+          portalUserId = existing.userId;
+          patch.userId = portalUserId;
+        }
+      }
+    }
+
+    if (primaryId && String(primaryId) !== cid) {
+      patch.canonicalCandidateId = primaryId;
+    }
+  }
+
+  const effectiveUserId = patch.userId || plain.userId;
+  if (effectiveUserId && (plain.portalAccessToken || plain.portalAccessTokenExpiresAt)) {
+    patch.portalAccessToken = null;
+    patch.portalAccessTokenExpiresAt = null;
+  }
+
+  if (!Object.keys(patch).length) return { candidateId: cid, repaired: false };
+
+  await Candidate.update(patch, { where: { id: cid } });
+  await cacheDel(cid);
+  return { candidateId: cid, repaired: true, ...patch };
+};
+
+const identityHasPortalAccount = async (identity = {}) => {
+  const existing = await findExistingByIdentity(identity);
+  return Boolean(existing?.userId);
+};
+
+const prepareCreatePayload = async (payload) => {
   const cleanPayload = { ...payload };
   if ('embedding' in cleanPayload) {
     const parsed = sanitizeEmbedding(cleanPayload.embedding);
     if (parsed && parsed.length > 0) cleanPayload.embedding = parsed;
-    else delete cleanPayload.embedding; // avoid invalid/empty vector writes
+    else delete cleanPayload.embedding;
   }
-  // If the DB column is pgvector and has a bad default (e.g. empty vector),
-  // explicitly set null on create so we don't hit "vector must have at least 1 dimension".
   if (!('embedding' in cleanPayload)) {
     cleanPayload.embedding = null;
   }
   delete cleanPayload.tags;
   delete cleanPayload.sendWelcomeEmail;
-  // Always derive companyExperiences from workExperience for cross-experience search
+  delete cleanPayload.skipIdentityLink;
+  delete cleanPayload.allowProfileVersion;
+
+  if (cleanPayload.email) {
+    const norm = normalizeEmail(cleanPayload.email);
+    if (norm) cleanPayload.email = norm;
+  }
+
   cleanPayload.companyExperiences = buildCompanyExperiences(
     cleanPayload.workExperience,
     cleanPayload.experience,
@@ -2263,6 +2439,107 @@ const create = async (payload) => {
   normalizePreferredWorkingHoursInPayload(cleanPayload);
   await applyCandidateCityFromCatalog(cleanPayload);
   syncCandidateNameForCreate(cleanPayload);
+  return cleanPayload;
+};
+
+/** Soft-delete a duplicate ingest row after its data was merged into the primary candidate. */
+const mergeIfDuplicateIdentity = async (candidateId, identity = {}) => {
+  const dupId = String(candidateId || '').trim();
+  if (!dupId) return { candidateId: dupId, merged: false };
+
+  const duplicate = await Candidate.findByPk(dupId);
+  if (!duplicate || duplicate.isDeleted) return { candidateId: dupId, merged: false };
+
+  const dupPlain = duplicate.toJSON ? duplicate.toJSON() : { ...duplicate };
+  const existing = await findExistingByIdentity({
+    email: identity.email || dupPlain.email,
+    phone: identity.phone || dupPlain.phone,
+    idNumber: identity.idNumber || dupPlain.idNumber,
+    excludeId: dupId,
+  });
+  if (!existing) return { candidateId: dupId, merged: false };
+
+  const plan = buildMergePlan(dupPlain, existing, identity);
+  if (!plan.merged) return { candidateId: dupId, merged: false };
+
+  if (plan.linked && plan.linkFields) {
+    await Candidate.update(plan.linkFields, { where: { id: dupId } });
+    await cacheDel(dupId);
+    return {
+      candidateId: plan.candidateId,
+      merged: true,
+      linked: true,
+      linkedToId: plan.linkedToId,
+      _identityLinked: true,
+    };
+  }
+
+  if (Object.keys(plan.mergeFields).length) {
+    await update(plan.candidateId, plan.mergeFields);
+  }
+  await Candidate.update({ isDeleted: true }, { where: { id: plan.removedDuplicateId } });
+  await cacheDel(plan.removedDuplicateId);
+
+  return {
+    candidateId: plan.candidateId,
+    merged: true,
+    removedDuplicateId: plan.removedDuplicateId,
+    _identityReused: true,
+  };
+};
+
+const create = async (payload, options = {}) => {
+  const cleanPayload = await prepareCreatePayload(payload);
+  const allowNewProfileVersion =
+    options.allowProfileVersion === true || options.skipIdentityLink === true;
+
+  if (!allowNewProfileVersion) {
+    const existing = await findExistingByIdentity({
+      email: cleanPayload.email,
+      phone: cleanPayload.phone,
+      idNumber: cleanPayload.idNumber,
+    });
+    if (existing) {
+      const primaryId = String(resolvePrimaryCandidateId(existing));
+
+      if (existing.userId) {
+        cleanPayload.userId = existing.userId;
+        cleanPayload.canonicalCandidateId = primaryId;
+        delete cleanPayload.portalAccessToken;
+        delete cleanPayload.portalAccessTokenExpiresAt;
+
+        let linked;
+        try {
+          linked = await Candidate.create(cleanPayload);
+        } catch (err) {
+          if (!isCityValidationError(err)) throw err;
+          cleanPayload.address = null;
+          cleanPayload.location = null;
+          linked = await Candidate.create(cleanPayload);
+        }
+        await cacheSet(linked.toJSON ? linked.toJSON() : linked);
+        const out = await getById(linked.id);
+        out._identityLinked = true;
+        out._linkedExistingId = existing.id;
+        return out;
+      }
+
+      const attachPayload = { ...cleanPayload };
+      delete attachPayload.id;
+      delete attachPayload.canonicalCandidateId;
+      delete attachPayload.userId;
+      delete attachPayload.portalAccessToken;
+      delete attachPayload.portalAccessTokenExpiresAt;
+
+      await update(primaryId, attachPayload);
+      await cacheDel(primaryId);
+      const attached = await getById(primaryId);
+      attached._identityReused = true;
+      attached._linkedExistingId = existing.id;
+      return attached;
+    }
+  }
+
   let created;
   try {
     created = await Candidate.create(cleanPayload);
@@ -2275,6 +2552,27 @@ const create = async (payload) => {
     created = await Candidate.create(cleanPayload);
   }
   await cacheSet(created.toJSON ? created.toJSON() : created);
+
+  if (!allowNewProfileVersion) {
+    const reconcile = await mergeIfDuplicateIdentity(created.id, {
+      email: cleanPayload.email,
+      phone: cleanPayload.phone,
+      idNumber: cleanPayload.idNumber,
+    });
+    if (reconcile.merged) {
+      if (reconcile.linked) {
+        const linked = await getById(reconcile.candidateId);
+        linked._identityLinked = true;
+        return linked;
+      }
+      const attached = await getById(reconcile.candidateId);
+      attached._identityReused = true;
+      return attached;
+    }
+    await repairPartialIdentityLink(created.id);
+    return getById(created.id);
+  }
+
   return created;
 };
 
@@ -2500,7 +2798,7 @@ const searchFree = async ({ query, limit = 50, pipelineId, stageIds, includeUnas
     ],
   };
 
-  const whereParts = [{ isDeleted: false }, textMatch];
+  const whereParts = [{ isDeleted: false, canonicalCandidateId: null }, textMatch];
 
   const normalizedStageIds = Array.isArray(stageIds)
     ? [...new Set(stageIds.map((id) => String(id || '').trim()).filter(Boolean))]
@@ -2551,6 +2849,10 @@ module.exports = {
   listByWorkedAtOrganization,
   findByEmail,
   findByInboundFromEmail,
+  findExistingByIdentity,
+  mergeIfDuplicateIdentity,
+  repairPartialIdentityLink,
+  identityHasPortalAccount,
   attachLatestJobSubmissions,
   attachJobMatchScores,
   findByPkWithTagsForMatchScore,

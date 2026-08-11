@@ -10,6 +10,8 @@ const clientUsageSettingService = require('./clientUsageSettingService');
 
 const JOURNAL_CAP = 200;
 
+const { EVENT_CLOSED_SUMMARY, EVENT_REOPENED_SUMMARY } = require('../utils/clientEventHistory');
+
 const displayNameFromUser = (u) => {
   if (!u) return 'מערכת';
   const plain = u.get ? u.get({ plain: true }) : u;
@@ -72,6 +74,30 @@ function appendStatusJournal(meta, payload) {
   journal.unshift(entry);
   base.statusJournal = journal.slice(0, JOURNAL_CAP);
   return base;
+}
+
+/** Append an activity row to a journal entry's updates; optionally set isActive. */
+function appendJournalEntryActivity(entry, { summary, actor, isActive } = {}) {
+  if (!entry || typeof entry !== 'object') return entry;
+  const title = String(summary || '').trim();
+  if (!title) return entry;
+  const creator = String(actor || 'מערכת').trim() || 'מערכת';
+  const ts = new Date().toISOString();
+  const updates = Array.isArray(entry.updates) ? [...entry.updates] : [];
+  updates.unshift({
+    id: uuidv4(),
+    title,
+    date: ts,
+    creator,
+  });
+  const next = {
+    ...entry,
+    updates: updates.slice(0, 50),
+  };
+  if (isActive !== undefined) {
+    next.isActive = isActive !== false;
+  }
+  return next;
 }
 
 async function resolveClientIdForJobCandidate(jc) {
@@ -303,7 +329,7 @@ async function patchJournalEntry(jobCandidateId, entryId, body, actor) {
   }
 
   const actorName = actor || 'מערכת';
-  const entry = { ...journal[idx] };
+  let entry = { ...journal[idx] };
   if (body.description !== undefined) {
     entry.description = body.description == null ? '' : String(body.description).trim();
   }
@@ -318,7 +344,15 @@ async function patchJournalEntry(jobCandidateId, entryId, body, actor) {
       body.creator == null || body.creator === '' ? 'מערכת' : String(body.creator).trim();
   }
   if (body.isActive !== undefined) {
-    entry.isActive = body.isActive !== false;
+    const prevActive = entry.isActive !== false;
+    const nextActive = body.isActive !== false;
+    entry.isActive = nextActive;
+    if (prevActive !== nextActive) {
+      entry = appendJournalEntryActivity(entry, {
+        summary: nextActive ? EVENT_REOPENED_SUMMARY : EVENT_CLOSED_SUMMARY,
+        actor: actorName,
+      });
+    }
   }
   const nextStageTitle =
     body.nextStageTitle != null ? String(body.nextStageTitle).trim() : '';
@@ -401,7 +435,9 @@ function applyJournalOnStatusPatch({
 
 module.exports = {
   appendStatusJournal,
+  appendJournalEntryActivity,
   applyJournalOnStatusPatch,
+  plainWorkflowMeta,
   getProcessJournal,
   patchJournalEntry,
   materializeStatusJournalForPatch,

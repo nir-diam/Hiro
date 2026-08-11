@@ -25,6 +25,9 @@ const SYSTEM_EVENTS = {
   // 4. שלמות נתוני מועמד (אישור תיקונים בפרופיל)
   CANDIDATE_DATA_APPROVED: { triggerName: 'שלמות נתוני מועמד', eventName: 'אישור תיקונים' },
 
+  // 9. פורטל מועמד — אישור פרופיל
+  CANDIDATE_PROFILE_APPROVED: { triggerName: 'מועמד', eventName: 'אישר את הפרופיל' },
+
   // 5. תקשורת צוות
   TEAM_FEEDBACK:    { triggerName: 'תקשורת צוות', eventName: 'משוב לאחר ראיון' },
   TEAM_INTERNAL:    { triggerName: 'תקשורת צוות', eventName: 'הודעה פנימית' },

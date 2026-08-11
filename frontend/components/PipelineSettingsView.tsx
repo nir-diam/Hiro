@@ -52,6 +52,12 @@ interface Pipeline {
 
 const SYSTEM_EVENT_GROUPS: Array<{ label: string; events: Array<{ value: string; label: string }> }> = [
     {
+        label: 'פורטל מועמד',
+        events: [
+            { value: 'candidate_confirmed_profile', label: 'מועמד.אישר_את_הפרופיל' },
+        ],
+    },
+    {
         label: 'אישורי הגעה',
         events: [
             { value: 'candidate_confirmed_interview', label: 'מועמד.אישר_הגעה_לראיון' },

@@ -9,6 +9,7 @@ import {
   ChevronDownIcon,
   ChevronUpIcon,
   PencilIcon,
+  ArrowPathIcon,
 } from './Icons';
 import EventFormModal from './EventFormModal';
 import { type Event } from './EventsView';
@@ -35,6 +36,12 @@ import {
   summarizeAutomationResults,
 } from '../utils/processOutcomeSla';
 import { executePipelineOutcome } from '../services/pipelineOutcomesApi';
+import { fetchSystemEvents } from '../services/systemEventsApi';
+import ProcessManagementCatalogPanel from './ProcessManagementCatalogPanel';
+import {
+  filterOutcomesByStageSelection,
+  type EnrichedPipeline,
+} from '../utils/processManagementCatalog';
 import {
   buildMoveTargetOptions,
   resolveStageIdFromMoveTargetLabel,
@@ -113,6 +120,20 @@ type ActionOutcome = {
   automations?: unknown[];
 };
 
+const SYSTEM_EVENT_GROUPS_FALLBACK: Array<{ label: string; events: Array<{ value: string; label: string }> }> = [
+  {
+    label: 'פורטל מועמד',
+    events: [{ value: 'candidate_confirmed_profile', label: 'מועמד.אישר_את_הפרופיל' }],
+  },
+  {
+    label: 'אישורי הגעה',
+    events: [
+      { value: 'candidate_confirmed_interview', label: 'מועמד.אישר_הגעה_לראיון' },
+      { value: 'candidate_canceled_interview', label: 'מועמד.ביטל_הגעה_לראיון' },
+    ],
+  },
+];
+
 function mapStageOutcomes(stage: PipelineStageDto | null | undefined): ActionOutcome[] {
   if (!stage?.outcomes?.length) return [];
   return stage.outcomes
@@ -174,9 +195,14 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
   const [editDueDateValue, setEditDueDateValue] = useState('');
   const [editCreatorValue, setEditCreatorValue] = useState('');
   const [editIsActiveValue, setEditIsActiveValue] = useState(true);
-  const [showInactiveEntries, setShowInactiveEntries] = useState(false);
+  const [showInactiveEntries, setShowInactiveEntries] = useState(true);
   const [staffUsers, setStaffUsers] = useState<StaffUserDto[]>([]);
   const [entrySaving, setEntrySaving] = useState(false);
+  const [selectedPipelineIds, setSelectedPipelineIds] = useState<Set<string>>(new Set());
+  const [selectedSystemEventIds, setSelectedSystemEventIds] = useState<Set<string>>(new Set());
+  const [selectedStageOutcomeKeys, setSelectedStageOutcomeKeys] = useState<Set<string>>(new Set());
+  const [actionPipelineId, setActionPipelineId] = useState<string | null>(null);
+  const [systemEventGroups, setSystemEventGroups] = useState(SYSTEM_EVENT_GROUPS_FALLBACK);
   const dueDateInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -272,6 +298,50 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
     };
   }, [isOpen, clientId]);
 
+  useEffect(() => {
+    if (!isOpen || !apiBase) return;
+    let cancelled = false;
+    void fetchSystemEvents(apiBase, typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
+      .then((rows) => {
+        if (cancelled) return;
+        const active = rows.filter((r) => r.isActive);
+        const grouped = new Map<string, typeof rows>();
+        for (const row of active) {
+          const key = row.triggerName || 'אירועים';
+          if (!grouped.has(key)) grouped.set(key, []);
+          grouped.get(key)!.push(row);
+        }
+        const fromApi = Array.from(grouped.entries()).map(([label, evs]) => ({
+          label,
+          events: evs.map((ev) => ({
+            value: ev.id,
+            label: `${ev.triggerName}.${ev.eventName}`,
+          })),
+        }));
+        setSystemEventGroups(fromApi.length > 0 ? fromApi : SYSTEM_EVENT_GROUPS_FALLBACK);
+      })
+      .catch(() => {
+        if (!cancelled) setSystemEventGroups(SYSTEM_EVENT_GROUPS_FALLBACK);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, apiBase]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      setSelectedPipelineIds(new Set());
+      setSelectedSystemEventIds(new Set());
+      setSelectedStageOutcomeKeys(new Set());
+      setActionPipelineId(null);
+    }
+  }, [isOpen]);
+
+  const candidatePipelinesCatalog = useMemo((): EnrichedPipeline[] => {
+    if (!clientId) return [];
+    return candidatePipelines.map((p) => ({ ...p, kind: 'candidate' as const, clientId }));
+  }, [candidatePipelines, clientId]);
+
   const newestEntryId = journalEntries[0]?.id ?? null;
 
   const visibleJournalEntries = useMemo(() => {
@@ -290,12 +360,24 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
 
   const activePipeline = useMemo((): PipelineDto | null => {
     if (!candidatePipelines.length) return null;
+    if (actionPipelineId) {
+      const byAction = candidatePipelines.find((p) => p.id === actionPipelineId);
+      if (byAction) return byAction;
+    }
     if (currentPipelineId) {
       const found = candidatePipelines.find((p) => p.id === currentPipelineId);
       if (found) return found;
     }
     return candidatePipelines[0] ?? null;
-  }, [candidatePipelines, currentPipelineId]);
+  }, [candidatePipelines, currentPipelineId, actionPipelineId]);
+
+  useEffect(() => {
+    if (!isOpen || !activePipeline?.id) return;
+    if (!actionPipelineId) {
+      setActionPipelineId(activePipeline.id);
+      setSelectedPipelineIds(new Set([activePipeline.id]));
+    }
+  }, [isOpen, activePipeline?.id, actionPipelineId]);
 
   const pipelineStages = useMemo((): PipelineStageDto[] => {
     if (!activePipeline?.stages?.length) return [];
@@ -351,10 +433,11 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
     return pipelineStages[0] ?? null;
   }, [pipelineStages, currentStageId, contextStatusName]);
 
-  const currentOutcomes = useMemo(
-    () => mapStageOutcomes(contextStage),
-    [contextStage],
-  );
+  const currentOutcomes = useMemo(() => {
+    const outcomes = mapStageOutcomes(contextStage);
+    if (!contextStage?.id) return outcomes;
+    return filterOutcomesByStageSelection(outcomes, contextStage.id, selectedStageOutcomeKeys);
+  }, [contextStage, selectedStageOutcomeKeys]);
 
   const nextStageOptions = useMemo(() => {
     return buildMoveTargetOptions(pipelineStages).map((option) => option.label);
@@ -515,6 +598,25 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
       await loadJournal();
     }
     setIsEventModalOpen(false);
+  };
+
+  const handleReactivateEntry = async (entry: ProcessJournalEntry) => {
+    if (!localJob.linkId || entry.isActive !== false) return;
+    setEntrySaving(true);
+    setStageError(null);
+    try {
+      const data = await patchJobLinkProcessJournalEntry(localJob.linkId, entry.id, {
+        isActive: true,
+        creator: actorDisplayName,
+      });
+      applyJournalResponse(data);
+      setExpandedEntryId(entry.id);
+      setEditingEntryId(null);
+    } catch (e: unknown) {
+      setStageError(e instanceof Error ? e.message : 'הפעלת האירוע מחדש נכשלה');
+    } finally {
+      setEntrySaving(false);
+    }
   };
 
   const handleEditEntry = (entry: ProcessJournalEntry) => {
@@ -689,7 +791,7 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
                         <div
                           className={`relative border-2 rounded-2xl transition-all duration-300 cursor-pointer shadow-sm ${
                             isInactive
-                              ? 'bg-gray-50/80 border-gray-200 opacity-70 hover:opacity-80'
+                              ? 'bg-gray-50/80 border-gray-200 opacity-60 hover:opacity-75'
                               : isExpanded
                                 ? 'bg-white border-primary-500 shadow-primary-500/10 hover:shadow-md'
                                 : 'bg-white border-border-default hover:border-primary-300 hover:shadow-md'
@@ -850,12 +952,32 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
                                   </div>
                                 </div>
                               ) : (
-                                <div className="mb-5">
-                                  <p className="text-sm text-text-default whitespace-pre-wrap leading-relaxed bg-gray-50/80 rounded-xl p-4 border border-gray-100">
+                                <div className="mb-5 relative">
+                                  <p
+                                    className={`text-sm whitespace-pre-wrap leading-relaxed rounded-xl p-4 border border-gray-100 ${
+                                      isInactive
+                                        ? 'text-gray-500 bg-gray-50/80'
+                                        : 'text-text-default bg-gray-50/80'
+                                    }`}
+                                  >
                                     {entry.description || (
                                       <span className="text-gray-400 italic">אין תיאור</span>
                                     )}
                                   </p>
+                                  {isInactive ? (
+                                    <button
+                                      type="button"
+                                      disabled={entrySaving}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        void handleReactivateEntry(entry);
+                                      }}
+                                      className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-primary-600 text-white text-sm font-bold hover:bg-primary-700 transition shadow-sm disabled:opacity-60"
+                                    >
+                                      <ArrowPathIcon className="w-4 h-4" />
+                                      {entrySaving ? 'מפעיל...' : 'הפעל מחדש'}
+                                    </button>
+                                  ) : null}
                                 </div>
                               )}
 
@@ -987,7 +1109,16 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
                       <ClockIcon className="w-6 h-6 text-gray-400" />
                     </div>
                     <p className="text-sm font-semibold text-gray-500">אירוע לא פעיל</p>
-                    <p className="text-xs text-text-muted mt-1">לא ניתן לבצע פעולות או לערוך עד שהאירוע יופעל מחדש.</p>
+                    <p className="text-xs text-text-muted mt-1 mb-4">לא ניתן לבצע פעולות עד שהאירוע יופעל מחדש.</p>
+                    <button
+                      type="button"
+                      disabled={entrySaving}
+                      onClick={() => void handleReactivateEntry(selectedEntry)}
+                      className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 text-white text-sm font-bold hover:bg-primary-700 transition shadow-sm disabled:opacity-60"
+                    >
+                      <ArrowPathIcon className="w-4 h-4" />
+                      {entrySaving ? 'מפעיל...' : 'הפעל מחדש'}
+                    </button>
                   </div>
                 ) : !activePipeline || pipelineStages.length === 0 ? (
                   <div className="text-center py-8 text-text-muted text-sm px-2">
@@ -995,6 +1126,33 @@ const CandidateProcessManagementModal: React.FC<CandidateProcessManagementModalP
                   </div>
                 ) : (
                   <div className="space-y-4">
+                    <ProcessManagementCatalogPanel
+                      variant="sidebar"
+                      clientPipelines={[]}
+                      candidatePipelines={candidatePipelinesCatalog}
+                      systemEventGroups={systemEventGroups}
+                      selectedPipelineIds={selectedPipelineIds}
+                      onSelectedPipelineIdsChange={(next) => {
+                        setSelectedPipelineIds(next);
+                        const first = [...next][0] || null;
+                        setActionPipelineId(first);
+                        if (first) {
+                          setCurrentPipelineId(first);
+                          const pipe = candidatePipelines.find((p) => p.id === first);
+                          const firstStage = [...(pipe?.stages || [])].sort(
+                            (a, b) => (a.order ?? 0) - (b.order ?? 0),
+                          )[0];
+                          if (firstStage) setCurrentStageId(firstStage.id);
+                        }
+                      }}
+                      selectedSystemEventIds={selectedSystemEventIds}
+                      onSelectedSystemEventIdsChange={setSelectedSystemEventIds}
+                      selectedStageOutcomeKeys={selectedStageOutcomeKeys}
+                      onSelectedStageOutcomeKeysChange={setSelectedStageOutcomeKeys}
+                      actionPipelineId={actionPipelineId}
+                      onActionPipelineIdChange={setActionPipelineId}
+                      disabled={selectedEntry?.isActive === false}
+                    />
                     <div className="mb-2 pb-2 border-b border-border-default">
                       <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider mb-1">
                         תוצאות לשלב

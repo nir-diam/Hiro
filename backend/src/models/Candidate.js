@@ -27,6 +27,8 @@ const Candidate = sequelize.define(
     drivingLicenses: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     mobility: DataTypes.STRING,
     userId: { type: DataTypes.UUID, allowNull: true },
+    /** When set, this row is a version of the primary candidate (same person, different CV ingest). */
+    canonicalCandidateId: { type: DataTypes.UUID, allowNull: true },
     employmentType: DataTypes.STRING,
     employmentTypes: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     jobScope: DataTypes.STRING,

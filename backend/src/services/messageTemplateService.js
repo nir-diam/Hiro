@@ -6,6 +6,7 @@ const emailService = require('./emailService');
 const jobCandidateService = require('./jobCandidateService');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const candidatePortalAccessService = require('./candidatePortalAccessService');
+const { findExistingByIdentity } = require('./candidateIdentityService');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
@@ -782,6 +783,13 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
     console.log('[message-templates] welcome skipped: sendWelcomeEmail false');
     return;
   }
+  if (record?.userId) {
+    console.log('[message-templates] welcome skipped: candidate already has portal userId', {
+      candidateId: record?.id || '(no-id)',
+      userId: record.userId,
+    });
+    return;
+  }
   const id = record?.id || '(no-id)';
   if (!record) {
     console.log('[message-templates] welcome skipped: no record');
@@ -815,6 +823,21 @@ const queueCandidateWelcomeEmail = (record, options = {}) => {
 
   // Gate on client usage autoThanksEmail (default false) + dispatch (fire-and-forget).
   void (async () => {
+    const identityMatch = await findExistingByIdentity({
+      email: record.email,
+      phone: record.phone,
+      idNumber: record.idNumber,
+      excludeId: record.id,
+    });
+    if (identityMatch?.userId) {
+      console.log('[message-templates] welcome skipped: identity already linked to portal user', {
+        candidateId: id,
+        existingCandidateId: identityMatch.id,
+        userId: identityMatch.userId,
+      });
+      return;
+    }
+
     const clientId = await clientUsageSettingService.resolveClientIdForWelcomeEmail({
       clientId: options.clientId,
       jobId: jobIdOpt,

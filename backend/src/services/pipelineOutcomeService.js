@@ -20,6 +20,10 @@ const {
   resolveOutcomeSlaDays,
   dueDateAfterDaysFromToday,
 } = require('../utils/pipelineMoveTargets');
+const {
+  appendClientEventActivity,
+  EVENT_CLOSED_SUMMARY,
+} = require('../utils/clientEventHistory');
 
 function matchStageByName(stages, name) {
   const normalized = String(name || '').trim().toLowerCase();
@@ -413,9 +417,14 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
     case 'close_event': {
       if (ctx.kind === 'client' && ctx.event) {
         const events = Array.isArray(ctx.client.events) ? ctx.client.events : [];
-        const next = events.map((e) =>
-          String(e.id) === String(ctx.clientEventId) ? { ...e, isActive: false } : e,
-        );
+        const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+        const next = events.map((e) => {
+          if (String(e.id) !== String(ctx.clientEventId)) return e;
+          return appendClientEventActivity({ ...e, isActive: false }, {
+            summary: EVENT_CLOSED_SUMMARY,
+            actor,
+          });
+        });
         await clientService.update(ctx.clientId, { events: next });
         return { status: 'applied', action: 'close_event' };
       }
@@ -423,7 +432,12 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
         const wm = jobCandidateProcessJournalService.plainWorkflowMeta(ctx.jobCandidate.workflowMeta);
         const journal = Array.isArray(wm.statusJournal) ? wm.statusJournal : [];
         if (journal[0]) {
-          journal[0] = { ...journal[0], isActive: false };
+          const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+          journal[0] = jobCandidateProcessJournalService.appendJournalEntryActivity(journal[0], {
+            summary: EVENT_CLOSED_SUMMARY,
+            actor,
+            isActive: false,
+          });
           wm.statusJournal = journal;
           await JobCandidate.update({ workflowMeta: wm }, { where: { id: ctx.jobCandidate.id } });
         }
@@ -470,7 +484,16 @@ async function applyCandidateOutcomeAction(req, ctx, outcome, pipeline) {
       const wm = jobCandidateProcessJournalService.plainWorkflowMeta(ctx.jobCandidate.workflowMeta);
       const journal = Array.isArray(wm.statusJournal) ? wm.statusJournal : [];
       if (journal[0]) {
-        journal[0] = { ...journal[0], isActive: false };
+        const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+        const closeSummary =
+          outcome.name && String(outcome.name).trim() && outcome.name !== EVENT_CLOSED_SUMMARY
+            ? `${EVENT_CLOSED_SUMMARY} · ${String(outcome.name).trim()}`
+            : EVENT_CLOSED_SUMMARY;
+        journal[0] = jobCandidateProcessJournalService.appendJournalEntryActivity(journal[0], {
+          summary: closeSummary,
+          actor,
+          isActive: false,
+        });
         wm.statusJournal = journal;
         await JobCandidate.update({ workflowMeta: wm }, { where: { id: ctx.jobCandidate.id } });
       }
@@ -557,9 +580,15 @@ async function applyClientOutcomeAction(req, ctx, outcome, pipeline) {
   }
 
   const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+  const activitySummary =
+    outcome.actionType === 'close'
+      ? outcome.name && String(outcome.name).trim() && outcome.name !== EVENT_CLOSED_SUMMARY
+        ? `${EVENT_CLOSED_SUMMARY} · ${String(outcome.name).trim()}`
+        : EVENT_CLOSED_SUMMARY
+      : outcome.name;
   const newUpdate = {
     id: `u-${Date.now()}`,
-    title: outcome.name,
+    title: activitySummary,
     date: new Date().toISOString(),
     creator: actor,
   };
@@ -575,7 +604,7 @@ async function applyClientOutcomeAction(req, ctx, outcome, pipeline) {
           isActive: nextIsActive,
           updates: [newUpdate, ...(Array.isArray(e.updates) ? e.updates : [])],
           history: [
-            { user: actor, timestamp: newUpdate.date, summary: outcome.name },
+            { user: actor, timestamp: newUpdate.date, summary: activitySummary },
             ...(Array.isArray(e.history) ? e.history : []),
           ],
         }
@@ -677,6 +706,7 @@ async function executeOutcome(req, params) {
 }
 
 const LEGACY_SYSTEM_EVENT_KEYS = {
+  candidate_confirmed_profile: 'מועמד.אישר את הפרופיל',
   candidate_confirmed_interview: 'מועמד.אישר_הגעה_לראיון',
   candidate_canceled_interview: 'מועמד.ביטל_הגעה_לראיון',
   candidate_requested_reschedule: 'מועמד.ביקש_לשנות_מועד',

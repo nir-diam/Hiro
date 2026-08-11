@@ -12,11 +12,20 @@ import {
   PencilIcon,
   CheckIcon,
   UserIcon,
+  ArrowPathIcon,
 } from './Icons';
 import ProcessEventModal, { type ProcessEventSavePayload } from './ProcessEventModal';
+import ProcessManagementCatalogPanel from './ProcessManagementCatalogPanel';
 import { authHeaders } from '../utils/authHeaders';
 import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
+import { fetchCandidatePipelines } from '../services/candidatePipelinesApi';
 import { fetchStaffUsers } from '../services/usersApi';
+import { fetchSystemEvents } from '../services/systemEventsApi';
+import {
+  eventMatchesPipelineFilters,
+  filterOutcomesByStageSelection,
+  type EnrichedPipeline,
+} from '../utils/processManagementCatalog';
 import { applyOutcomeDueDate, outcomeActionSubtitle, summarizeAutomationResults } from '../utils/processOutcomeSla';
 import { executePipelineOutcome } from '../services/pipelineOutcomesApi';
 import {
@@ -55,6 +64,21 @@ type ActionOutcome = {
   trigger?: { type?: string; systemEventId?: string };
   automations?: unknown[];
 };
+
+const SYSTEM_EVENT_GROUPS_FALLBACK: Array<{ label: string; events: Array<{ value: string; label: string }> }> = [
+  {
+    label: 'פורטל מועמד',
+    events: [{ value: 'candidate_confirmed_profile', label: 'מועמד.אישר_את_הפרופיל' }],
+  },
+  {
+    label: 'אישורי הגעה',
+    events: [
+      { value: 'candidate_confirmed_interview', label: 'מועמד.אישר_הגעה_לראיון' },
+      { value: 'candidate_canceled_interview', label: 'מועמד.ביטל_הגעה_לראיון' },
+      { value: 'candidate_requested_reschedule', label: 'מועמד.ביקש_לשנות_מועד' },
+    ],
+  },
+];
 
 const processLabel = (p: string) => {
   const key = String(p || '').toLowerCase();
@@ -334,16 +358,18 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [createClientId, setCreateClientId] = useState<string>(defaultClientId || clientOptions[0]?.id || '');
 
-  const [selectedProcesses, setSelectedProcesses] = useState<Set<string>>(new Set());
-  const [selectedStages, setSelectedStages] = useState<Set<string>>(new Set());
+  const [selectedPipelineIds, setSelectedPipelineIds] = useState<Set<string>>(new Set());
+  const [selectedSystemEventIds, setSelectedSystemEventIds] = useState<Set<string>>(new Set());
+  const [selectedStageOutcomeKeys, setSelectedStageOutcomeKeys] = useState<Set<string>>(new Set());
+  const [actionPipelineId, setActionPipelineId] = useState<string | null>(null);
   const [selectedStatuses, setSelectedStatuses] = useState<Set<string>>(new Set());
-  const [selectedActiveStates, setSelectedActiveStates] = useState<Set<string>>(() => new Set(['פעיל']));
+  const [selectedActiveStates, setSelectedActiveStates] = useState<Set<string>>(
+    () => new Set(['פעיל', 'לא פעיל']),
+  );
   const [selectedCompanies, setSelectedCompanies] = useState<Set<string>>(new Set());
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
 
-  const [isProcessDropdownOpen, setIsProcessDropdownOpen] = useState(false);
-  const [isStageDropdownOpen, setIsStageDropdownOpen] = useState(false);
   const [isStatusDropdownOpen, setIsStatusDropdownOpen] = useState(false);
   const [isActiveDropdownOpen, setIsActiveDropdownOpen] = useState(false);
   const [isCompanyDropdownOpen, setIsCompanyDropdownOpen] = useState(false);
@@ -357,10 +383,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [assigneeOptions, setAssigneeOptions] = useState<string[]>(['אני']);
 
   const [pipelinesByClient, setPipelinesByClient] = useState<Record<string, PipelineDto[]>>({});
+  const [candidatePipelinesByClient, setCandidatePipelinesByClient] = useState<
+    Record<string, PipelineDto[]>
+  >({});
+  const [systemEventGroups, setSystemEventGroups] = useState(SYSTEM_EVENT_GROUPS_FALLBACK);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [pipelinesLoading, setPipelinesLoading] = useState(false);
 
-  const processDropdownRef = useRef<HTMLDivElement>(null);
-  const stageDropdownRef = useRef<HTMLDivElement>(null);
   const statusDropdownRef = useRef<HTMLDivElement>(null);
   const activeDropdownRef = useRef<HTMLDivElement>(null);
   const companyDropdownRef = useRef<HTMLDivElement>(null);
@@ -415,6 +444,98 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     void load();
   }, [load]);
 
+  const catalogClientIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (defaultClientId) ids.add(defaultClientId);
+    if (createClientId) ids.add(createClientId);
+    for (const opt of clientOptions.slice(0, 12)) {
+      if (opt.id) ids.add(opt.id);
+    }
+    for (const ev of events) {
+      if (ev.clientId) ids.add(ev.clientId);
+    }
+    return [...ids];
+  }, [defaultClientId, createClientId, clientOptions, events]);
+
+  useEffect(() => {
+    if (!catalogClientIds.length) return;
+    let cancelled = false;
+    setCatalogLoading(true);
+    void Promise.all([
+      Promise.all(
+        catalogClientIds.map((cid) =>
+          fetchPipelines(cid)
+            .then((rows) => ({ cid, rows: Array.isArray(rows) ? rows : [] }))
+            .catch(() => ({ cid, rows: [] as PipelineDto[] })),
+        ),
+      ),
+      Promise.all(
+        catalogClientIds.map((cid) =>
+          fetchCandidatePipelines(cid)
+            .then((rows) => ({ cid, rows: Array.isArray(rows) ? rows : [] }))
+            .catch(() => ({ cid, rows: [] as PipelineDto[] })),
+        ),
+      ),
+      apiBase
+        ? fetchSystemEvents(apiBase, typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null)
+            .then((rows) => {
+              const active = rows.filter((r) => r.isActive);
+              const grouped = new Map<string, typeof rows>();
+              for (const row of active) {
+                const key = row.triggerName || 'אירועים';
+                if (!grouped.has(key)) grouped.set(key, []);
+                grouped.get(key)!.push(row);
+              }
+              return Array.from(grouped.entries()).map(([label, evs]) => ({
+                label,
+                events: evs.map((ev) => ({
+                  value: ev.id,
+                  label: `${ev.triggerName}.${ev.eventName}`,
+                })),
+              }));
+            })
+            .catch(() => SYSTEM_EVENT_GROUPS_FALLBACK)
+        : Promise.resolve(SYSTEM_EVENT_GROUPS_FALLBACK),
+    ])
+      .then(([clientRows, candidateRows, sysGroups]) => {
+        if (cancelled) return;
+        const clientMap: Record<string, PipelineDto[]> = {};
+        const candidateMap: Record<string, PipelineDto[]> = {};
+        for (const row of clientRows) clientMap[row.cid] = row.rows;
+        for (const row of candidateRows) candidateMap[row.cid] = row.rows;
+        setPipelinesByClient((prev) => ({ ...prev, ...clientMap }));
+        setCandidatePipelinesByClient((prev) => ({ ...prev, ...candidateMap }));
+        setSystemEventGroups(sysGroups.length > 0 ? sysGroups : SYSTEM_EVENT_GROUPS_FALLBACK);
+      })
+      .finally(() => {
+        if (!cancelled) setCatalogLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [catalogClientIds, apiBase]);
+
+  const clientPipelinesCatalog = useMemo((): EnrichedPipeline[] => {
+    const out: EnrichedPipeline[] = [];
+    for (const [cid, rows] of Object.entries(pipelinesByClient)) {
+      for (const p of rows as PipelineDto[]) out.push({ ...p, kind: 'client', clientId: cid });
+    }
+    return out;
+  }, [pipelinesByClient]);
+
+  const candidatePipelinesCatalog = useMemo((): EnrichedPipeline[] => {
+    const out: EnrichedPipeline[] = [];
+    for (const [cid, rows] of Object.entries(candidatePipelinesByClient)) {
+      for (const p of rows as PipelineDto[]) out.push({ ...p, kind: 'candidate', clientId: cid });
+    }
+    return out;
+  }, [candidatePipelinesByClient]);
+
+  const allPipelinesCatalog = useMemo(
+    () => [...clientPipelinesCatalog, ...candidatePipelinesCatalog],
+    [clientPipelinesCatalog, candidatePipelinesCatalog],
+  );
+
   useEffect(() => {
     if (defaultClientId) setCreateClientId(defaultClientId);
     else if (!createClientId && clientOptions[0]?.id) setCreateClientId(clientOptions[0].id);
@@ -423,8 +544,6 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
-      if (processDropdownRef.current && !processDropdownRef.current.contains(t)) setIsProcessDropdownOpen(false);
-      if (stageDropdownRef.current && !stageDropdownRef.current.contains(t)) setIsStageDropdownOpen(false);
       if (statusDropdownRef.current && !statusDropdownRef.current.contains(t)) setIsStatusDropdownOpen(false);
       if (activeDropdownRef.current && !activeDropdownRef.current.contains(t)) setIsActiveDropdownOpen(false);
       if (companyDropdownRef.current && !companyDropdownRef.current.contains(t)) setIsCompanyDropdownOpen(false);
@@ -467,8 +586,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const currentOutcomes = useMemo(() => {
     if (!selectedEvent) return [] as ActionOutcome[];
-    return resolveOutcomesForEvent(selectedEvent, pipelinesByClient[selectedEvent.clientId] || []);
-  }, [selectedEvent, pipelinesByClient]);
+    const outcomes = resolveOutcomesForEvent(selectedEvent, pipelinesByClient[selectedEvent.clientId] || []);
+    const pipeline = matchPipelineForEvent(selectedEvent, pipelinesByClient[selectedEvent.clientId] || []);
+    const stage = pipeline ? matchStageForEvent(selectedEvent, pipeline) : undefined;
+    if (!stage?.id) return outcomes;
+    return filterOutcomesByStageSelection(outcomes, stage.id, selectedStageOutcomeKeys);
+  }, [selectedEvent, pipelinesByClient, selectedStageOutcomeKeys]);
 
   const currentStageLabel = useMemo(() => {
     if (!selectedEvent) return '';
@@ -485,22 +608,22 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     () => Array.from(new Set(events.map((e) => e.clientName).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'he')),
     [events],
   );
-  const allProcesses = useMemo(
-    () => Array.from(new Set(events.map((e) => e.process).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'he')),
-    [events],
-  );
-  const allStages = useMemo(
-    () => Array.from(new Set(events.map((e) => e.stage).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'he')),
-    [events],
-  );
   const statusOptions = ['עתידי', 'להיום', 'באיחור', 'הושלם', 'בוטל'];
   const activeStateOptions = ['פעיל', 'לא פעיל'];
 
   const filteredEvents = useMemo(() => {
     return events.filter((event) => {
       if (!eventMatchesContact(event, scopeContactId, scopeContactName)) return false;
-      if (selectedProcesses.size > 0 && !selectedProcesses.has(event.process)) return false;
-      if (selectedStages.size > 0 && !selectedStages.has(event.stage)) return false;
+      if (
+        !eventMatchesPipelineFilters(
+          event,
+          selectedPipelineIds,
+          allPipelinesCatalog,
+          selectedStageOutcomeKeys,
+        )
+      ) {
+        return false;
+      }
       if (selectedStatuses.size > 0) {
         const dynamicStatus = getDynamicStatus(event.status, event.dueDate).label;
         if (!selectedStatuses.has(dynamicStatus)) return false;
@@ -518,8 +641,9 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     events,
     scopeContactId,
     scopeContactName,
-    selectedProcesses,
-    selectedStages,
+    selectedPipelineIds,
+    selectedStageOutcomeKeys,
+    allPipelinesCatalog,
     selectedStatuses,
     selectedActiveStates,
     selectedCompanies,
@@ -620,6 +744,28 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       alert(e instanceof Error ? e.message : 'עדכון הסטטוס נכשלה');
       await load();
     }
+  };
+
+  const handleReactivateEvent = async (event: JournalEvent) => {
+    if (event.isActive !== false) return;
+
+    setEvents((prev) =>
+      prev.map((e) =>
+        e.id === event.id && e.clientId === event.clientId ? { ...e, isActive: true } : e,
+      ),
+    );
+
+    const result = await persistEventPatch(event, { isActive: true });
+    if (!result.ok) {
+      alert('הפעלת האירוע מחדש נכשלה');
+      await load();
+      return;
+    }
+    setEvents((prev) =>
+      prev.map((e) =>
+        e.id === event.id && e.clientId === event.clientId ? result.row : e,
+      ),
+    );
   };
 
   const handleEditDescription = (event: JournalEvent) => {
@@ -772,11 +918,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     '';
 
   const hasFilters =
-    selectedProcesses.size > 0 ||
-    selectedStages.size > 0 ||
+    selectedPipelineIds.size > 0 ||
+    selectedSystemEventIds.size > 0 ||
+    selectedStageOutcomeKeys.size > 0 ||
     selectedStatuses.size > 0 ||
-    selectedActiveStates.size !== 1 ||
-    !selectedActiveStates.has('פעיל') ||
+    selectedActiveStates.size !== activeStateOptions.length ||
+    !activeStateOptions.every((s) => selectedActiveStates.has(s)) ||
     selectedCompanies.size > 0 ||
     !!dateFrom ||
     !!dateTo;
@@ -792,63 +939,19 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             <span>סינון אירועים:</span>
           </div>
 
-          <div className="flex flex-col gap-1 relative" ref={processDropdownRef}>
-            <label className="text-xs font-semibold text-text-muted">תהליך</label>
-            <button
-              type="button"
-              onClick={() => setIsProcessDropdownOpen((v) => !v)}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[150px]"
-            >
-              <span className="truncate">
-                {selectedProcesses.size === 0 ? 'כל התהליכים' : `${selectedProcesses.size} תהליכים`}
-              </span>
-              <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
-            </button>
-            {isProcessDropdownOpen ? (
-              <div className="absolute top-full mt-1 right-0 w-56 bg-white border border-border-default shadow-xl rounded-xl p-2 z-50 max-h-64 overflow-y-auto">
-                {allProcesses.map((p) => (
-                  <label key={p} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedProcesses.has(p)}
-                      onChange={() => toggleSet(setSelectedProcesses, p)}
-                      className="rounded border-border-default text-primary-600 w-4 h-4"
-                    />
-                    <span className="text-sm font-medium">{processLabel(p)}</span>
-                  </label>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="flex flex-col gap-1 relative" ref={stageDropdownRef}>
-            <label className="text-xs font-semibold text-text-muted">שלב</label>
-            <button
-              type="button"
-              onClick={() => setIsStageDropdownOpen((v) => !v)}
-              className="bg-bg-input border border-border-default rounded-lg py-1.5 px-3 text-sm focus:ring-2 focus:ring-primary-500 outline-none flex items-center justify-between min-w-[150px]"
-            >
-              <span className="truncate">
-                {selectedStages.size === 0 ? 'כל השלבים' : `${selectedStages.size} שלבים`}
-              </span>
-              <ChevronDownIcon className="w-4 h-4 text-text-muted ml-2" />
-            </button>
-            {isStageDropdownOpen ? (
-              <div className="absolute top-full mt-1 right-0 w-56 bg-white border border-border-default shadow-xl rounded-xl p-2 z-50 max-h-64 overflow-y-auto">
-                {allStages.map((s) => (
-                  <label key={s} className="flex items-center gap-3 p-2 hover:bg-bg-hover rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selectedStages.has(s)}
-                      onChange={() => toggleSet(setSelectedStages, s)}
-                      className="rounded border-border-default text-primary-600 w-4 h-4"
-                    />
-                    <span className="text-sm font-medium truncate">{s}</span>
-                  </label>
-                ))}
-              </div>
-            ) : null}
-          </div>
+          <ProcessManagementCatalogPanel
+            variant="filters"
+            clientPipelines={clientPipelinesCatalog}
+            candidatePipelines={candidatePipelinesCatalog}
+            systemEventGroups={systemEventGroups}
+            selectedPipelineIds={selectedPipelineIds}
+            onSelectedPipelineIdsChange={setSelectedPipelineIds}
+            selectedSystemEventIds={selectedSystemEventIds}
+            onSelectedSystemEventIdsChange={setSelectedSystemEventIds}
+            selectedStageOutcomeKeys={selectedStageOutcomeKeys}
+            onSelectedStageOutcomeKeysChange={setSelectedStageOutcomeKeys}
+            disabled={catalogLoading}
+          />
 
           <div className="flex flex-col gap-1 relative" ref={companyDropdownRef}>
             <label className="text-xs font-semibold text-text-muted">חברה (בחירה מרובה)</label>
@@ -975,10 +1078,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
             <button
               type="button"
               onClick={() => {
-                setSelectedProcesses(new Set());
-                setSelectedStages(new Set());
+                setSelectedPipelineIds(new Set());
+                setSelectedSystemEventIds(new Set());
+                setSelectedStageOutcomeKeys(new Set());
                 setSelectedStatuses(new Set());
-                setSelectedActiveStates(new Set(['פעיל']));
+                setSelectedActiveStates(new Set(['פעיל', 'לא פעיל']));
                 setSelectedCompanies(new Set());
                 setDateFrom('');
                 setDateTo('');
@@ -1052,7 +1156,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                         alwaysShowDetails ? 'cursor-default' : 'cursor-pointer'
                       } ${
                         isInactive
-                          ? 'border-gray-200 bg-gray-50/80 opacity-70 hover:opacity-80'
+                          ? 'border-gray-200 bg-gray-50/80 opacity-60 hover:opacity-75'
                           : isSelected
                             ? 'border-primary-500 shadow-md bg-primary-50/10'
                             : 'border-border-default hover:border-primary-300 hover:shadow-sm bg-white'
@@ -1241,7 +1345,20 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                 >
                                   <PencilIcon className="w-4 h-4" />
                                 </button>
-                              ) : null}
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void handleReactivateEvent(event);
+                                  }}
+                                  className="absolute top-3 left-3 px-3 py-1.5 rounded-lg bg-white hover:bg-primary-50 flex items-center justify-center gap-1.5 transition-all border border-gray-200 hover:border-primary-200 hover:text-primary-700 text-gray-600 shadow-sm z-10 text-xs font-bold"
+                                  title="הפעל מחדש"
+                                >
+                                  <ArrowPathIcon className="w-4 h-4" />
+                                  הפעל מחדש
+                                </button>
+                              )}
                             </>
                           )}
                         </div>
@@ -1364,12 +1481,46 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                     <ClockIcon className="w-6 h-6 text-gray-400" />
                   </div>
                   <p className="text-sm font-semibold text-gray-500">אירוע לא פעיל</p>
-                  <p className="text-xs text-text-muted mt-1">לא ניתן לבצע פעולות או לערוך עד שהאירוע יופעל מחדש.</p>
+                  <p className="text-xs text-text-muted mt-1 mb-4">לא ניתן לבצע פעולות עד שהאירוע יופעל מחדש.</p>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleReactivateEvent(selectedEvent);
+                    }}
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary-600 text-white text-sm font-bold hover:bg-primary-700 transition shadow-sm"
+                  >
+                    <ArrowPathIcon className="w-4 h-4" />
+                    הפעל מחדש
+                  </button>
                 </div>
               ) : pipelinesLoading && !pipelinesByClient[selectedEvent.clientId] ? (
                 <div className="text-center py-8 text-sm text-text-muted">טוען פעולות מתהליך העבודה...</div>
               ) : (
                 <div className="space-y-2">
+                  <ProcessManagementCatalogPanel
+                    variant="sidebar"
+                    clientPipelines={
+                      selectedEvent?.clientId
+                        ? clientPipelinesCatalog.filter((p) => p.clientId === selectedEvent.clientId)
+                        : clientPipelinesCatalog
+                    }
+                    candidatePipelines={
+                      selectedEvent?.clientId
+                        ? candidatePipelinesCatalog.filter((p) => p.clientId === selectedEvent.clientId)
+                        : candidatePipelinesCatalog
+                    }
+                    systemEventGroups={systemEventGroups}
+                    selectedPipelineIds={selectedPipelineIds}
+                    onSelectedPipelineIdsChange={setSelectedPipelineIds}
+                    selectedSystemEventIds={selectedSystemEventIds}
+                    onSelectedSystemEventIdsChange={setSelectedSystemEventIds}
+                    selectedStageOutcomeKeys={selectedStageOutcomeKeys}
+                    onSelectedStageOutcomeKeysChange={setSelectedStageOutcomeKeys}
+                    actionPipelineId={actionPipelineId}
+                    onActionPipelineIdChange={setActionPipelineId}
+                    disabled={selectedEvent?.isActive === false}
+                  />
                   <div className="mb-4 pb-2 border-b border-border-default">
                     <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider mb-1">
                       תוצאות לשלב

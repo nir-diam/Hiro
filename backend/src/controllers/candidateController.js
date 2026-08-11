@@ -2380,7 +2380,11 @@ const get = async (req, res) => {
 const create = async (req, res) => {
   try {
     const sendWelcome = req.body?.sendWelcomeEmail !== false;
-    const candidate = await candidateService.create(req.body);
+    const allowProfileVersion = req.body?.allowProfileVersion === true;
+    const candidate = await candidateService.create(req.body, { allowProfileVersion });
+    const identityReused = Boolean(candidate?._identityReused);
+    const identityLinked = Boolean(candidate?._identityLinked);
+    const identityAttached = identityReused || identityLinked;
 
     // Audit: 'קליטת קו"ח' — manual / API-driven candidate creation
     systemEventEmitter.emit(req, {
@@ -2447,14 +2451,14 @@ const create = async (req, res) => {
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
     const enrichedAfter = await candidateService.getById(candidate.id);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
-    if (sendWelcome) {
+    if (sendWelcome && !identityAttached) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedAfter, {
         sendWelcomeEmail: true,
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
     }
-    res.status(201).json(enrichedAfter);
+    res.status(identityAttached ? 200 : 201).json(enrichedAfter);
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Create failed' });
   }
@@ -2656,8 +2660,9 @@ const createFromAi = async (req, res) => {
     }
 
     let createdCandidate;
+    const allowProfileVersion = req.body?.allowProfileVersion === true;
     try {
-      createdCandidate = await candidateService.create(candidatePayload);
+      createdCandidate = await candidateService.create(candidatePayload, { allowProfileVersion });
     } catch (createErr) {
       const msg = String(createErr?.message || '');
       if (createErr?.status === 400 && /עיר/.test(msg)) {
@@ -2667,11 +2672,14 @@ const createFromAi = async (req, res) => {
           ...candidatePayload,
           address: null,
           location: null,
-        });
+        }, { allowProfileVersion });
       } else {
         throw createErr;
       }
     }
+    let identityReused = Boolean(createdCandidate?._identityReused);
+    let identityLinked = Boolean(createdCandidate?._identityLinked);
+    let identityAttached = identityReused || identityLinked;
 
     // Audit: 'קליטת קו"ח' — AI-driven CV ingestion
     systemEventEmitter.emit(req, {
@@ -2734,16 +2742,48 @@ const createFromAi = async (req, res) => {
       });
     }
     await candidateCompletenessService.refreshCandidateDataStatusAfterSave(createdCandidate.id, req);
-    const enrichedCandidate = await candidateService.getById(createdCandidate.id);
+
+    let finalCandidateId = createdCandidate.id;
+    try {
+      const latestForIdentity = await candidateService.getById(finalCandidateId);
+      const identityResult = await candidateService.mergeIfDuplicateIdentity(finalCandidateId, {
+        email: latestForIdentity?.email,
+        phone: latestForIdentity?.phone,
+        idNumber: latestForIdentity?.idNumber,
+      });
+      if (identityResult.merged) {
+        finalCandidateId = identityResult.candidateId;
+        identityAttached = true;
+        if (identityResult.linked) identityLinked = true;
+        if (identityResult._identityReused) identityReused = true;
+        createdCandidate = await candidateService.getById(finalCandidateId);
+      }
+      await candidateService.repairPartialIdentityLink(finalCandidateId);
+    } catch (identityErr) {
+      console.warn('[createFromAi] identity reconcile failed', identityErr?.message || identityErr);
+    }
+
+    const enrichedCandidate = await candidateService.getById(finalCandidateId);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
-    if (sendWelcome) {
+    const portalAccountExists = await candidateService.identityHasPortalAccount({
+      email: enrichedCandidate?.email,
+      phone: enrichedCandidate?.phone,
+      idNumber: enrichedCandidate?.idNumber,
+    });
+    if (sendWelcome && !identityAttached && !portalAccountExists) {
       messageTemplateService.queueCandidateWelcomeEmail(enrichedCandidate, {
         sendWelcomeEmail: true,
         clientId: welcomeClientId,
         ...welcomePlaceholderContextFromRequest(req),
       });
     }
-    res.status(201).json({ candidate: enrichedCandidate, parsed: aiResult });
+    res.status(identityAttached ? 200 : 201).json({
+      candidate: enrichedCandidate,
+      parsed: aiResult,
+      identityReused,
+      identityLinked,
+      identityAttached,
+    });
   } catch (err) {
     console.error('[createFromAi-error]', err);
     res.status(err.status || 500).json({ message: err.message || 'AI candidate creation failed' });
@@ -2799,6 +2839,29 @@ const update = async (req, res) => {
 
     const candidateLabel = enrichedCandidate.fullName || candidate.fullName;
 
+    // Audit: 'מועמד אישר את הפרופיל' — portal profile approval by candidate
+    if (
+      Object.prototype.hasOwnProperty.call(body, 'approveByCandidate') &&
+      body.approveByCandidate === true &&
+      previous?.approveByCandidate !== true
+    ) {
+      const actor =
+        enrichedCandidate.fullName ||
+        candidateLabel ||
+        (req.user?.name && String(req.user.name).trim()) ||
+        (req.user?.email && String(req.user.email).trim()) ||
+        'המועמד';
+      await systemEventEmitter.emit(req, {
+        ...SYSTEM_EVENTS.CANDIDATE_PROFILE_APPROVED,
+        entityType: 'Candidate',
+        entityId: candidate.id,
+        entityName: candidateLabel,
+        params: {
+          name: candidateLabel || candidate.id,
+          actor,
+        },
+      });
+    }
     // Audit: 'הגדרת מקור גיוס' — only when value actually changed
     if (
       Object.prototype.hasOwnProperty.call(body, 'source') &&

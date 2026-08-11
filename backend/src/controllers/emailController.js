@@ -782,6 +782,29 @@ const processEmailUpload = async (record) => {
     }
     await candidateService.update(candidate.id, emailIngestSourcePatch);
 
+    // Duplicate identity (email / phone / tz): merge this ingest row into the existing candidate.
+    try {
+      const latestForIdentity = await candidateService.getById(candidate.id);
+      const identityResult = await candidateService.mergeIfDuplicateIdentity(candidate.id, {
+        email: latestForIdentity?.email,
+        phone: latestForIdentity?.phone,
+        idNumber: latestForIdentity?.idNumber,
+      });
+      if (identityResult.merged) {
+        console.log('[email] duplicate ingest reconciled with existing candidate', {
+          removedDuplicateId: identityResult.removedDuplicateId,
+          candidateId: identityResult.candidateId,
+          linked: Boolean(identityResult.linked),
+        });
+        candidate = await candidateService.getById(identityResult.candidateId);
+        candidateCreatedViaEmailIngest = false;
+        await record.update({ candidateId: candidate.id });
+      }
+      await candidateService.repairPartialIdentityLink(candidate.id);
+    } catch (identityErr) {
+      console.warn('[email] identity merge failed', identityErr?.message || identityErr);
+    }
+
     try {
       await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, resolvedJobClientId);
     } catch (cmpErr) {
@@ -815,6 +838,15 @@ const processEmailUpload = async (record) => {
     const welcomeOnce = new Set();
     const queueWelcome = async (cand, cvText = '') => {
       if (!cand?.id) return;
+      const plain =
+        cand.get && typeof cand.get === 'function' ? cand.get({ plain: true }) : { ...cand };
+      if (plain.userId) {
+        console.log('[email] welcome skipped: candidate already linked to portal user', {
+          candidateId: plain.id,
+          userId: plain.userId,
+        });
+        return;
+      }
       const fromNorm = String(fromEmail || '').trim().toLowerCase();
       let toEmail =
         candidateRowEmail(cand) || extractCvContactEmail(cvText, emailInFirstCv);
@@ -842,8 +874,6 @@ const processEmailUpload = async (record) => {
         return;
       }
       welcomeOnce.add(k);
-      let plain =
-        cand.get && typeof cand.get === 'function' ? cand.get({ plain: true }) : { ...cand };
       if (!candidateRowEmail(plain)) {
         try {
           await candidateService.update(cand.id, { email: k });
@@ -886,7 +916,18 @@ const processEmailUpload = async (record) => {
       let splitCand;
       let splitCandIsNew = false;
       if (identitySplitIndices.has(j)) {
-        // Multiple CVs often share one contact email; never reuse another row from findByEmail (would merge 2nd+ splits).
+        // Distinct people sharing one footer email — do not merge by identity.
+        splitCand = await candidateService.create(
+          {
+            email: norm,
+            fullName: nameGuess,
+            inboundFromEmail: fromEmail,
+            ...emailIngestSourcePatch,
+          },
+          { skipIdentityLink: true },
+        );
+        splitCandIsNew = true;
+      } else {
         splitCand = await candidateService.create({
           email: norm,
           fullName: nameGuess,
@@ -894,24 +935,12 @@ const processEmailUpload = async (record) => {
           ...emailIngestSourcePatch,
         });
         splitCandIsNew = true;
-      } else {
-        splitCand = await candidateService.findByEmail(norm);
-        if (!splitCand) {
-          splitCand = await candidateService.create({
-            email: norm,
-            fullName: nameGuess,
-            inboundFromEmail: fromEmail,
-            ...emailIngestSourcePatch,
+        if (splitCand._identityReused || splitCand._identityLinked) {
+          console.log('[email] split CV attached to existing candidate', {
+            candidateId: splitCand.id,
+            linked: Boolean(splitCand._identityLinked),
           });
-          splitCandIsNew = true;
-        } else if (splitCand.id === candidate.id) {
-          splitCand = await candidateService.create({
-            email: norm,
-            fullName: nameGuess,
-            inboundFromEmail: fromEmail,
-            ...emailIngestSourcePatch,
-          });
-          splitCandIsNew = true;
+          splitCandIsNew = false;
         }
       }
       await candidateService.update(splitCand.id, {
@@ -956,6 +985,20 @@ const processEmailUpload = async (record) => {
       }
       if (splitTags && splitTags.length) {
         await candidateTagService.syncTagsForCandidate(splitCand.id, splitTags);
+      }
+      try {
+        const splitFreshForIdentity = await candidateService.getById(splitCand.id);
+        const splitIdentity = await candidateService.mergeIfDuplicateIdentity(splitCand.id, {
+          email: splitFreshForIdentity?.email,
+          phone: splitFreshForIdentity?.phone,
+          idNumber: splitFreshForIdentity?.idNumber,
+        });
+        if (splitIdentity.merged) {
+          splitCand = await candidateService.getById(splitIdentity.candidateId);
+          splitCandIsNew = false;
+        }
+      } catch (splitIdentityErr) {
+        console.warn('[email] split identity merge failed', splitIdentityErr?.message || splitIdentityErr);
       }
       await jobCandidateService.associateCandidateWithJob({
         jobId: resolvedJob?.id || null,

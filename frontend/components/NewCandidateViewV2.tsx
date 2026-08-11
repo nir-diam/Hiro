@@ -530,6 +530,10 @@ const NewCandidateViewV2: React.FC = () => {
             if (candidate.title) summaryItems.push('פרופיל ראשי');
             if (candidate.industryAnalysis?.industries?.length) summaryItems.push('ניתוח תעשייתי');
 
+            if (json.identityAttached || json.identityLinked || json.identityReused) {
+                summaryItems.push('קושר לפרופיל קיים');
+            }
+
             setParsedSummary(summaryItems);
             setAiCandidateId(candidate.id || null);
             applyParsedData(candidate);
