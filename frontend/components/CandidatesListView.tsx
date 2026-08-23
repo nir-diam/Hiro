@@ -59,6 +59,7 @@ import {
     patchCandidatePipelineStage,
     type PipelineDto,
 } from '../services/candidatePipelinesApi';
+import { summarizeAutomationResults } from '../utils/processOutcomeSla';
 import JobDetailsDrawer from './JobDetailsDrawer';
 import { type Job as JobDetailsJob } from './JobsView';
 
@@ -352,6 +353,10 @@ export interface Candidate {
   /** True when the candidate approved their portal profile. */
   approveByCandidate?: boolean;
   consentToJobOffers?: boolean;
+  /** Recruiter outreach channel toggles (default true when unset). */
+  distributionEmail?: boolean;
+  distributionSms?: boolean;
+  distributionWhatsapp?: boolean;
   /** Tenant candidate pipeline assignment. */
   candidatePipelineId?: string;
   pipelineStageId?: string;
@@ -1842,6 +1847,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const dragItemIndex = useRef<number | null>(null);
     const kanbanDraggedCandidateIdRef = useRef<string | null>(null);
     const kanbanDidDragRef = useRef(false);
+    const [kanbanDropHoverColumnKey, setKanbanDropHoverColumnKey] = useState<string | null>(null);
     const kanbanColumnSearchTimersRef = useRef<Record<string, number>>({});
     const [kanbanColumnQueries, setKanbanColumnQueries] = useState<Record<string, string>>({});
     const [kanbanColumnResults, setKanbanColumnResults] = useState<Record<string, Candidate[]>>({});
@@ -2218,6 +2224,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 : '',
         approveByCandidate: Boolean(c.approveByCandidate ?? c.approve_by_candidate),
         consentToJobOffers: Boolean(c.consentToJobOffers ?? c.consent_to_job_offers),
+        distributionEmail:
+            String(c.status || '').trim() !== 'חסום' && c.distributionEmail !== false && c.distribution_email !== false,
+        distributionSms:
+            String(c.status || '').trim() !== 'חסום' && c.distributionSms !== false && c.distribution_sms !== false,
+        distributionWhatsapp:
+            String(c.status || '').trim() !== 'חסום' &&
+            c.distributionWhatsapp !== false &&
+            c.distribution_whatsapp !== false,
         candidatePipelineId: c.candidatePipelineId != null ? String(c.candidatePipelineId) : undefined,
         pipelineStageId: c.pipelineStageId != null ? String(c.pipelineStageId) : undefined,
         candidatePipelineName:
@@ -3030,8 +3044,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, []);
 
     const openBulkSendSms = useCallback(() => {
-        const list = candidates.filter((c) => selectedIds.has(c.id));
-        if (list.length === 0) return;
+        const list = candidates.filter((c) => selectedIds.has(c.id) && c.distributionSms !== false);
+        if (list.length === 0) {
+            setFeedbackMessage(t('candidates.bulk_channel_none'));
+            return;
+        }
         setIsBulkActionsMobileOpen(false);
         const phones = list.map((c) => String(c.phone || '').trim()).filter(Boolean);
         const label =
@@ -3048,8 +3065,11 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
 
     const openBulkSendEmail = useCallback(() => {
-        const list = candidates.filter((c) => selectedIds.has(c.id));
-        if (list.length === 0) return;
+        const list = candidates.filter((c) => selectedIds.has(c.id) && c.distributionEmail !== false);
+        if (list.length === 0) {
+            setFeedbackMessage(t('candidates.bulk_channel_none'));
+            return;
+        }
         setIsBulkActionsMobileOpen(false);
         const label =
             list.length === 1
@@ -3064,6 +3084,27 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             candidateName: label,
             candidatePhone: list.map((c) => String(c.phone || '').trim()).filter(Boolean).join('; '),
             candidateEmail: emailField,
+            candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
+        });
+    }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
+
+    const openBulkSendWhatsapp = useCallback(() => {
+        const list = candidates.filter((c) => selectedIds.has(c.id) && c.distributionWhatsapp !== false);
+        if (list.length === 0) {
+            setFeedbackMessage(t('candidates.bulk_channel_none'));
+            return;
+        }
+        setIsBulkActionsMobileOpen(false);
+        const phones = list.map((c) => String(c.phone || '').trim()).filter(Boolean);
+        const label =
+            list.length === 1
+                ? list[0].name
+                : t('candidates.bulk_message_recipients', { count: list.length });
+        openMessageModal({
+            mode: 'whatsapp',
+            candidateName: label,
+            candidatePhone: phones.join('; '),
+            candidateEmail: list.length === 1 ? list[0].email || null : null,
             candidateId: list.length === 1 ? getCandidateRouteId(list[0]) : null,
         });
     }, [candidates, selectedIds, openMessageModal, getCandidateRouteId, t]);
@@ -3773,6 +3814,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         [candidatePipelines, activeCandidatePipelineId],
     );
 
+    const kanbanFirstStageId = useMemo(() => {
+        const stages = pipelineDtoToStages(activeCandidatePipeline).sort(
+            (a, b) => (a.order ?? 0) - (b.order ?? 0),
+        );
+        return stages[0]?.id || null;
+    }, [activeCandidatePipeline]);
+
     const boardCandidates = useMemo(() => {
         if (!activeCandidatePipelineId) return paginatedCandidates;
         return paginatedCandidates.filter(
@@ -3783,12 +3831,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, [paginatedCandidates, activeCandidatePipelineId]);
 
     const findCandidateByDragId = useCallback(
-        (dragId: string) =>
-            candidates.find(
-                (c) =>
-                    (c.backendId && c.backendId === dragId) || String(c.id) === dragId,
-            ),
-        [candidates],
+        (dragId: string) => candidates.find((c) => getCandidateRouteId(c) === dragId),
+        [candidates, getCandidateRouteId],
     );
 
     const resolveKanbanDragCandidateId = (e: React.DragEvent) =>
@@ -3802,6 +3846,10 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         e.dataTransfer.dropEffect = 'move';
     };
 
+    const handleKanbanColumnDragEnter = (_e: React.DragEvent, columnKey: string) => {
+        setKanbanDropHoverColumnKey(columnKey);
+    };
+
     const handleCandidateKanbanDragStart = (e: React.DragEvent, candidate: Candidate) => {
         const dragId = getCandidateRouteId(candidate);
         kanbanDraggedCandidateIdRef.current = dragId;
@@ -3813,6 +3861,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const handleCandidateKanbanDragEnd = () => {
         kanbanDraggedCandidateIdRef.current = null;
+        setKanbanDropHoverColumnKey(null);
         window.setTimeout(() => {
             kanbanDidDragRef.current = false;
         }, 0);
@@ -3825,19 +3874,77 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     ) => {
         const prev = findCandidateByDragId(candidateBackendId);
         const prevPipelineId = prev?.candidatePipelineId;
-        const prevStageId = prev?.pipelineStageId;
-        const matchesDragId = (c: Candidate) =>
-            c.backendId === candidateBackendId || String(c.id) === candidateBackendId;
-        setCandidates((prevList) =>
-            prevList.map((c) =>
-                matchesDragId(c)
-                    ? { ...c, candidatePipelineId: pipelineId, pipelineStageId: stageId }
-                    : c,
-            ),
-        );
+        const prevStageId =
+            prev?.pipelineStageId ||
+            ((!prevPipelineId || prevPipelineId === pipelineId) && kanbanFirstStageId
+                ? kanbanFirstStageId
+                : undefined);
+        if (prevStageId === stageId && (prevPipelineId || pipelineId) === pipelineId) return;
+
+        const matchesDragId = (c: Candidate) => getCandidateRouteId(c) === candidateBackendId;
+        const applyResolvedStage = (resolvedPipelineId: string, resolvedStageId: string) => {
+            setCandidates((prevList) =>
+                prevList.map((c) =>
+                    matchesDragId(c)
+                        ? {
+                              ...c,
+                              candidatePipelineId: resolvedPipelineId,
+                              pipelineStageId: resolvedStageId,
+                          }
+                        : c,
+                ),
+            );
+            setKanbanColumnResults((prevResults) => {
+                const nextResults: Record<string, Candidate[]> = {};
+                for (const key of Object.keys(prevResults)) {
+                    const list = prevResults[key] ?? [];
+                    nextResults[key] = list.map((c) =>
+                        matchesDragId(c)
+                            ? {
+                                  ...c,
+                                  candidatePipelineId: resolvedPipelineId,
+                                  pipelineStageId: resolvedStageId,
+                              }
+                            : c,
+                    );
+                }
+                return nextResults;
+            });
+        };
+
+        applyResolvedStage(pipelineId, stageId);
         try {
-            await patchCandidatePipelineStage(candidateBackendId, { pipelineId, stageId });
-        } catch {
+            const result = await patchCandidatePipelineStage(candidateBackendId, { pipelineId, stageId });
+            const resolvedPipelineId =
+                result.candidatePipelineId != null ? String(result.candidatePipelineId) : pipelineId;
+            const resolvedStageId =
+                result.pipelineStageId != null ? String(result.pipelineStageId) : stageId;
+            applyResolvedStage(resolvedPipelineId, resolvedStageId);
+            if (result.pipelineMove?.viaOutcome) {
+                const outcomeLabel = result.pipelineMove.outcomeName || 'תוצאת pipeline';
+                if (result.pipelineMove.async) {
+                    setFeedbackMessage(`הועבר: ${outcomeLabel} · אוטומציות רצות ברקע`);
+                } else {
+                    const automationSummary = summarizeAutomationResults(result.pipelineMove.automationResults);
+                    setFeedbackMessage(
+                        automationSummary
+                            ? `${outcomeLabel} · ${automationSummary}`
+                            : `הועבר דרך: ${outcomeLabel}`,
+                    );
+                }
+            }
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(
+                    new CustomEvent('hiro:candidate-pipeline-stage-moved', {
+                        detail: {
+                            candidateId: candidateBackendId,
+                            pipelineId: resolvedPipelineId,
+                            stageId: resolvedStageId,
+                        },
+                    }),
+                );
+            }
+        } catch (err) {
             setCandidates((prevList) =>
                 prevList.map((c) =>
                     matchesDragId(c)
@@ -3849,6 +3956,23 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                         : c,
                 ),
             );
+            setKanbanColumnResults((prevResults) => {
+                const nextResults: Record<string, Candidate[]> = {};
+                for (const key of Object.keys(prevResults)) {
+                    const list = prevResults[key] ?? [];
+                    nextResults[key] = list.map((c) =>
+                        matchesDragId(c)
+                            ? {
+                                  ...c,
+                                  candidatePipelineId: prevPipelineId,
+                                  pipelineStageId: prevStageId,
+                              }
+                            : c,
+                    );
+                }
+                return nextResults;
+            });
+            setFeedbackMessage(err instanceof Error ? err.message : 'העברת שלב נכשלה');
         }
     };
 
@@ -3859,6 +3983,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     ) => {
         e.preventDefault();
         e.stopPropagation();
+        setKanbanDropHoverColumnKey(null);
         const candidateBackendId = resolveKanbanDragCandidateId(e);
         if (!candidateBackendId || !pipelineId) return;
         if (column.stages.length <= 1) {
@@ -5167,10 +5292,21 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     return (
                                         <div
                                             key={column.key}
-                                            className="w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border border-border-default/60 shadow-sm"
-                                            onDragOver={handleKanbanDragOver}
+                                            className={`w-80 flex flex-col h-full max-h-full bg-bg-subtle/50 rounded-2xl border shadow-sm transition-colors ${
+                                                kanbanDropHoverColumnKey === column.key
+                                                    ? 'border-primary-400 ring-2 ring-primary-200 bg-primary-50/30'
+                                                    : 'border-border-default/60'
+                                            }`}
+                                            onDragEnter={(e) => handleKanbanColumnDragEnter(e, column.key)}
                                             onDragOverCapture={handleKanbanDragOver}
-                                            onDrop={(e) => handleCandidateKanbanColumnDrop(e, column, activeCandidatePipeline.id)}
+                                            onDragOver={handleKanbanDragOver}
+                                            onDrop={(e) =>
+                                                handleCandidateKanbanColumnDrop(
+                                                    e,
+                                                    column,
+                                                    activeCandidatePipeline.id,
+                                                )
+                                            }
                                         >
                                             <div className={`p-3 border-b border-border-default/50 flex justify-between items-center bg-white rounded-t-2xl border-t-4 ${column.color}`}>
                                                 <h3 className="font-bold text-sm truncate min-w-0 flex-1" title={column.title}>
@@ -5218,19 +5354,33 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             </div>
                                             <div
                                                 className="flex-1 overflow-y-auto p-3 space-y-3 custom-scrollbar max-h-[60vh] min-h-[120px]"
+                                                onDragOverCapture={handleKanbanDragOver}
                                                 onDragOver={handleKanbanDragOver}
-                                                onDrop={(e) => handleCandidateKanbanColumnDrop(e, column, activeCandidatePipeline.id)}
+                                                onDrop={(e) =>
+                                                    handleCandidateKanbanColumnDrop(
+                                                        e,
+                                                        column,
+                                                        activeCandidatePipeline.id,
+                                                    )
+                                                }
                                             >
                                                 {columnSearchActive && !columnLoading && displayItems.length === 0 ? (
                                                     <p className="text-xs text-text-muted text-center py-6">לא נמצאו מועמדים</p>
                                                 ) : null}
                                                 {displayItems.map((candidate) => (
                                                     <div
-                                                        key={candidate.id}
+                                                        key={candidate.backendId || `c-${candidate.id}`}
                                                         draggable
                                                         onDragStart={(e) => handleCandidateKanbanDragStart(e, candidate)}
                                                         onDragEnd={handleCandidateKanbanDragEnd}
                                                         onDragOver={handleKanbanDragOver}
+                                                        onDrop={(e) =>
+                                                            handleCandidateKanbanColumnDrop(
+                                                                e,
+                                                                column,
+                                                                activeCandidatePipeline.id,
+                                                            )
+                                                        }
                                                         onClick={() => {
                                                             if (kanbanDidDragRef.current) return;
                                                             if (selectionMode) {
@@ -5240,7 +5390,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                                             const search = location.search || '';
                                                             navigate(`/candidates/${getCandidateRouteId(candidate)}${search}`);
                                                         }}
-                                                        className={`bg-white border rounded-xl p-3 shadow-sm hover:border-primary-300 cursor-grab active:cursor-grabbing transition ${
+                                                        className={`bg-white border rounded-xl p-3 shadow-sm hover:border-primary-300 cursor-grab active:cursor-grabbing transition select-none ${
                                                             selectedIds.has(candidate.id) ? 'border-primary-500 ring-1 ring-primary-500' : 'border-border-default'
                                                         }`}
                                                     >
@@ -5415,6 +5565,14 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                         </button>
                                         <button
                                             type="button"
+                                            className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600"
+                                            onClick={openBulkSendWhatsapp}
+                                        >
+                                            <WhatsappIcon className="w-5 h-5 shrink-0" />
+                                            <span>Whatsapp</span>
+                                        </button>
+                                        <button
+                                            type="button"
                                             className="flex items-center gap-1.5 text-sm font-semibold text-text-muted hover:text-primary-600 disabled:opacity-50 disabled:pointer-events-none"
                                             disabled={isExportingCandidatesSearch}
                                             onClick={() => void handleExportSearchToExcel()}
@@ -5467,7 +5625,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                             <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover" onClick={openBulkAddEvent}>{t('actions.add_event')}</button>
                                             <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSendEmail}><EnvelopeIcon className="w-5 h-5"/>{t('actions.bulk_send_email')}</button>
                                             <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSendSms}><ChatBubbleBottomCenterTextIcon className="w-5 h-5"/>{t('profile.send_sms')}</button>
-                                            <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><WhatsappIcon className="w-5 h-5"/>שלח Whatsapp</button>
+                                            <button type="button" className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5" onClick={openBulkSendWhatsapp}><WhatsappIcon className="w-5 h-5"/>Whatsapp</button>
                                             <button className="bg-bg-subtle text-text-default py-3 px-2 rounded-lg hover:bg-bg-hover flex items-center justify-center gap-1.5"><ArchiveBoxIcon className="w-5 h-5"/>ארכיון</button>
                                             {/* MOBILE DOWNLOAD ACTION */}
                                             <button

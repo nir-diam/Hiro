@@ -10,7 +10,10 @@ import TagSelectorModal, { TagCategory, TagOption } from './TagSelectorModal';
 import { buildCandidateFullName } from '../utils/candidateName';
 import CityEditableField from './CityEditableField';
 import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
-import { computeAgeFromBirth } from '../utils/ageFromBirth';
+import {
+    buildMissingProfileFieldLabels,
+    resolveProfileDisplayAge,
+} from '../utils/candidateProfileDisplayCompleteness';
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 import { createPortal } from 'react-dom';
 
@@ -19,24 +22,6 @@ const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, 
     {children}
   </button>
 );
-
-function buildMissingProfileFieldLabels(
-    data: { field?: string; title?: string; address?: string; location?: string; age?: string; phone?: string },
-    displayAge: string,
-): string[] {
-    const labels: string[] = [];
-    const field = String(data.field ?? '').trim();
-    const title = String(data.title ?? '').trim();
-    if (!field && !title) labels.push('תחום משרה');
-    else {
-        if (!field) labels.push('תחום משרה');
-        if (!title) labels.push('כותרת משרה');
-    }
-    if (!candidateCityDisplay(data)) labels.push('כתובת');
-    if (!String(displayAge ?? '').trim() && !String(data.age ?? '').trim()) labels.push('גיל');
-    if (!String(data.phone ?? '').trim()) labels.push('טלפון');
-    return labels;
-}
 
 const TAG_LINE_CONFIG: Array<{
     type: SmartTagType;
@@ -687,16 +672,22 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const candidateInitials = getInitials(displayFullName);
   const profileVideoUrl = String(candidateData.profileVideoUrl ?? '').trim();
 
-  const displayAge = useMemo(() => {
-    const a = candidateData?.age;
-    if (a != null && String(a).trim() !== '') return String(a).trim();
-    return computeAgeFromBirth(candidateData?.birthYear, candidateData?.birthMonth, candidateData?.birthDay);
-  }, [candidateData?.age, candidateData?.birthYear, candidateData?.birthMonth, candidateData?.birthDay]);
+  const displayAge = useMemo(
+    () => resolveProfileDisplayAge(candidateData),
+    [candidateData?.age, candidateData?.birthYear, candidateData?.birthMonth, candidateData?.birthDay],
+  );
+  const isBlockedStatus = String(candidateData.status || '').trim() === 'חסום';
+  const canUseDistributionEmail = !isBlockedStatus && candidateData.distributionEmail !== false;
+  const canUseDistributionWhatsapp = !isBlockedStatus && candidateData.distributionWhatsapp !== false;
+  const canUseDistributionSms = !isBlockedStatus && candidateData.distributionSms !== false;
 
   const currentProfileId = activeProfileId ?? candidateData.id;
   const [fetchedProfiles, setFetchedProfiles] = useState<MultiProfileOption[]>([]);
-    const profileList = fetchedProfiles;
-    const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
+  const profileList = useMemo(() => {
+    if (profiles.length > 0) return profiles;
+    return fetchedProfiles;
+  }, [profiles, fetchedProfiles]);
+  const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
   const showProfileSwitcher = profileList.length > 0;
   const [isSwitcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
@@ -1919,10 +1910,25 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                             <PhoneIcon className="w-5 h-5" />
                         </a>
                         )}
-                        <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}><EnvelopeIcon className="w-5 h-5" /></SocialButton>
-                        <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}><WhatsappIcon className="w-5 h-5" /></SocialButton>
-                        <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}><ChatBubbleBottomCenterTextIcon className="w-5 h-5" /></SocialButton>
-                        <div className="h-6 w-px bg-border-default"></div>
+                        {canUseDistributionEmail ? (
+                            <SocialButton onClick={() => openModal('email')} title={t('profile.send_email')}>
+                                <EnvelopeIcon className="w-5 h-5" />
+                            </SocialButton>
+                        ) : null}
+                        {canUseDistributionWhatsapp ? (
+                            <SocialButton onClick={() => openModal('whatsapp')} title={t('profile.send_whatsapp')}>
+                                <WhatsappIcon className="w-5 h-5" />
+                            </SocialButton>
+                        ) : null}
+                        {canUseDistributionSms ? (
+                            <SocialButton onClick={() => openModal('sms')} title={t('profile.send_sms')}>
+                                <ChatBubbleBottomCenterTextIcon className="w-5 h-5" />
+                            </SocialButton>
+                        ) : null}
+                        {(canUseDistributionEmail || canUseDistributionWhatsapp || canUseDistributionSms) &&
+                        (candidateData.linkedInUrl || candidateData.linkedIn) ? (
+                            <div className="h-6 w-px bg-border-default" />
+                        ) : null}
                         <a href={candidateData.linkedInUrl || candidateData.linkedIn || '#'} target="_blank" rel="noopener noreferrer" title="LinkedIn Profile" className="w-10 h-10 flex items-center justify-center bg-[#0077b5]/10 text-[#0077b5] rounded-xl hover:bg-[#0077b5]/20 transition-all">
                             <LinkedInIcon className="w-5 h-5" />
                         </a>

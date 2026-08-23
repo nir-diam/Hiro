@@ -31,6 +31,7 @@ router.delete('/:id/job-match-ignores/:jobId', authMiddleware, candidateControll
 router.post('/:id/jobs/:jobId/deep-insight', authMiddleware, candidateController.getJobDeepInsight);
 router.get('/:id/screening-pool', authMiddleware, candidateController.getScreeningPoolForCandidate);
 router.get('/:id/screening-precheck', authMiddleware, candidateController.getScreeningPrecheck);
+router.get('/:id/related-candidates', candidateController.listRelatedCandidates);
 router.get('/:id/linked-jobs', candidateController.listLinkedJobs);
 router.post('/:id/linked-jobs', authMiddleware, candidateController.linkCandidateToJob);
 router.post('/:id/field-interest', authMiddleware, candidateController.addFieldInterest);
@@ -44,6 +45,7 @@ router.post(
   attachDbUser,
   candidateController.approveDataCorrections,
 );
+router.post('/:id/approve-profile', candidateController.approveProfileByCandidate);
 
 router.get('/:id/documents', candidateDocumentController.list);
 router.post('/:id/documents/upload-url', candidateDocumentController.createUploadUrl);

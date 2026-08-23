@@ -26,6 +26,10 @@ interface JobInterest {
   linkId: string;
   /** jobs.id */
   jobId: string;
+  /** candidates.id — owning profile when aggregating linked candidates */
+  candidateId?: string;
+  /** Display label for owning candidate profile */
+  candidateLabel?: string;
   industry: string;
   role: string;
   jobTitle: string;
@@ -85,7 +89,10 @@ function matchSummaryFromEngine(descPlain: string, bd: Record<string, unknown> |
   return line || descPlain || '—';
 }
 
-function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
+function mapLinkedJobRow(
+  row: LinkedJobApiRow,
+  meta?: { candidateId?: string; candidateLabel?: string },
+): JobInterest {
   const job = row.job || {};
   const wm =
     row.workflowMeta && typeof row.workflowMeta === 'object' && !Array.isArray(row.workflowMeta)
@@ -115,6 +122,8 @@ function mapLinkedJobRow(row: LinkedJobApiRow): JobInterest {
   return {
     linkId: row.jobCandidateId,
     jobId: row.jobId != null ? String(row.jobId) : '',
+    candidateId: meta?.candidateId,
+    candidateLabel: meta?.candidateLabel,
     industry: String(job.field || '').trim(),
     role: String(job.role || '').trim(),
     jobTitle: title,
@@ -329,7 +338,8 @@ const JobInterestCard: React.FC<{
     manageProcessLabel: string;
     matchRingTitle: string;
     lastUpdatedLabel: string;
-}> = ({ job, onStatusClick, onTitleClick, onManageProcess, manageProcessLabel, matchRingTitle, lastUpdatedLabel }) => (
+    showCandidateLabel?: boolean;
+}> = ({ job, onStatusClick, onTitleClick, onManageProcess, manageProcessLabel, matchRingTitle, lastUpdatedLabel, showCandidateLabel = false }) => (
     <div className="bg-bg-card rounded-lg border border-border-default shadow-sm p-4 hover:shadow-md transition-shadow flex flex-col justify-between">
         <div>
             <div className="flex justify-between items-start">
@@ -337,6 +347,9 @@ const JobInterestCard: React.FC<{
                 <MatchScore score={job.matchScore} title={matchRingTitle} />
             </div>
             <p className="text-sm text-text-muted">{job.company}</p>
+            {showCandidateLabel && job.candidateLabel ? (
+                <p className="text-xs text-text-subtle mt-1">{job.candidateLabel}</p>
+            ) : null}
         </div>
         <div className="mt-4 flex justify-between items-end gap-2">
             <StatusBadge status={job.status} onClick={onStatusClick} />
@@ -381,6 +394,8 @@ const InterestedInJobs: React.FC<{
     clientId?: string | null;
     candidatePipelineId?: string | null;
     pipelineStageId?: string | null;
+    /** All portal profile versions for this candidate (same list as profile switcher). */
+    relatedProfiles?: Array<{ id: string; label: string }>;
 }> = ({
     onOpenNewTask,
     candidateId = null,
@@ -390,6 +405,7 @@ const InterestedInJobs: React.FC<{
     clientId: clientIdProp = null,
     candidatePipelineId = null,
     pipelineStageId = null,
+    relatedProfiles: relatedProfilesProp = [],
 }) => {
     const { t } = useLanguage();
     const { user } = useAuth();
@@ -398,6 +414,14 @@ const InterestedInJobs: React.FC<{
         (user?.clientId && String(user.clientId).trim()) ||
         '';
     const [jobs, setJobs] = useState<JobInterest[]>([]);
+    const [relatedCandidates, setRelatedCandidates] = useState<{ id: string; label: string }[]>([]);
+    const [relatedCandidatesReady, setRelatedCandidatesReady] = useState(false);
+    const aggregatedProfiles = useMemo(() => {
+        const fromProp = (relatedProfilesProp || []).filter((p) => p?.id);
+        if (fromProp.length > 0) return fromProp;
+        return relatedCandidates;
+    }, [relatedProfilesProp, relatedCandidates]);
+    const showCandidateColumn = aggregatedProfiles.length > 1;
     const [linkedJobsLoading, setLinkedJobsLoading] = useState(false);
     const [linkedJobsError, setLinkedJobsError] = useState<string | null>(null);
     const [activePopoverId, setActivePopoverId] = useState<string | null>(null);
@@ -409,17 +433,21 @@ const InterestedInJobs: React.FC<{
         selection: SelectedJobField;
         jobs: FieldInterestPreviewJob[];
     } | null>(null);
-    
-    const allColumns = useMemo(() => [
-        { id: 'jobTitle', header: t('interested_jobs.col_jobTitle') },
-        { id: 'company', header: t('interested_jobs.col_company') },
-        { id: 'location', header: t('interested_jobs.col_location') },
-        { id: 'status', header: t('interested_jobs.col_status') },
-        { id: 'matchScore', header: t('interested_jobs.col_matchScore') },
-        { id: 'lastUpdated', header: t('interested_jobs.col_lastUpdated') },
-        { id: 'industry', header: t('interested_jobs.col_industry') },
-        { id: 'role', header: t('interested_jobs.col_role') },
-    ], [t]);
+
+    const allColumns = useMemo(() => {
+        const cols = [
+            { id: 'jobTitle', header: t('interested_jobs.col_jobTitle') },
+            ...(showCandidateColumn ? [{ id: 'candidate', header: t('interested_jobs.col_candidate') }] : []),
+            { id: 'company', header: t('interested_jobs.col_company') },
+            { id: 'location', header: t('interested_jobs.col_location') },
+            { id: 'status', header: t('interested_jobs.col_status') },
+            { id: 'matchScore', header: t('interested_jobs.col_matchScore') },
+            { id: 'lastUpdated', header: t('interested_jobs.col_lastUpdated') },
+            { id: 'industry', header: t('interested_jobs.col_industry') },
+            { id: 'role', header: t('interested_jobs.col_role') },
+        ];
+        return cols;
+    }, [t, showCandidateColumn]);
 
     const defaultVisibleColumns = useMemo(() => allColumns.map(c => c.id), [allColumns]);
     const allColumnIds = useMemo(() => allColumns.map((c) => c.id), [allColumns]);
@@ -435,6 +463,14 @@ const InterestedInJobs: React.FC<{
         defaultVisibleColumns,
         allColumnIds,
     });
+
+    useEffect(() => {
+        if (!showCandidateColumn || visibleColumns.includes('candidate')) return;
+        const next = [...visibleColumns];
+        const jobTitleIdx = next.indexOf('jobTitle');
+        next.splice(jobTitleIdx >= 0 ? jobTitleIdx + 1 : 0, 0, 'candidate');
+        setVisibleColumns(next);
+    }, [showCandidateColumn, visibleColumns, setVisibleColumns]);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
     const [draggingColumn, setDraggingColumn] = useState<string | null>(null);
     const [sortConfig, setSortConfig] = useState<{ key: string; direction: 'asc' | 'desc' } | null>(null);
@@ -476,33 +512,121 @@ const InterestedInJobs: React.FC<{
         };
     }, [apiBase]);
 
+    const fetchLinkedJobsForCandidate = useCallback(
+        async (targetId: string, meta?: { candidateId?: string; candidateLabel?: string }) => {
+            const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+            const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(targetId)}/linked-jobs`, {
+                credentials: 'include',
+                headers: {
+                    Accept: 'application/json',
+                    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                },
+            });
+            if (!res.ok) throw new Error(t('interested_jobs.load_error') || 'טעינת התעניינות במשרות נכשלה');
+            const rows: unknown = await res.json();
+            if (!Array.isArray(rows)) return [] as JobInterest[];
+            return rows.map((r) =>
+                mapLinkedJobRow(r as LinkedJobApiRow, {
+                    candidateId: meta?.candidateId ?? targetId,
+                    candidateLabel: meta?.candidateLabel,
+                }),
+            );
+        },
+        [apiBase, t],
+    );
+
     const reloadLinkedJobs = useCallback(async () => {
         const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
         if (!apiBase || !id) {
             setJobs([]);
             return;
         }
-        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-        const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/linked-jobs`, {
-            credentials: 'include',
-            headers: {
-                Accept: 'application/json',
-                ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
+
+        const targets =
+            aggregatedProfiles.length > 0
+                ? aggregatedProfiles
+                : [{ id, label: candidateName || '' }];
+
+        const batches = await Promise.allSettled(
+            targets.map(async (target) => {
+                const label = target.label || candidateName || '';
+                return fetchLinkedJobsForCandidate(target.id, {
+                    candidateId: target.id,
+                    candidateLabel: label,
+                });
+            }),
+        );
+
+        const merged = batches
+            .filter((result): result is PromiseFulfilledResult<JobInterest[]> => result.status === 'fulfilled')
+            .flatMap((result) => result.value);
+        merged.sort((a, b) => {
+            const aTime = Date.parse(a.lastUpdated.split('/').reverse().join('-')) || 0;
+            const bTime = Date.parse(b.lastUpdated.split('/').reverse().join('-')) || 0;
+            return bTime - aTime;
         });
-        if (!res.ok) throw new Error(t('interested_jobs.load_error') || 'טעינת התעניינות במשרות נכשלה');
-        const rows: unknown = await res.json();
-        if (Array.isArray(rows)) {
-            setJobs(rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
+        setJobs(merged);
+    }, [apiBase, candidateId, candidateName, aggregatedProfiles, fetchLinkedJobsForCandidate]);
+
+    useEffect(() => {
+        const fromProp = (relatedProfilesProp || []).filter((p) => p?.id);
+        if (fromProp.length > 0) {
+            setRelatedCandidates(fromProp);
+            setRelatedCandidatesReady(true);
+            return;
         }
-    }, [apiBase, candidateId, t]);
+
+        const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
+        if (!apiBase || !id) {
+            setRelatedCandidates([]);
+            setRelatedCandidatesReady(true);
+            return;
+        }
+        let cancelled = false;
+        setRelatedCandidatesReady(false);
+        const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+        (async () => {
+            try {
+                const res = await fetch(`${apiBase}/api/candidates/${encodeURIComponent(id)}/related-candidates`, {
+                    credentials: 'include',
+                    headers: {
+                        Accept: 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                });
+                if (!res.ok) return;
+                const payload: unknown = await res.json();
+                if (!cancelled && Array.isArray(payload)) {
+                    setRelatedCandidates(
+                        payload
+                            .filter((row): row is { id: string; label: string } =>
+                                Boolean(row && typeof row === 'object' && (row as { id?: string }).id),
+                            )
+                            .map((row) => ({
+                                id: String(row.id),
+                                label: String(row.label || '').trim() || candidateName || 'מועמד',
+                            })),
+                    );
+                }
+            } catch (err) {
+                console.error('[InterestedInJobs] failed to load related candidates', err);
+            } finally {
+                if (!cancelled) setRelatedCandidatesReady(true);
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, candidateId, candidateName, relatedProfilesProp]);
 
     useEffect(() => {
         const id = candidateId != null && String(candidateId).trim() ? String(candidateId).trim() : '';
-        if (!apiBase || !id) {
-            setJobs([]);
-            setLinkedJobsLoading(false);
-            setLinkedJobsError(null);
+        if (!apiBase || !id || !relatedCandidatesReady) {
+            if (!id) {
+                setJobs([]);
+                setLinkedJobsLoading(false);
+                setLinkedJobsError(null);
+            }
             return;
         }
         let cancelled = false;
@@ -518,7 +642,7 @@ const InterestedInJobs: React.FC<{
         return () => {
             cancelled = true;
         };
-    }, [apiBase, candidateId, reloadLinkedJobs]);
+    }, [apiBase, candidateId, reloadLinkedJobs, relatedCandidates, relatedCandidatesReady]);
 
     // Sorting logic
     const requestSort = (key: string) => {
@@ -552,7 +676,7 @@ const InterestedInJobs: React.FC<{
         const q = searchQuery.trim().toLowerCase();
         if (!q) return sortedJobs;
         return sortedJobs.filter((job) => {
-            const haystack = [job.jobTitle, job.company, job.location, job.industry, job.role]
+            const haystack = [job.jobTitle, job.company, job.location, job.industry, job.role, job.candidateLabel]
                 .map((v) => String(v || '').toLowerCase())
                 .join(' ');
             return haystack.includes(q);
@@ -633,13 +757,18 @@ const InterestedInJobs: React.FC<{
         ...extra,
     });
 
-    const applyLinkedJobsResponse = useCallback((rows: unknown) => {
+    const applyLinkedJobsResponse = useCallback((rows: unknown, meta?: { candidateId?: string; candidateLabel?: string }) => {
         if (Array.isArray(rows)) {
-            setJobs(rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow)));
+            const mapped = rows.map((r) => mapLinkedJobRow(r as LinkedJobApiRow, meta));
+            if (relatedCandidates.length > 1) {
+                void reloadLinkedJobs();
+            } else {
+                setJobs(mapped);
+            }
         } else {
             void reloadLinkedJobs();
         }
-    }, [reloadLinkedJobs]);
+    }, [reloadLinkedJobs, relatedCandidates.length]);
 
     const commitFieldInterest = useCallback(
         async (selection: SelectedJobField, jobIds?: string[]) => {
@@ -881,6 +1010,12 @@ const InterestedInJobs: React.FC<{
                 );
             case 'status':
                 return <StatusBadge status={job.status} onClick={() => handleOpenStatusModal(job)} />;
+            case 'candidate':
+                return (
+                    <span className="text-text-default font-medium whitespace-nowrap">
+                        {job.candidateLabel || '—'}
+                    </span>
+                );
             case 'matchScore':
                 return (
                     <div className="relative" data-popover-trigger>
@@ -929,6 +1064,11 @@ const InterestedInJobs: React.FC<{
                     {linkedJobsError}
                 </div>
             )}
+            {showCandidateColumn ? (
+                <div className="mx-3 mt-3 rounded-lg border border-primary-100 bg-primary-50/60 text-xs text-primary-800 px-4 py-2">
+                    מציג הגשות מ-{aggregatedProfiles.length} גרסאות פרופיל
+                </div>
+            ) : null}
             {/* Toolbar */}
             <header className="flex items-center justify-between p-3 border-b border-border-default bg-bg-card">
                  <div className="flex items-center gap-3">
@@ -1124,6 +1264,7 @@ const InterestedInJobs: React.FC<{
                             manageProcessLabel={t('interested_jobs.manage_process')}
                             matchRingTitle={t('interested_jobs.match_ring_title')}
                             lastUpdatedLabel={t('interested_jobs.card_last_updated')}
+                            showCandidateLabel={showCandidateColumn}
                         />
                     ))}
                 </div>
@@ -1190,11 +1331,11 @@ const InterestedInJobs: React.FC<{
                 onClose={() => setIsDrawerOpen(false)}
             />
 
-            {manageJob && candidateId ? (
+            {manageJob && (manageJob.candidateId || candidateId) ? (
                 <CandidateProcessManagementModal
                     isOpen={Boolean(manageJob)}
                     onClose={() => setManageJob(null)}
-                    candidateId={String(candidateId)}
+                    candidateId={String(manageJob.candidateId || candidateId)}
                     candidateName={candidateName || 'מועמד'}
                     job={jobInterestToLink(manageJob)}
                     clientId={clientId || null}

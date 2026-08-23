@@ -50,6 +50,7 @@ const CV_MERGE_FIELDS = [
   'professionalSummary',
   'resumeUrl',
   'resumeUploadedAt',
+  'resumeContentHash',
   'searchText',
   'searchTextSavedAt',
   'skills',

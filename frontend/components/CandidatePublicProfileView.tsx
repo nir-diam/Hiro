@@ -2479,7 +2479,50 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
 
     const handleApproveProfile = async () => {
         if (formData.approveByCandidate) return;
-        await saveNow({ approveByCandidate: true });
+        const id = candidateId || (await ensureCandidateRecord(formData));
+        if (!id) {
+            setSaveError('לא ניתן לאשר — חסר מזהה מועמד');
+            return;
+        }
+        setIsSaving(true);
+        setSaveError(null);
+        try {
+            const base = apiBase || '';
+            const res = await fetch(`${base}/api/candidates/${encodeURIComponent(String(id))}/approve-profile`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({}),
+            });
+            if (!res.ok) {
+                const errBody = await res.json().catch(() => ({}));
+                throw new Error(
+                    typeof (errBody as { message?: string })?.message === 'string'
+                        ? (errBody as { message: string }).message
+                        : 'אישור הפרופיל נכשל',
+                );
+            }
+            const updated = await res.json();
+            const normalized = normalizeCandidateData({
+                ...formData,
+                ...updated,
+                approveByCandidate: true,
+            });
+            setFormData(normalized);
+            setProfiles((prev) => prev.map((p) => String(p.id) === String(id) ? normalized : p));
+            setCandidateId(String(updated.id || id));
+            await loadCandidateRef.current?.();
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(
+                    new CustomEvent('hiro:candidate-profile-approved', {
+                        detail: { candidateId: String(updated.id || id) },
+                    }),
+                );
+            }
+        } catch (err: unknown) {
+            setSaveError(err instanceof Error ? err.message : 'אישור הפרופיל נכשל');
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     const handleToggleJobOffersConsent = async (checked: boolean) => {
@@ -3285,7 +3328,10 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                         {activeView === 'jobs' && renderJobs()}
                         {activeView === 'favorites' && renderFavorites()}
                         {activeView === 'applications' && (
-                            <CandidateApplicationsView candidateId={candidateId || formData.id?.toString()} />
+                            <CandidateApplicationsView
+                                candidateId={candidateId || formData.id?.toString()}
+                                relatedProfileIds={navigableProfiles.map((p) => String(p.id))}
+                            />
                         )}
                         {activeView === 'offers' && renderOffers()} 
                         </div>

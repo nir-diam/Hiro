@@ -38,6 +38,11 @@ const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
 const { embedCandidateAndSave } = require('../services/vectorSearchService');
+const {
+  hashResumeBuffer,
+  findCandidateByResumeContentHash,
+  resolvePrimaryFromHashMatch,
+} = require('../services/cvContentHashService');
 const { normalizeResumeSearchText } = require('../utils/normalizeResumeSearchText');
 
 const supportedResumeExtensions = ['.pdf', '.doc', '.docx', '.rtf', '.txt'];
@@ -536,10 +541,29 @@ const processEmailUpload = async (record) => {
     // For job-directed mail (posting code in To), inbound-only reuse is dangerous:
     // one recruiter can forward many applicants from the same From address.
     let candidate = null;
-    if (!resolvedJob?.id) {
+    let candidateCreatedViaEmailIngest = false;
+    let reusedExistingCandidateByHash = false;
+
+    // Single attachment with known CV bytes → reuse before creating a stub row.
+    if (resumeAttachments.length === 1) {
+      const preHash = hashResumeBuffer(resumeAttachments[0].content);
+      if (preHash) {
+        const hashMatch = await findCandidateByResumeContentHash(preHash);
+        if (hashMatch) {
+          const primary = await resolvePrimaryFromHashMatch(hashMatch);
+          candidate = await candidateService.getById(primary.id);
+          reusedExistingCandidateByHash = true;
+          console.log('[email] reusing candidate from resume content hash (pre-create)', {
+            candidateId: candidate.id,
+            hashPrefix: preHash.slice(0, 12),
+          });
+        }
+      }
+    }
+
+    if (!candidate && !resolvedJob?.id) {
       candidate = await candidateService.findByInboundFromEmail(fromEmail);
     }
-    let candidateCreatedViaEmailIngest = false;
     if (!candidate) {
       const inferredName =
         fromAddress?.name?.trim() || fromEmail.split('@')[0] || 'מועמד חדש';
@@ -577,8 +601,38 @@ const processEmailUpload = async (record) => {
     /** @type {Array<{ publicUrl: string, key: string, size: number, fileLabel: string }>} */
     const uploaded = [];
     const totalResumes = resumeAttachments.length;
+    const attachmentHashes = [];
+    const hashDedupedAttachmentIndices = new Set();
+    let firstResumeContentHash = null;
     for (let i = 0; i < resumeAttachments.length; i += 1) {
       const resumeAttachment = resumeAttachments[i];
+      const attachmentHash = hashResumeBuffer(resumeAttachment.content);
+      attachmentHashes[i] = attachmentHash;
+      if (i === 0) firstResumeContentHash = attachmentHash;
+
+      if (attachmentHash) {
+        const hashMatch = await findCandidateByResumeContentHash(attachmentHash);
+        if (hashMatch && String(hashMatch.id) !== String(candidate.id)) {
+          const primary = await resolvePrimaryFromHashMatch(hashMatch);
+          console.log('[email] duplicate resume content hash; using existing candidate', {
+            hashPrefix: attachmentHash.slice(0, 12),
+            existingId: primary.id,
+            previousCandidateId: candidate.id,
+          });
+          if (candidateCreatedViaEmailIngest) {
+            try {
+              await candidateService.update(candidate.id, { isDeleted: true });
+            } catch (delErr) {
+              console.warn('[email] failed to soft-delete stub after hash dedup', delErr?.message || delErr);
+            }
+          }
+          candidate = await candidateService.getById(primary.id);
+          candidateCreatedViaEmailIngest = false;
+          reusedExistingCandidateByHash = true;
+          hashDedupedAttachmentIndices.add(i);
+        }
+      }
+
       const fileBase64 = resumeAttachment.content.toString('base64');
       const rawName =
         String(resumeAttachment.filename || 'resume')
@@ -598,7 +652,12 @@ const processEmailUpload = async (record) => {
         `(${i + 1}/${totalResumes})`,
         put.publicUrl.slice(0, 60),
       );
-      const piece = (await fetchResumeText(put.publicUrl, candidate.id)) || '';
+      let piece = '';
+      if (hashDedupedAttachmentIndices.has(i)) {
+        console.log('[email] skipping text extract for hash-deduped attachment', { index: i });
+      } else {
+        piece = (await fetchResumeText(put.publicUrl, candidate.id)) || '';
+      }
       textChunks.push(piece);
     }
     if (!uploaded.length) {
@@ -608,30 +667,6 @@ const processEmailUpload = async (record) => {
         attempted: totalResumes,
       });
       return;
-    }
-
-    // Audit after at least one CV is stored — must be awaited so the run (incl. workers)
-    // does not end before audit rows are written; matches "CV loaded from email".
-    const primaryAuditId = candidate.id != null ? String(candidate.id) : null;
-    const primaryAuditName =
-      (typeof candidate.get === 'function' ? candidate.get('fullName') : null) ||
-      candidate.fullName ||
-      '—';
-    if (candidateCreatedViaEmailIngest) {
-      await systemEventEmitter.emit(null, {
-        ...SYSTEM_EVENTS.CV_RECEIVED,
-        entityType: 'Candidate',
-        entityId: primaryAuditId,
-        entityName: primaryAuditName,
-        params: { id: record?.id != null ? String(record.id) : primaryAuditId },
-      });
-      await systemEventEmitter.emit(null, {
-        ...SYSTEM_EVENTS.CV_SOURCE,
-        entityType: 'Candidate',
-        entityId: primaryAuditId,
-        entityName: primaryAuditName,
-        params: { source: emailIngestSource },
-      });
     }
 
     if (textChunks.length !== uploaded.length) {
@@ -687,6 +722,14 @@ const processEmailUpload = async (record) => {
       }
     }
 
+    // Hash-deduped attachments were already routed to an existing candidate — do not split again.
+    for (const j of hashDedupedAttachmentIndices) {
+      if (splitFileIndices.delete(j)) {
+        console.log('[email] multi-CV: skip split for hash-deduped attachment index', { j });
+      }
+      identitySplitIndices.delete(j);
+    }
+
     const latest = await candidateService.getById(candidate.id);
     const prevDocs = Array.isArray(latest?.documents) ? [...latest.documents] : [];
     const extraDocEntries = uploaded
@@ -710,6 +753,7 @@ const processEmailUpload = async (record) => {
     await candidateService.update(candidate.id, {
       resumeUrl: uploaded[0].publicUrl,
       resumeUploadedAt: new Date(),
+      ...(firstResumeContentHash ? { resumeContentHash: firstResumeContentHash } : {}),
       documents: extraDocEntries.length ? [...extraDocEntries, ...prevDocs] : prevDocs,
     });
 
@@ -719,65 +763,72 @@ const processEmailUpload = async (record) => {
     }
     const combinedText = primaryTextParts.filter(Boolean).join('\n\n----\n\n');
 
-    const parsedUpdates = buildParsedUpdates(candidate, combinedText || '');
-    if (Object.keys(parsedUpdates).length) {
-      await candidateService.update(candidate.id, parsedUpdates);
-    }
-    const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(combinedText);
-    if (aiFields && Object.keys(aiFields).length) {
-      const safeAi = { ...aiFields };
-      if (safeAi.email && String(safeAi.email).includes('@')) {
-        safeAi.email = String(safeAi.email).trim().toLowerCase();
-      } else {
-        // Keep any email extracted directly from the CV; never fall back to the envelope From.
-        delete safeAi.email;
-        const cvMail = extractCvContactEmail(combinedText || '', emailInFirstCv);
-        const fromNorm = String(fromEmail || '').trim().toLowerCase();
-        if (cvMail && cvMail !== fromNorm) {
-          safeAi.email = cvMail;
-        }
+    if (!reusedExistingCandidateByHash) {
+      const parsedUpdates = buildParsedUpdates(candidate, combinedText || '');
+      if (Object.keys(parsedUpdates).length) {
+        await candidateService.update(candidate.id, parsedUpdates);
       }
-      await candidateService.update(candidate.id, safeAi);
+      const { aiFields, aiTags } = await deriveCandidateFieldsFromResume(combinedText);
+      if (aiFields && Object.keys(aiFields).length) {
+        const safeAi = { ...aiFields };
+        if (safeAi.email && String(safeAi.email).includes('@')) {
+          safeAi.email = String(safeAi.email).trim().toLowerCase();
+        } else {
+          // Keep any email extracted directly from the CV; never fall back to the envelope From.
+          delete safeAi.email;
+          const cvMail = extractCvContactEmail(combinedText || '', emailInFirstCv);
+          const fromNorm = String(fromEmail || '').trim().toLowerCase();
+          if (cvMail && cvMail !== fromNorm) {
+            safeAi.email = cvMail;
+          }
+        }
+        await candidateService.update(candidate.id, safeAi);
 
-      const auditNameAfterAi = await resolveCandidateAuditDisplayName(candidate);
+        const auditNameAfterAi = await resolveCandidateAuditDisplayName(candidate);
 
-      // Audit: 'פרסור ניתוח ועיבוד מידע' — AI parsed CV and applied auto updates
-      await systemEventEmitter.emit(null, {
-        ...SYSTEM_EVENTS.CV_PARSED,
-        entityType: 'Candidate',
-        entityId: candidate.id,
-        entityName: auditNameAfterAi,
-        params: { source: aiFields?.source || emailIngestSource },
-      });
-
-      // Audit: 'הגדרת תחום משרה' — candidate "field" inferred by AI
-      if (safeAi.field) {
+        // Audit: 'פרסור ניתוח ועיבוד מידע' — AI parsed CV and applied auto updates
         await systemEventEmitter.emit(null, {
-          ...SYSTEM_EVENTS.CV_FIELD,
+          ...SYSTEM_EVENTS.CV_PARSED,
           entityType: 'Candidate',
           entityId: candidate.id,
           entityName: auditNameAfterAi,
-          params: { job: safeAi.field },
+          params: { source: aiFields?.source || emailIngestSource },
+        });
+
+        // Audit: 'הגדרת תחום משרה' — candidate "field" inferred by AI
+        if (safeAi.field) {
+          await systemEventEmitter.emit(null, {
+            ...SYSTEM_EVENTS.CV_FIELD,
+            entityType: 'Candidate',
+            entityId: candidate.id,
+            entityName: auditNameAfterAi,
+            params: { job: safeAi.field },
+          });
+        }
+      }
+      if (aiTags.length) {
+        await candidateTagService.syncTagsForCandidate(candidate.id, aiTags);
+
+        const auditNameAfterTags = await resolveCandidateAuditDisplayName(candidate);
+
+        // Audit: 'הגדרת תגיות' — tags created/synced for candidate
+        const tagsLabel = aiTags
+          .map((t) => t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name)
+          .filter(Boolean)
+          .slice(0, 12)
+          .join(', ');
+        await systemEventEmitter.emit(null, {
+          ...SYSTEM_EVENTS.CV_TAGS,
+          entityType: 'Candidate',
+          entityId: candidate.id,
+          entityName: auditNameAfterTags,
+          params: { tags: tagsLabel || `${aiTags.length} תגיות` },
         });
       }
-    }
-    if (aiTags.length) {
-      await candidateTagService.syncTagsForCandidate(candidate.id, aiTags);
-
-      const auditNameAfterTags = await resolveCandidateAuditDisplayName(candidate);
-
-      // Audit: 'הגדרת תגיות' — tags created/synced for candidate
-      const tagsLabel = aiTags
-        .map((t) => t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name)
-        .filter(Boolean)
-        .slice(0, 12)
-        .join(', ');
-      await systemEventEmitter.emit(null, {
-        ...SYSTEM_EVENTS.CV_TAGS,
-        entityType: 'Candidate',
-        entityId: candidate.id,
-        entityName: auditNameAfterTags,
-        params: { tags: tagsLabel || `${aiTags.length} תגיות` },
+    } else {
+      console.log('[email] skipping AI parse/embed — existing candidate reused from resume content hash', {
+        candidateId: candidate.id,
+        hashDedupedAttachmentIndices: [...hashDedupedAttachmentIndices],
       });
     }
     await candidateService.update(candidate.id, emailIngestSourcePatch);
@@ -814,10 +865,12 @@ const processEmailUpload = async (record) => {
     const primarySynced = await candidateService.getById(candidate.id);
     await ensureOrganizationsFromExperience(primarySynced?.workExperience, candidate.id);
 
-    try {
-      await embedCandidateAndSave(candidate.id, combinedText || '');
-    } catch (embErr) {
-      console.warn('[email] embed primary candidate failed', candidate.id, embErr?.message || embErr);
+    if (!reusedExistingCandidateByHash) {
+      try {
+        await embedCandidateAndSave(candidate.id, combinedText || '');
+      } catch (embErr) {
+        console.warn('[email] embed primary candidate failed', candidate.id, embErr?.message || embErr);
+      }
     }
 
     const association = await jobCandidateService.associateCandidateWithJob({
@@ -833,6 +886,28 @@ const processEmailUpload = async (record) => {
     });
     await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
     await record.reload();
+
+    // Audit + pipeline automations: run after job link so clientId and jobCandidateId resolve.
+    const primaryAuditId = candidate.id != null ? String(candidate.id) : null;
+    const primaryAuditName = await resolveCandidateAuditDisplayName(candidate);
+    if (candidateCreatedViaEmailIngest && primaryAuditId) {
+      await systemEventEmitter.emit(null, {
+        ...SYSTEM_EVENTS.CV_RECEIVED,
+        entityType: 'Candidate',
+        entityId: primaryAuditId,
+        entityName: primaryAuditName,
+        clientId: resolvedJobClientId || null,
+        params: { id: record?.id != null ? String(record.id) : primaryAuditId },
+      });
+      await systemEventEmitter.emit(null, {
+        ...SYSTEM_EVENTS.CV_SOURCE,
+        entityType: 'Candidate',
+        entityId: primaryAuditId,
+        entityName: primaryAuditName,
+        clientId: resolvedJobClientId || null,
+        params: { source: emailIngestSource },
+      });
+    }
 
     const welcomeClientId = resolvedJobClientId;
     const welcomeOnce = new Set();
@@ -915,37 +990,56 @@ const processEmailUpload = async (record) => {
 
       let splitCand;
       let splitCandIsNew = false;
-      if (identitySplitIndices.has(j)) {
-        // Distinct people sharing one footer email — do not merge by identity.
-        splitCand = await candidateService.create(
-          {
+      let splitHashReused = false;
+      const splitHash = attachmentHashes[j] || null;
+      if (splitHash) {
+        const hashMatch = await findCandidateByResumeContentHash(splitHash);
+        if (hashMatch) {
+          const primary = await resolvePrimaryFromHashMatch(hashMatch);
+          splitCand = await candidateService.getById(primary.id);
+          splitCandIsNew = false;
+          splitHashReused = true;
+          console.log('[email] split CV: reusing existing candidate from resume content hash', {
+            attachmentIndex: j,
+            candidateId: splitCand.id,
+            hashPrefix: splitHash.slice(0, 12),
+          });
+        }
+      }
+      if (!splitCand) {
+        if (identitySplitIndices.has(j)) {
+          // Distinct people sharing one footer email — do not merge by identity.
+          splitCand = await candidateService.create(
+            {
+              email: norm,
+              fullName: nameGuess,
+              inboundFromEmail: fromEmail,
+              ...emailIngestSourcePatch,
+            },
+            { skipIdentityLink: true },
+          );
+          splitCandIsNew = true;
+        } else {
+          splitCand = await candidateService.create({
             email: norm,
             fullName: nameGuess,
             inboundFromEmail: fromEmail,
             ...emailIngestSourcePatch,
-          },
-          { skipIdentityLink: true },
-        );
-        splitCandIsNew = true;
-      } else {
-        splitCand = await candidateService.create({
-          email: norm,
-          fullName: nameGuess,
-          inboundFromEmail: fromEmail,
-          ...emailIngestSourcePatch,
-        });
-        splitCandIsNew = true;
-        if (splitCand._identityReused || splitCand._identityLinked) {
-          console.log('[email] split CV attached to existing candidate', {
-            candidateId: splitCand.id,
-            linked: Boolean(splitCand._identityLinked),
           });
-          splitCandIsNew = false;
+          splitCandIsNew = true;
+          if (splitCand._identityReused || splitCand._identityLinked) {
+            console.log('[email] split CV attached to existing candidate', {
+              candidateId: splitCand.id,
+              linked: Boolean(splitCand._identityLinked),
+            });
+            splitCandIsNew = false;
+          }
         }
       }
       await candidateService.update(splitCand.id, {
         resumeUrl: up.publicUrl,
         resumeUploadedAt: new Date(),
+        ...(splitHash ? { resumeContentHash: splitHash } : {}),
         ...emailIngestSourcePatch,
       });
       if (splitCandIsNew) {
@@ -955,36 +1049,30 @@ const processEmailUpload = async (record) => {
           splitCand.fullName ||
           nameGuess ||
           '—';
-        await systemEventEmitter.emit(null, {
-          ...SYSTEM_EVENTS.CV_RECEIVED,
-          entityType: 'Candidate',
-          entityId: sid,
-          entityName: sname,
-          params: { id: record?.id != null ? String(record.id) : sid },
-        });
-        await systemEventEmitter.emit(null, {
-          ...SYSTEM_EVENTS.CV_SOURCE,
-          entityType: 'Candidate',
-          entityId: sid,
-          entityName: sname,
-          params: { source: emailIngestSource },
-        });
+        splitCand._pendingCvAudit = { sid, sname };
       }
       const tj = textChunks[j] || '';
-      const { aiFields: splitAi, aiTags: splitTags } = await deriveCandidateFieldsFromResume(tj);
-      if (splitAi && Object.keys(splitAi).length) {
-        const safeS = { ...splitAi };
-        if (safeS.email && String(safeS.email).includes('@')) {
-          safeS.email = String(safeS.email).trim().toLowerCase();
-        } else if (norm && norm !== fromEmail) {
-          safeS.email = norm;
-        } else {
-          delete safeS.email;
+      if (!splitHashReused) {
+        const { aiFields: splitAi, aiTags: splitTags } = await deriveCandidateFieldsFromResume(tj);
+        if (splitAi && Object.keys(splitAi).length) {
+          const safeS = { ...splitAi };
+          if (safeS.email && String(safeS.email).includes('@')) {
+            safeS.email = String(safeS.email).trim().toLowerCase();
+          } else if (norm && norm !== fromEmail) {
+            safeS.email = norm;
+          } else {
+            delete safeS.email;
+          }
+          await candidateService.update(splitCand.id, safeS);
         }
-        await candidateService.update(splitCand.id, safeS);
-      }
-      if (splitTags && splitTags.length) {
-        await candidateTagService.syncTagsForCandidate(splitCand.id, splitTags);
+        if (splitTags && splitTags.length) {
+          await candidateTagService.syncTagsForCandidate(splitCand.id, splitTags);
+        }
+      } else {
+        console.log('[email] split CV: skipping AI parse/embed — hash-reused candidate', {
+          attachmentIndex: j,
+          candidateId: splitCand.id,
+        });
       }
       try {
         const splitFreshForIdentity = await candidateService.getById(splitCand.id);
@@ -1006,12 +1094,34 @@ const processEmailUpload = async (record) => {
         source: 'email',
         manualOverride: false,
       });
+      if (splitCand._pendingCvAudit) {
+        const { sid, sname } = splitCand._pendingCvAudit;
+        await systemEventEmitter.emit(null, {
+          ...SYSTEM_EVENTS.CV_RECEIVED,
+          entityType: 'Candidate',
+          entityId: sid,
+          entityName: sname,
+          clientId: resolvedJobClientId || null,
+          params: { id: record?.id != null ? String(record.id) : sid },
+        });
+        await systemEventEmitter.emit(null, {
+          ...SYSTEM_EVENTS.CV_SOURCE,
+          entityType: 'Candidate',
+          entityId: sid,
+          entityName: sname,
+          clientId: resolvedJobClientId || null,
+          params: { source: emailIngestSource },
+        });
+        delete splitCand._pendingCvAudit;
+      }
       const splitFresh = await candidateService.getById(splitCand.id);
       await ensureOrganizationsFromExperience(splitFresh?.workExperience, splitCand.id);
-      try {
-        await embedCandidateAndSave(splitCand.id, tj || '');
-      } catch (embErr) {
-        console.warn('[email] embed split candidate failed', splitCand.id, embErr?.message || embErr);
+      if (!splitHashReused) {
+        try {
+          await embedCandidateAndSave(splitCand.id, tj || '');
+        } catch (embErr) {
+          console.warn('[email] embed split candidate failed', splitCand.id, embErr?.message || embErr);
+        }
       }
       // Mirror row so GET /api/email-uploads/candidate/:id finds this mail for split candidates (same S3 object as primary).
       try {
@@ -1032,28 +1142,36 @@ const processEmailUpload = async (record) => {
           mirrorErr?.message || mirrorErr,
         );
       }
-      await queueWelcome(splitFresh, textChunks[j] || '');
+      if (!splitHashReused) {
+        await queueWelcome(splitFresh, textChunks[j] || '');
+      }
     }
 
-    try {
-      const { row: fresh, email: welcomeEmail } = await ensureCandidateEmailFromCvText(
-        candidate.id,
-        combinedText,
-        emailInFirstCv,
-      );
-      console.log('[email] ingest template email queue (primary CV-by-mail)', {
-        candidateId: fresh?.id,
-        newCandidateThisIngest: candidateCreatedViaEmailIngest,
-        email: welcomeEmail || fresh?.email || null,
-        source: fresh?.source,
-        resolvedJobId: resolvedJob?.id || null,
-        welcomeClientId,
-        postingCode: postingCode || null,
-        splitAttachmentWelcomeCount: splitFileIndices.size,
+    if (!reusedExistingCandidateByHash) {
+      try {
+        const { row: fresh, email: welcomeEmail } = await ensureCandidateEmailFromCvText(
+          candidate.id,
+          combinedText,
+          emailInFirstCv,
+        );
+        console.log('[email] ingest template email queue (primary CV-by-mail)', {
+          candidateId: fresh?.id,
+          newCandidateThisIngest: candidateCreatedViaEmailIngest,
+          email: welcomeEmail || fresh?.email || null,
+          source: fresh?.source,
+          resolvedJobId: resolvedJob?.id || null,
+          welcomeClientId,
+          postingCode: postingCode || null,
+          splitAttachmentWelcomeCount: splitFileIndices.size,
+        });
+        await queueWelcome(fresh, combinedText);
+      } catch (welcomeErr) {
+        console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
+      }
+    } else {
+      console.log('[email] skipping welcome email — hash-reused existing candidate', {
+        candidateId: candidate.id,
       });
-      await queueWelcome(fresh, combinedText);
-    } catch (welcomeErr) {
-      console.warn('[email] ingest template email queue failed', welcomeErr?.message || welcomeErr);
     }
     console.log('[email] resume(s) attached for candidate', candidate.id, record.fileKey, {
       count: totalResumes,

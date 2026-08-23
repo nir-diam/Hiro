@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
     BriefcaseIcon,
     GlobeAmericasIcon,
@@ -10,11 +10,17 @@ import {
 } from './Icons';
 import { useLanguage } from '../context/LanguageContext';
 import {
+    buildJobTagMatchCategories,
+    type JobTagMatchInput,
+} from '../utils/jobTagMatchCategories';
+import { fetchCandidate } from '../utils/candidateJobMatchingApi';
+import {
     isExperienceLayerActive,
     pickBreakdownScore,
     type SonarScoreBreakdown,
     type ParameterMatchStatus,
 } from '../utils/sonarMatchBreakdown';
+import TagMatchPanel, { type TagMatchCategory } from './TagMatchPanel';
 
 export type MatchScoreBreakdownData = SonarScoreBreakdown;
 
@@ -50,6 +56,21 @@ const LAYER_LABEL_KEYS: Record<string, string> = {
     experience: 'job.sonar.layer_experience',
     intent: 'job.sonar.layer_intent',
 };
+
+function jobRecordToTagMatchJob(job: Record<string, unknown>): JobTagMatchInput {
+    const req = job.requirements;
+    const requirements = Array.isArray(req) ? req.map((r) => String(r ?? '').trim()).filter(Boolean) : [];
+    return {
+        title: typeof job.title === 'string' ? job.title : undefined,
+        role: typeof job.role === 'string' ? job.role : undefined,
+        field: typeof job.field === 'string' ? job.field : undefined,
+        skills: Array.isArray(job.skills) ? (job.skills as JobTagMatchInput['skills']) : undefined,
+        languages: Array.isArray(job.languages) ? (job.languages as JobTagMatchInput['languages']) : undefined,
+        requirements,
+        filterPosition: typeof job.filterPosition === 'string' ? job.filterPosition : undefined,
+        filterNotes: typeof job.filterNotes === 'string' ? job.filterNotes : undefined,
+    };
+}
 
 const LAYER_LABEL_FULL_KEYS: Record<string, string> = {
     semantic: 'job.sonar.layer_semantic_full',
@@ -127,26 +148,62 @@ function buildLayerBars(
 
 type PenaltyItem = { key: string; label: string; amount: number };
 
-const LayerBarRow: React.FC<{ layer: LayerBarConfig; compact?: boolean }> = ({ layer, compact }) => {
+const LayerBarRow: React.FC<{
+    layer: LayerBarConfig;
+    compact?: boolean;
+    onClick?: () => void;
+    clickable?: boolean;
+    actionLoading?: boolean;
+    actionLoadingLabel?: string;
+}> = ({ layer, compact, onClick, clickable, actionLoading, actionLoadingLabel }) => {
     const pct = Math.max(0, Math.min(100, layer.score));
     const Icon = layer.Icon;
-    return (
-        <div className={compact ? 'space-y-1.5' : 'space-y-2'}>
+    const shellCls = compact ? 'space-y-1.5' : 'space-y-2';
+    const headerCls = `flex justify-between text-text-default ${compact ? 'text-xs font-semibold' : 'text-sm font-bold'}`;
+    const scoreLabel = actionLoading && actionLoadingLabel ? actionLoadingLabel : `${pct}%`;
+
+    const bar = (
+        <div className={`${compact ? 'h-1.5' : 'h-2.5'} bg-bg-subtle rounded-full overflow-hidden`}>
             <div
-                className={`flex justify-between text-text-default ${compact ? 'text-xs font-semibold' : 'text-sm font-bold'}`}
+                className={`h-full ${layer.barClass} rounded-full transition-all duration-1000`}
+                style={{ width: `${pct}%` }}
+            />
+        </div>
+    );
+
+    if (clickable) {
+        return (
+            <button
+                type="button"
+                onClick={onClick}
+                disabled={actionLoading}
+                className={`${shellCls} w-full text-right rounded-lg -mx-1 px-1 py-0.5 transition-colors hover:bg-bg-subtle/80 disabled:opacity-70 disabled:cursor-wait cursor-pointer group`}
+                aria-label={layer.label}
             >
+                <div className={headerCls}>
+                    <span className="flex items-center gap-1.5 min-w-0">
+                        <Icon className={`${compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} shrink-0 ${layer.iconClass}`} />
+                        <span className="truncate group-hover:text-primary-700">{layer.label}</span>
+                    </span>
+                    <span className={compact ? 'text-text-default shrink-0' : 'text-text-muted shrink-0'}>
+                        {scoreLabel}
+                    </span>
+                </div>
+                {bar}
+            </button>
+        );
+    }
+
+    return (
+        <div className={shellCls}>
+            <div className={headerCls}>
                 <span className="flex items-center gap-1.5 min-w-0">
                     <Icon className={`${compact ? 'w-3.5 h-3.5' : 'w-4 h-4'} shrink-0 ${layer.iconClass}`} />
                     <span className="truncate">{layer.label}</span>
                 </span>
-                <span className={compact ? 'text-text-default shrink-0' : 'text-text-muted shrink-0'}>{pct}%</span>
+                <span className={compact ? 'text-text-default shrink-0' : 'text-text-muted shrink-0'}>{scoreLabel}</span>
             </div>
-            <div className={`${compact ? 'h-1.5' : 'h-2.5'} bg-bg-subtle rounded-full overflow-hidden`}>
-                <div
-                    className={`h-full ${layer.barClass} rounded-full transition-all duration-1000`}
-                    style={{ width: `${pct}%` }}
-                />
-            </div>
+            {bar}
         </div>
     );
 };
@@ -187,6 +244,8 @@ export const MatchScoreBreakdownPanel: React.FC<{
     matchScore,
     jobTitle,
     scoreBreakdown,
+    job,
+    candidate,
     isExperienceEnabled: isExperienceEnabledProp,
     loading,
     professionalSummary,
@@ -197,6 +256,8 @@ export const MatchScoreBreakdownPanel: React.FC<{
     onClose,
 }) => {
     const { t } = useLanguage();
+    const [tagPanelCategories, setTagPanelCategories] = useState<TagMatchCategory[] | null>(null);
+    const [tagPanelLoading, setTagPanelLoading] = useState(false);
     const compact = variant === 'popup';
     const bd = scoreBreakdown;
     const hasLayers = Boolean(bd && typeof bd === 'object');
@@ -212,6 +273,46 @@ export const MatchScoreBreakdownPanel: React.FC<{
         () => buildLayerBars(bd, t, compact, showExperience),
         [bd, t, compact, showExperience],
     );
+
+    const tagJobModel = useMemo(
+        () => (job && typeof job === 'object' ? jobRecordToTagMatchJob(job) : null),
+        [job],
+    );
+    const canOpenTagPanel = Boolean(tagJobModel && candidate && typeof candidate === 'object');
+
+    const enrichCandidateForTags = useCallback(async (c: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        const cid = c.id != null ? String(c.id) : '';
+        const hasDetails = Array.isArray(c.tagDetails) && (c.tagDetails as unknown[]).length > 0;
+        if (!cid || hasDetails) return c;
+        try {
+            const full = await fetchCandidate(cid);
+            return full && typeof full === 'object' ? { ...c, ...full } : c;
+        } catch {
+            return c;
+        }
+    }, []);
+
+    const openTagPanel = useCallback(async () => {
+        if (!tagJobModel || !candidate || typeof candidate !== 'object') return;
+        setTagPanelLoading(true);
+        setTagPanelCategories(null);
+        try {
+            const cand = await enrichCandidateForTags(candidate);
+            setTagPanelCategories(buildJobTagMatchCategories(tagJobModel, cand));
+        } finally {
+            setTagPanelLoading(false);
+        }
+    }, [tagJobModel, candidate, enrichCandidateForTags]);
+
+    const closeTagPanel = useCallback(() => {
+        setTagPanelCategories(null);
+    }, []);
+
+    const tagPanelSubtitle =
+        jobTitle?.trim() ||
+        (typeof job?.title === 'string' ? job.title.trim() : '') ||
+        (typeof job?.client === 'string' ? job.client.trim() : '') ||
+        undefined;
 
     const agePenalty = typeof bd?.ageGapPenalty === 'number' && bd.ageGapPenalty > 0 ? Math.round(bd.ageGapPenalty) : 0;
     const salaryPenalty =
@@ -306,10 +407,29 @@ export const MatchScoreBreakdownPanel: React.FC<{
     const layersBlock = (
         <div className={compact ? 'space-y-3.5 max-h-[14rem] overflow-y-auto custom-scrollbar' : 'space-y-5 pt-2'}>
             {layerBars.map((layer) => (
-                <LayerBarRow key={layer.key} layer={layer} compact={compact} />
+                <LayerBarRow
+                    key={layer.key}
+                    layer={layer}
+                    compact={compact}
+                    clickable={layer.key === 'tags' && canOpenTagPanel}
+                    onClick={layer.key === 'tags' ? () => void openTagPanel() : undefined}
+                    actionLoading={layer.key === 'tags' && tagPanelLoading}
+                    actionLoadingLabel={layer.key === 'tags' && tagPanelLoading ? t('job.sonar.loading_tags') : undefined}
+                />
             ))}
         </div>
     );
+
+    const tagMatchPanel =
+        tagPanelCategories != null ? (
+            <TagMatchPanel
+                isOpen
+                onClose={closeTagPanel}
+                title={displayName}
+                subtitle={tagPanelSubtitle}
+                categories={tagPanelCategories}
+            />
+        ) : null;
 
     const penaltiesBlock =
         penaltyItems.length > 0 ? (
@@ -410,24 +530,30 @@ export const MatchScoreBreakdownPanel: React.FC<{
 
     if (compact) {
         return (
-            <div className={cardCls}>
-                {popupHeader}
-                <div className="p-4">
-                    {scoreBlock}
-                    {layersBlock}
-                    {penaltiesBlock}
-                    {footerBlock}
+            <>
+                <div className={cardCls}>
+                    {popupHeader}
+                    <div className="p-4">
+                        {scoreBlock}
+                        {layersBlock}
+                        {penaltiesBlock}
+                        {footerBlock}
+                    </div>
                 </div>
-            </div>
+                {tagMatchPanel}
+            </>
         );
     }
 
     return (
-        <div className={cardCls}>
-            {scoreBlock}
-            {layersBlock}
-            {penaltiesBlock}
-            {footerBlock}
-        </div>
+        <>
+            <div className={cardCls}>
+                {scoreBlock}
+                {layersBlock}
+                {penaltiesBlock}
+                {footerBlock}
+            </div>
+            {tagMatchPanel}
+        </>
     );
 };

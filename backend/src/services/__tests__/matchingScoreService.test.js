@@ -2,8 +2,37 @@ jest.mock('../vectorSearchService', () => ({
   normalizeEmbedding: (e) => (Array.isArray(e) ? e : []),
 }));
 
+jest.mock('../jobTaxonomyResolver', () => ({
+  loadTaxonomyIndex: jest.fn().mockResolvedValue({}),
+  resolveJobTaxonomy: jest.fn(() => ({})),
+  buildLinkedJobsForIntent: jest.fn().mockResolvedValue([]),
+}));
+
+jest.mock('../embeddingService', () => ({
+  embedText: jest.fn().mockResolvedValue([]),
+}));
+
 jest.mock('../../models/City', () => ({
   findAll: jest.fn(),
+}));
+
+jest.mock('../tagAliasIndexService', () => ({
+  loadTagAliasIndex: jest.fn().mockResolvedValue(new Map()),
+  resolveCanonicalTagKey: (raw, index) => {
+    const term = String(raw ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    if (!term) return '';
+    return index?.get?.(term) || term;
+  },
+  tagKeysEquivalent: (a, b, index) => {
+    const norm = (s) => String(s ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+    const na = norm(a);
+    const nb = norm(b);
+    if (!na || !nb) return false;
+    if (na === nb) return true;
+    const ca = index?.get?.(na) || na;
+    const cb = index?.get?.(nb) || nb;
+    return ca === cb;
+  },
 }));
 
 const City = require('../../models/City');
@@ -130,7 +159,7 @@ describe('computeFullMatchScore formula', () => {
     expect(breakdown.penaltyReasons.length).toBeGreaterThan(0);
   });
 
-  it('computeTagScore respects tagWeights per job skill tagType category', () => {
+  it('computeTagScore uses binary 0/100 per category and respects tagWeights', async () => {
     const candidate = {
       tagDetails: [
         { rawType: 'role', tagKey: 'developer', displayNameHe: 'developer' },
@@ -141,31 +170,35 @@ describe('computeFullMatchScore formula', () => {
       skills: [
         { tagType: 'role', key: 'developer', name: 'developer' },
         { tagType: 'skill', key: 'missing-skill', name: 'missing-skill' },
+        { tagType: 'skill', key: 'another-missing', name: 'another-missing' },
       ],
     };
-    const roleHeavy = computeTagScore(candidate, job, [
+    const roleHeavy = await computeTagScore(candidate, job, [
       { id: 'role', value: 100 },
       { id: 'skill', value: 0 },
-    ], {});
-    const skillHeavy = computeTagScore(candidate, job, [
+    ], {}, new Map());
+    const skillHeavy = await computeTagScore(candidate, job, [
       { id: 'role', value: 0 },
       { id: 'skill', value: 100 },
-    ], {});
-    expect(roleHeavy.score).toBeGreaterThan(skillHeavy.score);
+    ], {}, new Map());
+    expect(roleHeavy.score).toBe(100);
     expect(roleHeavy.breakdown.role).toBe(100);
     expect(roleHeavy.breakdown.skill).toBe(0);
+    expect(skillHeavy.breakdown.role).toBe(100);
+    expect(skillHeavy.breakdown.skill).toBe(0);
+    expect(skillHeavy.score).toBe(0);
   });
 
-  it('returns 0 with empty breakdown when job has no skills', () => {
+  it('returns 0 with empty breakdown when job has no skills', async () => {
     const candidate = {
       tagDetails: [{ rawType: 'skill', tagKey: 'react', displayNameHe: 'react' }],
     };
-    const empty = computeTagScore(candidate, { skills: [] }, [], {});
+    const empty = await computeTagScore(candidate, { skills: [] }, [], {}, new Map());
     expect(empty.score).toBe(0);
     expect(empty.breakdown).toEqual({});
   });
 
-  it('scores below 100 when job skills do not match candidate tags', () => {
+  it('binary category: one matching skill among several still yields 100% for that category', async () => {
     const candidate = {
       tagDetails: [{ rawType: 'skill', tagKey: 'priority_erp', displayNameHe: 'priority' }],
     };
@@ -176,12 +209,39 @@ describe('computeFullMatchScore formula', () => {
         { tagType: 'role', key: 'back_office_desk', name: 'Back office' },
       ],
     };
-    const result = computeTagScore(candidate, job, [
+    const result = await computeTagScore(candidate, job, [
       { id: 'skill', value: 50 },
       { id: 'role', value: 50 },
-    ], {});
-    expect(result.score).toBeLessThan(100);
-    expect(Object.keys(result.breakdown).length).toBeGreaterThan(0);
+    ], {}, new Map());
+    expect(result.breakdown.skill).toBe(100);
+    expect(result.breakdown.role).toBe(0);
+    expect(result.score).toBe(50);
+  });
+
+  it('matches catalog aliases/synonyms within the same category', async () => {
+    const aliasIndex = new Map([
+      ['הנהלת חשבונות', 'bookkeeping'],
+      ['bookkeeping', 'bookkeeping'],
+      ['אנגלית', 'english'],
+      ['english', 'english'],
+    ]);
+    const candidate = {
+      skills: { technical: ['הנהלת חשבונות'] },
+      languages: [{ name: 'אנגלית', level: 9 }],
+    };
+    const job = {
+      skills: [
+        { tagType: 'skill', key: 'bookkeeping', name: 'bookkeeping' },
+        { tagType: 'language', key: 'english', name: 'english' },
+      ],
+    };
+    const result = await computeTagScore(candidate, job, [
+      { id: 'skill', value: 50 },
+      { id: 'language', value: 50 },
+    ], {}, aliasIndex);
+    expect(result.breakdown.skill).toBe(100);
+    expect(result.breakdown.language).toBe(100);
+    expect(result.score).toBe(100);
   });
 
   it('uses cluster intent weight for same category / different cluster (not legacy category:20)', () => {

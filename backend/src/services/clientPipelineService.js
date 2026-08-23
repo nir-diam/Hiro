@@ -23,7 +23,7 @@ function normalizeAutomations(raw) {
   return raw
     .map((a, i) => {
       if (!a || typeof a !== 'object') return null;
-      const actionType = ['send_email', 'send_sms', 'start_pipeline', 'close_event'].includes(a.actionType)
+      const actionType = ['send_email', 'send_sms', 'start_pipeline', 'close_event', 'change_status'].includes(a.actionType)
         ? a.actionType
         : 'send_email';
       const scheduleType = ['immediate', 'minutes', 'hours', 'days'].includes(a.scheduleType)
@@ -37,6 +37,7 @@ function normalizeAutomations(raw) {
       };
       if (a.templateId) item.templateId = String(a.templateId);
       if (a.pipelineId) item.pipelineId = String(a.pipelineId);
+      if (a.statusName) item.statusName = String(a.statusName).trim();
       if (a.scheduleValue != null && a.scheduleValue !== '') {
         item.scheduleValue = Math.max(0, parseInt(a.scheduleValue, 10) || 0);
       }

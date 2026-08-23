@@ -453,12 +453,7 @@ const Sidebar: React.FC<SidebarProps> = ({ isSidebarOpen, onClose }) => {
                                         onClick={() => handleNavigation('/jobs/new')} 
                                         isActive={pathname === '/jobs/new'}
                                     />
-                                     <SubMenuLink 
-                                        to="/jobs/existing"
-                                        label={t('nav.existing_job')}
-                                        onClick={() => handleNavigation('/jobs/existing')} 
-                                        isActive={pathname.startsWith('/jobs/existing')}
-                                    />
+                                    
                                     <SubMenuLink 
                                         to="/jobs/existing/events"
                                         label={t('job_events.title')}

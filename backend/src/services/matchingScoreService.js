@@ -34,6 +34,11 @@ const {
 } = require('./jobTaxonomyResolver');
 const redisService = require('./redisService');
 const { isRedisAvailable } = require('../config/redis');
+const {
+  loadTagAliasIndex,
+  resolveCanonicalTagKey,
+  tagKeysEquivalent,
+} = require('./tagAliasIndexService');
 
 const JOB_EMB_CACHE_TTL = 86_400; // 24 h — embeddings are stable until the job text changes
 
@@ -191,21 +196,19 @@ function resolveTagProvenance(td) {
 
 /**
  * Build a multi-map of { category → Set<normKey> } from a candidate's tags/skills.
- * Also tracks best tag provenance per category:key for sourceWeights.
+ * Keys include raw normalized labels and catalog canonical tag_key (when aliasIndex is set).
  */
-function buildCandidateTagMap(candidate) {
+function buildCandidateTagMap(candidate, aliasIndex = null) {
   /** @type {Record<string, Set<string>>} */
   const byType = {};
   /** @type {Map<string, string>} category:key → recruiter|candidate|ai */
   const keySources = new Map();
 
-  const add = (rawType, rawKey, sourceId = 'ai') => {
-    const t = normalizeTagCategory(rawType);
-    const k = norm(rawKey);
-    if (!k) return;
-    if (!byType[t]) byType[t] = new Set();
-    byType[t].add(k);
-    const mapKey = `${t}:${k}`;
+  const registerKey = (category, key, sourceId = 'ai') => {
+    if (!key) return;
+    if (!byType[category]) byType[category] = new Set();
+    byType[category].add(key);
+    const mapKey = `${category}:${key}`;
     const rank = { recruiter: 3, candidate: 2, ai: 1 };
     const prev = keySources.get(mapKey);
     if (!prev || (rank[sourceId] || 0) > (rank[prev] || 0)) {
@@ -213,11 +216,23 @@ function buildCandidateTagMap(candidate) {
     }
   };
 
+  const add = (rawType, rawKey, sourceId = 'ai') => {
+    const t = normalizeTagCategory(rawType);
+    const k = norm(rawKey);
+    if (!k) return;
+    registerKey(t, k, sourceId);
+    const canonical = aliasIndex?.size ? resolveCanonicalTagKey(k, aliasIndex) : k;
+    if (canonical && canonical !== k) registerKey(t, canonical, sourceId);
+  };
+
   const flat = new Set();
   const addFlat = (rawType, rawKey, sourceId = 'ai') => {
     add(rawType, rawKey, sourceId);
     const k = norm(rawKey);
-    if (k) flat.add(k);
+    if (!k) return;
+    flat.add(k);
+    const canonical = aliasIndex?.size ? resolveCanonicalTagKey(k, aliasIndex) : k;
+    if (canonical && canonical !== k) flat.add(canonical);
   };
 
   const tagDetails = Array.isArray(candidate.tagDetails) ? candidate.tagDetails : [];
@@ -269,32 +284,50 @@ function buildCandidateTagMap(candidate) {
     if (typeof t === 'string') addFlat('skill', t);
   }
 
+  // candidate.languages JSON → language category (e.g. אנגלית → english via alias index)
+  const langs = Array.isArray(candidate.languages) ? candidate.languages : [];
+  for (const lang of langs) {
+    if (!lang || typeof lang !== 'object') continue;
+    const name = lang.name || lang.language || '';
+    if (name) addFlat('language', name, 'candidate');
+  }
+
   return { byType, flat, keySources };
 }
 
-function sourceWeightFactor(sourceWeights, sourceId) {
-  const arr = toWeightArray(sourceWeights);
-  if (!arr.length) return 1;
-  const maxW = Math.max(1, ...arr.map((s) => Number(s.value) || 0));
-  const w = arr.find((s) => s.id === sourceId)?.value;
-  const val = w != null ? Number(w) : 50;
-  return val / maxW;
+/** True when any job skill in the category matches a candidate tag (same category, aliases/synonyms). */
+function categoryHasTagMatch(categorySet, jobSkills, aliasIndex) {
+  if (!categorySet?.size || !jobSkills?.length) return false;
+  for (const skill of jobSkills) {
+    const jobKey = norm(skill.key || skill.name || '');
+    if (!jobKey) continue;
+    const jobCanon = resolveCanonicalTagKey(jobKey, aliasIndex);
+    if (categorySet.has(jobKey) || (jobCanon && categorySet.has(jobCanon))) return true;
+    for (const candKey of categorySet) {
+      if (tagKeysEquivalent(jobKey, candKey, aliasIndex)) return true;
+    }
+  }
+  return false;
 }
 
 /**
+ * Tag layer: each category is binary (0% or 100%) — any single job/candidate tag match
+ * in that category (including catalog aliases/synonyms) yields 100%.
+ *
  * @param {object} candidate
  * @param {object} job
- * @param {Array<{id:string,value:number}>} tagWeights   – from admin config
- * @param {object|Array} sourceWeights – recruiter/candidate/ai weights
- * @returns {{ score: number, breakdown: Record<string, number> }}
+ * @param {Array<{id:string,value:number}>} tagWeights – from admin config
+ * @param {object|Array} [_sourceWeights] – kept for API compat; not used in binary scoring
+ * @param {Map<string, string>|null} [aliasIndex]
+ * @returns {Promise<{ score: number, breakdown: Record<string, number> }>}
  */
-function computeTagScore(candidate, job, tagWeights, sourceWeights = []) {
+async function computeTagScore(candidate, job, tagWeights, _sourceWeights = [], aliasIndex = null) {
   const jobSkills = Array.isArray(job.skills) ? job.skills : [];
   if (!jobSkills.length) return { score: 0, breakdown: {} };
 
-  const { byType, flat: allCandidateKeys, keySources } = buildCandidateTagMap(candidate);
+  const index = aliasIndex || await loadTagAliasIndex();
+  const { byType } = buildCandidateTagMap(candidate, index);
 
-  // Group job requirements by category
   /** @type {Record<string, object[]>} */
   const byCategory = {};
   for (const skill of jobSkills) {
@@ -312,30 +345,11 @@ function computeTagScore(candidate, job, tagWeights, sourceWeights = []) {
   const breakdown   = {};
 
   for (const [category, skills] of Object.entries(byCategory)) {
-    const tw  = tagWeights.find(w => w.id === category);
-    const wgt = tw ? tw.value : 20; // low default for unknown categories
+    const tw  = tagWeights.find((w) => w.id === category);
+    const wgt = tw ? tw.value : 20;
 
     const categorySet = byType[category] || new Set();
-    let matched = 0;
-
-    for (const skill of skills) {
-      const key = norm(skill.key || skill.name || '');
-      if (!key) { matched += 0.5; continue; }
-
-      let credit = 0;
-      if (categorySet.has(key)) {
-        credit = 1;
-      } else if (allCandidateKeys.has(key)) {
-        credit = 0.7;
-      }
-      if (credit > 0) {
-        const src = keySources.get(`${category}:${key}`) || 'ai';
-        matched += credit * sourceWeightFactor(sourceWeights, src);
-      }
-    }
-
-    const ratio         = skills.length > 0 ? matched / skills.length : 1;
-    const categoryScore = clamp(Math.round(ratio * 100));
+    const categoryScore = categoryHasTagMatch(categorySet, skills, index) ? 100 : 0;
 
     totalWeighted += categoryScore * wgt;
     totalWeight   += wgt;
@@ -1113,7 +1127,8 @@ async function computeFullMatchScore(candidate, job, jobEmb, config, linkedInfo 
   const vectorScore  = computeVectorScore(candidateEmb, jobEmb || []);
 
   // ── 2. Tags ─────────────────────────────────────────────────────────────────
-  const tagResult  = computeTagScore(candidate, job, tagWeights, sourceWeights);
+  const aliasIndex = await loadTagAliasIndex();
+  const tagResult  = await computeTagScore(candidate, job, tagWeights, sourceWeights, aliasIndex);
   const tagsScore  = tagResult.score;
 
   // ── 3. Geo ──────────────────────────────────────────────────────────────────
@@ -1356,6 +1371,7 @@ module.exports = {
   computeExperienceScore,
   computeIntentScore,
   buildCandidateTagMap,
+  categoryHasTagMatch,
   getJobEmbedding,
   invalidateCityCache,
   enrichBreakdownForApi,

@@ -3,7 +3,7 @@ import React, { useId, useState, useEffect, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import AccordionSection from './AccordionSection';
 import ContentNavBar from './ContentNavBar';
-import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon, InformationCircleIcon } from './Icons';
+import { ClipboardDocumentCheckIcon, TagIcon, PencilIcon, CalendarDaysIcon, AcademicCapIcon, LanguageIcon, WalletIcon, ChatBubbleOvalLeftEllipsisIcon, EnvelopeIcon, MapPinIcon, PlusIcon, TrashIcon, BriefcaseIcon, LockClosedIcon, XMarkIcon, InformationCircleIcon, ShareIcon } from './Icons';
 import WorkExperienceSection from './WorkExperienceSection';
 import { TagInput } from './TagInput';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
@@ -32,6 +32,8 @@ import {
     type PicklistValueRow,
 } from '../services/picklistValuesApi';
 import { WorkingHoursInput } from './WorkingHoursInput';
+import CityEditableField from './CityEditableField';
+import { candidateCityDisplay, candidateCityPatch } from '../utils/citySearchApi';
 
 const FormInput: React.FC<{ label: string; name: string; value: string; onChange: (e: React.ChangeEvent<HTMLInputElement>) => void; required?: boolean; type?: string; icon?: React.ReactNode }> = ({ label, name, value, onChange, required, type = "text", icon }) => {
     const id = useId();
@@ -385,9 +387,27 @@ const MainContent: React.FC<MainContentProps> = ({
         });
     };
 
+    const isBlockedStatus = String(formData.status || '').trim() === 'חסום';
+
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-        const { name, value } = e.target;
-        updateFormPreserveScroll({ ...formData, [name]: value }, e.target);
+        const { name, value, type } = e.target;
+        const checked = type === 'checkbox' ? (e.target as HTMLInputElement).checked : undefined;
+        if (isBlockedStatus && name.startsWith('distribution')) {
+            return;
+        }
+        let next: Record<string, unknown> = {
+            ...formData,
+            [name]: type === 'checkbox' ? checked : value,
+        };
+        if (name === 'status' && String(value).trim() === 'חסום') {
+            next = {
+                ...next,
+                distributionEmail: false,
+                distributionSms: false,
+                distributionWhatsapp: false,
+            };
+        }
+        updateFormPreserveScroll(next, e.target);
     };
 
     const handleNamePartChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -584,12 +604,28 @@ const MainContent: React.FC<MainContentProps> = ({
                                 <option value="פעיל">פעיל</option>
                                 <option value="חדש">חדש</option>
                                 <option value="עבר בדיקה ראשונית">עבר בדיקה ראשונית</option>
+                                <option value="חסום">חסום</option>
                             </FormSelect>
                         )}
 
                         <FormInput label={t('form.phone')} name="phone" value={formData.phone} onChange={handleInputChange} required />
                         <FormInput label={t('form.email')} name="email" value={formData.email} onChange={handleInputChange} type="email" icon={<EnvelopeIcon className="w-4 h-4" />}/>
-                        <FormInput label={t('form.address')} name="address" value={formData.address} onChange={handleInputChange} required icon={<MapPinIcon className="w-4 h-4" />} />
+                        <div>
+                            <label className="flex items-center text-sm font-semibold text-text-muted mb-1">
+                                {t('form.address')} <span className="text-red-500 mr-1">*</span>
+                                <span className="text-gray-400 mr-2">
+                                    <MapPinIcon className="w-4 h-4" />
+                                </span>
+                            </label>
+                            <CityEditableField
+                                value={candidateCityDisplay(formData)}
+                                placeholder={t('form.address')}
+                                onSave={(val) =>
+                                    onFormChange({ ...formData, ...candidateCityPatch(val) })
+                                }
+                                icon={<MapPinIcon className="w-4 h-4" />}
+                            />
+                        </div>
                         <FormInput label={t('form.id_number')} name="idNumber" value={formData.idNumber} onChange={handleInputChange} />
 
                         <FormSelect
@@ -924,6 +960,58 @@ const MainContent: React.FC<MainContentProps> = ({
             <div id="notes" className="space-y-6">
                 {viewMode === 'recruiter' && (
                     <>
+                        <div id="distribution-channels">
+                            <AccordionSection
+                                title={t('section.distribution_channels')}
+                                icon={<ShareIcon className="w-5 h-5" />}
+                                defaultOpen
+                            >
+                                <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
+                                    <label
+                                        className={`inline-flex items-center gap-2 text-sm font-semibold text-text-default ${isBlockedStatus ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            name="distributionEmail"
+                                            checked={!isBlockedStatus && formData.distributionEmail !== false}
+                                            onChange={handleInputChange}
+                                            disabled={isBlockedStatus}
+                                            className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed"
+                                        />
+                                        <span>{t('section.distribution_email')}</span>
+                                    </label>
+                                    <label
+                                        className={`inline-flex items-center gap-2 text-sm font-semibold text-text-default ${isBlockedStatus ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            name="distributionSms"
+                                            checked={!isBlockedStatus && formData.distributionSms !== false}
+                                            onChange={handleInputChange}
+                                            disabled={isBlockedStatus}
+                                            className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed"
+                                        />
+                                        <span>{t('section.distribution_sms')}</span>
+                                    </label>
+                                    <label
+                                        className={`inline-flex items-center gap-2 text-sm font-semibold text-text-default ${isBlockedStatus ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}`}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            name="distributionWhatsapp"
+                                            checked={!isBlockedStatus && formData.distributionWhatsapp !== false}
+                                            onChange={handleInputChange}
+                                            disabled={isBlockedStatus}
+                                            className="h-4 w-4 rounded border-border-default text-primary-600 focus:ring-primary-500 disabled:cursor-not-allowed"
+                                        />
+                                        <span>{t('section.distribution_whatsapp')}</span>
+                                    </label>
+                                </div>
+                                {isBlockedStatus ? (
+                                    <p className="mt-2 text-xs text-text-muted">{t('section.distribution_blocked_hint')}</p>
+                                ) : null}
+                            </AccordionSection>
+                        </div>
                         <div id="candidate-notes-recruiter">
                             <AccordionSection title={t('section.recruiter_notes')} icon={<ChatBubbleOvalLeftEllipsisIcon className="w-5 h-5"/>} defaultOpen>
                                 <label htmlFor={candidateNotesId} className="sr-only">{t('section.recruiter_notes')}</label>

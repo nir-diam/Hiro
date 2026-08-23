@@ -51,6 +51,8 @@ const Candidate = sequelize.define(
     resumeUrl: DataTypes.STRING,
     /** When resumeUrl was last set (file upload); not updated on parsed-text edits. */
     resumeUploadedAt: { type: DataTypes.DATE, allowNull: true },
+    /** SHA-256 hex of raw CV file bytes at ingest (before AI parse). */
+    resumeContentHash: { type: DataTypes.STRING(64), allowNull: true },
     internalTags: { type: DataTypes.ARRAY(DataTypes.STRING), defaultValue: [] },
     skills: { type: DataTypes.JSONB, defaultValue: { soft: [], technical: [] } },
     languages: { type: DataTypes.JSONB, defaultValue: [] },
@@ -100,6 +102,10 @@ const Candidate = sequelize.define(
     approveByCandidate: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     /** Candidate opted in to platform job offers and marketing email. */
     consentToJobOffers: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+    /** Recruiter-controlled outreach channel toggles (bulk messaging). */
+    distributionEmail: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    distributionSms: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
+    distributionWhatsapp: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
     /** Active candidate lifecycle pipeline (tenant-scoped). */
     candidatePipelineId: { type: DataTypes.UUID, allowNull: true },
     /** Current stage within candidatePipelineId. */

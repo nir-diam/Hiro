@@ -37,6 +37,12 @@ const cache = new Map(); // key = `${trigger}::${event}` → { row, expiresAt }
 
 const cacheKey = (triggerName, eventName) => `${triggerName}::${eventName}`;
 
+/** Legacy DB rows may use older Hebrew labels — try aliases before skipping emit. */
+const SYSTEM_EVENT_NAME_ALIASES = {
+  'מועמד::אישור הפרופיל על ידי המועמד': ['מועמד::אישר את הפרופיל'],
+  'מועמד::אישר את הפרופיל': ['מועמד::אישור הפרופיל על ידי המועמד'],
+};
+
 const loadFromDb = async (triggerName, eventName) => {
   const row = await SystemEvent.findOne({
     where: { triggerName, eventName },
@@ -49,7 +55,18 @@ const getRow = async (triggerName, eventName) => {
   const now = Date.now();
   const hit = cache.get(key);
   if (hit && hit.expiresAt > now) return hit.row;
-  const row = await loadFromDb(triggerName, eventName);
+
+  let row = await loadFromDb(triggerName, eventName);
+  if (!row) {
+    const aliases = SYSTEM_EVENT_NAME_ALIASES[key] || [];
+    for (const altKey of aliases) {
+      const sep = altKey.indexOf('::');
+      if (sep <= 0) continue;
+      row = await loadFromDb(altKey.slice(0, sep), altKey.slice(sep + 2));
+      if (row) break;
+    }
+  }
+
   cache.set(key, { row, expiresAt: now + CACHE_TTL_MS });
   return row;
 };
@@ -118,6 +135,8 @@ const emit = async (req, options = {}) => {
       entityType,
       entityId,
       entityName,
+      clientId: explicitClientId,
+      jobCandidateId: explicitJobCandidateId,
       params = {},
       level,
       action,
@@ -159,7 +178,13 @@ const emit = async (req, options = {}) => {
           eventName: row.eventName,
           entityType: normalizedEntity,
           entityId: entityId != null ? String(entityId) : null,
-          clientId: req?.dbUser?.clientId || null,
+          clientId: explicitClientId || req?.dbUser?.clientId || null,
+          jobCandidateId:
+            explicitJobCandidateId != null
+              ? String(explicitJobCandidateId)
+              : params.jobCandidateId != null
+                ? String(params.jobCandidateId)
+                : null,
         });
       } catch (dispatchErr) {
         console.error('[systemEventEmitter] pipeline dispatch failed', dispatchErr.message || dispatchErr);

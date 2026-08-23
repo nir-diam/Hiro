@@ -43,7 +43,7 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
         company: '',
         role: '',
         link: '',
-        cvFile: 'שי שני ניהול הפצה',
+        cvFile: '',
         date: new Date().toISOString().split('T')[0],
         notes: '',
         status: 'נשלח',
@@ -57,7 +57,7 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
                 company: initialData.company,
                 role: initialData.role,
                 link: initialData.link || '',
-                cvFile: initialData.cvFile || 'שי שני ניהול הפצה',
+                cvFile: initialData.cvFile || '',
                 date: initialData.date,
                 notes: initialData.notes || '',
                 status: initialData.status || 'נשלח',
@@ -69,7 +69,7 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
                 company: '',
                 role: '',
                 link: '',
-                cvFile: 'שי שני ניהול הפצה',
+                cvFile: '',
                 date: new Date().toISOString().split('T')[0],
                 notes: '',
                 status: 'נשלח',
@@ -94,8 +94,8 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
 
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
+        if (isSaving) return;
         onSave(formData);
-        onClose();
     };
 
     return (

@@ -17,7 +17,7 @@ import {
 import ProcessEventModal, { type ProcessEventSavePayload } from './ProcessEventModal';
 import ProcessManagementCatalogPanel from './ProcessManagementCatalogPanel';
 import { authHeaders } from '../utils/authHeaders';
-import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
+import { fetchPipelines, type PipelineDto, type PipelineStageDto } from '../services/pipelinesApi';
 import { fetchCandidatePipelines } from '../services/candidatePipelinesApi';
 import { fetchStaffUsers } from '../services/usersApi';
 import { fetchSystemEvents } from '../services/systemEventsApi';
@@ -27,7 +27,13 @@ import {
   type EnrichedPipeline,
 } from '../utils/processManagementCatalog';
 import { applyOutcomeDueDate, outcomeActionSubtitle, summarizeAutomationResults } from '../utils/processOutcomeSla';
-import { executePipelineOutcome } from '../services/pipelineOutcomesApi';
+import { approvePipelineAutomations, executePipelineOutcome } from '../services/pipelineOutcomesApi';
+import {
+  automationErrors,
+  pendingAutomationRows,
+  type PendingAutomationRow,
+} from '../utils/automationApproval';
+import AutomationApprovalModal from './AutomationApprovalModal';
 import {
   buildMoveTargetOptions,
   resolveStageIdFromMoveTargetLabel,
@@ -52,7 +58,14 @@ export type JournalEvent = {
   stage: string;
   stageId?: string | null;
   type?: string[];
+  metadata?: Record<string, unknown>;
   updates: Array<{ id: string; title: string; date: string; creator: string }>;
+};
+
+type ActionPipelineContext = {
+  pipeline: PipelineDto;
+  pipelineKind: 'client' | 'candidate';
+  stage: PipelineStageDto;
 };
 
 type ActionOutcome = {
@@ -68,7 +81,7 @@ type ActionOutcome = {
 const SYSTEM_EVENT_GROUPS_FALLBACK: Array<{ label: string; events: Array<{ value: string; label: string }> }> = [
   {
     label: 'פורטל מועמד',
-    events: [{ value: 'candidate_confirmed_profile', label: 'מועמד.אישר_את_הפרופיל' }],
+    events: [{ value: 'candidate_confirmed_profile', label: 'מועמד.אישור הפרופיל על ידי המועמד' }],
   },
   {
     label: 'אישורי הגעה',
@@ -117,9 +130,60 @@ const matchPipelineForEvent = (
   return found || pipelines[0];
 };
 
+const resolveCandidateIdFromEvent = (event: JournalEvent): string | null => {
+  const meta = event.metadata;
+  if (meta?.candidateId) return String(meta.candidateId);
+  if (meta?.missingDetailsCompletedCandidate) return String(meta.missingDetailsCompletedCandidate);
+  if (meta?.profileApprovedByCandidate) return String(meta.profileApprovedByCandidate);
+  return null;
+};
+
+const resolveActionPipelineContext = (
+  event: JournalEvent,
+  actionPipelineId: string | null,
+  clientPipelines: PipelineDto[],
+  candidatePipelines: PipelineDto[],
+): ActionPipelineContext | null => {
+  const build = (pipeline: PipelineDto, pipelineKind: 'client' | 'candidate'): ActionPipelineContext | null => {
+    const stage = matchStageForEvent(event, pipeline);
+    if (!stage) return null;
+    return { pipeline, pipelineKind, stage };
+  };
+
+  if (actionPipelineId) {
+    const fromClient = clientPipelines.find((p) => p.id === actionPipelineId);
+    if (fromClient) return build(fromClient, 'client');
+    const fromCandidate = candidatePipelines.find((p) => p.id === actionPipelineId);
+    if (fromCandidate) return build(fromCandidate, 'candidate');
+  }
+
+  if (event.processId) {
+    const byClient = clientPipelines.find((p) => p.id === event.processId);
+    if (byClient) return build(byClient, 'client');
+    const byCandidate = candidatePipelines.find((p) => p.id === event.processId);
+    if (byCandidate) return build(byCandidate, 'candidate');
+  }
+
+  const clientMatch = matchPipelineForEvent(event, clientPipelines);
+  if (clientMatch) return build(clientMatch, 'client');
+
+  const candidateMatch = matchPipelineForEvent(event, candidatePipelines);
+  if (candidateMatch) return build(candidateMatch, 'candidate');
+
+  if (clientPipelines[0]) return build(clientPipelines[0], 'client');
+  if (candidatePipelines[0]) return build(candidatePipelines[0], 'candidate');
+  return null;
+};
+
 const matchStageForEvent = (event: JournalEvent, pipeline: PipelineDto) => {
   const stages = [...(pipeline.stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   if (!stages.length) return undefined;
+
+  const meta = event.metadata;
+  if (meta?.lastKanbanStageId) {
+    const byKanban = stages.find((s) => s.id === String(meta.lastKanbanStageId));
+    if (byKanban) return byKanban;
+  }
 
   const stageName = String(event.stage || '').trim().toLowerCase();
   const byName = stageName
@@ -148,13 +212,20 @@ const matchStageForEvent = (event: JournalEvent, pipeline: PipelineDto) => {
 const resolveStageIdForEvent = (
   event: JournalEvent,
   stageName: string,
-  pipelines: PipelineDto[],
+  clientPipelines: PipelineDto[],
+  candidatePipelines: PipelineDto[] = [],
+  actionPipelineId: string | null = null,
 ): string | null => {
   const trimmed = String(stageName || '').trim();
   if (!trimmed) return event.stageId || null;
-  const pipeline = matchPipelineForEvent(event, pipelines);
-  if (!pipeline) return event.stageId || null;
-  const resolved = resolveStageIdFromMoveTargetLabel(trimmed, pipeline.stages || []);
+  const ctx = resolveActionPipelineContext(
+    event,
+    actionPipelineId,
+    clientPipelines,
+    candidatePipelines,
+  );
+  if (!ctx) return event.stageId || null;
+  const resolved = resolveStageIdFromMoveTargetLabel(trimmed, ctx.pipeline.stages || []);
   if (resolved) return resolved;
   return event.stageId || null;
 };
@@ -274,6 +345,10 @@ const normalizeRow = (raw: Record<string, unknown>): JournalEvent => {
     stage: String(raw.stage || types[1] || ''),
     stageId: raw.stageId ? String(raw.stageId) : null,
     type: types,
+    metadata:
+      raw.metadata && typeof raw.metadata === 'object' && !Array.isArray(raw.metadata)
+        ? (raw.metadata as Record<string, unknown>)
+        : undefined,
     updates: resolveStatusUpdates(raw),
   };
 };
@@ -282,8 +357,14 @@ const eventMatchesContact = (
   event: JournalEvent,
   contactId?: string | null,
   contactName?: string | null,
+  candidateId?: string | null,
 ): boolean => {
-  if (!contactId && !contactName) return true;
+  if (candidateId) {
+    const fromMeta = resolveCandidateIdFromEvent(event);
+    if (fromMeta && String(fromMeta) === String(candidateId)) return true;
+    if (event.contactId && String(event.contactId) === String(candidateId)) return true;
+  }
+  if (!contactId && !contactName && !candidateId) return true;
   if (contactId && event.contactId && String(event.contactId) === String(contactId)) return true;
   if (contactName && event.contactName && String(event.contactName).includes(contactName)) return true;
   if (contactName) {
@@ -293,14 +374,32 @@ const eventMatchesContact = (
   return false;
 };
 
+const eventMatchesJobScope = (
+  event: JournalEvent,
+  jobId?: string | null,
+  jobLinkId?: string | null,
+  jobTitle?: string | null,
+  jobCompany?: string | null,
+): boolean => {
+  if (!jobId && !jobLinkId && !jobTitle && !jobCompany) return true;
+  const meta = event.metadata || {};
+  if (jobId && meta.jobId != null && String(meta.jobId) === String(jobId)) return true;
+  if (jobLinkId && meta.jobCandidateId != null && String(meta.jobCandidateId) === String(jobLinkId)) {
+    return true;
+  }
+  const blob = `${event.title || ''} ${event.description || ''} ${event.process || ''}`.toLowerCase();
+  const title = String(jobTitle || '').trim().toLowerCase();
+  const company = String(jobCompany || '').trim().toLowerCase();
+  if (title && title !== '—' && blob.includes(title)) return true;
+  if (company && company !== '—' && blob.includes(company)) return true;
+  return false;
+};
+
 /**
  * Sidebar "פעולות אפשריות" = stage.outcomes from Pipeline Settings
  * (same records configured under each stage in PipelineSettingsView).
  */
-function resolveOutcomesForEvent(event: JournalEvent, pipelines: PipelineDto[]): ActionOutcome[] {
-  const pipeline = matchPipelineForEvent(event, pipelines);
-  if (!pipeline) return [];
-  const stage = matchStageForEvent(event, pipeline);
+function resolveOutcomesForStage(stage: PipelineStageDto | undefined): ActionOutcome[] {
   if (!stage) return [];
 
   return (stage.outcomes || [])
@@ -319,11 +418,18 @@ function resolveOutcomesForEvent(event: JournalEvent, pipelines: PipelineDto[]):
 /** Stage names and outcome labels for the "השלב הבא" edit dropdown. */
 function resolveStagesForEvent(
   event: JournalEvent,
-  pipelines: PipelineDto[],
+  clientPipelines: PipelineDto[],
+  candidatePipelines: PipelineDto[] = [],
+  actionPipelineId: string | null = null,
 ): Array<{ id: string; title: string }> {
-  const pipeline = matchPipelineForEvent(event, pipelines);
-  if (!pipeline) return [];
-  return buildMoveTargetOptions(pipeline.stages || []).map((option) => ({
+  const ctx = resolveActionPipelineContext(
+    event,
+    actionPipelineId,
+    clientPipelines,
+    candidatePipelines,
+  );
+  if (!ctx) return [];
+  return buildMoveTargetOptions(ctx.pipeline.stages || []).map((option) => ({
     id: option.value,
     title: option.label,
   }));
@@ -335,10 +441,21 @@ type Props = {
   /** When set, only events for this contact are shown (contact profile tab). */
   scopeContactId?: string | null;
   scopeContactName?: string | null;
+  /** Match events by metadata.candidateId (candidate process modal). */
+  scopeCandidateId?: string | null;
+  scopeJobId?: string | null;
+  scopeJobLinkId?: string | null;
+  scopeJobTitle?: string | null;
+  scopeJobCompany?: string | null;
   /** Hide the top filter bar (e.g. on contact profile). */
   hideFilters?: boolean;
   /** Always show description/history — no collapsed state (contact profile). */
   alwaysShowDetails?: boolean;
+  /** Fit inside CandidateProcessManagementModal shell. */
+  embeddedInModal?: boolean;
+  defaultActionPipelineId?: string | null;
+  autoSelectFirstEvent?: boolean;
+  onEventsChanged?: () => void;
 };
 
 const ClientsEventsJournalTab: React.FC<Props> = ({
@@ -346,8 +463,17 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   defaultClientId = null,
   scopeContactId = null,
   scopeContactName = null,
+  scopeCandidateId = null,
+  scopeJobId = null,
+  scopeJobLinkId = null,
+  scopeJobTitle = null,
+  scopeJobCompany = null,
   hideFilters = false,
   alwaysShowDetails = false,
+  embeddedInModal = false,
+  defaultActionPipelineId = null,
+  autoSelectFirstEvent = false,
+  onEventsChanged,
 }) => {
   const { user } = useAuth();
   const apiBase = (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
@@ -389,6 +515,19 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [systemEventGroups, setSystemEventGroups] = useState(SYSTEM_EVENT_GROUPS_FALLBACK);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [pipelinesLoading, setPipelinesLoading] = useState(false);
+  const [automationApproval, setAutomationApproval] = useState<{
+    pipelineKind: 'client' | 'candidate';
+    clientId: string;
+    pipelineId: string;
+    stageId: string;
+    outcomeId: string;
+    outcomeName: string;
+    context: {
+      clientEventId?: string;
+      candidateId?: string;
+    };
+    pending: PendingAutomationRow[];
+  } | null>(null);
 
   const statusDropdownRef = useRef<HTMLDivElement>(null);
   const activeDropdownRef = useRef<HTMLDivElement>(null);
@@ -400,7 +539,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setError(null);
     try {
       const scopedClientId = defaultClientId || clientOptions[0]?.id || '';
-      if (scopedClientId && (scopeContactId || scopeContactName)) {
+      if (scopedClientId && (scopeContactId || scopeContactName || scopeCandidateId)) {
         const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events`, {
           credentials: 'include',
           headers: authHeaders(),
@@ -438,10 +577,27 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     } finally {
       setLoading(false);
     }
-  }, [apiBase, defaultClientId, clientOptions, scopeContactId, scopeContactName]);
+  }, [apiBase, defaultClientId, clientOptions, scopeContactId, scopeContactName, scopeCandidateId]);
 
   useEffect(() => {
     void load();
+  }, [load]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const reloadJournal = () => {
+      void load();
+    };
+    window.addEventListener('hiro:candidate-profile-approved', reloadJournal);
+    window.addEventListener('hiro:candidate-missing-details-completed', reloadJournal);
+    window.addEventListener('hiro:outbound-message-logged', reloadJournal);
+    window.addEventListener('hiro:candidate-pipeline-stage-moved', reloadJournal);
+    return () => {
+      window.removeEventListener('hiro:candidate-profile-approved', reloadJournal);
+      window.removeEventListener('hiro:candidate-missing-details-completed', reloadJournal);
+      window.removeEventListener('hiro:outbound-message-logged', reloadJournal);
+      window.removeEventListener('hiro:candidate-pipeline-stage-moved', reloadJournal);
+    };
   }, [load]);
 
   const catalogClientIds = useMemo(() => {
@@ -584,25 +740,81 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     if (event?.isActive === false) setEditingDescriptionId(null);
   }, [events, editingDescriptionId]);
 
+  const selectedClientPipelines = useMemo(
+    () => (selectedEvent?.clientId ? pipelinesByClient[selectedEvent.clientId] || [] : []),
+    [selectedEvent?.clientId, pipelinesByClient],
+  );
+
+  const selectedCandidatePipelines = useMemo(
+    () => (selectedEvent?.clientId ? candidatePipelinesByClient[selectedEvent.clientId] || [] : []),
+    [selectedEvent?.clientId, candidatePipelinesByClient],
+  );
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      setActionPipelineId(null);
+      return;
+    }
+    const clientP = pipelinesByClient[selectedEvent.clientId] || [];
+    const candP = candidatePipelinesByClient[selectedEvent.clientId] || [];
+    if (
+      defaultActionPipelineId &&
+      candP.some((p) => p.id === defaultActionPipelineId)
+    ) {
+      setActionPipelineId(defaultActionPipelineId);
+      setSelectedPipelineIds(new Set([defaultActionPipelineId]));
+      return;
+    }
+    if (selectedEvent.processId) {
+      if (candP.some((p) => p.id === selectedEvent.processId) || clientP.some((p) => p.id === selectedEvent.processId)) {
+        setActionPipelineId(selectedEvent.processId);
+        setSelectedPipelineIds(new Set([selectedEvent.processId]));
+        return;
+      }
+    }
+    const ctx = resolveActionPipelineContext(selectedEvent, null, clientP, candP);
+    if (ctx) {
+      setActionPipelineId(ctx.pipeline.id);
+      setSelectedPipelineIds(new Set([ctx.pipeline.id]));
+    }
+  }, [
+    selectedEvent?.id,
+    selectedEvent?.clientId,
+    selectedEvent?.processId,
+    pipelinesByClient,
+    candidatePipelinesByClient,
+    defaultActionPipelineId,
+  ]);
+
+  const actionPipelineContext = useMemo((): ActionPipelineContext | null => {
+    if (!selectedEvent) return null;
+    return resolveActionPipelineContext(
+      selectedEvent,
+      actionPipelineId,
+      selectedClientPipelines,
+      selectedCandidatePipelines,
+    );
+  }, [selectedEvent, actionPipelineId, selectedClientPipelines, selectedCandidatePipelines]);
+
   const currentOutcomes = useMemo(() => {
-    if (!selectedEvent) return [] as ActionOutcome[];
-    const outcomes = resolveOutcomesForEvent(selectedEvent, pipelinesByClient[selectedEvent.clientId] || []);
-    const pipeline = matchPipelineForEvent(selectedEvent, pipelinesByClient[selectedEvent.clientId] || []);
-    const stage = pipeline ? matchStageForEvent(selectedEvent, pipeline) : undefined;
-    if (!stage?.id) return outcomes;
-    return filterOutcomesByStageSelection(outcomes, stage.id, selectedStageOutcomeKeys);
-  }, [selectedEvent, pipelinesByClient, selectedStageOutcomeKeys]);
+    if (!actionPipelineContext?.stage) return [] as ActionOutcome[];
+    const outcomes = resolveOutcomesForStage(actionPipelineContext.stage);
+    if (!actionPipelineContext.stage.id) return outcomes;
+    return filterOutcomesByStageSelection(
+      outcomes,
+      actionPipelineContext.stage.id,
+      selectedStageOutcomeKeys,
+    );
+  }, [actionPipelineContext, selectedStageOutcomeKeys]);
 
   const currentStageLabel = useMemo(() => {
-    if (!selectedEvent) return '';
-    const pipeline = matchPipelineForEvent(
-      selectedEvent,
-      pipelinesByClient[selectedEvent.clientId] || [],
-    );
-    if (!pipeline) return selectedEvent.stage || '';
-    const stage = matchStageForEvent(selectedEvent, pipeline);
-    return stage?.name || selectedEvent.stage || '';
-  }, [selectedEvent, pipelinesByClient]);
+    if (!actionPipelineContext) return selectedEvent?.stage || '';
+    return actionPipelineContext.stage.name || selectedEvent?.stage || '';
+  }, [actionPipelineContext, selectedEvent?.stage]);
+
+  const currentPipelineLabel = useMemo(() => {
+    return actionPipelineContext?.pipeline.name || selectedEvent?.process || '';
+  }, [actionPipelineContext, selectedEvent?.process]);
 
   const allCompanies = useMemo(
     () => Array.from(new Set(events.map((e) => e.clientName).filter(Boolean))).sort((a, b) => a.localeCompare(b, 'he')),
@@ -612,8 +824,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const activeStateOptions = ['פעיל', 'לא פעיל'];
 
   const filteredEvents = useMemo(() => {
-    return events.filter((event) => {
-      if (!eventMatchesContact(event, scopeContactId, scopeContactName)) return false;
+    const scoped = events.filter((event) => {
+      if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
       if (
         !eventMatchesPipelineFilters(
           event,
@@ -637,10 +849,20 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
       return true;
     });
+    if (!scopeJobId && !scopeJobLinkId && !scopeJobTitle && !scopeJobCompany) return scoped;
+    const jobScoped = scoped.filter((event) =>
+      eventMatchesJobScope(event, scopeJobId, scopeJobLinkId, scopeJobTitle, scopeJobCompany),
+    );
+    return jobScoped.length > 0 ? jobScoped : scoped;
   }, [
     events,
     scopeContactId,
     scopeContactName,
+    scopeCandidateId,
+    scopeJobId,
+    scopeJobLinkId,
+    scopeJobTitle,
+    scopeJobCompany,
     selectedPipelineIds,
     selectedStageOutcomeKeys,
     allPipelinesCatalog,
@@ -650,6 +872,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     dateFrom,
     dateTo,
   ]);
+
+  useEffect(() => {
+    if (!autoSelectFirstEvent || expandedEventId || !filteredEvents.length) return;
+    const preferred = filteredEvents.find((e) => e.isActive !== false) || filteredEvents[0];
+    if (preferred) setExpandedEventId(preferred.id);
+  }, [autoSelectFirstEvent, filteredEvents, expandedEventId]);
 
   const toggleSet = (setter: React.Dispatch<React.SetStateAction<Set<string>>>, value: string) => {
     setter((prev) => {
@@ -692,22 +920,29 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const handleLogOutcome = async (outcome: ActionOutcome) => {
     if (!selectedEvent || selectedEvent.isActive === false) return;
-    const pipelines = pipelinesByClient[selectedEvent.clientId] || [];
-    const pipeline = matchPipelineForEvent(selectedEvent, pipelines);
-    const currentStage = pipeline ? matchStageForEvent(selectedEvent, pipeline) : undefined;
-    if (!pipeline?.id || !currentStage?.id) {
+    if (!actionPipelineContext?.pipeline.id || !actionPipelineContext.stage.id) {
       alert('לא נמצא תהליך או שלb לתוצאה זו');
+      return;
+    }
+
+    const { pipeline, pipelineKind, stage } = actionPipelineContext;
+    const candidateId = resolveCandidateIdFromEvent(selectedEvent);
+    if (pipelineKind === 'candidate' && !candidateId) {
+      alert('לא נמצא מועמד מקושר לאירוע זה');
       return;
     }
 
     try {
       const result = await executePipelineOutcome({
-        pipelineKind: 'client',
+        pipelineKind,
         clientId: selectedEvent.clientId,
         pipelineId: pipeline.id,
-        stageId: currentStage.id,
+        stageId: stage.id,
         outcomeId: outcome.id,
-        context: { clientEventId: selectedEvent.id },
+        context: {
+          clientEventId: selectedEvent.id,
+          ...(pipelineKind === 'candidate' && candidateId ? { candidateId } : {}),
+        },
         source: 'manual',
       });
 
@@ -728,22 +963,73 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         );
       }
 
-      const pending = (result.automationResults || []).filter((r) => r.status === 'pending_approval');
-      const errors = (result.automationResults || []).filter((r) => r.status === 'error');
+      if (
+        pipelineKind === 'candidate' &&
+        candidateId &&
+        typeof window !== 'undefined'
+      ) {
+        const nextStageId =
+          typeof result.actionResult?.nextStageId === 'string'
+            ? result.actionResult.nextStageId
+            : stage.id;
+        window.dispatchEvent(
+          new CustomEvent('hiro:candidate-pipeline-stage-moved', {
+            detail: { candidateId, pipelineId: pipeline.id, stageId: nextStageId },
+          }),
+        );
+      }
+
+      const pending = pendingAutomationRows(result.automationResults);
+      const errors = automationErrors(result.automationResults);
       const automationSummary = summarizeAutomationResults(result.automationResults);
       if (errors.length) {
         alert(errors.map((e) => e.message || 'שגיאת אוטומציה').join('\n'));
       } else if (pending.length) {
-        alert(`${pending.length} אוטומציות ממתינות לאישור ידני`);
+        setAutomationApproval({
+          pipelineKind,
+          clientId: selectedEvent.clientId,
+          pipelineId: pipeline.id,
+          stageId: stage.id,
+          outcomeId: outcome.id,
+          outcomeName: outcome.title,
+          context: {
+            clientEventId: selectedEvent.id,
+            ...(pipelineKind === 'candidate' && candidateId ? { candidateId } : {}),
+          },
+          pending,
+        });
       } else if (automationSummary) {
         alert(`הפעולה בוצעה · ${automationSummary}`);
       }
 
       await load();
+      onEventsChanged?.();
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'עדכון הסטטוס נכשלה');
       await load();
     }
+  };
+
+  const handleApproveAutomations = async (automationIds: string[]) => {
+    if (!automationApproval) return;
+    const result = await approvePipelineAutomations({
+      pipelineKind: automationApproval.pipelineKind,
+      clientId: automationApproval.clientId,
+      pipelineId: automationApproval.pipelineId,
+      stageId: automationApproval.stageId,
+      outcomeId: automationApproval.outcomeId,
+      context: automationApproval.context,
+      automationIds,
+    });
+    const errors = automationErrors(result.automationResults);
+    const automationSummary = summarizeAutomationResults(result.automationResults);
+    if (errors.length) {
+      alert(errors.map((e) => e.message || 'שגיאת אוטומציה').join('\n'));
+    } else if (automationSummary) {
+      alert(`הפעולה בוצעה · ${automationSummary}`);
+    }
+    await load();
+    onEventsChanged?.();
   };
 
   const handleReactivateEvent = async (event: JournalEvent) => {
@@ -766,6 +1052,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         e.id === event.id && e.clientId === event.clientId ? result.row : e,
       ),
     );
+    onEventsChanged?.();
   };
 
   const handleEditDescription = (event: JournalEvent) => {
@@ -797,11 +1084,19 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const handleSaveDescription = async (event: JournalEvent) => {
     const actor = editAssigneeValue || user?.name || 'אני';
-    const pipelines = pipelinesByClient[event.clientId] || [];
+    const clientPipelines = pipelinesByClient[event.clientId] || [];
+    const candidatePipelines = candidatePipelinesByClient[event.clientId] || [];
+    const pipelineIdForEvent = event.id === selectedEvent?.id ? actionPipelineId : null;
     const stageChanged = Boolean(editNextStageValue.trim());
     const nextStageName = stageChanged ? editNextStageValue.trim() : event.stage;
     const nextStageId = stageChanged
-      ? resolveStageIdForEvent(event, nextStageName, pipelines)
+      ? resolveStageIdForEvent(
+          event,
+          nextStageName,
+          clientPipelines,
+          candidatePipelines,
+          pipelineIdForEvent,
+        )
       : event.stageId;
     const nextUpdates = stageChanged
       ? [
@@ -865,6 +1160,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     );
     setEditingDescriptionId(null);
     setEditNextStageValue('');
+    onEventsChanged?.();
   };
 
   const handleCreateProcessEvent = async (data: ProcessEventSavePayload) => {
@@ -884,13 +1180,20 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       stage: data.stageName,
       stageId: data.stageId,
       dueDate: new Date(Date.now() + (data.slaDays || 0) * 86400000).toISOString().slice(0, 10),
-      linkedTo: data.contactId || scopeContactId
+      linkedTo: data.contactId || scopeContactId || scopeCandidateId
         ? {
-            type: 'איש קשר',
-            id: data.contactId || scopeContactId,
+            type: scopeCandidateId ? 'מועמד' : 'איש קשר',
+            id: data.contactId || scopeContactId || scopeCandidateId,
             name: data.contactName || scopeContactName || '',
           }
         : { type: 'לקוח', name: data.clientName || '' },
+      metadata: {
+        ...(scopeCandidateId ? { candidateId: scopeCandidateId } : {}),
+        ...(scopeJobId ? { jobId: scopeJobId } : {}),
+        ...(scopeJobLinkId ? { jobCandidateId: scopeJobLinkId } : {}),
+        ...(scopeJobTitle && scopeJobTitle !== '—' ? { jobTitle: scopeJobTitle } : {}),
+        ...(scopeJobCompany && scopeJobCompany !== '—' ? { jobCompany: scopeJobCompany } : {}),
+      },
       history: [
         {
           user: data.assignee || 'אני',
@@ -910,6 +1213,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       throw new Error((err as { message?: string }).message || 'יצירת האירוע נכשלה');
     }
     await load();
+    onEventsChanged?.();
   };
 
   const createClientName =
@@ -929,10 +1233,22 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     !!dateTo;
 
   return (
-    <div className="bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col overflow-hidden min-h-[560px]">
-      <div className="flex flex-col h-full bg-bg-default rounded-2xl border border-border-default overflow-hidden">
+    <div
+      className={
+        embeddedInModal
+          ? 'flex flex-col flex-1 min-h-0 overflow-hidden'
+          : 'bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col overflow-hidden min-h-[560px]'
+      }
+    >
+      <div
+        className={
+          embeddedInModal
+            ? 'flex flex-col flex-1 min-h-0 overflow-hidden'
+            : 'flex flex-col h-full bg-bg-default rounded-2xl border border-border-default overflow-hidden'
+        }
+      >
         {/* Filters */}
-        {!hideFilters ? (
+        {!hideFilters && !embeddedInModal ? (
         <div className="bg-bg-card p-4 border-b border-border-default flex flex-wrap items-end gap-4 shadow-sm z-10 relative">
           <div className="flex items-center gap-2 text-primary-700 font-bold ml-2">
             <FunnelIcon className="w-5 h-5" />
@@ -1095,7 +1411,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         </div>
         ) : null}
 
-        <div className="flex flex-col md:flex-row gap-6 p-4 flex-1 overflow-hidden bg-bg-subtle">
+        <div className={`flex flex-col md:flex-row gap-6 p-4 flex-1 overflow-hidden bg-bg-subtle ${embeddedInModal ? 'min-h-0' : ''}`}>
           {/* Events list */}
           <div className="flex-1 bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden">
             <div className="p-4 border-b border-border-default flex flex-wrap justify-between items-center gap-3 bg-gray-50/50">
@@ -1253,7 +1569,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                   <p className="text-[12px] text-text-muted mb-1.5">
                                     שלב נוכחי:{' '}
                                     <span className="font-bold text-amber-800">
-                                      {matchStageForEvent(event, pipelinesByClient[event.clientId] || [])?.name ||
+                                      {resolveActionPipelineContext(
+                                        event,
+                                        event.id === selectedEvent?.id ? actionPipelineId : null,
+                                        pipelinesByClient[event.clientId] || [],
+                                        candidatePipelinesByClient[event.clientId] || [],
+                                      )?.stage.name ||
                                         event.stage ||
                                         '—'}
                                     </span>
@@ -1267,6 +1588,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                                     {resolveStagesForEvent(
                                       event,
                                       pipelinesByClient[event.clientId] || [],
+                                      candidatePipelinesByClient[event.clientId] || [],
+                                      event.id === selectedEvent?.id ? actionPipelineId : null,
                                     ).map((o) => (
                                       <option key={o.id} value={o.title}>
                                         {o.title}
@@ -1494,33 +1817,12 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                     הפעל מחדש
                   </button>
                 </div>
-              ) : pipelinesLoading && !pipelinesByClient[selectedEvent.clientId] ? (
+              ) : pipelinesLoading &&
+                !pipelinesByClient[selectedEvent.clientId] &&
+                !candidatePipelinesByClient[selectedEvent.clientId] ? (
                 <div className="text-center py-8 text-sm text-text-muted">טוען פעולות מתהליך העבודה...</div>
               ) : (
                 <div className="space-y-2">
-                  <ProcessManagementCatalogPanel
-                    variant="sidebar"
-                    clientPipelines={
-                      selectedEvent?.clientId
-                        ? clientPipelinesCatalog.filter((p) => p.clientId === selectedEvent.clientId)
-                        : clientPipelinesCatalog
-                    }
-                    candidatePipelines={
-                      selectedEvent?.clientId
-                        ? candidatePipelinesCatalog.filter((p) => p.clientId === selectedEvent.clientId)
-                        : candidatePipelinesCatalog
-                    }
-                    systemEventGroups={systemEventGroups}
-                    selectedPipelineIds={selectedPipelineIds}
-                    onSelectedPipelineIdsChange={setSelectedPipelineIds}
-                    selectedSystemEventIds={selectedSystemEventIds}
-                    onSelectedSystemEventIdsChange={setSelectedSystemEventIds}
-                    selectedStageOutcomeKeys={selectedStageOutcomeKeys}
-                    onSelectedStageOutcomeKeysChange={setSelectedStageOutcomeKeys}
-                    actionPipelineId={actionPipelineId}
-                    onActionPipelineIdChange={setActionPipelineId}
-                    disabled={selectedEvent?.isActive === false}
-                  />
                   <div className="mb-4 pb-2 border-b border-border-default">
                     <h4 className="text-xs font-bold text-text-muted uppercase tracking-wider mb-1">
                       תוצאות לשלב
@@ -1529,7 +1831,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                       {currentStageLabel || '—'}
                       <span className="text-text-muted font-normal">
                         {' '}
-                        · {processLabel(selectedEvent.process)}
+                        · {currentPipelineLabel || processLabel(selectedEvent.process)}
                       </span>
                     </p>
                   </div>
@@ -1553,7 +1855,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                           <span className="text-[10px] font-medium text-text-muted">
                             {outcomeActionSubtitle(
                               outcome,
-                              pipelinesByClient[selectedEvent?.clientId || '']?.flatMap((p) => p.stages || []) || [],
+                              actionPipelineContext?.pipeline.stages || [],
                             )}
                           </span>
                         </span>
@@ -1577,10 +1879,18 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           onSave={handleCreateProcessEvent}
           clientId={createClientId}
           clientName={createClientName}
-          contactId={scopeContactId || undefined}
+          contactId={scopeContactId || scopeCandidateId || undefined}
           contactName={scopeContactName || undefined}
         />
       ) : null}
+
+      <AutomationApprovalModal
+        isOpen={Boolean(automationApproval?.pending.length)}
+        outcomeName={automationApproval?.outcomeName}
+        pending={automationApproval?.pending || []}
+        onClose={() => setAutomationApproval(null)}
+        onApprove={handleApproveAutomations}
+      />
     </div>
   );
 };

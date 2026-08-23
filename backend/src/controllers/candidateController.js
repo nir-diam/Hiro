@@ -19,11 +19,20 @@ const jobCandidateStatusService = require('../services/jobCandidateStatusService
 const jobCandidateProcessJournalService = require('../services/jobCandidateProcessJournalService');
 const screeningInclusionService = require('../services/screeningInclusionService');
 const candidateJobMatchingService = require('../services/candidateJobMatchingService');
+const {
+  hashResumeBuffer,
+  hashFileBase64,
+  findCandidateByResumeContentHash,
+  resolvePrimaryFromHashMatch,
+} = require('../services/cvContentHashService');
 const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
-const { mergeProfileApprovalEvent } = require('../utils/candidateProfileApprovalEvent');
+const { mergeProfileApprovalEvent, recordProfileApprovalClientJournal, recordProfileApprovalJobLinkJournals } = require('../utils/candidateProfileApprovalEvent');
+const pipelineOutcomeService = require('../services/pipelineOutcomeService');
+const candidatePipelineService = require('../services/candidatePipelineService');
+const clientUsageSettingService = require('../services/clientUsageSettingService');
 
 const isMissing = (v) => v === undefined || v === null || v === '';
 
@@ -2339,6 +2348,15 @@ const getByUser = async (req, res) => {
   }
 };
 
+const listRelatedCandidates = async (req, res) => {
+  try {
+    const rows = await candidateService.listRelatedCandidates(req.params.id);
+    res.json(rows);
+  } catch (err) {
+    res.status(err.status || 500).json({ message: err.message || 'Failed to list related candidates' });
+  }
+};
+
 
 const getCandidateTagsSchemaText = () => `
 Candidate tag schema (from backend/src/models/SystemTag.js):
@@ -2470,14 +2488,34 @@ const createFromAi = async (req, res) => {
     const { resumeText, fileBase64, mimeType, fileName } = req.body || {};
     let text = typeof resumeText === 'string' ? resumeText : '';
     let buffer = null;
-    if (fileBase64 && !text) {
+    let resumeContentHash = null;
+    if (fileBase64) {
       buffer = decodeFileBase64Payload(fileBase64);
       if (!buffer?.length) {
         buffer = Buffer.from(String(fileBase64).replace(/\s/g, ''), 'base64');
       }
+      if (buffer?.length) {
+        resumeContentHash = hashResumeBuffer(buffer);
+        const hashMatch = await findCandidateByResumeContentHash(resumeContentHash);
+        if (hashMatch) {
+          const primary = await resolvePrimaryFromHashMatch(hashMatch);
+          const enriched = await candidateService.getById(primary.id);
+          return res.status(200).json({
+            candidate: enriched,
+            parsed: null,
+            resumeHashReused: true,
+            identityAttached: true,
+            identityReused: true,
+            identityLinked: Boolean(enriched?.canonicalCandidateId),
+          });
+        }
+      }
+    }
+    if (fileBase64 && !text) {
       if (!buffer?.length) {
         return res.status(400).json({ message: 'Invalid or empty file upload (could not decode base64).' });
       }
+
       if ((mimeType || '').startsWith('image/')) {
         text = await extractTextFromImageBuffer(buffer);
       } else {
@@ -2636,6 +2674,7 @@ const createFromAi = async (req, res) => {
       searchText: normalizeResumeSearchText(text).slice(0, 50000),
       searchTextSavedAt: new Date(),
       source: strOrNull(aiResult.source) || 'ai-upload',
+      ...(resumeContentHash ? { resumeContentHash } : {}),
     };
 
     const portalUserId = req.body?.userId != null ? String(req.body.userId).trim() : '';
@@ -2719,15 +2758,11 @@ const createFromAi = async (req, res) => {
       });
     }
 
-    if (fileBase64) {
-      await uploadResumeForCandidate(createdCandidate.id, fileBase64, fileName, mimeType);
-    }
     void tryEmbedCandidate(createdCandidate.id, text);
     void ensureOrganizationsFromExperience(createdCandidate.workExperience, createdCandidate.id);
     if (aiTagsForSync.length) {
       await candidateTagService.syncTagsForCandidate(createdCandidate.id, aiTagsForSync);
 
-      // Audit: 'הגדרת תגיות' — AI tags synced
       const tagsLabel = aiTagsForSync
         .map((t) => t?.displayNameHe || t?.displayNameEn || t?.tagKey || t?.name)
         .filter(Boolean)
@@ -2741,7 +2776,6 @@ const createFromAi = async (req, res) => {
         params: { tags: tagsLabel || `${aiTagsForSync.length} תגיות` },
       });
     }
-    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(createdCandidate.id, req);
 
     let finalCandidateId = createdCandidate.id;
     try {
@@ -2763,6 +2797,19 @@ const createFromAi = async (req, res) => {
       console.warn('[createFromAi] identity reconcile failed', identityErr?.message || identityErr);
     }
 
+    if (fileBase64) {
+      try {
+        await uploadResumeForCandidate(finalCandidateId, fileBase64, fileName, mimeType);
+        if (resumeContentHash) {
+          await candidateService.update(finalCandidateId, { resumeContentHash });
+        }
+      } catch (uploadErr) {
+        console.warn('[createFromAi] resume upload/hash failed', uploadErr?.message || uploadErr);
+      }
+    }
+
+    await candidateCompletenessService.refreshCandidateDataStatusAfterSave(finalCandidateId, req);
+
     const enrichedCandidate = await candidateService.getById(finalCandidateId);
     const welcomeClientId = await getStaffClientIdFromRequest(req);
     const portalAccountExists = await candidateService.identityHasPortalAccount({
@@ -2783,6 +2830,7 @@ const createFromAi = async (req, res) => {
       identityReused,
       identityLinked,
       identityAttached,
+      resumeHashReused: false,
     });
   } catch (err) {
     console.error('[createFromAi-error]', err);
@@ -2807,6 +2855,12 @@ const saveParsedText = async (req, res) => {
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Save failed' });
   }
+};
+
+/** POST /api/candidates/:id/approve-profile — portal “אישור פרופיל” (journal + system event). */
+const approveProfileByCandidate = async (req, res) => {
+  req.body = { ...(req.body && typeof req.body === 'object' ? req.body : {}), approveByCandidate: true };
+  return update(req, res);
 };
 
 const update = async (req, res) => {
@@ -2839,18 +2893,20 @@ const update = async (req, res) => {
 
     const candidateLabel = enrichedCandidate.fullName || candidate.fullName;
 
-    // Audit: 'מועמד אישר את הפרופיל' — portal profile approval by candidate
-    if (
+    const profileApprovalActor =
+      enrichedCandidate.fullName ||
+      candidateLabel ||
+      (req.user?.name && String(req.user.name).trim()) ||
+      (req.user?.email && String(req.user.email).trim()) ||
+      'המועמד';
+
+    // Audit: portal profile approval — system event once; journals are idempotent (repair if missing).
+    const profileJustApproved =
       Object.prototype.hasOwnProperty.call(body, 'approveByCandidate') &&
       body.approveByCandidate === true &&
-      previous?.approveByCandidate !== true
-    ) {
-      const actor =
-        enrichedCandidate.fullName ||
-        candidateLabel ||
-        (req.user?.name && String(req.user.name).trim()) ||
-        (req.user?.email && String(req.user.email).trim()) ||
-        'המועמד';
+      previous?.approveByCandidate !== true;
+
+    if (profileJustApproved) {
       await systemEventEmitter.emit(req, {
         ...SYSTEM_EVENTS.CANDIDATE_PROFILE_APPROVED,
         entityType: 'Candidate',
@@ -2858,8 +2914,19 @@ const update = async (req, res) => {
         entityName: candidateLabel,
         params: {
           name: candidateLabel || candidate.id,
-          actor,
+          actor: profileApprovalActor,
         },
+      });
+    }
+
+    if (enrichedCandidate.approveByCandidate === true) {
+      await recordProfileApprovalClientJournal(req, candidate.id, {
+        candidateRow: enrichedCandidate,
+        actorLabel: profileApprovalActor,
+      });
+      await recordProfileApprovalJobLinkJournals(candidate.id, {
+        candidateRow: enrichedCandidate,
+        actorLabel: profileApprovalActor,
       });
     }
     // Audit: 'הגדרת מקור גיוס' — only when value actually changed
@@ -2986,7 +3053,9 @@ const update = async (req, res) => {
       statusExplicitlyChanged ||
       (statusOnlyPatch && Object.prototype.hasOwnProperty.call(body, 'status'));
     if (!skipCompletenessRefresh) {
-      await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req);
+      await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidate.id, req, {
+        previousRow: previous,
+      });
     }
     const refreshed = await candidateService.getById(candidate.id);
 
@@ -3193,9 +3262,11 @@ const putResumeFileInS3 = async (candidateId, fileBase64, filename, mimeType) =>
 const uploadResumeForCandidate = async (candidateId, fileBase64, filename, mimeType) => {
   const out = await putResumeFileInS3(candidateId, fileBase64, filename, mimeType);
   if (!out) return null;
+  const resumeContentHash = hashFileBase64(fileBase64);
   await candidateService.update(candidateId, {
     resumeUrl: out.publicUrl,
     resumeUploadedAt: new Date(),
+    ...(resumeContentHash ? { resumeContentHash } : {}),
   });
   return out.publicUrl;
 };
@@ -4319,14 +4390,27 @@ const patchJobLinkStatus = async (req, res) => {
 
     // Audit: 'סטטוס השתנה'
     if (prevStatus !== newStatus) {
+      let statusChangeClientId = null;
+      try {
+        const job = jc.jobId ? await Job.findByPk(jc.jobId, { attributes: ['id', 'client'] }) : null;
+        if (job?.client) {
+          statusChangeClientId = await clientUsageSettingService.getClientIdForJobClientLabel(job.client);
+        }
+      } catch {
+        // optional
+      }
       systemEventEmitter.emit(req, {
         ...SYSTEM_EVENTS.CANDIDATE_STATUS,
         entityType: 'Candidate',
         entityId: jc.candidateId,
         entityName: candidateLabel,
+        clientId: statusChangeClientId || req.dbUser?.clientId || null,
+        jobCandidateId: jc.id,
         params: {
           candidate: candidateLabel || jc.candidateId,
           status: newStatus,
+          prevStatus,
+          jobCandidateId: jc.id,
         },
       });
     }
@@ -5020,22 +5104,92 @@ const patchWorkExperienceOrganization = async (req, res) => {
 
 const patchPipelineStage = async (req, res) => {
   try {
+    const candidateId = req.params.id;
     const body = req.body || {};
+    const existing = await candidateService.getById(candidateId);
+    if (!existing) {
+      return res.status(404).json({ message: 'Candidate not found' });
+    }
+
+    const hasPipelinePatch =
+      Object.prototype.hasOwnProperty.call(body, 'candidatePipelineId') ||
+      Object.prototype.hasOwnProperty.call(body, 'pipelineId');
+    const hasStagePatch =
+      Object.prototype.hasOwnProperty.call(body, 'pipelineStageId') ||
+      Object.prototype.hasOwnProperty.call(body, 'stageId');
+
+    const newPipelineId = hasPipelinePatch
+      ? body.pipelineId || body.candidatePipelineId || null
+      : existing.candidatePipelineId || null;
+    const newStageId = hasStagePatch
+      ? body.stageId || body.pipelineStageId || null
+      : existing.pipelineStageId || null;
+
+    let fromStageId = existing.pipelineStageId || null;
+    const clientId = await pipelineOutcomeService.resolveClientIdForCandidate(
+      candidateId,
+      req?.dbUser?.clientId || null,
+    );
+
+    if (!fromStageId && newPipelineId && clientId) {
+      fromStageId = await pipelineOutcomeService.inferFirstPipelineStageId(clientId, newPipelineId);
+    }
+
     const patch = {};
-    if (Object.prototype.hasOwnProperty.call(body, 'candidatePipelineId')) {
-      patch.candidatePipelineId = body.candidatePipelineId || null;
+    if (hasPipelinePatch) {
+      patch.candidatePipelineId = newPipelineId;
     }
-    if (Object.prototype.hasOwnProperty.call(body, 'pipelineId')) {
-      patch.candidatePipelineId = body.pipelineId || null;
+    if (hasStagePatch) {
+      patch.pipelineStageId = newStageId;
     }
-    if (Object.prototype.hasOwnProperty.call(body, 'pipelineStageId')) {
-      patch.pipelineStageId = body.pipelineStageId || null;
+
+    let candidate = existing;
+    if (Object.keys(patch).length > 0) {
+      candidate = await candidateService.update(candidateId, patch);
     }
-    if (Object.prototype.hasOwnProperty.call(body, 'stageId')) {
-      patch.pipelineStageId = body.stageId || null;
+
+    const stageChanged = Boolean(newStageId && fromStageId && newStageId !== fromStageId);
+    let pipelineMove = null;
+    if (stageChanged && clientId && newPipelineId && fromStageId) {
+      try {
+        const pipelines = await candidatePipelineService.listOrSeedByClientId(clientId);
+        const pipeline = pipelines.find((p) => p.id === newPipelineId);
+        const outcome = pipelineOutcomeService.findMoveOutcomeForTransition(
+          pipeline?.stages,
+          fromStageId,
+          newStageId,
+        );
+        if (outcome) {
+          pipelineMove = {
+            viaOutcome: true,
+            async: false,
+            outcomeId: outcome.id,
+            outcomeName: outcome.name,
+          };
+        }
+        try {
+          await pipelineOutcomeService.executeCandidateKanbanStageMove(req, {
+            candidateId,
+            clientId,
+            pipelineId: newPipelineId,
+            fromStageId,
+            toStageId: newStageId,
+          });
+        } catch (outcomeErr) {
+          console.error(
+            '[patchPipelineStage] kanban journal/automation sync failed',
+            outcomeErr.message || outcomeErr,
+          );
+        }
+      } catch (peekErr) {
+        console.error('[patchPipelineStage] pipeline outcome lookup failed', peekErr.message || peekErr);
+      }
     }
-    const candidate = await candidateService.update(req.params.id, patch);
-    return res.json(candidate);
+
+    return res.json({
+      ...candidate,
+      ...(pipelineMove ? { pipelineMove } : {}),
+    });
   } catch (err) {
     return res.status(err.status || 500).json({ message: err.message || 'Update failed' });
   }
@@ -5046,10 +5200,12 @@ module.exports = {
   listPost,
   listByWorkedAtCompany,
   getByUser,
+  listRelatedCandidates,
   get,
   create,
   createFromAi,
   update,
+  approveProfileByCandidate,
   patchPipelineStage,
   saveParsedText,
   approveDataCorrections,

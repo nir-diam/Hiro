@@ -23,7 +23,7 @@ export type OutcomeTrigger = {
     systemEventId?: string;
 };
 
-export type AutomationActionType = 'send_email' | 'send_sms' | 'start_pipeline' | 'close_event';
+export type AutomationActionType = 'send_email' | 'send_sms' | 'start_pipeline' | 'close_event' | 'change_status';
 export type AutomationScheduleType = 'immediate' | 'minutes' | 'hours' | 'days';
 
 export type OutcomeAutomationRecipients = {
@@ -38,6 +38,7 @@ export type OutcomeAutomation = {
     actionType: AutomationActionType;
     templateId?: string;
     pipelineId?: string;
+    statusName?: string;
     scheduleType: AutomationScheduleType;
     scheduleValue?: number;
     requireManualApproval?: boolean;

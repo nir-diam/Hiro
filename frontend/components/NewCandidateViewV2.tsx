@@ -533,6 +533,9 @@ const NewCandidateViewV2: React.FC = () => {
             if (json.identityAttached || json.identityLinked || json.identityReused) {
                 summaryItems.push('קושר לפרופיל קיים');
             }
+            if (json.resumeHashReused) {
+                summaryItems.push('קובץ זהה לקו"ח שכבר במערכת');
+            }
 
             setParsedSummary(summaryItems);
             setAiCandidateId(candidate.id || null);

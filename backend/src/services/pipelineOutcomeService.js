@@ -1,8 +1,10 @@
 const { v4: uuidv4 } = require('uuid');
 const Candidate = require('../models/Candidate');
+const CandidatePipeline = require('../models/CandidatePipeline');
 const JobCandidate = require('../models/JobCandidate');
 const Job = require('../models/Job');
 const User = require('../models/User');
+const ClientContact = require('../models/ClientContact');
 const MessageTemplate = require('../models/MessageTemplate');
 const clientPipelineService = require('./clientPipelineService');
 const candidatePipelineService = require('./candidatePipelineService');
@@ -75,8 +77,10 @@ async function resolveClientIdForJobCandidate(jobCandidateId) {
   if (!jc) return { jc: null, clientId: null, candidateId: null };
   let clientId = null;
   if (jc.jobId) {
-    const job = await Job.findByPk(jc.jobId, { attributes: ['id', 'client', 'recruiter'] });
-    if (job?.client) {
+    const job = await Job.findByPk(jc.jobId, { attributes: ['id', 'clientId', 'client', 'recruiter'] });
+    if (job?.clientId) {
+      clientId = String(job.clientId);
+    } else if (job?.client) {
       clientId = await getClientIdForJobClientLabel(job.client);
     }
   }
@@ -85,16 +89,74 @@ async function resolveClientIdForJobCandidate(jobCandidateId) {
 
 async function resolveClientIdForCandidate(candidateId, explicitClientId = null) {
   if (explicitClientId) return explicitClientId;
-  const link = await JobCandidate.findOne({
+
+  const candidate = await Candidate.findByPk(candidateId, {
+    attributes: ['id', 'candidatePipelineId', 'userId'],
+  });
+
+  if (candidate?.candidatePipelineId) {
+    const pipeline = await CandidatePipeline.findByPk(candidate.candidatePipelineId, {
+      attributes: ['clientId'],
+    });
+    if (pipeline?.clientId) return pipeline.clientId;
+  }
+
+  const links = await JobCandidate.findAll({
     where: { candidateId },
     attributes: ['id'],
     order: [['updatedAt', 'DESC']],
+    limit: 12,
   });
-  if (link) {
+  for (const link of links) {
     const resolved = await resolveClientIdForJobCandidate(link.id);
     if (resolved.clientId) return resolved.clientId;
   }
+
+  if (candidate?.userId) {
+    const user = await User.findByPk(candidate.userId, { attributes: ['clientId'] });
+    if (user?.clientId) return user.clientId;
+  }
+
   return null;
+}
+
+/** All tenant clients that should receive candidate journal rows (CRM + pipeline + jobs). */
+async function resolveClientIdsForCandidateJournal(candidateId, req = null) {
+  const ids = new Set();
+  const cid = String(candidateId || '').trim();
+  if (!cid) return [];
+
+  if (req?.dbUser?.clientId) ids.add(String(req.dbUser.clientId));
+
+  const candidate = await Candidate.findByPk(cid, {
+    attributes: ['id', 'userId', 'candidatePipelineId'],
+  });
+  if (!candidate) return [...ids];
+
+  if (candidate.userId) {
+    const user = await User.findByPk(candidate.userId, { attributes: ['clientId'] });
+    if (user?.clientId) ids.add(String(user.clientId));
+  }
+
+  if (candidate.candidatePipelineId) {
+    const pipeline = await CandidatePipeline.findByPk(candidate.candidatePipelineId, {
+      attributes: ['clientId'],
+    });
+    if (pipeline?.clientId) ids.add(String(pipeline.clientId));
+  }
+
+  const links = await JobCandidate.findAll({
+    where: { candidateId: cid },
+    attributes: ['id'],
+    order: [['updatedAt', 'DESC']],
+    limit: 12,
+  });
+  for (const link of links) {
+    const resolved = await resolveClientIdForJobCandidate(link.id);
+    if (resolved.clientId) ids.add(String(resolved.clientId));
+  }
+
+  return [...ids];
 }
 
 async function buildCandidateDispatchContexts(clientId, candidateId) {
@@ -189,6 +251,13 @@ async function buildCandidateContext(clientId, jobCandidateId, candidateId) {
   }
   const candidate = await Candidate.findByPk(candidateId);
   if (!candidate) throw Object.assign(new Error('Candidate not found'), { status: 404 });
+
+  if (!jc) {
+    jc = await JobCandidate.findOne({
+      where: { candidateId: candidate.id },
+      order: [['updatedAt', 'DESC']],
+    });
+  }
 
   let job = null;
   if (jc?.jobId) {
@@ -322,6 +391,42 @@ async function resolveAutomationRecipients(automation, ctx) {
     if (r.hiringManager && ctx.job?.contactEmail) emails.push(ctx.job.contactEmail);
   }
 
+  if (ctx.kind === 'client' && ctx.event) {
+    const meta = ctx.event.metadata && typeof ctx.event.metadata === 'object' ? ctx.event.metadata : {};
+    const linkedCandidateId =
+      meta.candidateId || meta.missingDetailsCompletedCandidate || meta.profileApprovedByCandidate || null;
+
+    const pushCandidateContact = (candidateRow) => {
+      if (!candidateRow || !r.candidate) return;
+      if (candidateRow.email) emails.push(candidateRow.email);
+      if (candidateRow.phone) phones.push(candidateRow.phone);
+    };
+
+    if (linkedCandidateId) {
+      const candidateRow = await Candidate.findByPk(linkedCandidateId, {
+        attributes: ['id', 'email', 'phone'],
+      });
+      pushCandidateContact(candidateRow);
+    }
+
+    const contactId = ctx.event.contactId;
+    if (contactId && r.candidate && !linkedCandidateId) {
+      const contact = await ClientContact.findByPk(contactId, {
+        attributes: ['id', 'email', 'phone', 'mobilePhone'],
+      });
+      if (contact) {
+        if (contact.email) emails.push(contact.email);
+        if (contact.phone) phones.push(contact.phone);
+        if (contact.mobilePhone) phones.push(contact.mobilePhone);
+      } else {
+        const candidateRow = await Candidate.findByPk(contactId, {
+          attributes: ['id', 'email', 'phone'],
+        });
+        pushCandidateContact(candidateRow);
+      }
+    }
+  }
+
   emails.push(...extra.emails);
   phones.push(...extra.phones);
 
@@ -333,7 +438,13 @@ async function resolveAutomationRecipients(automation, ctx) {
 
 async function runAutomation(req, automation, ctx, { skipManualApproval = false, pipelineKind = 'client' } = {}) {
   if (automation.requireManualApproval && !skipManualApproval) {
-    return { status: 'pending_approval', automationId: automation.id };
+    return {
+      status: 'pending_approval',
+      automationId: automation.id,
+      actionType: automation.actionType || null,
+      templateId: automation.templateId || null,
+      statusName: automation.statusName || null,
+    };
   }
 
   const delayMs = scheduleDelayMs(automation.scheduleType, automation.scheduleValue);
@@ -376,8 +487,12 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
     }
     case 'start_pipeline': {
       if (!automation.pipelineId) return { status: 'skipped', reason: 'missing_pipeline' };
-      const targetKind = pipelineKind === 'candidate' ? 'candidate' : 'client';
-      const targetPipeline = await loadPipelineDto(targetKind, ctx.clientId, automation.pipelineId);
+      let targetKind = pipelineKind;
+      let targetPipeline = await loadPipelineDto(targetKind, ctx.clientId, automation.pipelineId);
+      if (!targetPipeline) {
+        targetKind = pipelineKind === 'candidate' ? 'client' : 'candidate';
+        targetPipeline = await loadPipelineDto(targetKind, ctx.clientId, automation.pipelineId);
+      }
       if (!targetPipeline) return { status: 'skipped', reason: 'pipeline_not_found' };
       const firstStage = [...(targetPipeline.stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))[0];
       if (ctx.kind === 'client' && ctx.event) {
@@ -406,10 +521,64 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
         return { status: 'applied', action: 'start_pipeline', pipelineId: targetPipeline.id };
       }
       if (ctx.kind === 'candidate' && ctx.candidateId) {
+        const fromStageId = ctx.stageId || null;
+        if (targetKind === 'candidate') {
+          await candidateService.update(ctx.candidateId, {
+            candidatePipelineId: targetPipeline.id,
+            pipelineStageId: firstStage?.id || null,
+          });
+          try {
+            const { recordCandidateKanbanStageMove } = require('../utils/candidateKanbanStageMoveEvent');
+            await recordCandidateKanbanStageMove(req, {
+              candidateId: ctx.candidateId,
+              clientId: ctx.clientId,
+              pipelineId: targetPipeline.id,
+              fromStageId,
+              toStageId: firstStage?.id,
+            });
+          } catch (journalErr) {
+            console.warn(
+              '[pipelineOutcomeService] start_pipeline journal sync failed',
+              journalErr?.message || journalErr,
+            );
+          }
+        } else if (ctx.clientEventId) {
+          const events = Array.isArray(ctx.client?.events) ? ctx.client.events : [];
+          const next = events.map((e) =>
+            String(e.id) === String(ctx.clientEventId)
+              ? {
+                  ...e,
+                  processId: targetPipeline.id,
+                  process: targetPipeline.name,
+                  stageId: firstStage?.id || e.stageId,
+                  stage: firstStage?.name || e.stage,
+                }
+              : e,
+          );
+          await clientService.update(ctx.clientId, { events: next });
+        }
+        return { status: 'applied', action: 'start_pipeline', pipelineId: targetPipeline.id };
+      }
+      if (ctx.candidateId && targetKind === 'candidate') {
         await candidateService.update(ctx.candidateId, {
-          candidatePipelineId: automation.pipelineId,
+          candidatePipelineId: targetPipeline.id,
           pipelineStageId: firstStage?.id || null,
         });
+        try {
+          const { recordCandidateKanbanStageMove } = require('../utils/candidateKanbanStageMoveEvent');
+          await recordCandidateKanbanStageMove(req, {
+            candidateId: ctx.candidateId,
+            clientId: ctx.clientId,
+            pipelineId: targetPipeline.id,
+            fromStageId: ctx.stageId || null,
+            toStageId: firstStage?.id,
+          });
+        } catch (journalErr) {
+          console.warn(
+            '[pipelineOutcomeService] start_pipeline journal sync failed',
+            journalErr?.message || journalErr,
+          );
+        }
         return { status: 'applied', action: 'start_pipeline', pipelineId: targetPipeline.id };
       }
       return { status: 'skipped', reason: 'unsupported_context' };
@@ -444,6 +613,51 @@ async function runAutomation(req, automation, ctx, { skipManualApproval = false,
         return { status: 'applied', action: 'close_event' };
       }
       return { status: 'skipped', reason: 'unsupported_context' };
+    }
+    case 'change_status': {
+      const statusName = automation.statusName ? String(automation.statusName).trim() : '';
+      if (!statusName) return { status: 'skipped', reason: 'missing_status' };
+
+      let jobCandidateId = ctx.jobCandidateId || ctx.jobCandidate?.id || null;
+      if (!jobCandidateId && ctx.candidateId) {
+        const links = await JobCandidate.findAll({
+          where: { candidateId: ctx.candidateId },
+          attributes: ['id'],
+          order: [['updatedAt', 'DESC']],
+          limit: 1,
+        });
+        jobCandidateId = links[0]?.id || null;
+      }
+      if (!jobCandidateId) return { status: 'skipped', reason: 'missing_job_candidate' };
+
+      const jc = ctx.jobCandidate || (await JobCandidate.findByPk(jobCandidateId));
+      if (!jc) return { status: 'skipped', reason: 'job_link_not_found' };
+      if (String(jc.status || '').trim() === statusName) {
+        return { status: 'skipped', reason: 'already_status', statusName };
+      }
+
+      const actorName = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser) || 'אוטומציה';
+      let prevMeta = await jobCandidateProcessJournalService.materializeStatusJournalForPatch(jc);
+      prevMeta.workflowUpdatedAt = new Date().toISOString();
+      const journalMeta = jobCandidateProcessJournalService.applyJournalOnStatusPatch({
+        workflowMeta: prevMeta,
+        prevStatus: jc.status,
+        newStatus: statusName,
+        actor: actorName,
+        internalNoteChanged: false,
+        internalNote: prevMeta.internalNote != null ? String(prevMeta.internalNote).trim() : '',
+        dueDate: prevMeta.dueDate || null,
+        dueTime: prevMeta.dueTime || null,
+        forceAppendStatus: true,
+      });
+      await jobCandidateStatusService.applyJobCandidateStatusChange({
+        jobCandidateId,
+        newStatus: statusName,
+        workflowMeta: journalMeta,
+        req,
+        source: 'automation',
+      });
+      return { status: 'applied', action: 'change_status', statusName };
     }
     default:
       return { status: 'skipped', reason: 'unknown_action' };
@@ -623,6 +837,70 @@ async function applyClientOutcomeAction(req, ctx, outcome, pipeline) {
   };
 }
 
+async function syncClientEventAfterCandidateOutcome(
+  req,
+  clientId,
+  clientEventId,
+  outcome,
+  actionResult,
+) {
+  const cid = String(clientId || '').trim();
+  const eventId = String(clientEventId || '').trim();
+  if (!cid || !eventId) return null;
+
+  const client = await clientService.getById(cid);
+  const events = Array.isArray(client?.events) ? client.events : [];
+  const event = events.find((e) => String(e.id) === eventId);
+  if (!event) return null;
+
+  const actor = jobCandidateProcessJournalService.displayNameFromUser(req?.dbUser);
+  const now = new Date().toISOString();
+  const activitySummary =
+    actionResult?.note && String(actionResult.note).trim()
+      ? String(actionResult.note).trim()
+      : outcome.name;
+
+  let nextStageName = actionResult?.nextStageName || event.stage;
+  let nextStageId = actionResult?.nextStageId || event.stageId || null;
+  let nextStatus = event.status;
+  let nextDueDate = actionResult?.dueDate || event.dueDate || null;
+  let nextIsActive = event.isActive !== false;
+
+  if (outcome.actionType === 'freeze') nextStatus = 'הושלם';
+  if (outcome.actionType === 'close') nextIsActive = false;
+
+  const newUpdate = {
+    id: `u-${Date.now()}`,
+    title: activitySummary,
+    date: now,
+    creator: actor,
+  };
+  const nextEvents = events.map((e) =>
+    String(e.id) === eventId
+      ? {
+          ...e,
+          stage: nextStageName,
+          stageId: nextStageId,
+          status: nextStatus,
+          dueDate: nextDueDate,
+          isActive: nextIsActive,
+          updates: [newUpdate, ...(Array.isArray(e.updates) ? e.updates : [])],
+          history: [
+            { user: actor, timestamp: now, summary: activitySummary },
+            ...(Array.isArray(e.history) ? e.history : []),
+          ],
+          metadata: {
+            ...(e.metadata && typeof e.metadata === 'object' ? e.metadata : {}),
+            lastKanbanStageId: nextStageId,
+            lastKanbanStageName: nextStageName,
+          },
+        }
+      : e,
+  );
+  await clientService.update(cid, { events: nextEvents });
+  return nextEvents.find((e) => String(e.id) === eventId) || null;
+}
+
 async function executeOutcome(req, params) {
   const {
     pipelineKind,
@@ -632,6 +910,7 @@ async function executeOutcome(req, params) {
     outcomeId,
     context = {},
     source = 'manual',
+    skipCandidateAction = false,
   } = params;
 
   if (!clientId || !pipelineId || !stageId || !outcomeId) {
@@ -653,19 +932,34 @@ async function executeOutcome(req, params) {
     ctx = await buildClientEventContext(clientId, context.clientEventId);
     ctx.stageId = stageId;
     ctx.pipelineId = pipelineId;
+    if (context.candidateId) ctx.candidateId = context.candidateId;
+    if (context.jobCandidateId) ctx.jobCandidateId = context.jobCandidateId;
   }
 
   let actionResult;
   if (pipelineKind === 'candidate') {
-    actionResult = await applyCandidateOutcomeAction(req, ctx, outcome, pipeline);
+    if (skipCandidateAction) {
+      actionResult = { skippedAction: true };
+    } else {
+      actionResult = await applyCandidateOutcomeAction(req, ctx, outcome, pipeline);
+      if (context.clientEventId) {
+        const updatedEvent = await syncClientEventAfterCandidateOutcome(
+          req,
+          clientId,
+          context.clientEventId,
+          outcome,
+          actionResult,
+        );
+        if (updatedEvent) actionResult.event = updatedEvent;
+      }
+    }
   } else {
     actionResult = await applyClientOutcomeAction(req, ctx, outcome, pipeline);
   }
 
   const automations = Array.isArray(outcome.automations) ? outcome.automations : [];
   const automationResults = [];
-  // Staff manual clicks and system-event triggers both execute configured automations.
-  const skipManualApproval = source === 'system_event' || source === 'manual';
+  const skipManualApproval = params.skipManualApproval === true;
 
   for (const automation of automations) {
     try {
@@ -705,8 +999,88 @@ async function executeOutcome(req, params) {
   };
 }
 
+async function approveAutomations(req, params) {
+  const {
+    pipelineKind,
+    clientId,
+    pipelineId,
+    stageId,
+    outcomeId,
+    context = {},
+    automationIds = [],
+  } = params;
+
+  if (!clientId || !pipelineId || !stageId || !outcomeId) {
+    throw Object.assign(new Error('clientId, pipelineId, stageId and outcomeId are required'), { status: 400 });
+  }
+  const ids = Array.isArray(automationIds)
+    ? automationIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (!ids.length) {
+    throw Object.assign(new Error('automationIds are required'), { status: 400 });
+  }
+
+  const pipeline = await loadPipelineDto(pipelineKind, clientId, pipelineId);
+  if (!pipeline) throw Object.assign(new Error('Pipeline not found'), { status: 404 });
+
+  const { outcome } = findOutcomeInPipeline(pipeline, stageId, outcomeId);
+  if (!outcome) throw Object.assign(new Error('Outcome not found'), { status: 404 });
+
+  let ctx;
+  if (pipelineKind === 'candidate') {
+    ctx = await buildCandidateContext(clientId, context.jobCandidateId, context.candidateId);
+    ctx.stageId = stageId;
+    ctx.pipelineId = pipelineId;
+  } else {
+    ctx = await buildClientEventContext(clientId, context.clientEventId);
+    ctx.stageId = stageId;
+    ctx.pipelineId = pipelineId;
+    if (context.candidateId) ctx.candidateId = context.candidateId;
+    if (context.jobCandidateId) ctx.jobCandidateId = context.jobCandidateId;
+  }
+
+  const automations = (Array.isArray(outcome.automations) ? outcome.automations : []).filter((a) =>
+    ids.includes(String(a.id)),
+  );
+  if (!automations.length) {
+    throw Object.assign(new Error('No matching automations to approve'), { status: 404 });
+  }
+
+  const automationResults = [];
+  for (const automation of automations) {
+    try {
+      const result = await runAutomation(req, automation, ctx, { skipManualApproval: true, pipelineKind });
+      automationResults.push({ automationId: automation.id, ...result });
+    } catch (err) {
+      automationResults.push({
+        automationId: automation.id,
+        status: 'error',
+        message: err.message || String(err),
+      });
+    }
+  }
+
+  await auditLogger.log(req, {
+    level: 'info',
+    action: 'pipeline_automation_approved',
+    description: `אישור ידני לאוטומציות: ${outcome.name}`,
+    entityType: pipelineKind === 'candidate' ? 'Candidate' : 'Client',
+    entityId: pipelineKind === 'candidate' ? ctx.candidateId : ctx.clientId,
+    metadata: {
+      pipelineKind,
+      pipelineId,
+      stageId,
+      outcomeId,
+      automationIds: ids,
+      automationResults,
+    },
+  });
+
+  return { automationResults };
+}
+
 const LEGACY_SYSTEM_EVENT_KEYS = {
-  candidate_confirmed_profile: 'מועמד.אישר את הפרופיל',
+  candidate_confirmed_profile: 'מועמד.אישור הפרופיל על ידי המועמד',
   candidate_confirmed_interview: 'מועמד.אישר_הגעה_לראיון',
   candidate_canceled_interview: 'מועמד.ביטל_הגעה_לראיון',
   candidate_requested_reschedule: 'מועמד.ביקש_לשנות_מועד',
@@ -729,6 +1103,76 @@ function triggerMatchesOutcome(trigger, systemEventRowId, triggerName, eventName
   return false;
 }
 
+function collectTriggeredOutcomes(clientPipelines, candidatePipelines, systemEventRowId, triggerName, eventName) {
+  const matches = [];
+  const seen = new Set();
+  const scan = (pipelineKind, pipelines) => {
+    for (const pipeline of pipelines || []) {
+      for (const stage of pipeline.stages || []) {
+        for (const outcome of stage.outcomes || []) {
+          if (!triggerMatchesOutcome(outcome.trigger, systemEventRowId, triggerName, eventName)) continue;
+          const key = `${pipelineKind}::${pipeline.id}::${stage.id}::${outcome.id}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          matches.push({
+            pipelineKind,
+            pipelineId: pipeline.id,
+            stageId: stage.id,
+            outcomeId: outcome.id,
+            pipeline,
+            stage,
+            outcome,
+          });
+        }
+      }
+    }
+  };
+  scan('candidate', candidatePipelines);
+  scan('client', clientPipelines);
+  return matches;
+}
+
+async function ensureClientEventForCandidate(clientId, candidateId, { pipeline, stage, candidateName } = {}) {
+  const cid = String(candidateId || '').trim();
+  if (!clientId || !cid) return null;
+
+  const client = await clientService.getById(clientId);
+  const prevEvents = Array.isArray(client?.events) ? client.events : [];
+  const existing = prevEvents.find((event) => {
+    if (event?.isActive === false) return false;
+    if (String(event?.contactId || '') === cid) return true;
+    if (String(event?.metadata?.candidateId || '') === cid) return true;
+    return false;
+  });
+  if (existing?.id) return String(existing.id);
+
+  const now = new Date().toISOString();
+  const label = String(candidateName || 'מועמד').trim() || 'מועמד';
+  const event = {
+    id: uuidv4(),
+    title: `קליטת קו"ח: ${label}`.slice(0, 240),
+    type: [pipeline?.name || 'תהליך'],
+    process: pipeline?.name || 'תהליך',
+    processId: pipeline?.id || null,
+    stage: stage?.name || '',
+    stageId: stage?.id || null,
+    date: now,
+    coordinator: 'מערכת',
+    creator: 'מערכת',
+    status: 'עתידי',
+    contactId: cid,
+    contactName: label,
+    linkedTo: { type: 'מועמד', id: cid, name: label },
+    description: '',
+    updates: [],
+    history: [],
+    metadata: { candidateId: cid, systemEventBootstrap: true },
+    isActive: true,
+  };
+  await clientService.update(clientId, { events: [event, ...prevEvents] });
+  return String(event.id);
+}
+
 async function dispatchFromSystemEvent(req, payload) {
   const {
     systemEventRowId,
@@ -737,56 +1181,104 @@ async function dispatchFromSystemEvent(req, payload) {
     entityType,
     entityId,
     clientId: explicitClientId,
+    jobCandidateId: explicitJobCandidateId,
   } = payload;
 
   if (!systemEventRowId && (!triggerName || !eventName)) return [];
 
   let clientId = explicitClientId || req?.dbUser?.clientId || null;
-  let contexts = [];
+  const results = [];
 
   if (String(entityType || '').toLowerCase() === 'candidate' && entityId) {
     clientId = await resolveClientIdForCandidate(entityId, clientId);
-    if (!clientId) return [];
-    contexts = await buildCandidateDispatchContexts(clientId, entityId);
-  } else if (String(entityType || '').toLowerCase() === 'client' && entityId) {
-    clientId = clientId || entityId;
-    const client = await clientService.getById(entityId);
-    const events = Array.isArray(client.events) ? client.events : [];
-    for (const ev of events.filter((e) => e.isActive !== false).slice(0, 20)) {
-      if (ev.processId && ev.stageId) {
-        contexts.push({
-          pipelineKind: 'client',
-          pipelineId: ev.processId,
-          stageId: ev.stageId,
-          context: { clientEventId: ev.id },
-        });
-      }
+    if (!clientId) {
+      console.warn('[pipelineOutcomeService.dispatchFromSystemEvent] no clientId for candidate', entityId);
+      return [];
     }
-  }
 
-  if (!clientId || !contexts.length) return [];
+    const clientPipelines = await clientPipelineService.listByClientId(clientId);
+    const candidatePipelines = await candidatePipelineService.listOrSeedByClientId(clientId);
+    const triggered = collectTriggeredOutcomes(
+      clientPipelines,
+      candidatePipelines,
+      systemEventRowId,
+      triggerName,
+      eventName,
+    );
+    if (!triggered.length) return [];
 
-  const clientPipelines = await clientPipelineService.listByClientId(clientId);
-  const candidatePipelines = await candidatePipelineService.listOrSeedByClientId(clientId);
-  const results = [];
+    const candidate = await Candidate.findByPk(entityId, { attributes: ['id', 'fullName'] });
+    let jobCandidateId = explicitJobCandidateId ? String(explicitJobCandidateId) : null;
+    if (!jobCandidateId) {
+      const links = await JobCandidate.findAll({
+        where: { candidateId: entityId },
+        attributes: ['id'],
+        order: [['updatedAt', 'DESC']],
+        limit: 1,
+      });
+      jobCandidateId = links[0]?.id ? String(links[0].id) : null;
+    }
 
-  for (const item of contexts) {
-    const pipelines = item.pipelineKind === 'candidate' ? candidatePipelines : clientPipelines;
-    const pipeline = pipelines.find((p) => p.id === item.pipelineId);
-    if (!pipeline) continue;
-    const stage = (pipeline.stages || []).find((s) => s.id === item.stageId);
-    if (!stage) continue;
+    for (const match of triggered) {
+      let context = { candidateId: entityId, jobCandidateId };
+      if (match.pipelineKind === 'client') {
+        const clientEventId = await ensureClientEventForCandidate(clientId, entityId, {
+          pipeline: match.pipeline,
+          stage: match.stage,
+          candidateName: candidate?.fullName,
+        });
+        if (!clientEventId) continue;
+        context = { clientEventId, candidateId: entityId, jobCandidateId };
+      }
 
-    for (const outcome of stage.outcomes || []) {
-      if (!triggerMatchesOutcome(outcome.trigger, systemEventRowId, triggerName, eventName)) continue;
       try {
         const result = await executeOutcome(req, {
-          pipelineKind: item.pipelineKind,
+          pipelineKind: match.pipelineKind,
           clientId,
-          pipelineId: item.pipelineId,
-          stageId: item.stageId,
-          outcomeId: outcome.id,
-          context: item.context,
+          pipelineId: match.pipelineId,
+          stageId: match.stageId,
+          outcomeId: match.outcomeId,
+          context,
+          source: 'system_event',
+        });
+        results.push(result);
+      } catch (err) {
+        console.error('[pipelineOutcomeService.dispatchFromSystemEvent]', err.message || err);
+      }
+    }
+
+    return results;
+  }
+
+  if (String(entityType || '').toLowerCase() === 'client' && entityId) {
+    clientId = clientId || entityId;
+    const clientPipelines = await clientPipelineService.listByClientId(clientId);
+    const candidatePipelines = await candidatePipelineService.listOrSeedByClientId(clientId);
+    const triggered = collectTriggeredOutcomes(
+      clientPipelines,
+      candidatePipelines,
+      systemEventRowId,
+      triggerName,
+      eventName,
+    );
+
+    const client = await clientService.getById(entityId);
+    const events = Array.isArray(client.events) ? client.events : [];
+    const activeEvents = events.filter((e) => e.isActive !== false && e.processId && e.stageId);
+
+    const clientMatches = triggered.filter((m) => m.pipelineKind === 'client');
+    for (const match of clientMatches) {
+      const linkedEvent =
+        activeEvents.find((e) => String(e.processId) === String(match.pipelineId)) || activeEvents[0];
+      if (!linkedEvent) continue;
+      try {
+        const result = await executeOutcome(req, {
+          pipelineKind: 'client',
+          clientId,
+          pipelineId: match.pipelineId,
+          stageId: match.stageId,
+          outcomeId: match.outcomeId,
+          context: { clientEventId: linkedEvent.id },
           source: 'system_event',
         });
         results.push(result);
@@ -799,8 +1291,90 @@ async function dispatchFromSystemEvent(req, payload) {
   return results;
 }
 
+function findMoveOutcomeForTransition(stages, fromStageId, toStageId) {
+  if (!fromStageId || !toStageId || fromStageId === toStageId) return null;
+  const sourceStage = (stages || []).find((s) => s.id === fromStageId);
+  if (!sourceStage) return null;
+  for (const outcome of sourceStage.outcomes || []) {
+    if (outcome.actionType !== 'move' || !outcome.targetStageId) continue;
+    const resolved = resolveMoveTarget(outcome.targetStageId, stages);
+    if (resolved?.stageId === toStageId) return outcome;
+  }
+  return null;
+}
+
+async function inferFirstPipelineStageId(clientId, pipelineId) {
+  if (!clientId || !pipelineId) return null;
+  const pipelines = await candidatePipelineService.listOrSeedByClientId(clientId);
+  const pipeline = pipelines.find((p) => p.id === pipelineId);
+  if (!pipeline) return null;
+  const sorted = [...(pipeline.stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  return sorted[0]?.id || null;
+}
+
+/**
+ * Kanban / manual stage drag: run the configured "move" outcome (and its automations)
+ * when staff moves a candidate between pipeline stages.
+ */
+async function executeCandidateKanbanStageMove(req, params) {
+  const { candidateId, clientId, pipelineId, fromStageId, toStageId } = params || {};
+  if (!candidateId || !clientId || !pipelineId || !fromStageId || !toStageId) {
+    return { executed: false, reason: 'missing_params' };
+  }
+  if (fromStageId === toStageId) {
+    return { executed: false, reason: 'same_stage' };
+  }
+
+  const pipeline = await loadPipelineDto('candidate', clientId, pipelineId);
+  if (!pipeline) return { executed: false, reason: 'pipeline_not_found' };
+
+  const outcome = findMoveOutcomeForTransition(pipeline.stages, fromStageId, toStageId);
+
+  const { recordCandidateKanbanStageMove } = require('../utils/candidateKanbanStageMoveEvent');
+  const journalResult = await recordCandidateKanbanStageMove(req, {
+    candidateId,
+    clientId,
+    pipelineId,
+    fromStageId,
+    toStageId,
+    outcome,
+  });
+
+  if (!outcome) {
+    return { executed: false, reason: 'no_matching_outcome', journalResult };
+  }
+
+  const links = await JobCandidate.findAll({
+    where: { candidateId },
+    attributes: ['id'],
+    order: [['updatedAt', 'DESC']],
+    limit: 1,
+  });
+  const jobCandidateId = links[0]?.id || null;
+
+  const result = await executeOutcome(req, {
+    pipelineKind: 'candidate',
+    clientId,
+    pipelineId,
+    stageId: fromStageId,
+    outcomeId: outcome.id,
+    context: { candidateId, jobCandidateId },
+    source: 'manual',
+    skipCandidateAction: true,
+  });
+
+  return { executed: true, outcome, result, journalResult };
+}
+
 module.exports = {
   executeOutcome,
+  approveAutomations,
   dispatchFromSystemEvent,
+  executeCandidateKanbanStageMove,
+  findMoveOutcomeForTransition,
+  inferFirstPipelineStageId,
   triggerMatchesOutcome,
+  collectTriggeredOutcomes,
+  resolveClientIdForCandidate,
+  resolveClientIdsForCandidateJournal,
 };

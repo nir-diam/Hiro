@@ -424,6 +424,7 @@ const resources = {
         'candidates.export_search_no_api': 'חסרה כתובת API',
         'candidates.export_search_in_progress': 'מייצא מועמדים…',
         'candidates.export_selected_none': 'בחר מועמדים לייצוא (סמן בתיבות הסימון)',
+        'candidates.bulk_channel_none': 'אין מועמדים נבחרים עם ערוץ תפוצה זה מופעל',
 
         'candidates.export_col.id': 'מזהה',
         'candidates.export_col.fullName': 'שם מלא',
@@ -499,6 +500,11 @@ const resources = {
         'section.recruiter_notes_placeholder': 'הזן הערות פנימיות כאן...',
         'section.candidate_notes_placeholder': 'הוסף כאן הערות, דגשים או בקשות שיוצגו לצוות הגיוס...',
         'section.notes': 'הערות',
+        'section.distribution_channels': 'ערוצי תפוצה',
+        'section.distribution_email': 'דוא"ל',
+        'section.distribution_sms': 'סמס',
+        'section.distribution_whatsapp': 'Whatsapp',
+        'section.distribution_blocked_hint': 'מועמד חסום — ערוצי תפוצה כבויים עד שינוי הסטטוס.',
 
         // Profile Form Fields
         'form.full_name': 'שם מלא',
@@ -1114,6 +1120,7 @@ const resources = {
         'interested_jobs.col_lastUpdated': 'עדכון אחרון',
         'interested_jobs.col_industry': 'תעשייה',
         'interested_jobs.col_role': 'תפקיד',
+        'interested_jobs.col_candidate': 'מועמד',
         'interested_jobs.match_ring_title': 'ציון התאמה מהמנוע (התאמה וקטורית, תגיות, מיקום ועוד)',
         'interested_jobs.popover_title': 'ניתוח התאמת AI',
         'interested_jobs.popover_recalc': 'חשב מחדש התאמה',
@@ -1932,6 +1939,7 @@ const resources = {
         'candidates.export_search_no_api': 'API base URL is not configured',
         'candidates.export_search_in_progress': 'Exporting candidates…',
         'candidates.export_selected_none': 'Select candidates to export (use the checkboxes)',
+        'candidates.bulk_channel_none': 'No selected candidates have this distribution channel enabled',
 
         'candidates.export_col.id': 'Id',
         'candidates.export_col.fullName': 'Full name',
@@ -2007,6 +2015,11 @@ const resources = {
          'section.recruiter_notes_placeholder': 'Enter internal notes here...',
          'section.candidate_notes_placeholder': 'Add notes, highlights or requests for the recruitment team here...',
          'section.notes': 'Notes',
+         'section.distribution_channels': 'Distribution channels',
+         'section.distribution_email': 'Email',
+         'section.distribution_sms': 'SMS',
+         'section.distribution_whatsapp': 'WhatsApp',
+         'section.distribution_blocked_hint': 'Blocked candidate — distribution channels stay off until status changes.',
 
          // Profile Form Fields
         'form.full_name': 'Full Name',
@@ -2642,6 +2655,7 @@ const resources = {
         'interested_jobs.col_lastUpdated': 'Last updated',
         'interested_jobs.col_industry': 'Industry',
         'interested_jobs.col_role': 'Role',
+        'interested_jobs.col_candidate': 'Candidate',
         'interested_jobs.match_ring_title': 'Engine match score (vector, tags, location, etc.)',
         'interested_jobs.popover_title': 'AI match breakdown',
         'interested_jobs.popover_recalc': 'Recalculate match',

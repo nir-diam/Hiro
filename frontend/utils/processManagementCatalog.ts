@@ -25,6 +25,60 @@ export type SystemEventOption = {
   groupLabel: string;
 };
 
+export const pipelineNameKey = (pipeline: Pick<EnrichedPipeline, 'kind' | 'name'>) =>
+  `${pipeline.kind}:${String(pipeline.name || '').trim().toLowerCase()}`;
+
+/** One entry per pipeline template name (avoids duplicates across tenants/clients). */
+export function dedupeEnrichedPipelinesByName(pipelines: EnrichedPipeline[]): EnrichedPipeline[] {
+  const map = new Map<string, EnrichedPipeline>();
+  for (const pipeline of pipelines) {
+    const key = pipelineNameKey(pipeline);
+    if (!map.has(key)) map.set(key, pipeline);
+  }
+  return Array.from(map.values());
+}
+
+export function siblingPipelineIds(
+  pipeline: EnrichedPipeline,
+  allPipelines: EnrichedPipeline[],
+): string[] {
+  const key = pipelineNameKey(pipeline);
+  return allPipelines.filter((row) => pipelineNameKey(row) === key).map((row) => row.id);
+}
+
+export function isPipelineGroupSelected(
+  pipeline: EnrichedPipeline,
+  selectedPipelineIds: Set<string>,
+  allPipelines: EnrichedPipeline[],
+): boolean {
+  if (selectedPipelineIds.size === 0) return false;
+  return siblingPipelineIds(pipeline, allPipelines).some((id) => selectedPipelineIds.has(id));
+}
+
+export function togglePipelineGroupSelection(
+  pipeline: EnrichedPipeline,
+  selectedPipelineIds: Set<string>,
+  allPipelines: EnrichedPipeline[],
+): Set<string> {
+  const siblings = siblingPipelineIds(pipeline, allPipelines);
+  const anySelected = siblings.some((id) => selectedPipelineIds.has(id));
+  const next = new Set(selectedPipelineIds);
+  for (const id of siblings) {
+    if (anySelected) next.delete(id);
+    else next.add(id);
+  }
+  return next;
+}
+
+export function countSelectedPipelineGroups(
+  selectedPipelineIds: Set<string>,
+  allPipelines: EnrichedPipeline[],
+): number {
+  return dedupeEnrichedPipelinesByName(allPipelines).filter((pipeline) =>
+    isPipelineGroupSelected(pipeline, selectedPipelineIds, allPipelines),
+  ).length;
+}
+
 export const stageOutcomeKey = (pipelineId: string, stageId: string, outcomeId?: string) =>
   outcomeId ? `outcome:${pipelineId}:${stageId}:${outcomeId}` : `stage:${pipelineId}:${stageId}`;
 
@@ -44,13 +98,24 @@ export const parseStageOutcomeKey = (key: string) => {
   return null;
 };
 
+function pipelineMatchesSelection(
+  pipeline: EnrichedPipeline,
+  selectedPipelineIds: Set<string>,
+  selectionPool: EnrichedPipeline[],
+): boolean {
+  if (selectedPipelineIds.size === 0) return true;
+  if (selectedPipelineIds.has(pipeline.id)) return true;
+  return siblingPipelineIds(pipeline, selectionPool).some((id) => selectedPipelineIds.has(id));
+}
+
 export function buildStageOutcomeOptions(
   pipelines: EnrichedPipeline[],
   selectedPipelineIds: Set<string>,
+  selectionPool: EnrichedPipeline[] = pipelines,
 ): StageOutcomeOption[] {
   const out: StageOutcomeOption[] = [];
   for (const pipeline of pipelines) {
-    if (selectedPipelineIds.size > 0 && !selectedPipelineIds.has(pipeline.id)) continue;
+    if (!pipelineMatchesSelection(pipeline, selectedPipelineIds, selectionPool)) continue;
     const kindLabel = pipeline.kind === 'candidate' ? 'מועמדים' : 'לקוחות';
     const stages = [...(pipeline.stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
     for (const stage of stages) {
@@ -103,19 +168,19 @@ export function eventMatchesPipelineFilters(
 ): boolean {
   if (selectedPipelineIds.size > 0) {
     const pid = event.processId ? String(event.processId) : '';
-    if (pid && selectedPipelineIds.has(pid)) {
-      // matched by id
-    } else {
-      const proc = String(event.process || '').trim().toLowerCase();
-      const matched = pipelines.some(
-        (p) =>
-          selectedPipelineIds.has(p.id) &&
-          (String(p.name || '').trim().toLowerCase() === proc ||
-            proc.includes(String(p.name || '').trim().toLowerCase()) ||
-            String(p.name || '').trim().toLowerCase().includes(proc)),
-      );
-      if (!matched) return false;
-    }
+    const proc = String(event.process || '').trim().toLowerCase();
+    const matchedById = pid && pipelines.some(
+      (p) => selectedPipelineIds.has(p.id) && String(p.id) === pid,
+    );
+    const matchedBySelection = pipelines.some(
+      (p) =>
+        isPipelineGroupSelected(p, selectedPipelineIds, pipelines) &&
+        (pid === String(p.id) ||
+          proc === String(p.name || '').trim().toLowerCase() ||
+          proc.includes(String(p.name || '').trim().toLowerCase()) ||
+          String(p.name || '').trim().toLowerCase().includes(proc)),
+    );
+    if (!matchedById && !matchedBySelection) return false;
   }
 
   if (selectedStageOutcomeKeys.size > 0) {

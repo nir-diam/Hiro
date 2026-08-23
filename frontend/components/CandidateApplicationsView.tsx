@@ -2,12 +2,22 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { PlusIcon, PencilIcon, TrashIcon, DocumentTextIcon, MagnifyingGlassIcon } from './Icons';
 import AddApplicationModal, { type ApplicationFormValues } from './AddApplicationModal';
+import { authHeaders } from '../utils/authHeaders';
 
 interface JobOption {
     id: string;
     title: string;
     client?: string;
 }
+
+type EmailUploadRow = {
+    id: number | string;
+    candidateId?: string | null;
+    jobId?: string | null;
+    subject?: string | null;
+    from?: string | null;
+    createdAt?: string | null;
+};
 
 interface ApplicationRecord {
     id: string;
@@ -22,13 +32,66 @@ interface ApplicationRecord {
     notes?: string | null;
     job?: JobOption | null;
     date?: string;
+    source?: 'manual' | 'email';
+    readOnly?: boolean;
 }
 
 interface CandidateApplicationsViewProps {
     candidateId?: string | null;
+    /** All profile version ids for the same portal user — aggregates email + manual submissions. */
+    relatedProfileIds?: string[];
 }
 
-const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ candidateId }) => {
+const apiBase = () => (import.meta.env.VITE_API_BASE || '').replace(/\/$/, '');
+
+function normalizeDate(value?: string | null): string {
+    if (!value) return new Date().toISOString().slice(0, 10);
+    const d = new Date(value);
+    if (Number.isNaN(d.getTime())) return String(value).slice(0, 10);
+    return d.toISOString().slice(0, 10);
+}
+
+function mapManualApplication(app: ApplicationRecord): ApplicationRecord {
+    return {
+        ...app,
+        source: 'manual',
+        readOnly: false,
+        date: app.applicationDate ? normalizeDate(app.applicationDate) : app.date || normalizeDate(null),
+    };
+}
+
+function mapEmailUploadToApplication(
+    upload: EmailUploadRow,
+    jobsById: Map<string, JobOption>,
+): ApplicationRecord | null {
+    const candidateId = upload.candidateId ? String(upload.candidateId) : '';
+    if (!candidateId) return null;
+    const jobId = upload.jobId != null ? String(upload.jobId).trim() : '';
+    const job = jobId ? jobsById.get(jobId) : undefined;
+    const subject = String(upload.subject || '').trim();
+    const from = String(upload.from || '').trim();
+    return {
+        id: `email-${upload.id}`,
+        candidateId,
+        jobId: jobId || null,
+        company: job?.client || '—',
+        role: job?.title || subject || 'הגשה ממייל',
+        status: 'נקלט ממייל',
+        applicationDate: upload.createdAt || null,
+        date: normalizeDate(upload.createdAt),
+        link: null,
+        cvFile: subject || 'קורות חיים ממייל',
+        notes: from ? `מ: ${from}` : null,
+        job: job || null,
+        source: 'email',
+        readOnly: true,
+    };
+}
+
+const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
+    candidateId,
+    relatedProfileIds = [],
+}) => {
     const [applications, setApplications] = useState<ApplicationRecord[]>([]);
     const [jobs, setJobs] = useState<JobOption[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -36,64 +99,150 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
     const [searchTerm, setSearchTerm] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+    const [loadError, setLoadError] = useState<string | null>(null);
 
-    const formatApplications = useCallback((items: ApplicationRecord[]) => {
-        return items.map((app) => ({
-            ...app,
-            date: app.applicationDate
-                ? app.applicationDate.slice(0, 10)
-                : app.date || new Date().toISOString().slice(0, 10),
-        }));
-    }, []);
+    const profileIds = useMemo(() => {
+        const ids = new Set<string>();
+        const primary = candidateId != null ? String(candidateId).trim() : '';
+        if (primary) ids.add(primary);
+        for (const id of relatedProfileIds) {
+            const s = String(id || '').trim();
+            if (s) ids.add(s);
+        }
+        return [...ids];
+    }, [candidateId, relatedProfileIds]);
 
-    const loadJobs = useCallback(async () => {
+    const loadJobs = useCallback(async (): Promise<Map<string, JobOption>> => {
+        const base = apiBase();
+        const map = new Map<string, JobOption>();
         try {
-            const res = await fetch('/api/jobs');
+            const res = await fetch(`${base}/api/jobs`, {
+                headers: authHeaders(),
+                credentials: 'include',
+            });
             if (!res.ok) throw new Error('Failed to load jobs');
             const payload = await res.json();
-            if (!Array.isArray(payload)) return;
-            setJobs(
-                payload.map((job) => ({
-                    id: job.id,
+            if (!Array.isArray(payload)) return map;
+            for (const job of payload) {
+                if (!job?.id) continue;
+                map.set(String(job.id), {
+                    id: String(job.id),
                     title: job.title || '',
                     client: job.client || '',
-                })),
-            );
+                });
+            }
+            setJobs([...map.values()]);
         } catch (err) {
             console.error('[CandidateApplicationsView] loadJobs', err);
         }
+        return map;
+    }, []);
+
+    const loadManualApplications = useCallback(async (ids: string[]) => {
+        const base = apiBase();
+        const batches = await Promise.allSettled(
+            ids.map(async (id) => {
+                const res = await fetch(`${base}/api/applications?candidateId=${encodeURIComponent(id)}`, {
+                    headers: authHeaders(),
+                    credentials: 'include',
+                });
+                if (!res.ok) throw new Error('Failed to load applications');
+                const payload = await res.json();
+                if (!Array.isArray(payload)) return [] as ApplicationRecord[];
+                return payload.map((row) => mapManualApplication(row as ApplicationRecord));
+            }),
+        );
+        const merged: ApplicationRecord[] = [];
+        const seen = new Set<string>();
+        for (const batch of batches) {
+            if (batch.status !== 'fulfilled') continue;
+            for (const app of batch.value) {
+                const key = app.id;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                merged.push(app);
+            }
+        }
+        return merged;
+    }, []);
+
+    const loadEmailApplications = useCallback(async (ids: string[], jobsById: Map<string, JobOption>) => {
+        const base = apiBase();
+        const batches = await Promise.allSettled(
+            ids.map(async (id) => {
+                const res = await fetch(`${base}/api/email-uploads/candidate/${encodeURIComponent(id)}`, {
+                    headers: authHeaders(),
+                    credentials: 'include',
+                });
+                if (!res.ok) return [] as ApplicationRecord[];
+                const payload = await res.json();
+                if (!Array.isArray(payload)) return [] as ApplicationRecord[];
+                return payload
+                    .map((row) => mapEmailUploadToApplication(row as EmailUploadRow, jobsById))
+                    .filter((row): row is ApplicationRecord => Boolean(row));
+            }),
+        );
+        const merged: ApplicationRecord[] = [];
+        const seen = new Set<string>();
+        for (const batch of batches) {
+            if (batch.status !== 'fulfilled') continue;
+            for (const app of batch.value) {
+                const key = app.id;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                merged.push(app);
+            }
+        }
+        return merged;
     }, []);
 
     const loadApplications = useCallback(async () => {
-        if (!candidateId) return;
+        if (!profileIds.length) {
+            setApplications([]);
+            return;
+        }
         setIsLoading(true);
+        setLoadError(null);
         try {
-            const res = await fetch(`/api/applications?candidateId=${candidateId}`);
-            if (!res.ok) throw new Error('Failed to load applications');
-            const payload = await res.json();
-            if (!Array.isArray(payload)) throw new Error('Invalid application response');
-            setApplications(formatApplications(payload));
+            const jobsById = await loadJobs();
+            const [manualApps, emailApps] = await Promise.all([
+                loadManualApplications(profileIds),
+                loadEmailApplications(profileIds, jobsById),
+            ]);
+            const manualJobKeys = new Set(
+                manualApps.map((a) => `${a.candidateId}::${a.jobId || ''}::${a.date || ''}`),
+            );
+            const emailOnly = emailApps.filter((app) => {
+                const key = `${app.candidateId}::${app.jobId || ''}::${app.date || ''}`;
+                if (app.jobId && manualJobKeys.has(key)) return false;
+                return true;
+            });
+            const combined = [...manualApps, ...emailOnly].sort((a, b) => {
+                const aTime = Date.parse(String(a.date || '')) || 0;
+                const bTime = Date.parse(String(b.date || '')) || 0;
+                return bTime - aTime;
+            });
+            setApplications(combined);
         } catch (err) {
             console.error('[CandidateApplicationsView] loadApplications', err);
+            setLoadError(err instanceof Error ? err.message : 'טעינת הגשות נכשלה');
         } finally {
             setIsLoading(false);
         }
-    }, [candidateId, formatApplications]);
+    }, [profileIds, loadJobs, loadManualApplications, loadEmailApplications]);
 
     useEffect(() => {
-        loadJobs();
-    }, [loadJobs]);
-
-    useEffect(() => {
-        loadApplications();
+        void loadApplications();
     }, [loadApplications]);
 
     const saveApplication = async (formData: ApplicationFormValues) => {
         if (!candidateId) return;
         setIsSaving(true);
+        setLoadError(null);
         try {
+            const base = apiBase();
             const payload = {
-                candidateId,
+                candidateId: String(candidateId),
                 jobId: formData.jobId || null,
                 company: formData.company,
                 role: formData.role,
@@ -104,38 +253,54 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
                 applicationDate: formData.date,
             };
             if (formData.id) {
-                const res = await fetch(`/api/applications/${formData.id}`, {
+                const res = await fetch(`${base}/api/applications/${formData.id}`, {
                     method: 'PUT',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
+                    credentials: 'include',
                     body: JSON.stringify(payload),
                 });
-                if (!res.ok) throw new Error('Failed to update application');
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body.message || 'Failed to update application');
+                }
             } else {
-                const res = await fetch('/api/applications', {
+                const res = await fetch(`${base}/api/applications`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    headers: authHeaders(true),
+                    credentials: 'include',
                     body: JSON.stringify(payload),
                 });
-                if (!res.ok) throw new Error('Failed to save application');
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body.message || 'Failed to save application');
+                }
             }
             await loadApplications();
-        } catch (err) {
-            console.error('[CandidateApplicationsView] saveApplication', err);
-        } finally {
-            setIsSaving(false);
             setIsModalOpen(false);
             setEditingApp(null);
+        } catch (err) {
+            console.error('[CandidateApplicationsView] saveApplication', err);
+            setLoadError(err instanceof Error ? err.message : 'שמירת הגשה נכשלה');
+        } finally {
+            setIsSaving(false);
         }
     };
 
     const handleDelete = async (appId: string) => {
+        if (appId.startsWith('email-')) return;
         if (!window.confirm('האם למחוק הגשה זו?')) return;
         try {
-            const res = await fetch(`/api/applications/${appId}`, { method: 'DELETE' });
+            const base = apiBase();
+            const res = await fetch(`${base}/api/applications/${appId}`, {
+                method: 'DELETE',
+                headers: authHeaders(),
+                credentials: 'include',
+            });
             if (!res.ok) throw new Error('Failed to delete application');
             await loadApplications();
         } catch (err) {
             console.error('[CandidateApplicationsView] handleDelete', err);
+            setLoadError(err instanceof Error ? err.message : 'מחיקה נכשלה');
         }
     };
 
@@ -160,6 +325,7 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
     };
 
     const openEditModal = (app: ApplicationRecord) => {
+        if (app.readOnly || app.source === 'email') return;
         setEditingApp({
             id: app.id,
             jobId: app.jobId || '',
@@ -193,6 +359,12 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
                 <h1 className="text-3xl font-black text-text-default tracking-tight">פנקס הגשות</h1>
                 <p className="text-text-muted text-lg">נהל/י ועקוב/י אחר כל הגשות המועמדות שלך למשרות במקום אחד.</p>
             </div>
+
+            {loadError ? (
+                <div className="rounded-xl border border-red-200 bg-red-50 text-sm text-red-700 px-4 py-3">
+                    {loadError}
+                </div>
+            ) : null}
 
             <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
                 <div className="relative w-full sm:w-auto sm:min-w-[300px]">
@@ -250,7 +422,13 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
                                             ) : null}
                                         </td>
                                         <td className="px-6 py-4">
-                                            <span className="px-2 py-1 bg-primary-50 text-primary-700 rounded-md text-xs font-bold">
+                                            <span
+                                                className={`px-2 py-1 rounded-md text-xs font-bold ${
+                                                    app.source === 'email'
+                                                        ? 'bg-blue-50 text-blue-700'
+                                                        : 'bg-primary-50 text-primary-700'
+                                                }`}
+                                            >
                                                 {app.status}
                                             </span>
                                         </td>
@@ -276,22 +454,26 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
                                             {app.notes || '-'}
                                         </td>
                                         <td className="px-6 py-4">
-                                            <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                                                <button
-                                                    onClick={() => openEditModal(app)}
-                                                    className="p-2 rounded-lg text-primary-600 hover:bg-primary-50 transition-colors"
-                                                    title="ערוך"
-                                                >
-                                                    <PencilIcon className="w-4 h-4" />
-                                                </button>
-                                                <button
-                                                    onClick={() => handleDelete(app.id)}
-                                                    className="p-2 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
-                                                    title="מחק"
-                                                >
-                                                    <TrashIcon className="w-4 h-4" />
-                                                </button>
-                                            </div>
+                                            {app.readOnly ? (
+                                                <span className="text-xs text-text-muted">מקור: מייל</span>
+                                            ) : (
+                                                <div className="flex items-center justify-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                    <button
+                                                        onClick={() => openEditModal(app)}
+                                                        className="p-2 rounded-lg text-primary-600 hover:bg-primary-50 transition-colors"
+                                                        title="ערוך"
+                                                    >
+                                                        <PencilIcon className="w-4 h-4" />
+                                                    </button>
+                                                    <button
+                                                        onClick={() => handleDelete(app.id)}
+                                                        className="p-2 rounded-lg text-red-500 hover:bg-red-50 transition-colors"
+                                                        title="מחק"
+                                                    >
+                                                        <TrashIcon className="w-4 h-4" />
+                                                    </button>
+                                                </div>
+                                            )}
                                         </td>
                                     </tr>
                                 ))
@@ -309,7 +491,11 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({ c
 
             <AddApplicationModal
                 isOpen={isModalOpen}
-                onClose={() => setIsModalOpen(false)}
+                onClose={() => {
+                    if (isSaving) return;
+                    setIsModalOpen(false);
+                    setEditingApp(null);
+                }}
                 onSave={saveApplication}
                 initialData={editingApp}
                 jobs={jobs}

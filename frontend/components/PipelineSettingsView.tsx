@@ -25,6 +25,7 @@ import {
     type MessageTemplateDto,
 } from '../services/messageTemplatesApi';
 import { fetchSystemEvents, type SystemEventApiRow } from '../services/systemEventsApi';
+import { fetchRecruitmentStatuses, type RecruitmentStatusDto } from '../services/recruitmentStatusesApi';
 import type {
     OutcomeAutomation,
     OutcomeTrigger,
@@ -54,7 +55,7 @@ const SYSTEM_EVENT_GROUPS: Array<{ label: string; events: Array<{ value: string;
     {
         label: 'פורטל מועמד',
         events: [
-            { value: 'candidate_confirmed_profile', label: 'מועמד.אישר_את_הפרופיל' },
+            { value: 'candidate_confirmed_profile', label: 'מועמד.אישור הפרופיל על ידי המועמד' },
         ],
     },
     {
@@ -157,9 +158,10 @@ const OutcomeAutomationRow: React.FC<{
     pipelines: Pipeline[];
     emailTemplates: MessageTemplateDto[];
     smsTemplates: MessageTemplateDto[];
+    recruitmentStatuses: RecruitmentStatusDto[];
     onChange: (automation: OutcomeAutomation) => void;
     onDelete: () => void;
-}> = ({ automation, pipelines, emailTemplates, smsTemplates, onChange, onDelete }) => {
+}> = ({ automation, pipelines, emailTemplates, smsTemplates, recruitmentStatuses, onChange, onDelete }) => {
     const showManualApproval = automation.actionType === 'send_email' || automation.actionType === 'send_sms';
     const recipients = automation.recipients || { candidate: true, hiringManager: false, coordinator: false, extra: '' };
 
@@ -188,6 +190,7 @@ const OutcomeAutomationRow: React.FC<{
                         actionType,
                         templateId: undefined,
                         pipelineId: undefined,
+                        statusName: undefined,
                     });
                 }}
                 className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500"
@@ -196,6 +199,7 @@ const OutcomeAutomationRow: React.FC<{
                 <option value="send_sms">שליחת SMS מתוך תבנית</option>
                 <option value="start_pipeline">העבר לתהליך אחר</option>
                 <option value="close_event">סגירת אירוע</option>
+                <option value="change_status">שנה סטטוס</option>
             </select>
 
             {automation.actionType === 'send_email' ? (
@@ -288,6 +292,25 @@ const OutcomeAutomationRow: React.FC<{
                         {pipelines.map((p) => (
                             <option key={p.id} value={p.id}>
                                 {p.name}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            ) : null}
+
+            {automation.actionType === 'change_status' ? (
+                <div className="flex flex-col gap-2 flex-1 min-w-[200px]">
+                    <select
+                        value={automation.statusName || ''}
+                        onChange={(e) => patch({ statusName: e.target.value })}
+                        className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full"
+                    >
+                        <option value="" disabled>
+                            -- בחר סטטוס גיוס --
+                        </option>
+                        {recruitmentStatuses.map((status) => (
+                            <option key={status.id} value={status.name}>
+                                {status.name}
                             </option>
                         ))}
                     </select>
@@ -477,6 +500,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
     const [saveError, setSaveError] = useState<string | null>(null);
     const [messageTemplates, setMessageTemplates] = useState<MessageTemplateDto[]>(FALLBACK_TEMPLATES);
     const [systemEventGroups, setSystemEventGroups] = useState(SYSTEM_EVENT_GROUPS);
+    const [recruitmentStatuses, setRecruitmentStatuses] = useState<RecruitmentStatusDto[]>([]);
 
     const emailTemplates = useMemo(
         () => messageTemplates.filter((t) => t.channels.includes('email')),
@@ -518,6 +542,24 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
             })
             .catch(() => {
                 if (!cancelled) setMessageTemplates(FALLBACK_TEMPLATES);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [clientId]);
+
+    useEffect(() => {
+        if (!clientId) {
+            setRecruitmentStatuses([]);
+            return;
+        }
+        let cancelled = false;
+        void fetchRecruitmentStatuses(clientId)
+            .then((rows) => {
+                if (!cancelled) setRecruitmentStatuses(Array.isArray(rows) ? rows.filter((r) => r.isActive !== false) : []);
+            })
+            .catch(() => {
+                if (!cancelled) setRecruitmentStatuses([]);
             });
         return () => {
             cancelled = true;
@@ -1331,6 +1373,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                                                             key={automation.id}
                                                                             automation={automation}
                                                                             pipelines={pipelines}
+                                                                            recruitmentStatuses={recruitmentStatuses}
                                                                             emailTemplates={
                                                                                 emailTemplates.length > 0
                                                                                     ? emailTemplates

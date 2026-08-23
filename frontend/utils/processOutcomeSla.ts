@@ -85,12 +85,12 @@ export type AutomationResultRow = {
 
 export function summarizeAutomationResults(results: AutomationResultRow[] | undefined): string | null {
   if (!results?.length) return null;
-  const sent = results.filter((r) => r.status === 'sent' || r.status === 'applied').length;
+  const applied = results.filter((r) => r.status === 'sent' || r.status === 'applied').length;
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const errors = results.filter((r) => r.status === 'error').length;
   const pending = results.filter((r) => r.status === 'pending_approval').length;
   const parts: string[] = [];
-  if (sent) parts.push(`${sent} אוטומציות בוצעו`);
+  if (applied) parts.push(`${applied} אוטומציות בוצעו`);
   if (pending) parts.push(`${pending} ממתינות לאישור`);
   if (skipped) parts.push(`${skipped} דולגו`);
   if (errors) parts.push(`${errors} שגיאות`);

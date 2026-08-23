@@ -30,16 +30,25 @@ export type ExecutePipelineOutcomeParams = {
   source?: 'manual' | 'system_event';
 };
 
+export type AutomationResultItem = {
+  automationId: string;
+  status: string;
+  actionType?: string | null;
+  templateId?: string | null;
+  statusName?: string | null;
+  channel?: string;
+  reason?: string;
+  message?: string;
+};
+
 export type ExecutePipelineOutcomeResult = {
   outcome: { id: string; name: string; actionType: string };
   actionResult: Record<string, unknown>;
-  automationResults: Array<{
-    automationId: string;
-    status: string;
-    channel?: string;
-    reason?: string;
-    message?: string;
-  }>;
+  automationResults: AutomationResultItem[];
+};
+
+export type ApprovePipelineAutomationsParams = ExecutePipelineOutcomeParams & {
+  automationIds: string[];
 };
 
 export async function executePipelineOutcome(
@@ -52,4 +61,16 @@ export async function executePipelineOutcome(
   });
   if (!res.ok) throw new Error(await parseErr(res));
   return (await res.json()) as ExecutePipelineOutcomeResult;
+}
+
+export async function approvePipelineAutomations(
+  params: ApprovePipelineAutomationsParams,
+): Promise<{ automationResults: AutomationResultItem[] }> {
+  const res = await fetch(`${apiBase()}/api/pipeline-outcomes/approve-automations`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error(await parseErr(res));
+  return (await res.json()) as { automationResults: AutomationResultItem[] };
 }

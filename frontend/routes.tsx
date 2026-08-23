@@ -36,6 +36,7 @@ import RecruitmentSourcesSettingsView from './components/RecruitmentSourcesSetti
 import QuestionnaireBuilderView from './components/QuestionnaireBuilderView'; 
 import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
 import { syncCandidateNameFields } from './utils/candidateName';
+import { buildMissingProfileFieldLabels, resolveProfileDisplayAge } from './utils/candidateProfileDisplayCompleteness';
 import PipelineSettingsView from './components/PipelineSettingsView';
 import CandidatePipelineSettingsView from './components/CandidatePipelineSettingsView';
 import StatusSettingsView from './components/StatusSettingsView';
@@ -214,6 +215,9 @@ const initialData = {
     salaryMax: 20000,
     internalNotes: '',
     candidateNotes: '',
+    distributionEmail: true,
+    distributionSms: true,
+    distributionWhatsapp: true,
     source: '',
     recruitmentSourceId: null as string | null,
     recruitmentSourceCreatedAt: null as string | null,
@@ -251,6 +255,7 @@ const normalizeCandidatePayload = (payload: any) => {
     const drivingLicenseSingle = payload?.drivingLicense != null ? String(payload.drivingLicense) : '';
     const employmentSingle = payload?.employmentType != null ? String(payload.employmentType) : '';
     const jobScopeSingle = payload?.jobScope != null ? String(payload.jobScope) : '';
+    const isBlockedStatus = String(payload?.status ?? '').trim() === 'חסום';
 
     const out = {
         ...initialData,
@@ -268,6 +273,9 @@ const normalizeCandidatePayload = (payload: any) => {
         recruitmentSourceId: payload?.recruitmentSourceId ?? null,
         recruitmentSourceCreatedAt: payload?.recruitmentSourceCreatedAt ?? null,
         recruitmentSourceUpdatedAt: payload?.recruitmentSourceUpdatedAt ?? null,
+        distributionEmail: isBlockedStatus ? false : payload?.distributionEmail !== false,
+        distributionSms: isBlockedStatus ? false : payload?.distributionSms !== false,
+        distributionWhatsapp: isBlockedStatus ? false : payload?.distributionWhatsapp !== false,
         drivingLicenses:
             drivingLicensesRaw.length > 0
                 ? drivingLicensesRaw.map((x: any) => String(x || '').trim()).filter(Boolean)
@@ -314,6 +322,11 @@ const normalizeCandidatePayload = (payload: any) => {
     }
 
     syncCandidateNameFields(out as Record<string, unknown>);
+    const cityDisplay = String(out.address ?? out.location ?? '').trim();
+    if (cityDisplay) {
+        out.address = cityDisplay;
+        out.location = cityDisplay;
+    }
     return out;
 };
 
@@ -492,6 +505,10 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         setCandidateUpdateMessage(null);
 
         try {
+            const prevMissing = buildMissingProfileFieldLabels(
+                formData,
+                resolveProfileDisplayAge(formData),
+            );
             const response = await fetch(`${apiBase}/api/candidates/${urlId}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -506,6 +523,20 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
             const normalized = normalizeCandidatePayload(payload);
             const localId = deriveLocalCandidateId(payload.id ?? payload.userId, formData.id);
             setFormData({ ...normalized, id: localId, backendId: payload.id });
+            const nextMissing = buildMissingProfileFieldLabels(
+                normalized,
+                resolveProfileDisplayAge(normalized),
+            );
+            if (prevMissing.length > 0 && nextMissing.length === 0) {
+                window.dispatchEvent(
+                    new CustomEvent('hiro:candidate-missing-details-completed', {
+                        detail: { backendId: payload.id },
+                    }),
+                );
+            }
+            window.dispatchEvent(
+                new CustomEvent('candidate-data-refreshed', { detail: { backendId: payload.id } }),
+            );
             setCandidateUpdateMessage('השינויים נשמרו בהצלחה.');
         } catch (error: any) {
             setCandidateUpdateMessage(error?.message || 'עדכון נכשל.');
@@ -621,6 +652,17 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         profileName: profile.profileName || profile.fullName || 'פרופיל',
         profilePicture: profile.profilePicture,
     })), [profiles]);
+
+    const relatedProfilesForJobs = useMemo(
+        () =>
+            profiles
+                .map((profile) => ({
+                    id: String(profile.backendId || profile.id || '').trim(),
+                    label: String(profile.profileName || profile.fullName || profile.title || 'פרופיל').trim(),
+                }))
+                .filter((row) => row.id),
+        [profiles],
+    );
 
     const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
     const [generateSummaryError, setGenerateSummaryError] = useState<string | null>(null);
@@ -811,6 +853,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                         pipelineStageId={
                             (formData as { pipelineStageId?: string }).pipelineStageId ?? null
                         }
+                        relatedProfiles={relatedProfilesForJobs}
                     />
                 );
             case 'referrals':

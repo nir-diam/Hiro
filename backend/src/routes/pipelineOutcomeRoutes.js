@@ -6,5 +6,6 @@ const pipelineOutcomeController = require('../controllers/pipelineOutcomeControl
 const router = express.Router();
 
 router.post('/execute', authMiddleware, attachDbUser, pipelineOutcomeController.execute);
+router.post('/approve-automations', authMiddleware, attachDbUser, pipelineOutcomeController.approveAutomations);
 
 module.exports = router;

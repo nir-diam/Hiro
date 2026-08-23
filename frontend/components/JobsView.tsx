@@ -532,18 +532,6 @@ const JobsView: React.FC = () => {
         return updated;
     }, [apiBase]);
 
-    const createJobRecord = useCallback(async (payload: Partial<Job>) => {
-        const res = await fetch(`${apiBase}/api/jobs`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        if (!res.ok) throw new Error('Failed to create job');
-        const created = await res.json();
-        setJobs(prev => [...prev, created]);
-        return created;
-    }, [apiBase]);
-
     const deleteJobRecord = useCallback(async (id: number) => {
         const res = await fetch(`${apiBase}/api/jobs/${id}`, { method: 'DELETE' });
         if (!res.ok) throw new Error('Failed to delete job');
@@ -695,36 +683,6 @@ const JobsView: React.FC = () => {
         }
     };
 
-    const handleCreateJob = async () => {
-        if (!window.confirm('האם ליצור משרה חדשה דיפולטית?')) return;
-        try {
-            const created = await createJobRecord({
-                title: 'משרה חדשה',
-                client: 'לקוח חדש',
-                field: 'כללי',
-                role: 'תפקיד פתוח',
-                priority: 'רגילה',
-                status: 'טיוטה',
-                openDate: new Date().toISOString(),
-                jobType: ['קבועה'],
-                salaryMin: 0,
-                salaryMax: 0,
-                ageMin: 18,
-                ageMax: 99,
-                openPositions: 1,
-                recruiter: 'admin',
-                location: 'לא הוגדר',
-                rating: 0,
-            });
-            if (created) {
-                setSelectedJob(created);
-                setIsDrawerOpen(true);
-            }
-        } catch (err) {
-            alert((err as Error).message || 'Failed to create job');
-        }
-    };
-    
     // --- Bulk Update Handlers ---
     const handleBulkUpdate = async (field: keyof Job, value: any) => {
         if (selectedIds.size === 0) return;
@@ -1101,10 +1059,13 @@ const JobsView: React.FC = () => {
                             </button>
                         </div>
                         
-                        <button onClick={handleCreateJob} className="flex-grow md:flex-grow-0 flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm">
+                        <Link
+                            to="/jobs/new"
+                            className="flex-grow md:flex-grow-0 flex items-center justify-center gap-2 bg-primary-500 text-white font-semibold py-2 px-4 rounded-lg hover:bg-primary-600 transition shadow-sm"
+                        >
                             <PlusIcon className="w-5 h-5"/>
                             <span>{t('jobs.new_job_btn')}</span>
-                        </button>
+                        </Link>
                     </div>
                 </div>
             </header>

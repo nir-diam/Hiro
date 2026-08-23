@@ -99,10 +99,33 @@ export async function createCandidatePipeline(
 /** Re-export client pipeline helpers for settings view switching. */
 export { fetchPipelines, syncPipelines, createPipeline };
 
+export type PatchCandidatePipelineStageResult = {
+    id?: string;
+    candidatePipelineId?: string | null;
+    pipelineStageId?: string | null;
+    pipelineMove?: {
+        viaOutcome?: boolean;
+        async?: boolean;
+        outcomeId?: string | null;
+        outcomeName?: string | null;
+        automationResults?: Array<{
+            status: string;
+            message?: string;
+            channel?: string;
+            reason?: string;
+        }>;
+        actionResult?: {
+            nextStageId?: string;
+            nextStageName?: string;
+            note?: string;
+        } | null;
+    };
+};
+
 export async function patchCandidatePipelineStage(
     candidateId: string,
     payload: { pipelineId?: string | null; stageId?: string | null },
-): Promise<void> {
+): Promise<PatchCandidatePipelineStageResult> {
     const apiBase = () => import.meta.env.VITE_API_BASE || '';
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('token') : null;
     const h: HeadersInit = { 'Content-Type': 'application/json' };
@@ -122,4 +145,5 @@ export async function patchCandidatePipelineStage(
         }
         throw new Error(msg || 'Request failed');
     }
+    return (await res.json()) as PatchCandidatePipelineStageResult;
 }

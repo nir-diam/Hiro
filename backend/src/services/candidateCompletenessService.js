@@ -7,6 +7,8 @@ const SystemTag = require('../models/SystemTag');
 const { SYSTEM_TAG_TYPE_CANDIDATE } = require('../models/SystemTag');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const User = require('../models/User');
+const { recordMissingDetailsCompleted } = require('../utils/candidateMissingDetailsCompletedEvent');
+const { buildProfileDisplayMissingLabels } = require('../utils/candidateProfileDisplayCompleteness');
 
 const STATUS_INCOMPLETE = 'חסר נתונים';
 const STATUS_ACTIVE = 'פעיל';
@@ -78,7 +80,8 @@ async function resolveUsageSettingsForRequest(req) {
 /**
  * Enforce "חסר נתונים" when invalid. When valid and status was "חסר נתונים", keep it until explicit approve.
  */
-async function refreshCandidateDataStatusAfterSave(candidateId, req) {
+async function refreshCandidateDataStatusAfterSave(candidateId, req, options = {}) {
+  const previousRow = options.previousRow || null;
   const instance = await Candidate.findByPk(candidateId);
   if (!instance) return null;
   const usage = await resolveUsageSettingsForRequest(req);
@@ -86,6 +89,16 @@ async function refreshCandidateDataStatusAfterSave(candidateId, req) {
   const plain = instance.get({ plain: true });
   const { ok, missing } = evaluateCandidateDataCompleteness(plain, usage, tagCount);
   const prev = trim(plain.status) || 'חדש';
+
+  const prevDisplayMissing = previousRow ? buildProfileDisplayMissingLabels(previousRow) : [];
+  const nowDisplayMissing = buildProfileDisplayMissingLabels(plain);
+  let prevEvalOk = true;
+  let prevEvalMissing = [];
+  if (previousRow) {
+    const prevEval = evaluateCandidateDataCompleteness(previousRow, usage, tagCount);
+    prevEvalOk = prevEval.ok;
+    prevEvalMissing = prevEval.missing;
+  }
 
   if (!ok) {
     const explanation = buildIncompleteStatusExplanation(missing);
@@ -102,7 +115,26 @@ async function refreshCandidateDataStatusAfterSave(candidateId, req) {
       await instance.update({ statusExplanation: null });
     }
   }
-  return instance.reload();
+
+  const reloaded = await instance.reload();
+  const reloadedPlain = reloaded.get({ plain: true });
+
+  if (req) {
+    const shouldRecordDisplay =
+      prevDisplayMissing.length > 0 && buildProfileDisplayMissingLabels(reloadedPlain).length === 0;
+    const shouldRecordMandatory = previousRow && !prevEvalOk && ok;
+    if (shouldRecordDisplay || shouldRecordMandatory) {
+      const resolvedLabels = shouldRecordDisplay
+        ? prevDisplayMissing
+        : (prevEvalMissing || []).map((k) => MISSING_LABELS_HE[k] || k);
+      await recordMissingDetailsCompleted(req, candidateId, {
+        candidateRow: reloadedPlain,
+        previousMissingLabels: resolvedLabels.length ? resolvedLabels : prevDisplayMissing,
+      });
+    }
+  }
+
+  return reloaded;
 }
 
 /**

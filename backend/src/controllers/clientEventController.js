@@ -81,6 +81,7 @@ const listAll = async (req, res) => {
             id: String(e.id || ''),
             clientId,
             clientName,
+            contactId: e.contactId || linked?.id || null,
             contactName: linked?.name || e.contactName || null,
             process: e.process || types[0] || '',
             processId: e.processId || null,

@@ -24,9 +24,13 @@ const SYSTEM_EVENTS = {
 
   // 4. שלמות נתוני מועמד (אישור תיקונים בפרופיל)
   CANDIDATE_DATA_APPROVED: { triggerName: 'שלמות נתוני מועמד', eventName: 'אישור תיקונים' },
+  CANDIDATE_MISSING_DETAILS_COMPLETED: {
+    triggerName: 'שלמות נתוני מועמד',
+    eventName: 'השלמת פרטים חסרים',
+  },
 
-  // 9. פורטל מועמד — אישור פרופיל
-  CANDIDATE_PROFILE_APPROVED: { triggerName: 'מועמד', eventName: 'אישר את הפרופיל' },
+  // 9. פורטל מועמד — אישור פרופיל (matches candidate.events journal type label)
+  CANDIDATE_PROFILE_APPROVED: { triggerName: 'מועמד', eventName: 'אישור הפרופיל על ידי המועמד' },
 
   // 5. תקשורת צוות
   TEAM_FEEDBACK:    { triggerName: 'תקשורת צוות', eventName: 'משוב לאחר ראיון' },

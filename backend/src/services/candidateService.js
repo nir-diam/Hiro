@@ -1055,6 +1055,9 @@ const LIST_GRID_ATTRIBUTES = [
   'isDeleted',
   'approveByCandidate',
   'consentToJobOffers',
+  'distributionEmail',
+  'distributionSms',
+  'distributionWhatsapp',
   'candidatePipelineId',
   'pipelineStageId',
   'createdAt',
@@ -2699,8 +2702,20 @@ const update = async (id, payload) => {
     buildCompanyExperiences(wxForUpdate, exForUpdate),
   );
 
+  const rawCityInput = Object.prototype.hasOwnProperty.call(cleanPayload, 'address')
+    ? String(cleanPayload.address ?? '').trim()
+    : Object.prototype.hasOwnProperty.call(cleanPayload, 'location')
+      ? String(cleanPayload.location ?? '').trim()
+      : '';
+
   await prepareCityFieldsInPayload(cleanPayload);
   await applyCandidateCityFromCatalog(cleanPayload);
+
+  if (rawCityInput && !String(cleanPayload.address ?? cleanPayload.location ?? '').trim()) {
+    const err = new Error('העיר לא נמצאה ברשימת הערים. יש לבחור עיר מהרשימה.');
+    err.status = 400;
+    throw err;
+  }
 
   syncCandidateNameForUpdate(cleanPayload, candidate);
 
@@ -2834,12 +2849,77 @@ const searchFree = async ({ query, limit = 50, pipelineId, stageIds, includeUnas
   return mappedRows;
 };
 
+const buildRelatedCandidateLabel = (row) =>
+  String(row?.profileName || '').trim() ||
+  String(row?.title || '').trim() ||
+  String(row?.fullName || '').trim() ||
+  [row?.firstName, row?.lastName].filter(Boolean).join(' ').trim() ||
+  'מועמד';
+
+/** Portal profiles + canonical identity links for aggregating jobs across related rows. */
+const listRelatedCandidates = async (candidateId) => {
+  const cid = String(candidateId || '').trim();
+  if (!cid) return [];
+
+  const self = await Candidate.findOne({
+    where: { id: cid, isDeleted: false },
+    attributes: ['id', 'userId', 'fullName', 'firstName', 'lastName', 'profileName', 'title'],
+    raw: true,
+  });
+  if (!self) return [];
+
+  const byId = new Map();
+  const push = (row) => {
+    if (!row?.id) return;
+    const id = String(row.id);
+    if (byId.has(id)) return;
+    byId.set(id, { id, label: buildRelatedCandidateLabel(row) });
+  };
+
+  push(self);
+
+  const primaryId = await resolvePrimaryCandidateIdDeep(cid);
+  const identityRows = await Candidate.findAll({
+    where: {
+      isDeleted: false,
+      [Op.or]: [{ id: primaryId }, { canonicalCandidateId: primaryId }],
+    },
+    attributes: ['id', 'fullName', 'firstName', 'lastName', 'profileName', 'title'],
+    raw: true,
+  });
+  identityRows.forEach(push);
+
+  const uid = self.userId ? String(self.userId).trim() : '';
+  if (uid) {
+    const primaries = await Candidate.findAll({
+      where: { userId: uid, isDeleted: false },
+      attributes: ['id'],
+      raw: true,
+    });
+    const primaryIds = primaries.map((r) => r.id);
+    if (primaryIds.length) {
+      const userRows = await Candidate.findAll({
+        where: {
+          isDeleted: false,
+          [Op.or]: [{ userId: uid }, { canonicalCandidateId: { [Op.in]: primaryIds } }],
+        },
+        attributes: ['id', 'fullName', 'firstName', 'lastName', 'profileName', 'title'],
+        raw: true,
+      });
+      userRows.forEach(push);
+    }
+  }
+
+  return [...byId.values()];
+};
+
 module.exports = {
   list,
   listSlimForVectorSearch,
   getById,
   getByUserId,
   listByUserId,
+  listRelatedCandidates,
   create,
   update,
   saveParsedTextVersion,

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { XMarkIcon } from './Icons';
 import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
+import { fetchCandidatePipelines } from '../services/candidatePipelinesApi';
 import { authHeaders } from '../utils/authHeaders';
 
 export type ProcessEventSavePayload = {
@@ -30,6 +31,11 @@ interface ProcessEventModalProps {
   contactId?: string | null;
   contactName?: string;
   initialData?: Partial<ProcessEventSavePayload> | null;
+  /** Client work pipelines (default) vs candidate recruitment pipelines */
+  pipelineKind?: 'client' | 'candidate';
+  /** Read-only linked entity shown instead of contact picker (e.g. candidate name) */
+  linkedEntityName?: string;
+  linkedEntityLabel?: string;
 }
 
 const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
@@ -41,6 +47,9 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
   contactId = null,
   contactName = '',
   initialData = null,
+  pipelineKind = 'client',
+  linkedEntityName = '',
+  linkedEntityLabel = 'מועמד',
 }) => {
   const apiBase = import.meta.env.VITE_API_BASE || '';
   const [pipelines, setPipelines] = useState<PipelineDto[]>([]);
@@ -85,24 +94,30 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     setLoadingMeta(true);
     setError(null);
 
-    Promise.all([
-      fetchPipelines(clientId).catch(() => [] as PipelineDto[]),
-      fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts`, {
-        credentials: 'include',
-        headers: authHeaders(),
-      })
-        .then((r) => (r.ok ? r.json() : []))
-        .then((data) => {
-          const list = Array.isArray(data) ? data : data?.data ?? [];
-          return list
-            .map((c: { id?: string; name?: string }) => ({
-              id: String(c.id || ''),
-              name: String(c.name || '').trim(),
-            }))
-            .filter((c: ContactOption) => c.id && c.name);
-        })
-        .catch(() => [] as ContactOption[]),
-    ])
+    const pipelinesPromise =
+      pipelineKind === 'candidate'
+        ? fetchCandidatePipelines(clientId).catch(() => [] as PipelineDto[])
+        : fetchPipelines(clientId).catch(() => [] as PipelineDto[]);
+    const contactsPromise =
+      pipelineKind === 'candidate'
+        ? Promise.resolve([] as ContactOption[])
+        : fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts`, {
+            credentials: 'include',
+            headers: authHeaders(),
+          })
+            .then((r) => (r.ok ? r.json() : []))
+            .then((data) => {
+              const list = Array.isArray(data) ? data : data?.data ?? [];
+              return list
+                .map((c: { id?: string; name?: string }) => ({
+                  id: String(c.id || ''),
+                  name: String(c.name || '').trim(),
+                }))
+                .filter((c: ContactOption) => c.id && c.name);
+            })
+            .catch(() => [] as ContactOption[]);
+
+    Promise.all([pipelinesPromise, contactsPromise])
       .then(([pls, cts]) => {
         if (cancelled) return;
         setPipelines(pls);
@@ -113,7 +128,10 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
           const stageId = prev.stageId || pipeline?.stages?.[0]?.id || '';
           let nextContactId = prev.contactId;
           let nextContactName = prev.contactName;
-          if (nextContactId) {
+          if (pipelineKind === 'candidate') {
+            nextContactId = '';
+            nextContactName = linkedEntityName || prev.contactName || contactName || '';
+          } else if (nextContactId) {
             const match = cts.find((c) => c.id === nextContactId);
             if (match) nextContactName = match.name;
           } else if (nextContactName) {
@@ -137,7 +155,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, clientId, apiBase, clientName]);
+  }, [isOpen, clientId, apiBase, clientName, pipelineKind, linkedEntityName, contactName]);
 
   if (!isOpen) return null;
 
@@ -176,7 +194,7 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 bg-black/60 z-[100] flex items-center justify-center p-4 sm:p-8 backdrop-blur-sm"
+      className="fixed inset-0 bg-black/60 z-[10080] flex items-center justify-center p-4 sm:p-8 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
@@ -280,27 +298,38 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                     />
                   </div>
                   <div>
-                    <label className="block text-sm font-bold text-text-default mb-2">איש קשר</label>
-                    <select
-                      value={formData.contactId}
-                      onChange={(e) => {
-                        const id = e.target.value;
-                        const match = contacts.find((c) => c.id === id);
-                        setFormData({
-                          ...formData,
-                          contactId: id,
-                          contactName: match?.name || '',
-                        });
-                      }}
-                      className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
-                    >
-                      <option value="">-- בחר איש קשר --</option>
-                      {contacts.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name}
-                        </option>
-                      ))}
-                    </select>
+                    <label className="block text-sm font-bold text-text-default mb-2">
+                      {pipelineKind === 'candidate' ? linkedEntityLabel : 'איש קשר'}
+                    </label>
+                    {pipelineKind === 'candidate' ? (
+                      <input
+                        type="text"
+                        value={formData.contactName || linkedEntityName}
+                        readOnly
+                        className="w-full bg-bg-subtle border border-border-default rounded-xl p-3.5 text-sm text-text-muted"
+                      />
+                    ) : (
+                      <select
+                        value={formData.contactId}
+                        onChange={(e) => {
+                          const id = e.target.value;
+                          const match = contacts.find((c) => c.id === id);
+                          setFormData({
+                            ...formData,
+                            contactId: id,
+                            contactName: match?.name || '',
+                          });
+                        }}
+                        className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
+                      >
+                        <option value="">-- בחר איש קשר --</option>
+                        {contacts.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                 </div>
 
