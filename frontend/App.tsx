@@ -1,7 +1,7 @@
 
 // ... existing imports
 import React, { useState } from 'react';
-import { useLocation, useSearchParams, useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ResumeViewer from './components/ResumeViewer';
 import TopBar from './components/TopBar';
@@ -18,6 +18,7 @@ import CreateJobAlertModal from './components/CreateJobAlertModal';
 import { useLanguage } from './context/LanguageContext';
 import { FinanceProvider } from './context/FinanceContext';
 import { PromptProvider } from './context/PromptContext';
+import { buildBreadcrumbs } from './utils/buildBreadcrumbs';
 import StaffPageGate from './components/StaffPageGate';
 
 
@@ -27,7 +28,6 @@ const AppContent: React.FC = () => {
     const location = useLocation();
     const navigate = useNavigate();
     const { savedSearches, addSearch, updateSearch } = useSavedSearches();
-    const [searchParams] = useSearchParams();
     const { t } = useLanguage();
     
     // ... (keep existing state hooks) ...
@@ -61,93 +61,16 @@ const AppContent: React.FC = () => {
         });
     };
     
-    // Breadcrumbs Logic
-    const breadcrumbs = React.useMemo(() => {
-        const pathParts = location.pathname.split('/').filter(p => p);
-        const crumbs = [{ label: t('breadcrumbs.home'), path: '/dashboard' }];
-        
-        if (pathParts[0] === 'dashboard') {
-             crumbs.push({ label: t('breadcrumbs.dashboard'), path: '/dashboard' });
-        }
-        if (pathParts[0] === 'finance') {
-             crumbs.push({ label: 'ניהול כספים', path: '/finance/dashboard' });
-             if(pathParts[1] === 'dashboard') crumbs.push({ label: 'לוח בקרה', path: '/finance/dashboard' });
-             if(pathParts[1] === 'invoices') crumbs.push({ label: 'חשבוניות וגבייה', path: '/finance/invoices' });
-             if(pathParts[1] === 'commissions') crumbs.push({ label: 'עמלות רכזות', path: '/finance/commissions' });
-        }
-        if (pathParts[0] === 'candidates') {
-            crumbs.push({ label: t('breadcrumbs.candidates_list'), path: `/candidates${location.search}` });
-            // ... existing candidate crumbs logic
-            const savedSearchId = searchParams.get('savedSearchId');
-            if (pathParts[1] && pathParts[1] !== 'new') {
-                crumbs.push({ label: t('breadcrumbs.candidate_profile'), path: `/candidates/${pathParts[1]}` });
-            } else if (savedSearchId) {
-                const savedSearch = savedSearches.find(s => s.id === Number(savedSearchId));
-                if (savedSearch) {
-                    crumbs.push({ label: savedSearch.name, path: `/candidates?savedSearchId=${savedSearchId}` });
-                }
-            } else if (pathParts[1] === 'new') {
-                crumbs.push({ label: t('breadcrumbs.new_candidate'), path: '/candidates/new' });
-            }
-        }
-        // ... (Keep existing breadcrumb logic for other routes) ...
-         if (pathParts[0] === 'candidate-pool') {
-            crumbs.push({ label: t('breadcrumbs.candidate_pool'), path: '/candidate-pool' });
-        }
-        if (pathParts[0] === 'job-board') {
-            crumbs.push({ label: t('breadcrumbs.job_board'), path: '/job-board' });
-        }
-        if (pathParts[0] === 'jobs') {
-            crumbs.push({ label: t('breadcrumbs.jobs'), path: '/jobs' });
-            if (pathParts[1] === 'new') {
-                crumbs.push({ label: t('breadcrumbs.new_job'), path: '/jobs/new' });
-            }
-            if (pathParts[1] === 'existing') {
-                crumbs.push({ label: t('breadcrumbs.existing_job'), path: '/jobs/existing' });
-                if (pathParts[2] === 'events') {
-                    crumbs.push({ label: t('breadcrumbs.job_events'), path: '/jobs/existing/events' });
-                }
-            }
-        }
-         if (pathParts[0] === 'clients') {
-            crumbs.push({ label: t('breadcrumbs.clients'), path: '/clients' });
-            if (pathParts[1] === 'new') {
-                crumbs.push({ label: t('breadcrumbs.new_client'), path: '/clients/new' });
-            } else if (/^\d+$/.test(pathParts[1])) {
-                crumbs.push({ label: t('breadcrumbs.client_profile'), path: `/clients/${pathParts[1]}` });
-            }
-        }
-        if (pathParts[0] === 'reports') {
-            crumbs.push({ label: t('breadcrumbs.reports'), path: '/reports/referrals' });
-            if (pathParts[1] === 'referrals') {
-                crumbs.push({ label: t('nav.referrals'), path: '/reports/referrals' });
-            }
-            if (pathParts[1] === 'publications') {
-                crumbs.push({ label: t('nav.publications'), path: '/reports/publications' });
-            }
-            if (pathParts[1] === 'recruitment-sources') {
-                crumbs.push({ label: t('nav.recruitment_sources'), path: '/reports/recruitment-sources' });
-            }
-        }
-        if (pathParts[0] === 'settings') {
-             crumbs.push({ label: t('breadcrumbs.settings'), path: '/settings/company' });
-             if(pathParts[1] === 'company') crumbs.push({ label: t('breadcrumbs.company'), path: '/settings/company' });
-             if(pathParts[1] === 'coordinators') {
-                crumbs.push({ label: t('breadcrumbs.coordinators'), path: '/settings/coordinators' });
-                if(pathParts[2]) crumbs.push({ label: t('breadcrumbs.coordinator_profile'), path: `/settings/coordinators/${pathParts[2]}`});
-             }
-             if(pathParts[1] === 'message-templates') crumbs.push({ label: t('breadcrumbs.message_templates'), path: '/settings/message-templates' });
-             if(pathParts[1] === 'event-types') crumbs.push({ label: t('breadcrumbs.event_types'), path: '/settings/event-types' });
-             if(pathParts[1] === 'recruitment-sources') crumbs.push({ label: t('breadcrumbs.recruitment_sources'), path: '/settings/recruitment-sources' });
-        }
-         if (pathParts[0] === 'admin') {
-             crumbs.push({ label: t('breadcrumbs.admin'), path: '/admin' });
-             if(pathParts[1] === 'client') crumbs.push({ label: t('breadcrumbs.client_form'), path: '/admin/client/new' });
-        }
-
-        return crumbs;
-
-    }, [location.pathname, searchParams, savedSearches, t]);
+    const breadcrumbs = React.useMemo(
+        () =>
+            buildBreadcrumbs({
+                pathname: location.pathname,
+                search: location.search,
+                savedSearches,
+                t,
+            }),
+        [location.pathname, location.search, savedSearches, t],
+    );
 
     const handleViewFullProfileFromDrawer = (candidateId: number) => {
         closeSummaryDrawer();
