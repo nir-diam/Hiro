@@ -4,10 +4,12 @@ export type PipelineStageWithOutcomes = {
   id: string;
   name: string;
   slaLimit?: number;
+  slaLimitUnit?: 'days' | 'hours' | 'minutes';
   outcomes?: Array<{
     id: string;
     name: string;
     autoFollowupDays?: number;
+    autoFollowupUnit?: 'days' | 'hours' | 'minutes';
     actionType?: string;
   }>;
 };

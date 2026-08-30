@@ -774,6 +774,80 @@ const setComments = async (id, comments) => {
   return { id, comments: decision.comments ?? null };
 };
 
+/** Mark catalog tags as deprecated and record a blacklist audit row for the admin blacklist tab. */
+const blacklistCatalogTags = async (tagIds = []) => {
+  const ids = [...new Set((tagIds || []).map((id) => String(id).trim()).filter(isValidTagUuid))];
+  if (!ids.length) {
+    const err = new Error('No valid tag ids');
+    err.status = 400;
+    throw err;
+  }
+
+  const tags = await Tag.findAll({ where: { id: { [Op.in]: ids } } });
+  const tagById = new Map(tags.map((t) => [String(t.id), t]));
+  const blacklisted = [];
+  const skipped = [];
+
+  for (const id of ids) {
+    const tag = tagById.get(id);
+    if (!tag) {
+      skipped.push({ id, reason: 'not_found' });
+      continue;
+    }
+    if (String(tag.status || '').toLowerCase() === 'deprecated') {
+      skipped.push({ id, reason: 'already_blacklisted' });
+      continue;
+    }
+
+    tag.status = 'deprecated';
+    await tag.save({ fields: ['status'] });
+
+    const plain = tag.get ? tag.get({ plain: true }) : tag;
+    const originalTerm = String(
+      plain.displayNameHe || plain.displayNameEn || plain.tagKey || '',
+    ).trim() || id;
+    const detectedType = mapDetectedType(plain.type);
+
+    let decision = await TagAiDecision.findOne({
+      where: { pendingTagId: tag.id, reviewerAction: 'blacklist' },
+      order: [['createdAt', 'DESC']],
+    });
+    if (!decision) {
+      decision = await TagAiDecision.findOne({
+        where: { pendingTagId: tag.id },
+        order: [['createdAt', 'DESC']],
+      });
+    }
+
+    if (decision) {
+      await decision.update({
+        reviewStatus: 'overridden',
+        reviewerAction: 'blacklist',
+        resolvedAt: new Date(),
+        originalTerm: decision.originalTerm || originalTerm,
+        detectedType: decision.detectedType || detectedType,
+      });
+    } else {
+      await TagAiDecision.create({
+        pendingTagId: tag.id,
+        originalTerm,
+        detectedType,
+        contextSample: 'הוספה ידנית מניהול תגיות',
+        aiDecision: 'delete',
+        aiReasoning: 'הועבר לרשימה שחורה מניהול התגיות',
+        candidateTagsSnapshot: [],
+        reviewStatus: 'overridden',
+        reviewerAction: 'blacklist',
+        resolvedAt: new Date(),
+      });
+    }
+
+    blacklisted.push(id);
+  }
+
+  return { blacklisted, skipped, count: blacklisted.length };
+};
+
 module.exports = {
   PROMPT_ID,
   parseAgentJson,
@@ -789,4 +863,5 @@ module.exports = {
   resolveOccurrencesTagId,
   setApprovalStatus,
   setComments,
+  blacklistCatalogTags,
 };

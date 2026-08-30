@@ -60,7 +60,7 @@ async function create(organizationId, body = {}) {
   await assertOrganizationExists(organizationId);
   const data = normalizeContactPayload(body);
   if (!data.firstName && !data.lastName) {
-    const err = new Error('First name or last name is required');
+    const err = new Error('Name is required');
     err.status = 400;
     throw err;
   }
@@ -86,7 +86,7 @@ async function update(organizationId, contactId, body = {}) {
   }
   const data = normalizeContactPayload(body);
   if (!data.firstName && !data.lastName) {
-    const err = new Error('First name or last name is required');
+    const err = new Error('Name is required');
     err.status = 400;
     throw err;
   }

@@ -611,6 +611,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         void loadMessagingPlaceholderValues({
             candidateId: resolvedCandidateId,
             jobId: selectedJobId || null,
+            channel: config.channel,
             fallbackCandidateName: effectiveName,
             fallbackCandidatePhone: effectivePhone,
             fallbackCandidateEmail: effectiveEmail,
@@ -626,6 +627,7 @@ const SendMessageModal: React.FC<SendMessageModalProps> = ({
         isOpen,
         resolvedCandidateId,
         selectedJobId,
+        config.channel,
         effectiveName,
         effectivePhone,
         effectiveEmail,

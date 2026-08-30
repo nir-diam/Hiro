@@ -1,5 +1,6 @@
 import type { AuthUser } from '../context/AuthContext';
 import type { JobComposeRow } from './jobsApi';
+import { buildPublicJobAppUrl, buildPublicJobUrl, resolvePublicClientRouteKey } from './publishingApi';
 
 /** Logical keys (without `{}`) — used when merging templates before send. */
 export type MessageTemplateToken =
@@ -24,7 +25,8 @@ export type MessageTemplateToken =
     | 'recruiter_phone'
     | 'send_date'
     | 'privacy_policy_link'
-    | 'thank_you_page_link';
+    | 'thank_you_page_link'
+    | 'job_public_page_link';
 
 export const MESSAGE_TEMPLATE_PLACEHOLDER_ROWS: { label: string; token: MessageTemplateToken }[] = [
     { label: 'שם פרטי מועמד', token: 'candidate_first_name' },
@@ -49,6 +51,7 @@ export const MESSAGE_TEMPLATE_PLACEHOLDER_ROWS: { label: string; token: MessageT
     { label: 'תאריך שליחה', token: 'send_date' },
     { label: 'מדיניות הפרטיות', token: 'privacy_policy_link' },
     { label: 'כתובת דף תודה', token: 'thank_you_page_link' },
+    { label: 'לינק לדף משרה ציבורי', token: 'job_public_page_link' },
 ];
 
 /** Same shape `MessageTemplatesView` historically exported — UI inserts `{token}` into HTML/forms. */
@@ -122,9 +125,13 @@ export function applyMessageTemplatePlaceholders(template: string, values: Parti
     return out;
 }
 
+export type MessagingPlaceholderChannel = 'whatsapp' | 'sms' | 'email';
+
 export type MessagingPlaceholderLoadArgs = {
     candidateId?: string | null;
     jobId?: string | null;
+    /** WhatsApp uses the share URL (OG preview); email/SMS use the short app URL. */
+    channel?: MessagingPlaceholderChannel;
     /** Recipient strip shown before GET completes — overridden when candidate loads */
     fallbackCandidateName: string;
     fallbackCandidatePhone: string;
@@ -146,8 +153,10 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
     let cand: Record<string, unknown> | null = null;
     let linked: unknown[] = [];
     let jobFull: Record<string, unknown> | null = null;
+    let jobClientDomain: string | null = null;
 
     const cid = args.candidateId != null && String(args.candidateId).trim() ? String(args.candidateId).trim() : '';
+    const jid = args.jobId != null && String(args.jobId).trim() ? String(args.jobId).trim() : '';
 
     try {
         if (cid) {
@@ -169,14 +178,27 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
         /* keep fallbacks */
     }
 
-    const jid = args.jobId != null && String(args.jobId).trim() ? String(args.jobId).trim() : '';
     try {
         if (jid) {
-            const jUrl = `${root}/api/jobs/${encodeURIComponent(jid)}`;
-            const jRes = await fetch(jUrl, init);
+            const [jRes, pubRes] = await Promise.all([
+                fetch(`${root}/api/jobs/${encodeURIComponent(jid)}`, init),
+                fetch(`${root}/api/jobs/${encodeURIComponent(jid)}/publication`, init),
+            ]);
             if (jRes.ok) {
                 const j = (await jRes.json()) as unknown;
                 jobFull = j && typeof j === 'object' ? (j as Record<string, unknown>) : null;
+            }
+            if (pubRes.ok) {
+                const pub = (await pubRes.json()) as unknown;
+                if (pub && typeof pub === 'object') {
+                    const branding = (pub as Record<string, unknown>).clientBranding;
+                    if (branding && typeof branding === 'object') {
+                        jobClientDomain =
+                            resolvePublicClientRouteKey(
+                                String((branding as Record<string, unknown>).domain || '').trim() || null,
+                            ) ?? null;
+                    }
+                }
             }
         }
     } catch {
@@ -241,6 +263,19 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
     const privacy = String(import.meta.env.VITE_PRIVACY_POLICY_URL || '').trim();
     const thankYou = String(import.meta.env.VITE_THANK_YOU_PAGE_URL || '').trim();
 
+    const postingCode =
+        jobFull != null && String(jobFull.postingCode ?? '').trim()
+            ? String(jobFull.postingCode).trim()
+            : compose != null && String(compose.postingCode ?? '').trim()
+              ? String(compose.postingCode).trim()
+              : null;
+
+    const jobPublicPageLink = jid
+        ? args.channel === 'whatsapp'
+            ? buildPublicJobUrl(jid, undefined, postingCode, jobClientDomain)
+            : buildPublicJobAppUrl(jid, undefined, postingCode, jobClientDomain)
+        : '';
+
     const values: Partial<Record<MessageTemplateToken, string>> = {
         candidate_first_name: firstName,
         candidate_last_name: lastName,
@@ -263,6 +298,7 @@ export async function loadMessagingPlaceholderValues(args: MessagingPlaceholderL
         send_date: sendDate,
         privacy_policy_link: privacy,
         thank_you_page_link: thankYou,
+        job_public_page_link: jobPublicPageLink,
     };
 
     return values;

@@ -1,5 +1,5 @@
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { PencilIcon, TrashIcon, PlusIcon, CheckIcon, XMarkIcon, ChevronUpIcon, ChevronDownIcon, SparklesIcon } from './Icons';
 import { GoogleGenAI } from '@google/genai';
 
@@ -11,7 +11,64 @@ interface Experience {
     startDate: string; // YYYY-MM
     endDate: string;   // YYYY-MM or "Present"
     description: string;
+    isCurrent?: boolean;
+    is_current?: boolean;
 }
+
+const PRESENT_MARKERS = /present|current|כיום|היום|נוכחי|עד\s*היום/i;
+
+const isPresentEndDate = (value?: string | null, isCurrent?: boolean) => {
+    if (isCurrent === true) return true;
+    if (value == null || !String(value).trim()) return isCurrent === true;
+    return PRESENT_MARKERS.test(String(value).trim());
+};
+
+/** Normalize stored CV dates (YYYY, YYYY-MM, MM/YYYY, etc.) for `<input type="month">`. */
+const toMonthInputValue = (value?: string | null): string => {
+    if (!value || isPresentEndDate(value)) return '';
+    const clean = String(value).trim();
+    if (/^\d{4}-\d{2}$/.test(clean)) return clean;
+    const ym = clean.match(/^(\d{4})-(\d{1,2})$/);
+    if (ym) return `${ym[1]}-${ym[2].padStart(2, '0')}`;
+    const my = clean.match(/^(\d{1,2})[/.-](\d{4})$/);
+    if (my) {
+        const month = Number(my[1]);
+        const year = Number(my[2]);
+        if (month >= 1 && month <= 12) return `${year}-${String(month).padStart(2, '0')}`;
+    }
+    const yearOnly = clean.match(/^(\d{4})$/);
+    if (yearOnly) return `${yearOnly[1]}-01`;
+    const parsed = new Date(clean);
+    if (!Number.isNaN(parsed.getTime())) {
+        return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, '0')}`;
+    }
+    return '';
+};
+
+const formatExperienceDateLabel = (value?: string) => {
+    if (!value || isPresentEndDate(value)) return 'כיום';
+    const monthVal = toMonthInputValue(value);
+    if (!monthVal) return String(value);
+    const [year, month] = monthVal.split('-').map(Number);
+    return new Date(year, month - 1, 1).toLocaleDateString('he-IL', { year: 'numeric', month: 'short' });
+};
+
+const normalizeExperienceForForm = (item: Omit<Experience, 'id'> | Experience) => {
+    const isCurrent = item.isCurrent === true || item.is_current === true;
+    const endIsPresent = isPresentEndDate(item.endDate, isCurrent);
+    return {
+        ...item,
+        startDate: toMonthInputValue(item.startDate),
+        endDate: endIsPresent ? 'Present' : toMonthInputValue(item.endDate),
+    };
+};
+
+const parseMonthDate = (value?: string): Date | null => {
+    const monthVal = toMonthInputValue(value);
+    if (!monthVal) return null;
+    const [year, month] = monthVal.split('-').map(Number);
+    return new Date(year, month - 1, 1);
+};
 
 interface WorkExperienceSectionProps {
     experience: Experience[];
@@ -19,8 +76,9 @@ interface WorkExperienceSectionProps {
 }
 
 const calculateDuration = (startDate: string, endDate: string): string => {
-    const start = new Date(startDate);
-    const end = endDate === 'Present' ? new Date() : new Date(endDate);
+    const start = parseMonthDate(startDate);
+    if (!start) return '';
+    const end = isPresentEndDate(endDate) ? new Date() : (parseMonthDate(endDate) || new Date());
     
     let years = end.getFullYear() - start.getFullYear();
     let months = end.getMonth() - start.getMonth();
@@ -44,8 +102,12 @@ const ExperienceForm: React.FC<{
     onSave: (item: Omit<Experience, 'id'> | Experience) => void;
     onCancel: () => void;
 }> = ({ item, onSave, onCancel }) => {
-    const [formData, setFormData] = useState(item);
+    const [formData, setFormData] = useState(() => normalizeExperienceForForm(item));
     const [isGenerating, setIsGenerating] = useState(false);
+
+    useEffect(() => {
+        setFormData(normalizeExperienceForForm(item));
+    }, [item]);
 
     const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
         const { name, value } = e.target;
@@ -55,11 +117,13 @@ const ExperienceForm: React.FC<{
     const handleEndDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
          const { name, value, type, checked } = e.target;
          if (name === 'endDate' && type === 'checkbox') {
-             setFormData(prev => ({...prev, endDate: checked ? 'Present' : ''}));
+             setFormData(prev => ({ ...prev, endDate: checked ? 'Present' : toMonthInputValue(prev.endDate) }));
          } else {
-             setFormData(prev => ({...prev, [name]: value }));
+             setFormData(prev => ({ ...prev, [name]: value }));
          }
     };
+
+    const isWorkingHereToday = isPresentEndDate(formData.endDate);
 
     const handleGenerateDescription = async () => {
         if (!formData.title) return;
@@ -120,11 +184,11 @@ const ExperienceForm: React.FC<{
                     <span className="mt-6">-</span>
                     <div className="flex-1">
                          <label className="block text-xs font-semibold text-text-muted mb-1">תאריך סיום</label>
-                         <input type="month" name="endDate" value={formData.endDate === 'Present' ? '' : formData.endDate} onChange={handleEndDateChange} disabled={formData.endDate === 'Present'} className="w-full bg-bg-input border border-border-default rounded-md p-2 text-sm text-text-muted disabled:bg-bg-subtle focus:ring-1 focus:ring-primary-500" />
+                         <input type="month" name="endDate" value={isWorkingHereToday ? '' : formData.endDate} onChange={handleEndDateChange} disabled={isWorkingHereToday} className="w-full bg-bg-input border border-border-default rounded-md p-2 text-sm text-text-muted disabled:bg-bg-subtle focus:ring-1 focus:ring-primary-500" />
                     </div>
                  </div>
                  <label className="flex items-center gap-2 text-sm font-medium cursor-pointer mt-6">
-                    <input type="checkbox" name="endDate" checked={formData.endDate === 'Present'} onChange={handleEndDateChange} className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500" />
+                    <input type="checkbox" name="endDate" checked={isWorkingHereToday} onChange={handleEndDateChange} className="w-4 h-4 text-primary-600 rounded focus:ring-primary-500" />
                     אני עובד/ת כאן כיום
                 </label>
              </div>
@@ -214,7 +278,7 @@ const WorkExperienceSection: React.FC<WorkExperienceSectionProps> = ({ experienc
                                     <div>
                                         <h4 className="font-bold text-base text-text-default">{item.title}</h4>
                                         <p className="text-sm font-semibold text-text-muted">{item.company} {item.companyField && `· ${item.companyField}`}</p>
-                                        <p className="text-xs text-text-subtle mt-1">{new Date(item.startDate).toLocaleDateString('he-IL', {year: 'numeric', month: 'short'})} - {item.endDate === 'Present' ? 'כיום' : new Date(item.endDate).toLocaleDateString('he-IL', {year: 'numeric', month: 'short'})} &middot; <span className="font-semibold">{calculateDuration(item.startDate, item.endDate)}</span></p>
+                                        <p className="text-xs text-text-subtle mt-1">{formatExperienceDateLabel(item.startDate)} - {formatExperienceDateLabel(item.endDate)} &middot; <span className="font-semibold">{calculateDuration(item.startDate, item.endDate)}</span></p>
                                     </div>
                                     
                                     {/* Action Buttons */}

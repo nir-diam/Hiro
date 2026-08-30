@@ -46,6 +46,11 @@ const EmailUpload = sequelize.define(
       },
       onDelete: 'SET NULL',
     },
+    userNotes: {
+      type: DataTypes.TEXT,
+      allowNull: true,
+      field: 'user_notes',
+    },
   },
   {
     tableName: 'email_uploads',

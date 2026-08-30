@@ -168,6 +168,17 @@ const { createWorker } = require('tesseract.js');
 const isPdfMagicBuffer = (buf) =>
   Boolean(buf && buf.length >= 5 && buf.slice(0, 5).toString('ascii') === '%PDF-');
 
+/** Legacy Word 97–2003 `.doc` (OLE compound document), not `.docx` (zip). */
+const isLegacyDocBuffer = (buf) =>
+  Boolean(
+    buf &&
+      buf.length >= 4 &&
+      buf[0] === 0xd0 &&
+      buf[1] === 0xcf &&
+      buf[2] === 0x11 &&
+      buf[3] === 0xe0,
+  );
+
 /**
  * If "extracted text" starts like a PDF header, we fed raw bytes as a string — LLM will invent a profile.
  * See createFromAi / extractFromBuffer (pdf-parse often returns nothing for scanned/image PDFs).
@@ -2246,7 +2257,7 @@ const runCandidateList = async (req, res) => {
   } = parseCandidateListParams(req);
 
   // Sync last-job scoring for a full page exceeds gateway time/memory (502/504).
-  // Match % is hydrated client-side via /api/admin/matching-engine/simulate.
+  // Match % is hydrated client-side via POST /api/candidates/match-scores/batch.
   const matchLastJobScores = false;
   if (requestedMatchLastJobScores) {
     console.warn('[candidateController.list] ignoring matchLastJobScores=1 (list sync scoring disabled)');
@@ -2294,6 +2305,25 @@ const runCandidateList = async (req, res) => {
     page: payload.page,
     limit: payload.limit,
   });
+};
+
+const batchMatchScores = async (req, res) => {
+  try {
+    const items = req.body?.items;
+    if (!Array.isArray(items) || !items.length) {
+      return res.status(400).json({ message: 'items array is required' });
+    }
+    if (items.length > 100) {
+      return res.status(400).json({ message: 'Maximum 100 items per request' });
+    }
+    const tenantClientId = await getStaffClientIdFromRequest(req);
+    const scores = await candidateService.scoreCandidateJobPairs(items, { tenantClientId });
+    res.set('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+    res.json({ scores });
+  } catch (err) {
+    console.error('[candidateController.batchMatchScores]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to compute match scores' });
+  }
 };
 
 const list = async (req, res) => {
@@ -2482,38 +2512,37 @@ const create = async (req, res) => {
   }
 };
 
-const createFromAi = async (req, res) => {
+const clearCandidateIngestPending = async (candidateId) => {
+  if (!candidateId) return;
   try {
-    const sendWelcome = req.body?.sendWelcomeEmail !== false;
-    const { resumeText, fileBase64, mimeType, fileName } = req.body || {};
-    let text = typeof resumeText === 'string' ? resumeText : '';
-    let buffer = null;
-    let resumeContentHash = null;
-    if (fileBase64) {
-      buffer = decodeFileBase64Payload(fileBase64);
-      if (!buffer?.length) {
-        buffer = Buffer.from(String(fileBase64).replace(/\s/g, ''), 'base64');
-      }
-      if (buffer?.length) {
-        resumeContentHash = hashResumeBuffer(buffer);
-        const hashMatch = await findCandidateByResumeContentHash(resumeContentHash);
-        if (hashMatch) {
-          const primary = await resolvePrimaryFromHashMatch(hashMatch);
-          const enriched = await candidateService.getById(primary.id);
-          return res.status(200).json({
-            candidate: enriched,
-            parsed: null,
-            resumeHashReused: true,
-            identityAttached: true,
-            identityReused: true,
-            identityLinked: Boolean(enriched?.canonicalCandidateId),
-          });
-        }
-      }
-    }
+    await candidateService.update(candidateId, { ingestPending: false });
+  } catch (err) {
+    console.warn('[clearCandidateIngestPending]', candidateId, err?.message || err);
+  }
+};
+
+/** Gemini / regex enrichment for a stub row created with ingestPending=true. */
+const runCreateFromAiEnrichment = async (stubId, ctx) => {
+  const {
+    req,
+    sendWelcome,
+    resumeText,
+    fileBase64,
+    mimeType,
+    fileName,
+    buffer: initialBuffer,
+    resumeContentHash,
+    allowProfileVersion,
+  } = ctx;
+  let finalCandidateId = stubId;
+  let text = typeof resumeText === 'string' ? resumeText : '';
+  let buffer = initialBuffer;
+  try {
     if (fileBase64 && !text) {
       if (!buffer?.length) {
-        return res.status(400).json({ message: 'Invalid or empty file upload (could not decode base64).' });
+        const err = new Error('Invalid or empty file upload (could not decode base64).');
+        err.status = 400;
+        throw err;
       }
 
       if ((mimeType || '').startsWith('image/')) {
@@ -2522,18 +2551,15 @@ const createFromAi = async (req, res) => {
         text = await extractFromBuffer(buffer, mimeType);
       }
       if (!text || !String(text).trim()) {
-        // Never decode PDF/Office as UTF-8: that produces binary noise; Gemini will hallucinate a fake CV.
-        if (!isPdfMagicBuffer(buffer) && !(String(mimeType).toLowerCase().includes('pdf'))) {
+        if (!isPdfMagicBuffer(buffer) && !String(mimeType).toLowerCase().includes('pdf')) {
           text = buffer.toString('utf8');
         }
       }
     }
-    // Filename often carries the real name for Hebrew CVs with broken text layers.
     const fileNameHint = extractNameHintFromFileName(fileName)?.name || null;
     if (fileNameHint) {
       console.log('[cv-name-hint] from filename', { fileName, fileNameHint });
     }
-    // Fix Hebrew pdf-parse character-reversal (e.g. "לאקזחי ירא והילא" → "אליהו ארי יחזקאל")
     if (text) {
       const fixed = fixCharReversedHebrewText(text, fileNameHint);
       if (fixed !== text) {
@@ -2545,8 +2571,6 @@ const createFromAi = async (req, res) => {
       }
     }
 
-    // ── Gemini Vision: empty extract OR unreliable pdf-parse text (Hebrew/CID/name issues) ──
-    // Gemini 2.5 Flash understands PDFs natively — better for names than broken text layers.
     let visionAiResult = null;
     const pdfBuffer = buffer && isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
     const unreliableText = isUnreliableResumeTextExtract(text);
@@ -2560,28 +2584,27 @@ const createFromAi = async (req, res) => {
 
     if (!text || !String(text).trim()) {
       if (!visionAiResult) {
-        return res.status(400).json({
-          message:
-            'Could not extract readable text from this file. If the PDF is a scan or image-only, paste the resume as text in resumeText, or export a text-based PDF. Otherwise ensure fileBase64 is a valid file.',
-        });
+        const err = new Error(
+          'Could not extract readable text from this file. If the PDF is a scan or image-only, paste the resume as text in resumeText, or export a text-based PDF. Otherwise ensure fileBase64 is a valid file.',
+        );
+        err.status = 400;
+        throw err;
       }
-      // Vision succeeded — skip text-based AI call below, jump straight to normalization
     }
     if (text && looksLikeRawPdfUtf8String(text) && !visionAiResult) {
-      return res.status(400).json({
-        message:
-          'Extracted data looks like raw PDF bytes, not text. The PDF may be image-based — use resumeText to paste the CV, or a text-based PDF export.',
-      });
+      const err = new Error(
+        'Extracted data looks like raw PDF bytes, not text. The PDF may be image-based — use resumeText to paste the CV, or a text-based PDF export.',
+      );
+      err.status = 400;
+      throw err;
     }
 
     let aiResult = {};
     if (visionAiResult && (!String(text || '').trim() || unreliableText)) {
-      // Prefer full vision structured parse when the text layer is empty/unreliable
       aiResult = visionAiResult;
       console.log('[cv-vision] using vision result as primary structured parse');
     } else if (String(text || '').trim() && !looksLikeRawPdfUtf8String(text)) {
       aiResult = (await parseResumeWithAi({ resumeText: text, fileNameHint })) || {};
-      // Text AI ran, but name still looks wrong — try vision just for identity fields
       if (pdfBuffer && nameFieldsLookUnreliable(aiResult)) {
         console.log('[cv-vision] text AI name unreliable — trying vision for identity fields');
         if (!visionAiResult) visionAiResult = await tryParseResumeViaPdfVision(pdfBuffer, { fileNameHint });
@@ -2593,7 +2616,6 @@ const createFromAi = async (req, res) => {
     } else if (visionAiResult) {
       aiResult = visionAiResult;
     }
-    // Multi-signal name: filename + PDF header + AI (keeps middle names; confident "של X" wins).
     aiResult = applyFileNameNameHint(aiResult, fileName, text).ai;
 
     const fallback = extractStructuredFields(text);
@@ -2629,7 +2651,6 @@ const createFromAi = async (req, res) => {
           })
           .filter(Boolean)
       : [];
-      //DISABLE CANDIDATE TAGS BY JOB
     const roleCoveredTags = ensureRoleTagCoverage(aiTagObjects, normalizedWorkExperience);
 
     let tags = normalizeStringArray(roleCoveredTags.map((t) => t.name));
@@ -2673,7 +2694,7 @@ const createFromAi = async (req, res) => {
       industryAnalysis,
       searchText: normalizeResumeSearchText(text).slice(0, 50000),
       searchTextSavedAt: new Date(),
-      source: strOrNull(aiResult.source) || 'ai-upload',
+      source: strOrNull(req.body?.source) || strOrNull(aiResult.source) || 'ai-upload',
       ...(resumeContentHash ? { resumeContentHash } : {}),
     };
 
@@ -2682,7 +2703,6 @@ const createFromAi = async (req, res) => {
     const portalProfileName = req.body?.profileName != null ? String(req.body.profileName).trim() : '';
     if (portalProfileName) candidatePayload.title = portalProfileName;
 
-    // Keep first/last/full consistent (never let first+last drop a middle name from fullName).
     {
       const bestFull =
         pickFullerName(
@@ -2699,28 +2719,27 @@ const createFromAi = async (req, res) => {
     }
 
     let createdCandidate;
-    const allowProfileVersion = req.body?.allowProfileVersion === true;
     try {
-      createdCandidate = await candidateService.create(candidatePayload, { allowProfileVersion });
-    } catch (createErr) {
-      const msg = String(createErr?.message || '');
-      if (createErr?.status === 400 && /עיר/.test(msg)) {
-        // eslint-disable-next-line no-console
-        console.warn('[createFromAi] city validation failed, creating without address:', candidatePayload.address);
-        createdCandidate = await candidateService.create({
+      await candidateService.update(stubId, candidatePayload);
+      createdCandidate = await candidateService.getById(stubId);
+    } catch (updateErr) {
+      const msg = String(updateErr?.message || '');
+      if (updateErr?.status === 400 && /עיר/.test(msg)) {
+        console.warn('[createFromAi] city validation failed, updating without address:', candidatePayload.address);
+        await candidateService.update(stubId, {
           ...candidatePayload,
           address: null,
           location: null,
-        }, { allowProfileVersion });
+        });
+        createdCandidate = await candidateService.getById(stubId);
       } else {
-        throw createErr;
+        throw updateErr;
       }
     }
     let identityReused = Boolean(createdCandidate?._identityReused);
     let identityLinked = Boolean(createdCandidate?._identityLinked);
     let identityAttached = identityReused || identityLinked;
 
-    // Audit: 'קליטת קו"ח' — AI-driven CV ingestion
     systemEventEmitter.emit(req, {
       ...SYSTEM_EVENTS.CV_RECEIVED,
       entityType: 'Candidate',
@@ -2729,7 +2748,6 @@ const createFromAi = async (req, res) => {
       params: { id: createdCandidate.id },
     });
 
-    // Audit: 'פרסור ניתוח ועיבוד מידע' — AI parsed the resume
     systemEventEmitter.emit(req, {
       ...SYSTEM_EVENTS.CV_PARSED,
       entityType: 'Candidate',
@@ -2738,7 +2756,6 @@ const createFromAi = async (req, res) => {
       params: { source: candidatePayload.source || 'ai-upload' },
     });
 
-    // Audit: 'הגדרת מקור גיוס'
     systemEventEmitter.emit(req, {
       ...SYSTEM_EVENTS.CV_SOURCE,
       entityType: 'Candidate',
@@ -2747,7 +2764,6 @@ const createFromAi = async (req, res) => {
       params: { source: candidatePayload.source || 'ai-upload' },
     });
 
-    // Audit: 'הגדרת תחום משרה' (candidate field)
     if (candidatePayload.field) {
       systemEventEmitter.emit(req, {
         ...SYSTEM_EVENTS.CV_FIELD,
@@ -2777,7 +2793,7 @@ const createFromAi = async (req, res) => {
       });
     }
 
-    let finalCandidateId = createdCandidate.id;
+    finalCandidateId = createdCandidate.id;
     try {
       const latestForIdentity = await candidateService.getById(finalCandidateId);
       const identityResult = await candidateService.mergeIfDuplicateIdentity(finalCandidateId, {
@@ -2824,14 +2840,111 @@ const createFromAi = async (req, res) => {
         ...welcomePlaceholderContextFromRequest(req),
       });
     }
-    res.status(identityAttached ? 200 : 201).json({
-      candidate: enrichedCandidate,
-      parsed: aiResult,
-      identityReused,
-      identityLinked,
-      identityAttached,
-      resumeHashReused: false,
-    });
+
+    return {
+      statusCode: identityAttached ? 200 : 201,
+      body: {
+        candidate: enrichedCandidate,
+        parsed: aiResult,
+        identityReused,
+        identityLinked,
+        identityAttached,
+        resumeHashReused: false,
+      },
+    };
+  } finally {
+    await clearCandidateIngestPending(finalCandidateId);
+  }
+};
+
+const createFromAi = async (req, res) => {
+  try {
+    const sendWelcome = req.body?.sendWelcomeEmail !== false;
+    const syncEnrich =
+      req.body?.syncEnrich === true || req.body?.waitForEnrichment === true;
+    const { resumeText, fileBase64, mimeType, fileName } = req.body || {};
+    let text = typeof resumeText === 'string' ? resumeText : '';
+    let buffer = null;
+    let resumeContentHash = null;
+    if (fileBase64) {
+      buffer = decodeFileBase64Payload(fileBase64);
+      if (!buffer?.length) {
+        buffer = Buffer.from(String(fileBase64).replace(/\s/g, ''), 'base64');
+      }
+      if (buffer?.length) {
+        resumeContentHash = hashResumeBuffer(buffer);
+        const hashMatch = await findCandidateByResumeContentHash(resumeContentHash);
+        if (hashMatch) {
+          const primary = await resolvePrimaryFromHashMatch(hashMatch);
+          const enriched = await candidateService.getById(primary.id);
+          return res.status(200).json({
+            candidate: enriched,
+            parsed: null,
+            resumeHashReused: true,
+            identityAttached: true,
+            identityReused: true,
+            identityLinked: Boolean(enriched?.canonicalCandidateId),
+          });
+        }
+      }
+    }
+
+    if (!fileBase64 && !String(text || '').trim()) {
+      return res.status(400).json({ message: 'fileBase64 or resumeText is required.' });
+    }
+    if (fileBase64 && !buffer?.length) {
+      return res.status(400).json({ message: 'Invalid or empty file upload (could not decode base64).' });
+    }
+
+    const fileNameHintEarly = extractNameHintFromFileName(fileName)?.name || null;
+    const portalUserIdEarly = req.body?.userId != null ? String(req.body.userId).trim() : '';
+    const portalProfileNameEarly = req.body?.profileName != null ? String(req.body.profileName).trim() : '';
+    const allowProfileVersion = req.body?.allowProfileVersion === true;
+    const stubPayload = {
+      fullName: fileNameHintEarly || 'מועמד חדש',
+      source: strOrNull(req.body?.source) || 'ai-upload',
+      ingestPending: true,
+      ...(resumeContentHash ? { resumeContentHash } : {}),
+    };
+    if (portalUserIdEarly) stubPayload.userId = portalUserIdEarly;
+    if (portalProfileNameEarly) stubPayload.title = portalProfileNameEarly;
+    const stubRow = await candidateService.create(stubPayload, { allowProfileVersion });
+    const stubId = stubRow.id;
+
+    if (fileBase64) {
+      try {
+        await uploadResumeForCandidate(stubId, fileBase64, fileName, mimeType);
+      } catch (uploadErr) {
+        console.warn('[createFromAi] early resume upload failed', uploadErr?.message || uploadErr);
+      }
+    }
+
+    const enrichCtx = {
+      req,
+      sendWelcome,
+      resumeText,
+      fileBase64,
+      mimeType,
+      fileName,
+      buffer,
+      resumeContentHash,
+      allowProfileVersion,
+    };
+
+    if (!syncEnrich) {
+      void runCreateFromAiEnrichment(stubId, enrichCtx).catch((err) => {
+        console.error('[createFromAi-bg]', stubId, err?.message || err);
+      });
+      const stubView = await candidateService.getById(stubId);
+      return res.status(202).json({
+        candidate: stubView,
+        ingestPending: true,
+        processing: true,
+      });
+    }
+
+    const result = await runCreateFromAiEnrichment(stubId, enrichCtx);
+    return res.status(result.statusCode).json(result.body);
   } catch (err) {
     console.error('[createFromAi-error]', err);
     res.status(err.status || 500).json({ message: err.message || 'AI candidate creation failed' });
@@ -2877,7 +2990,7 @@ const update = async (req, res) => {
     const body = req.body || {};
     const updatePayload = mergeProfileApprovalEvent(previous, body, req);
 
-    const candidate = await candidateService.update(req.params.id, updatePayload);
+    const candidate = await candidateService.update(req.params.id, updatePayload, { req });
     const embedText = [
       candidate.fullName,
       candidate.professionalSummary,
@@ -3502,12 +3615,45 @@ const stripHtml = (html) => {
     .trim();
 };
 
+const extractLegacyDocText = async (buffer) => {
+  try {
+    const WordExtractor = require('word-extractor');
+    const doc = await new WordExtractor().extract(buffer);
+    const body = doc?.getBody?.() || '';
+    if (body && String(body).trim()) return normalizeResumeSearchText(body);
+  } catch (e) {
+    if (e?.code === 'MODULE_NOT_FOUND') {
+      console.warn('[embed-parse-doc-legacy-error] word-extractor not installed — run npm install in backend');
+    } else {
+      console.log('[embed-parse-doc-legacy-error]', e.message || e);
+    }
+  }
+  return '';
+};
+
+const extractDocxText = async (buffer) => {
+  try {
+    const resDoc = await mammoth.extractRawText({ buffer });
+    if (resDoc.value) return normalizeResumeSearchText(resDoc.value);
+  } catch (e) {
+    console.log('[embed-parse-docx-error]', e.message || e);
+  }
+  return '';
+};
+
 const extractFromBuffer = async (buffer, ct) => {
   const contentType = (ct || '').toLowerCase();
   const magic4 = buffer.slice(0, 4).toString('utf8');
   const magic2 = buffer.slice(0, 2).toString('binary');
   const looksPdf = magic4 === '%PDF';
   const looksZip = magic2 === 'PK';
+  const looksLegacyDoc = isLegacyDocBuffer(buffer);
+  const looksDocx =
+    looksZip ||
+    contentType.includes('officedocument') ||
+    contentType.includes('wordprocessingml');
+  const looksLegacyDocByType =
+    looksLegacyDoc || (contentType.includes('msword') && !looksZip);
 
   try {
     // Prefer magic-number detection, then fall back to content-type hints
@@ -3515,19 +3661,16 @@ const extractFromBuffer = async (buffer, ct) => {
       return await extractTextFromPdfBuffer(buffer);
     }
 
-    if (
-      looksZip ||
-      contentType.includes('officedocument') ||
-      contentType.includes('wordprocessingml') ||
-      contentType.includes('msword') ||
-      contentType.includes('application/octet-stream')
-    ) {
-      try {
-        const resDoc = await mammoth.extractRawText({ buffer });
-        if (resDoc.value) return normalizeResumeSearchText(resDoc.value);
-      } catch (e) {
-        console.log('[embed-parse-doc-error]', e.message || e);
-      }
+    // Legacy `.doc` (OLE) — mammoth only supports `.docx` (zip/OOXML).
+    if (looksLegacyDocByType) {
+      const legacyText = await extractLegacyDocText(buffer);
+      if (legacyText) return legacyText;
+    }
+
+    if (looksDocx || contentType.includes('application/octet-stream')) {
+      const docxText = await extractDocxText(buffer);
+      if (docxText) return docxText;
+      if (looksLegacyDocByType) return '';
     }
 
     // Wrong content-type (e.g. application/octet-stream) but file is a valid PDF
@@ -3542,12 +3685,7 @@ const extractFromBuffer = async (buffer, ct) => {
     if (isPdfMagicBuffer(buffer)) {
       return '';
     }
-    if (
-      looksZip ||
-      contentType.includes('officedocument') ||
-      contentType.includes('wordprocessingml') ||
-      contentType.includes('msword')
-    ) {
+    if (looksDocx || looksLegacyDocByType) {
       return '';
     }
 
@@ -3630,8 +3768,8 @@ const fetchResumeText = async (resumeUrl, candidateIdForLog = '') => {
 };
 
 /**
- * Upload resume to S3 and run the same AI/regex enrichment as attachMedia.
- * Extracts text from the upload buffer first, then falls back to fetching from S3.
+ * Upload resume to S3 and run the same AI/regex enrichment as attachMedia / createFromAi.
+ * Extracts from the uploaded bytes first — S3 upload must not block enrichment.
  */
 const processResumeUploadForCandidate = async (
   candidateId,
@@ -3644,30 +3782,92 @@ const processResumeUploadForCandidate = async (
   if (!buffer?.length) {
     buffer = Buffer.from(String(fileBase64 || '').replace(/\s/g, ''), 'base64');
   }
-  const bufferText = await extractResumeTextFromUpload(fileBase64, mimeType);
-  const resumeUrl = await uploadResumeForCandidate(candidateId, fileBase64, filename, mimeType);
-  if (!resumeUrl) return null;
-
-  let extraText = bufferText;
-  if (!extraText.trim()) {
-    extraText = await fetchResumeText(resumeUrl, candidateId);
+  if (!buffer?.length) {
+    console.warn('[processResumeUploadForCandidate] empty or invalid base64', candidateId);
+    return null;
   }
+
+  const fileNameHint = extractNameHintFromFileName(filename)?.name || null;
+  let extraText = '';
+  let pdfBuffer = isPdfUploadBuffer(buffer, mimeType) ? buffer : null;
+
+  try {
+    if ((mimeType || '').startsWith('image/')) {
+      extraText = await extractTextFromImageBuffer(buffer);
+    } else {
+      extraText = await extractFromBuffer(buffer, mimeType);
+    }
+    if (!String(extraText || '').trim()) {
+      if (!isPdfMagicBuffer(buffer) && !String(mimeType || '').toLowerCase().includes('pdf')) {
+        const asUtf8 = buffer.toString('utf8');
+        if (!looksLikeRawPdfUtf8String(asUtf8)) extraText = asUtf8;
+      }
+    }
+  } catch (e) {
+    console.warn('[processResumeUploadForCandidate] local extract failed', candidateId, e?.message || e);
+  }
+
+  if (extraText) {
+    const fixed = fixCharReversedHebrewText(extraText, fileNameHint);
+    if (fixed !== extraText) extraText = fixed;
+  }
+
+  let resumeUrl = null;
+  try {
+    resumeUrl = await uploadResumeForCandidate(candidateId, fileBase64, filename, mimeType);
+  } catch (uploadErr) {
+    console.warn('[processResumeUploadForCandidate] S3 upload failed', candidateId, uploadErr?.message || uploadErr);
+  }
+
+  if (!String(extraText || '').trim() && resumeUrl) {
+    try {
+      const bin = await fetchResumeBinaryForMail(resumeUrl, candidateId);
+      if (bin?.buffer?.length) {
+        if (isPdfUploadBuffer(bin.buffer, bin.contentType)) pdfBuffer = bin.buffer;
+        if ((bin.contentType || '').startsWith('image/')) {
+          extraText = await extractTextFromImageBuffer(bin.buffer);
+        } else {
+          extraText = await extractFromBuffer(bin.buffer, bin.contentType);
+        }
+      }
+    } catch (e) {
+      console.warn('[processResumeUploadForCandidate] S3 binary extract failed', candidateId, e?.message || e);
+    }
+    if (!String(extraText || '').trim()) {
+      extraText = await fetchResumeText(resumeUrl, candidateId);
+    }
+  }
+
   console.log('[processResumeUploadForCandidate]', candidateId, {
-    bufferTextLen: bufferText.length,
-    extraTextLen: extraText.length,
+    extraTextLen: String(extraText || '').length,
     preserveFormFields: options.preserveFormFields === true,
     unreliableText: isUnreliableResumeTextExtract(extraText),
+    hasPdfBuffer: Boolean(pdfBuffer),
+    resumeUploaded: Boolean(resumeUrl),
   });
 
   const enrichOptions = { ...options, fileName: filename || options.fileName || options.filename };
-  if (buffer?.length && isPdfUploadBuffer(buffer, mimeType)) {
-    enrichOptions.pdfBuffer = buffer;
-  }
+  if (pdfBuffer) enrichOptions.pdfBuffer = pdfBuffer;
 
   const baseCandidate = await candidateService.getById(candidateId);
   const refreshed = await enrichCandidateFromResumeText(baseCandidate, extraText || '', enrichOptions);
-  await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, null);
+  await candidateCompletenessService.refreshCandidateDataStatusAfterSave(candidateId, options.req || null);
   return { resumeUrl, candidate: refreshed };
+};
+
+/** Public job landing apply — same CV upload + enrich pipeline as attachMedia / staff upload. */
+const enrichCandidateFromPublicApplyUpload = async (
+  candidateId,
+  { cvBase64, cvFileName, cvMimeType } = {},
+) => {
+  if (!candidateId || !cvBase64) return null;
+  return processResumeUploadForCandidate(
+    candidateId,
+    cvBase64,
+    cvFileName,
+    cvMimeType,
+    { preserveFormFields: true },
+  );
 };
 
 const extFromContentType = (ct) => {
@@ -4060,7 +4260,12 @@ const semanticSearch = async (req, res) => {
     if (!query || !query.trim()) {
       return res.status(400).json({ message: 'query is required' });
     }
-    const results = await searchCandidates({ query, filters, limit: limit || 20 });
+    const results = await searchCandidates({
+      query,
+      filters,
+      limit: limit || 20,
+      maxInlineEmbedRebuild: 5,
+    });
     await candidateService.attachLatestJobSubmissions(results);
     const jid = bodyJobId != null && String(bodyJobId).trim() !== '' ? String(bodyJobId).trim() : '';
     if (jid) {
@@ -4265,9 +4470,15 @@ const linkCandidateToJob = async (req, res) => {
 };
 
 /** Explicit job–candidate links (job_candidates + jobs) for “התעניינות במשרה”. */
+const CANDIDATE_UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 const listLinkedJobs = async (req, res) => {
   try {
-    const candidateId = req.params.id;
+    const candidateId = String(req.params.id || '').trim();
+    if (!CANDIDATE_UUID_RE.test(candidateId)) {
+      return res.status(400).json({ message: 'Invalid candidate id' });
+    }
     const rows = await jobCandidateService.listForCandidate(candidateId);
     const usable = rows.filter((r) => {
       if (r.jobId && r.job && r.job.id) return true;
@@ -5126,6 +5337,21 @@ const patchPipelineStage = async (req, res) => {
       : existing.pipelineStageId || null;
 
     let fromStageId = existing.pipelineStageId || null;
+    if (
+      newPipelineId &&
+      String(existing.candidatePipelineId || '') !== String(newPipelineId)
+    ) {
+      const parallel = (Array.isArray(existing.candidatePipelineProcesses)
+        ? existing.candidatePipelineProcesses
+        : []
+      ).find(
+        (p) =>
+          p &&
+          p.isActive !== false &&
+          String(p.pipelineId || '') === String(newPipelineId),
+      );
+      if (parallel?.stageId) fromStageId = parallel.stageId;
+    }
     const clientId = await pipelineOutcomeService.resolveClientIdForCandidate(
       candidateId,
       req?.dbUser?.clientId || null,
@@ -5135,17 +5361,17 @@ const patchPipelineStage = async (req, res) => {
       fromStageId = await pipelineOutcomeService.inferFirstPipelineStageId(clientId, newPipelineId);
     }
 
-    const patch = {};
-    if (hasPipelinePatch) {
-      patch.candidatePipelineId = newPipelineId;
-    }
-    if (hasStagePatch) {
-      patch.pipelineStageId = newStageId;
-    }
-
     let candidate = existing;
-    if (Object.keys(patch).length > 0) {
-      candidate = await candidateService.update(candidateId, patch);
+
+    if ((hasPipelinePatch || hasStagePatch) && newPipelineId && newStageId) {
+      candidate = await pipelineOutcomeService.patchCandidatePipelinePlacement(
+        candidateId,
+        newPipelineId,
+        newStageId,
+      );
+      if (!candidate) {
+        return res.status(404).json({ message: 'Candidate not found' });
+      }
     }
 
     const stageChanged = Boolean(newStageId && fromStageId && newStageId !== fromStageId);
@@ -5198,6 +5424,7 @@ const patchPipelineStage = async (req, res) => {
 module.exports = {
   list,
   listPost,
+  batchMatchScores,
   listByWorkedAtCompany,
   getByUser,
   listRelatedCandidates,
@@ -5219,9 +5446,11 @@ module.exports = {
   uploadResumeForCandidate,
   putResumeFileInS3,
   processResumeUploadForCandidate,
+  enrichCandidateFromPublicApplyUpload,
   enrichCandidateFromResumeText,
   generateExperienceSummary,
   fetchResumeText,
+  extractResumeTextFromUpload,
   fetchResumeBinaryForMail,
   buildParsedUpdates,
   generateInternalOpinion,

@@ -1,10 +1,12 @@
 
 import React from 'react';
 import { useLanguage } from '../context/LanguageContext';
+import { useAuth } from '../context/AuthContext';
 
 interface CandidateNavProps {
     activeView: string;
     setActiveView: (view: string) => void;
+    candidateId?: string | null;
 }
 
 const NavButton: React.FC<{ title: string; isActive: boolean; onClick: () => void; }> = ({ title, isActive, onClick }) => (
@@ -20,8 +22,20 @@ const NavButton: React.FC<{ title: string; isActive: boolean; onClick: () => voi
     </button>
 );
 
-const CandidateNav: React.FC<CandidateNavProps> = ({ activeView, setActiveView }) => {
+const CandidateNav: React.FC<CandidateNavProps> = ({ activeView, setActiveView, candidateId }) => {
   const { t } = useLanguage();
+  const { user } = useAuth();
+  const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+  const previewCandidateId = String(candidateId || '').trim();
+
+  const openCandidatePublicView = () => {
+    if (!previewCandidateId) return;
+    const params = new URLSearchParams({
+      previewCandidateId,
+      staff: '1',
+    });
+    window.open(`/candidate-portal/profile?${params.toString()}`, '_blank', 'noopener,noreferrer');
+  };
   
   return (
     <>
@@ -32,6 +46,9 @@ const CandidateNav: React.FC<CandidateNavProps> = ({ activeView, setActiveView }
             <NavButton title={t('candidate_nav.referrals')} isActive={activeView === 'referrals'} onClick={() => setActiveView('referrals')} />
             <NavButton title={t('candidate_nav.events')} isActive={activeView === 'events'} onClick={() => setActiveView('events')} />
             <NavButton title={t('candidate_nav.documents')} isActive={activeView === 'documents'} onClick={() => setActiveView('documents')} />
+            {isPlatformAdmin && previewCandidateId ? (
+                <NavButton title="תצוגת מועמד" isActive={false} onClick={openCandidatePublicView} />
+            ) : null}
         </nav>
     </>
   );

@@ -176,6 +176,8 @@ async function runSonarScan(jobId, body = {}) {
       filters: {},
       limit: fetchLimit,
       maxLimitCap: 400,
+      maxInlineEmbedRebuild: 0,
+      requireKeywordMatch: false,
     });
     lap(`vector search returned ${raw.length} candidates`);
 

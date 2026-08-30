@@ -31,6 +31,9 @@ const SYSTEM_EVENTS = {
 
   // 9. פורטל מועמד — אישור פרופיל (matches candidate.events journal type label)
   CANDIDATE_PROFILE_APPROVED: { triggerName: 'מועמד', eventName: 'אישור הפרופיל על ידי המועמד' },
+  CANDIDATE_PROFILE_LINKED: { triggerName: 'מועמד', eventName: 'קישור פרופיל' },
+  CANDIDATE_PROFILE_UNLINKED: { triggerName: 'מועמד', eventName: 'ניתוק פרופיל' },
+  CANDIDATE_IDENTITY_MERGED: { triggerName: 'מועמד', eventName: 'מיזוג מועמד למועמד קיים' },
 
   // 5. תקשורת צוות
   TEAM_FEEDBACK:    { triggerName: 'תקשורת צוות', eventName: 'משוב לאחר ראיון' },

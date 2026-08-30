@@ -19,6 +19,9 @@ const geminiService = require('./geminiService');
 const { createS3Client, buildPublicUrl } = require('./s3Service');
 const matchingEngineService = require('./matchingEngineService');
 const organizationService = require('./organizationService');
+const candidateCompletenessService = require('./candidateCompletenessService');
+const systemEventEmitter = require('../utils/systemEventEmitter');
+const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 
 const DEFAULT_LANDING_FIELDS = [
   { key: 'fullName', label: 'שם מלא', status: 'mandatory' },
@@ -380,7 +383,7 @@ const getPublicJobSlug = (jobOrSlug) => {
 };
 
 const publicAppOrigin = () =>
-  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://hiro.co.il').replace(/\/$/, '');
+  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://app.hiro.co.il').replace(/\/$/, '');
 
 const buildAppUrl = (jobOrSlug, srcKey, clientRow) => {
   const slug = getPublicJobSlug(jobOrSlug);
@@ -399,7 +402,7 @@ const buildAppUrl = (jobOrSlug, srcKey, clientRow) => {
   return `${appPath}${query}`;
 };
 
-/** Public share link — server HTML with Open Graph tags (WhatsApp, LinkedIn, etc.). */
+/** Canonical public job URL — same path humans open in the app; crawlers receive OG HTML via API/nginx. */
 const buildLandingUrl = (jobOrSlug, srcKey, clientRow) => {
   const slug = getPublicJobSlug(jobOrSlug);
   if (!slug) return '';
@@ -409,6 +412,24 @@ const buildLandingUrl = (jobOrSlug, srcKey, clientRow) => {
   const query = srcKey ? `?src=${encodeURIComponent(srcKey)}` : '';
   const path = `/api/public/jobs/share/${clientSegment}${encodeURIComponent(slug)}${query}`;
   return base ? `${base}${path}` : path;
+};
+
+const FAVICON_OR_TINY_IMAGE_RE = /google\.com\/s2\/favicons|favicon/i;
+
+const isUsableOgImageUrl = (url) => {
+  if (!url || typeof url !== 'string') return false;
+  const u = url.trim();
+  if (!u) return false;
+  return !FAVICON_OR_TINY_IMAGE_RE.test(u);
+};
+
+const pickOgPreviewImage = (landing) => {
+  const candidates = [landing.heroImage, landing.logo, landing.clientBranding?.logoUrl];
+  for (const raw of candidates) {
+    const abs = absoluteAssetUrl(raw);
+    if (isUsableOgImageUrl(abs)) return abs;
+  }
+  return null;
 };
 
 const escapeHtml = (value) =>
@@ -436,12 +457,20 @@ const truncatePlainText = (text, maxLen = 200) => {
   return `${s.slice(0, maxLen - 1).trim()}…`;
 };
 
-const buildOgPreviewHtml = ({ title, description, shareUrl, appUrl, imageUrl, imageAlt }) => {
+const buildOgPreviewHtml = ({ title, description, shareUrl, appUrl, imageUrl, imageAlt, crawlerOnly = false }) => {
   const metaImage = imageUrl
     ? `<meta property="og:image" content="${escapeHtml(imageUrl)}" />
     <meta property="og:image:alt" content="${escapeHtml(imageAlt || title)}" />
     <meta name="twitter:image" content="${escapeHtml(imageUrl)}" />`
     : '';
+
+  const shouldRedirect = !crawlerOnly && appUrl && appUrl !== shareUrl;
+  const bodyContent = shouldRedirect
+    ? `<p style="font-family: sans-serif; padding: 1.5rem; text-align: center;">
+    <a href="${escapeHtml(appUrl)}">${escapeHtml(title)}</a>
+  </p>
+  <script>window.location.replace(${JSON.stringify(appUrl)});</script>`
+    : `<p style="font-family: sans-serif; padding: 1.5rem; text-align: center;">${escapeHtml(title)}</p>`;
 
   return `<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -461,13 +490,9 @@ const buildOgPreviewHtml = ({ title, description, shareUrl, appUrl, imageUrl, im
   <meta name="twitter:title" content="${escapeHtml(title)}" />
   <meta name="twitter:description" content="${escapeHtml(description)}" />
   <link rel="canonical" href="${escapeHtml(shareUrl)}" />
-  <meta http-equiv="refresh" content="0;url=${escapeHtml(appUrl)}" />
 </head>
 <body>
-  <p style="font-family: sans-serif; padding: 1.5rem; text-align: center;">
-    <a href="${escapeHtml(appUrl)}">${escapeHtml(title)}</a>
-  </p>
-  <script>window.location.replace(${JSON.stringify(appUrl)});</script>
+  ${bodyContent}
 </body>
 </html>`;
 };
@@ -488,7 +513,7 @@ const buildBoardShareUrl = (clientRow) => {
   return base ? `${base}${path}` : path;
 };
 
-const renderBoardSharePreviewPage = async ({ clientHint }) => {
+const renderBoardSharePreviewPage = async ({ clientHint, crawlerOnly = false }) => {
   const clientRow = clientHint ? await resolveClientByBoardParam(clientHint) : null;
   const branding = buildBoardBranding(clientRow);
   const appUrl = buildBoardAppUrl(clientRow);
@@ -496,7 +521,9 @@ const renderBoardSharePreviewPage = async ({ clientHint }) => {
   const companyName = branding?.clientName || 'Hiro';
   const title = `לוח משרות — ${companyName}`;
   const description = `גלו את המשרות הפתוחות ב-${companyName}. הגישו מועמדות online.`;
-  const imageUrl = absoluteAssetUrl(branding?.logoUrl);
+  const imageUrl = isUsableOgImageUrl(absoluteAssetUrl(branding?.logoUrl))
+    ? absoluteAssetUrl(branding?.logoUrl)
+    : null;
 
   return buildOgPreviewHtml({
     title,
@@ -505,10 +532,11 @@ const renderBoardSharePreviewPage = async ({ clientHint }) => {
     appUrl,
     imageUrl,
     imageAlt: companyName,
+    crawlerOnly,
   });
 };
 
-const renderSharePreviewPage = async ({ clientHint, slug, srcKey }) => {
+const renderSharePreviewPage = async ({ clientHint, slug, srcKey, crawlerOnly = false }) => {
   const landing = await getPublicLanding(slug, srcKey, clientHint);
   const clientRow = clientHint ? await resolveClientByBoardParam(clientHint) : null;
   const appUrl = buildAppUrl(
@@ -529,10 +557,7 @@ const renderSharePreviewPage = async ({ clientHint, slug, srcKey }) => {
     truncatePlainText(landing.descriptionPlain, 220) ||
     `${company}${title}${location}`.trim() ||
     'הצטרפו אלינו — הגישו מועמדות online';
-  const imageUrl =
-    absoluteAssetUrl(landing.heroImage) ||
-    absoluteAssetUrl(landing.logo) ||
-    absoluteAssetUrl(landing.clientBranding?.logoUrl);
+  const imageUrl = pickOgPreviewImage(landing);
 
   return buildOgPreviewHtml({
     title,
@@ -541,6 +566,7 @@ const renderSharePreviewPage = async ({ clientHint, slug, srcKey }) => {
     appUrl,
     imageUrl,
     imageAlt: title,
+    crawlerOnly,
   });
 };
 
@@ -701,6 +727,10 @@ const formatScreeningAnswersNote = (screeningAnswers = {}, questions = []) => {
   return lines.length ? `תשובות סינון מדף פרסום:\n${lines.join('\n')}` : '';
 };
 
+function buildLandingPageSource(srcKey) {
+  return `דף פרסום${srcKey !== 'direct' ? ` (${srcKey})` : ''}`;
+}
+
 const buildApplicationCandidatePayload = (body, srcKey, existing = null) => {
   const firstName = trimField(body.firstName);
   const lastName = trimField(body.lastName);
@@ -711,7 +741,7 @@ const buildApplicationCandidatePayload = (body, srcKey, existing = null) => {
   const idNumber = trimField(body.idNumber);
   const drivingLicense = trimField(body.drivingLicense);
   const applicationNotes = buildApplicationNotes(body);
-  const source = `דף פרסום${srcKey !== 'direct' ? ` (${srcKey})` : ''}`;
+  const source = buildLandingPageSource(srcKey);
 
   const payload = { email, source };
   if (fullName) payload.fullName = fullName;
@@ -756,6 +786,276 @@ const uploadResumeBuffer = async (candidateId, buffer, filename, mimeType) => {
   return buildPublicUrl(key);
 };
 
+/** Invoke POST /api/candidates/ai handler programmatically — same Gemini pipeline as staff upload. */
+function invokeCreateFromAi(body = {}) {
+  const candidateController = require('../controllers/candidateController');
+  return new Promise((resolve, reject) => {
+    let statusCode = 200;
+    const req = {
+      body: { sendWelcomeEmail: false, syncEnrich: true, ...body },
+      user: null,
+      get: () => undefined,
+      headers: {},
+    };
+    const res = {
+      status(code) {
+        statusCode = code;
+        return this;
+      },
+      json(data) {
+        if (statusCode >= 400) {
+          reject(new Error(data?.message || `createFromAi failed (${statusCode})`));
+          return;
+        }
+        resolve({ status: statusCode, data });
+      },
+    };
+    Promise.resolve(candidateController.createFromAi(req, res)).catch(reject);
+  });
+}
+
+const PARSED_CANDIDATE_COPY_FIELDS = [
+  'searchText',
+  'searchTextSavedAt',
+  'workExperience',
+  'education',
+  'languages',
+  'skills',
+  'professionalSummary',
+  'industryAnalysis',
+  'resumeUrl',
+  'resumeUploadedAt',
+  'resumeContentHash',
+  'tags',
+  'field',
+  'companyExperiences',
+  'experience',
+];
+
+async function copyParsedCandidateOntoStub(parsedId, stubId) {
+  const parsed = await candidateService.getById(parsedId);
+  if (!parsed || parsedId === stubId) return;
+  const updates = {};
+  for (const key of PARSED_CANDIDATE_COPY_FIELDS) {
+    const value = parsed[key];
+    if (value == null) continue;
+    if (typeof value === 'string' && !value.trim()) continue;
+    if (Array.isArray(value) && !value.length) continue;
+    if (typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) continue;
+    updates[key] = value;
+  }
+  if (Object.keys(updates).length) {
+    await candidateService.update(stubId, updates);
+  }
+}
+
+/**
+ * Run createFromAi on the uploaded CV, then attach parsed data to the landing-page candidate row.
+ * Keeps form email / phone / name / source on the stub created by submitApplication.
+ */
+async function processPublicApplyResume(
+  stubCandidateId,
+  body,
+  job,
+  {
+    isNewCandidate = false,
+    formEmail = null,
+    formPhone = null,
+    srcKey = 'direct',
+    screeningNote = null,
+    landingBody = null,
+  } = {},
+) {
+  if (!body?.cvBase64 || !stubCandidateId) return null;
+
+  const landingSource = buildLandingPageSource(srcKey);
+
+  console.log('[jobPublicationService] public apply CV enrich start (createFromAi)', {
+    stubCandidateId,
+    jobId: job?.id,
+    fileName: body.cvFileName || null,
+    mimeType: body.cvMimeType || null,
+    landingSource,
+  });
+
+  const { ensureOrganizationsFromExperience } = require('../controllers/candidateController');
+
+  const aiResult = await invokeCreateFromAi({
+    fileBase64: body.cvBase64,
+    mimeType: body.cvMimeType,
+    fileName: body.cvFileName,
+    source: landingSource,
+  });
+
+  const parsed = aiResult?.data?.candidate;
+  if (!parsed?.id) {
+    throw new Error(aiResult?.data?.message || 'CV AI ingest failed');
+  }
+
+  let targetCandidateId = String(stubCandidateId);
+  const parsedId = String(parsed.id);
+
+  if (parsedId !== targetCandidateId) {
+    const merged = await candidateService.mergeIfDuplicateIdentity(parsedId, {
+      email: formEmail || body.email || parsed.email,
+      phone: formPhone || body.phone || parsed.phone,
+    });
+    if (merged.merged && merged.candidateId) {
+      targetCandidateId = String(merged.candidateId);
+    } else {
+      await copyParsedCandidateOntoStub(parsedId, targetCandidateId);
+      try {
+        await candidateService.remove(parsedId);
+      } catch (removeErr) {
+        console.warn('[jobPublicationService] could not remove duplicate parsed candidate', parsedId, removeErr?.message || removeErr);
+      }
+    }
+  }
+
+  let candidate = await candidateService.getById(targetCandidateId);
+
+  // createFromAi already calls tryEmbedCandidate — skip duplicate embed here.
+
+  try {
+    await ensureOrganizationsFromExperience(candidate?.workExperience, targetCandidateId);
+  } catch (orgErr) {
+    console.warn('[jobPublicationService] org sync after public apply failed', targetCandidateId, orgErr?.message || orgErr);
+  }
+
+  const client = await resolveClientForJob(job);
+  try {
+    await candidateCompletenessService.refreshCandidateDataStatusForClient(targetCandidateId, client?.id);
+  } catch (cmpErr) {
+    console.warn('[jobPublicationService] completeness after public apply failed', targetCandidateId, cmpErr?.message || cmpErr);
+  }
+
+  try {
+    await systemEventEmitter.emit(null, {
+      ...SYSTEM_EVENTS.CV_RECEIVED,
+      entityType: 'Candidate',
+      entityId: targetCandidateId,
+      entityName: candidate?.fullName || body.fullName || '—',
+      clientId: client?.id || job?.clientId || null,
+      params: {
+        id: targetCandidateId,
+        source: isNewCandidate ? 'public_apply_new' : 'public_apply_existing',
+      },
+    });
+    await systemEventEmitter.emit(null, {
+      ...SYSTEM_EVENTS.CV_PARSED,
+      entityType: 'Candidate',
+      entityId: targetCandidateId,
+      entityName: candidate?.fullName || body.fullName || '—',
+      clientId: client?.id || job?.clientId || null,
+      params: { source: 'public_apply' },
+    });
+  } catch (evtErr) {
+    console.warn('[jobPublicationService] CV events failed', targetCandidateId, evtErr?.message || evtErr);
+  }
+
+  console.log('[jobPublicationService] public apply CV enrich done', {
+    stubCandidateId,
+    targetCandidateId,
+    jobId: job?.id,
+    workExperienceCount: Array.isArray(candidate?.workExperience) ? candidate.workExperience.length : 0,
+  });
+
+  candidate = await reapplyLandingFormFields(
+    targetCandidateId,
+    landingBody || body,
+    srcKey,
+    screeningNote,
+  );
+
+  return candidate;
+}
+
+/** Re-apply landing form fields after AI parse (preserve source, screening notes, form identity). */
+async function reapplyLandingFormFields(candidateId, body, srcKey, screeningNote) {
+  if (!candidateId) return null;
+  const current = await candidateService.getById(candidateId);
+  if (!current) return null;
+  const overlay = buildApplicationCandidatePayload(body, srcKey, current);
+  overlay.source = buildLandingPageSource(srcKey);
+  if (screeningNote) {
+    overlay.internalNotes = current.internalNotes
+      ? `${String(current.internalNotes).trim()}\n\n${screeningNote}`
+      : screeningNote;
+  }
+  await candidateService.update(candidateId, overlay);
+  return candidateService.getById(candidateId);
+}
+
+/** Returns a task to run after the HTTP response is sent (keeps apply fast for the user). */
+function buildPublicApplyEnrichmentTask(
+  candidateId,
+  cvBody,
+  job,
+  {
+    isNewCandidate = false,
+    formEmail = null,
+    formPhone = null,
+    srcKey = 'direct',
+    screeningNote = null,
+    landingBody = null,
+  } = {},
+) {
+  if (!candidateId || !cvBody?.cvBase64) return null;
+  const payload = {
+    cvBase64: cvBody.cvBase64,
+    cvFileName: cvBody.cvFileName,
+    cvMimeType: cvBody.cvMimeType,
+    fullName: cvBody.fullName,
+    email: formEmail || cvBody.email,
+    phone: formPhone || cvBody.phone,
+  };
+  const jobRef = {
+    id: job?.id,
+    clientId: job?.clientId,
+    client: job?.client,
+  };
+  return async () => {
+    console.log('[jobPublicationService] background CV enrich start (createFromAi)', {
+      candidateId,
+      jobId: jobRef.id,
+      fileName: payload.cvFileName || null,
+      cvBase64Len: String(payload.cvBase64).length,
+    });
+    try {
+      const enrichedCandidate = await processPublicApplyResume(candidateId, payload, jobRef, {
+        isNewCandidate,
+        formEmail,
+        formPhone,
+        srcKey,
+        screeningNote,
+        landingBody,
+      });
+      const targetId = enrichedCandidate?.id || candidateId;
+      console.log('[jobPublicationService] background CV enrich done', {
+        candidateId: targetId,
+        jobId: jobRef.id,
+        source: enrichedCandidate?.source || null,
+        workExperienceCount: Array.isArray(enrichedCandidate?.workExperience)
+          ? enrichedCandidate.workExperience.length
+          : 0,
+      });
+    } catch (err) {
+      console.error('[jobPublicationService] background CV enrich failed', {
+        candidateId,
+        jobId: jobRef.id,
+        message: err?.message || err,
+        stack: err?.stack,
+      });
+    } finally {
+      try {
+        await candidateService.update(candidateId, { ingestPending: false });
+      } catch (clearErr) {
+        console.warn('[jobPublicationService] clear ingestPending failed', candidateId, clearErr?.message || clearErr);
+      }
+    }
+  };
+}
+
 const submitApplication = async (slug, body = {}) => {
   const job = await resolveJobBySlug(slug);
   if (job.status !== 'פתוחה' && job.status !== 'מוקפאת') {
@@ -777,7 +1077,7 @@ const submitApplication = async (slug, body = {}) => {
     if (field.status !== 'mandatory') continue;
     const val = body[field.key];
     if (field.key === 'cv') {
-      if (!body.cvBase64 && !body.cvFileName) {
+      if (!body.cvBase64 || !String(body.cvBase64).trim()) {
         const err = new Error('קורות חיים נדרשים');
         err.status = 400;
         throw err;
@@ -832,6 +1132,7 @@ const submitApplication = async (slug, body = {}) => {
   const screeningNote = formatScreeningAnswersNote(screeningAnswers, publishedQuestions);
 
   let candidate = await candidateService.findByEmail(email);
+  const isNewCandidate = !candidate;
   const candidatePayload = buildApplicationCandidatePayload(body, srcKey, candidate);
   if (screeningNote) {
     candidatePayload.internalNotes = candidate?.internalNotes
@@ -847,20 +1148,10 @@ const submitApplication = async (slug, body = {}) => {
     candidate = await candidateService.getById(candidate.id);
   }
 
-  if (body.cvBase64) {
-    try {
-      await candidateController.processResumeUploadForCandidate(
-        candidate.id,
-        body.cvBase64,
-        body.cvFileName,
-        body.cvMimeType,
-        { preserveFormFields: true },
-      );
-      candidate = await candidateService.getById(candidate.id);
-    } catch (uploadErr) {
-      console.warn('[jobPublicationService] CV upload failed', uploadErr.message || uploadErr);
-    }
-  }
+  let enriched = false;
+  let enrichmentPending = false;
+  let enrichError = null;
+  let runEnrichmentAfterResponse = null;
 
   const { created } = await jobCandidateService.associateCandidateWithJob({
     jobId: job.id,
@@ -888,10 +1179,80 @@ const submitApplication = async (slug, body = {}) => {
     });
   }
 
+  if (body.cvBase64) {
+    const cvPayload = {
+      cvBase64: body.cvBase64,
+      cvFileName: body.cvFileName,
+      cvMimeType: body.cvMimeType,
+      fullName,
+    };
+    const enrichContext = {
+      isNewCandidate,
+      formEmail: email,
+      formPhone: trimField(body.phone),
+      srcKey,
+      screeningNote,
+      landingBody: body,
+    };
+    const useSyncEnrich = String(process.env.PUBLIC_APPLY_SYNC_ENRICH || '').toLowerCase() === 'true';
+
+    if (useSyncEnrich) {
+      console.log('[jobPublicationService] public apply sync CV enrich', {
+        candidateId: candidate.id,
+        jobId: job.id,
+        fileName: body.cvFileName || null,
+        cvBase64Len: String(body.cvBase64).length,
+      });
+      try {
+        const enrichedCandidate = await processPublicApplyResume(
+          candidate.id,
+          cvPayload,
+          job,
+          enrichContext,
+        );
+        if (enrichedCandidate?.id) {
+          candidate = enrichedCandidate;
+        }
+        enriched = Boolean(
+          Array.isArray(candidate?.workExperience) && candidate.workExperience.length > 0
+            || candidate?.resumeUrl
+            || (candidate?.searchText && String(candidate.searchText).length > 200),
+        );
+      } catch (err) {
+        enrichError = err?.message || String(err);
+        console.error('[jobPublicationService] public apply sync CV enrich failed', {
+          candidateId: candidate.id,
+          jobId: job.id,
+          message: enrichError,
+          stack: err?.stack,
+        });
+      }
+    } else {
+      enrichmentPending = true;
+      try {
+        await candidateService.update(candidate.id, { ingestPending: true });
+      } catch (markErr) {
+        console.warn('[jobPublicationService] mark ingestPending failed', candidate.id, markErr?.message || markErr);
+      }
+      runEnrichmentAfterResponse = buildPublicApplyEnrichmentTask(
+        candidate.id,
+        cvPayload,
+        job,
+        enrichContext,
+      );
+    }
+  }
+
   return {
-    ok: true,
-    candidateId: candidate.id,
-    companyName: client?.displayName || client?.name || job.client,
+    response: {
+      ok: true,
+      candidateId: candidate.id,
+      companyName: client?.displayName || client?.name || job.client,
+      enriched,
+      enrichmentPending,
+      ...(enrichError ? { enrichError } : {}),
+    },
+    runEnrichmentAfterResponse,
   };
 };
 

@@ -13,7 +13,7 @@ import { useLanguage } from '../context/LanguageContext';
 import {
   fetchJobPublication,
   saveJobPublication,
-  buildPublicJobUrl,
+  buildPublicJobAppUrl,
   resolvePublicClientRouteKey,
   createTrackingSrcKey,
   mapTrackingLinkFromApi,
@@ -394,14 +394,14 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
     const linkRouteKey = publicRouteKey || undefined;
 
     const buildLinkUrl = (srcKey?: string) =>
-        buildPublicJobUrl(targetJobId, srcKey, postingCode, linkRouteKey);
+        buildPublicJobAppUrl(targetJobId, srcKey, postingCode, linkRouteKey);
 
     const trackingLinksToPayload = (links: TrackingLinkRow[]) =>
         links.map((link) => ({
             id: link.id,
             source: link.source,
             srcKey: link.srcKey,
-            url: buildPublicJobUrl(targetJobId, link.srcKey, postingCode, linkRouteKey),
+            url: buildPublicJobAppUrl(targetJobId, link.srcKey, postingCode, linkRouteKey),
             visits: link.views,
             submissions: link.applicants,
         }));
@@ -474,7 +474,7 @@ const PublishJobView: React.FC<PublishJobViewProps> = ({ job: jobFromParent }) =
             if (!prev.length) return prev;
             return prev.map((link) => ({
                 ...link,
-                url: buildPublicJobUrl(targetJobId, link.srcKey, postingCode, linkRouteKey),
+                url: buildPublicJobAppUrl(targetJobId, link.srcKey, postingCode, linkRouteKey),
             }));
         });
     }, [targetJobId, postingCode, linkRouteKey]);

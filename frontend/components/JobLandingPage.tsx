@@ -261,21 +261,32 @@ const JobLandingPage: React.FC = () => {
     if (!jobIdOrCode || !landing) return;
     const ctx = analyticsContext();
     setSubmitError(null);
+    const cvMandatory = landing.landingPageFields?.some((f) => f.key === 'cv' && f.status === 'mandatory');
+    if (cvMandatory && !cvFile) {
+      setSubmitError('יש לצרף קובץ קורות חיים');
+      return;
+    }
     setIsSubmitting(true);
     try {
       let cvBase64: string | undefined;
       if (cvFile) {
         cvBase64 = await fileToBase64(cvFile);
+        if (!cvBase64?.trim()) {
+          throw new Error('לא ניתן לקרוא את קובץ קורות החיים');
+        }
       }
-      await submitLandingApplication(jobIdOrCode, {
+      const result = await submitLandingApplication(jobIdOrCode, {
         ...formData,
         src: src || 'direct',
         privacyAccepted,
         screeningAnswers,
         cvBase64,
         cvFileName: cvFile?.name,
-        cvMimeType: cvFile?.type,
+        cvMimeType: cvFile?.type || 'application/pdf',
       });
+      if (cvFile && result.enriched === false && !result.enrichmentPending) {
+        console.warn('[JobLandingPage] application saved but CV enrichment failed', result);
+      }
       captureApplicationSubmittedSuccess(ctx);
       setIsSubmitted(true);
     } catch (err: any) {

@@ -1,0 +1,65 @@
+# Route social crawlers (WhatsApp, Facebook, etc.) on public job URLs to the API so
+# link previews receive Open Graph HTML. Browsers continue to the SPA static host.
+#
+# Include inside the app.hiro.co.il server block. Adjust upstream names/ports.
+
+map $http_user_agent $hiro_social_crawler {
+    default 0;
+    ~*facebookexternalhit 1;
+    ~*WhatsApp             1;
+    ~*Twitterbot          1;
+    ~*LinkedInBot         1;
+    ~*Slackbot            1;
+    ~*TelegramBot         1;
+    ~*Discordbot          1;
+    ~*Pinterest           1;
+    ~*Embedly             1;
+}
+
+upstream hiro_api {
+    server 127.0.0.1:4000;
+}
+
+upstream hiro_frontend {
+    server 127.0.0.1:3000;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name app.hiro.co.il;
+
+    location /api/ {
+        proxy_pass http://hiro_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Public job landing + board: crawlers → API (OG HTML), humans → SPA
+    location ~ ^/jobs/[^/]+/public/(board|[^/]+)/?$ {
+        error_page 418 = @hiro_public_job_preview;
+        if ($hiro_social_crawler) {
+            return 418;
+        }
+        proxy_pass http://hiro_frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+
+    location @hiro_public_job_preview {
+        proxy_pass http://hiro_api;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location / {
+        proxy_pass http://hiro_frontend;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+    }
+}

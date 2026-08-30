@@ -35,8 +35,14 @@ import EventTypesSettingsView from './components/EventTypesSettingsView';
 import RecruitmentSourcesSettingsView from './components/RecruitmentSourcesSettingsView';
 import QuestionnaireBuilderView from './components/QuestionnaireBuilderView'; 
 import AgreementTypesSettingsView from './components/AgreementTypesSettingsView'; // New Import
-import { syncCandidateNameFields } from './utils/candidateName';
+import { buildCandidateFullName, syncCandidateNameFields } from './utils/candidateName';
 import { buildMissingProfileFieldLabels, resolveProfileDisplayAge } from './utils/candidateProfileDisplayCompleteness';
+import {
+    buildDuplicateProfileName,
+    buildProfileDuplicatePayload,
+    buildTagEntriesFromSource,
+    sanitizeProfileDuplicatePayload,
+} from './utils/candidateProfileDuplicate';
 import PipelineSettingsView from './components/PipelineSettingsView';
 import CandidatePipelineSettingsView from './components/CandidatePipelineSettingsView';
 import StatusSettingsView from './components/StatusSettingsView';
@@ -93,6 +99,7 @@ import AdminPromptsView from './components/AdminPromptsView';
 import AdminMatchingEngineView from './components/AdminMatchingEngineView';
 import AdminPicklistsView from './components/AdminPicklistsView';
 import AdminTagCorrectionsView from './components/AdminTagCorrectionsView';
+import AdminTagBlacklistView from './components/AdminTagBlacklistView';
 import AdminEventsView from './components/AdminEventsView';
 import AdminLogsView from './components/AdminLogsView';
 import AdminHelpCenterView from './components/AdminHelpCenterView';
@@ -347,6 +354,7 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     const [isCandidateLoading, setIsCandidateLoading] = useState(false);
     const [candidateFetchError, setCandidateFetchError] = useState<string | null>(null);
     const [isUpdatingCandidate, setIsUpdatingCandidate] = useState(false);
+    const [isDuplicatingProfile, setIsDuplicatingProfile] = useState(false);
     const [candidateUpdateMessage, setCandidateUpdateMessage] = useState<string | null>(null);
     const [approveCorrectionsLoading, setApproveCorrectionsLoading] = useState(false);
     const [candidateList, setCandidateList] = useState<{ id: string }[]>([]);
@@ -647,11 +655,119 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
         }
     }, [apiBase, formData, loadProfilesForUser, navigate]);
 
-    const profileOptions = useMemo(() => profiles.map(profile => ({
-        id: profile.backendId || profile.id,
-        profileName: profile.profileName || profile.fullName || 'פרופיל',
-        profilePicture: profile.profilePicture,
-    })), [profiles]);
+    const handleDuplicateProfile = useCallback(async () => {
+        if (!apiBase) {
+            setCandidateUpdateMessage('כתובת ה-API לא מוגדרת.');
+            return;
+        }
+        const sourceId = String(formData.backendId || urlId || '').trim();
+        if (!sourceId) {
+            setCandidateUpdateMessage('מזהה המועמד חסר.');
+            return;
+        }
+
+        const existingNames = profiles.map(
+            (profile) =>
+                profile.profileName ||
+                profile.fullName ||
+                buildCandidateFullName(profile.firstName, profile.lastName) ||
+                '',
+        );
+        const baseName =
+            formData.profileName ||
+            buildCandidateFullName(formData.firstName, formData.lastName) ||
+            formData.fullName ||
+            'פרופיל';
+        const profileName = buildDuplicateProfileName(baseName, existingNames);
+        const primaryCandidateId = String(formData.canonicalCandidateId || sourceId).trim();
+
+        setIsDuplicatingProfile(true);
+        setCandidateUpdateMessage(null);
+        try {
+            const payload = sanitizeProfileDuplicatePayload(
+                buildProfileDuplicatePayload(
+                    formData,
+                    profileName,
+                    formData.userId || null,
+                    primaryCandidateId,
+                ),
+            );
+            const res = await fetch(`${apiBase}/api/candidates`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                body: JSON.stringify({ ...payload, allowProfileVersion: true }),
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(typeof body?.message === 'string' ? body.message : 'יצירת העתק נכשלה.');
+            }
+            const created = await res.json();
+            const newId = String(created.id || '').trim();
+            const tagEntries = buildTagEntriesFromSource(formData);
+            if (newId && tagEntries.length) {
+                await fetch(`${apiBase}/api/admin/candidate-tags/bulk-create`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+                    body: JSON.stringify({ candidate_id: newId, tags: tagEntries }),
+                }).catch((err) => console.warn('Failed to copy tags to duplicate profile', err));
+            }
+
+            const normalizedCreated = normalizeCandidatePayload(created);
+            normalizedCreated.profileName = profileName;
+            normalizedCreated.title = profileName;
+            normalizedCreated.fullName = profileName;
+
+            setProfiles((prev) => {
+                const currentEntry = {
+                    ...formData,
+                    backendId: formData.backendId || formData.id,
+                    profileName:
+                        formData.profileName ||
+                        buildCandidateFullName(formData.firstName, formData.lastName) ||
+                        formData.fullName ||
+                        'פרופיל',
+                };
+                const merged = [...prev];
+                const hasCurrent = merged.some(
+                    (item) => String(item.backendId || item.id) === String(currentEntry.backendId),
+                );
+                if (!hasCurrent) merged.unshift(currentEntry);
+                const withoutNew = merged.filter(
+                    (item) => String(item.backendId || item.id) !== String(normalizedCreated.backendId || newId),
+                );
+                return [...withoutNew, { ...normalizedCreated, backendId: newId }];
+            });
+            setActiveProfileId(newId);
+            setFormData({ ...normalizedCreated, id: normalizedCreated.id, backendId: newId });
+            if (formData.userId) {
+                void loadProfilesForUser(formData.userId);
+            }
+            navigate(`/candidates/${newId}`);
+            setCandidateUpdateMessage('עותק הצל נוצר בהצלחה.');
+        } catch (err: unknown) {
+            setCandidateUpdateMessage(err instanceof Error ? err.message : 'יצירת העתק נכשלה.');
+        } finally {
+            setIsDuplicatingProfile(false);
+        }
+    }, [apiBase, authHeaders, formData, loadProfilesForUser, navigate, profiles, urlId]);
+
+    const profileOptions = useMemo(() => {
+        const list =
+            profiles.length > 0
+                ? profiles
+                : formData.backendId || formData.id
+                  ? [formData]
+                  : [];
+        return list.map((profile) => ({
+            id: profile.backendId || profile.id,
+            profileName:
+                profile.profileName ||
+                buildCandidateFullName(profile.firstName, profile.lastName) ||
+                profile.fullName ||
+                'פרופיל',
+            profilePicture: profile.profilePicture,
+        }));
+    }, [profiles, formData]);
 
     const relatedProfilesForJobs = useMemo(
         () =>
@@ -895,7 +1011,11 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
     return (
         <div className="space-y-6 relative">
             <div className="mt-4 mb-6">
-                 <CandidateNav activeView={props.activeView} setActiveView={handleNavClick} />
+                 <CandidateNav
+                    activeView={props.activeView}
+                    setActiveView={handleNavClick}
+                    candidateId={String(formData.backendId || urlId || '')}
+                />
             </div>
 
              <CandidateProfile 
@@ -915,6 +1035,8 @@ const ProfilePageWrapper: React.FC<AppRoutesProps> = (props) => {
                 activeProfileId={activeProfileId ?? formData.backendId ?? formData.id}
                 onSwitchProfile={handleProfileSwitch}
                 onAddProfile={handleAddProfile}
+                onDuplicateProfile={handleDuplicateProfile}
+                isDuplicatingProfile={isDuplicatingProfile}
                 candidateList={candidateList}
                 onNavigateCandidate={(id) => {
                     const search = location.search || '';
@@ -1052,6 +1174,7 @@ export const AppRoutes: React.FC<AppRoutesProps> = (props) => {
                         { index: true, element: <Navigate to="list" replace /> },
                         { path: 'list', element: <AdminTagsView /> },
                         { path: 'corrections', element: <AdminTagCorrectionsView /> },
+                        { path: 'blacklist', element: <AdminTagBlacklistView /> },
                         { path: 'candidates', element: <AdminCandidateTagsView /> },
                         { path: 'jobs', element: <AdminJobTagsView /> },
                     ],

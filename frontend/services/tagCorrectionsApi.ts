@@ -165,6 +165,20 @@ export async function updateTagAiDecisionComments(id: string, comments: string):
     return res.json();
 }
 
+export async function blacklistTags(ids: string[]): Promise<{
+    blacklisted: string[];
+    skipped: { id: string; reason: string }[];
+    count: number;
+}> {
+    const res = await fetch(`${apiBase()}/api/tags/blacklist`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ ids }),
+    });
+    if (!res.ok) throw new Error(await parseErr(res));
+    return res.json();
+}
+
 export async function resolveTagAiDecisions(payload: {
     decisionIds: string[];
     action: 'merge' | 'create' | 'delete' | 'blacklist' | 'manual' | 'undo_manual' | 'undo_blacklist';

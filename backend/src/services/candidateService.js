@@ -25,6 +25,10 @@ const {
   resolvePrimaryCandidateId,
   resolvePrimaryCandidateIdDeep,
 } = require('./candidateIdentityService');
+const {
+  recordCanonicalCandidateLinkChange,
+  recordCandidateIdentityMerge,
+} = require('../utils/candidateCanonicalLinkEvent');
 /** Lazy-require matchingScoreService + vectorSearchService inside scoring helpers to avoid circular load:
  * vectorSearchService → candidateService → matchingScoreService → vectorSearchService */
 
@@ -991,7 +995,10 @@ const VECTOR_SEARCH_ATTRIBUTES = [
 ];
 
 const listSlimForVectorSearch = async () => {
-  const rows = await Candidate.findAll({ attributes: VECTOR_SEARCH_ATTRIBUTES });
+  const rows = await Candidate.findAll({
+    attributes: VECTOR_SEARCH_ATTRIBUTES,
+    where: { isDeleted: false, isArchived: false },
+  });
   return rows.map((r) => r.get({ plain: true }));
 };
 
@@ -1060,6 +1067,7 @@ const LIST_GRID_ATTRIBUTES = [
   'distributionWhatsapp',
   'candidatePipelineId',
   'pipelineStageId',
+  'candidatePipelineProcesses',
   'createdAt',
   'updatedAt',
 ];
@@ -1067,6 +1075,81 @@ const LIST_GRID_ATTRIBUTES = [
 const pushBind = (binds, val) => {
   binds.push(val);
   return binds.length;
+};
+
+const { BUSINESS_FIELD_CATEGORY_ID } = require('./picklistService');
+
+/** SQL: case-insensitive equality on trimmed text (empty/null → no match). */
+const sqlExactIlikeTrim = (leftExpr, bindIdx) =>
+  `(COALESCE(${leftExpr}, '') <> '' AND LOWER(TRIM(${leftExpr})) = LOWER(TRIM($${bindIdx}::text)))`;
+
+/** Combined finance/insurance labels stored on employers — not substring-matched, but equal when filtering ביטוח. */
+const sqlIndustryMatchesFilterValue = (leftExpr, bindIdx) => `(
+  ${sqlExactIlikeTrim(leftExpr, bindIdx)}
+  OR (
+    LOWER(TRIM($${bindIdx}::text)) = 'ביטוח'
+    AND LOWER(TRIM(COALESCE(${leftExpr}, ''))) IN (
+      'פיננסים וביטוח', 'ביטוח ופיננסים', 'ביטוח ופיננסים', 'פיננסים וביטוח (כללי)', 'ביטוח ופנסיה'
+    )
+  )
+)`;
+
+/** Experience row industry compatible with an insurance sub-field match. */
+const sqlCeIndustryAllowsInsuranceSubField = (bindIdx) => `(
+  COALESCE(ce->>'industry', '') = ''
+  OR ${sqlIndustryMatchesFilterValue("ce->>'industry'", bindIdx)}
+)`;
+
+/**
+ * Industry filter for company background search.
+ * Uses exact picklist/industry matches — substring ILIKE previously matched combined
+ * buckets like "פיננסים וביטוח" when filtering for "ביטוח" alone.
+ */
+const buildCompanyIndustryFilterClause = (indName, binds, ceArr) => {
+  const n = pushBind(binds, indName.trim());
+  const industryAnalysisArr = `COALESCE(candidates."industryAnalysis"->'industries', '[]'::jsonb)`;
+  const picklistFieldExact = `LOWER(TRIM(COALESCE(pcv.display_name, pcv.label, pcv.value, '')))`;
+  const isGenericCategoryPicklistValue = `${picklistFieldExact} = LOWER(TRIM($${n}::text))`;
+  return `(
+    ${sqlExactIlikeTrim('candidates.industry', n)}
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+      WHERE ${sqlIndustryMatchesFilterValue("ce->>'industry'", n)}
+    )
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(${industryAnalysisArr}) AS ia
+      WHERE ${sqlExactIlikeTrim("ia->>'label'", n)}
+    )
+    OR EXISTS (
+      SELECT 1 FROM picklist_category_values pcv
+      INNER JOIN picklist_categories pc ON pc.id = pcv."categoryId"
+      WHERE LOWER(TRIM(pc.name)) = LOWER(TRIM($${n}::text))
+        AND pc."parentId" = '${BUSINESS_FIELD_CATEGORY_ID}'
+        AND pcv."isActive" = true
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+          WHERE COALESCE(ce->>'field', '') <> ''
+            AND LOWER(TRIM(ce->>'field')) = ${picklistFieldExact}
+            AND (
+              (
+                NOT (${isGenericCategoryPicklistValue})
+                AND ${sqlCeIndustryAllowsInsuranceSubField(n)}
+              )
+              OR (
+                ${isGenericCategoryPicklistValue}
+                AND ${sqlIndustryMatchesFilterValue("ce->>'industry'", n)}
+              )
+            )
+        )
+    )
+    OR EXISTS (
+      SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
+      WHERE COALESCE(ce->>'industry', '') = ''
+        AND COALESCE(ce->>'field', '') <> ''
+        AND LOWER(TRIM(ce->>'field')) LIKE '%' || LOWER(TRIM($${n}::text)) || '%'
+        AND LOWER(TRIM(ce->>'field')) <> LOWER(TRIM($${n}::text))
+    )
+  )`;
 };
 
 /** One visible row per identity group (userId / canonical link / email / phone / tz). */
@@ -1243,7 +1326,11 @@ const expandInterestRolePhrases = (roleRaw) => {
  * @param {object|null} advanced - JSON from GET ?adv= (frontend advanced search panel)
  */
 const buildCandidateListWhere = (trimmedSearch, advanced) => {
-  const fragments = ['"isDeleted" = false', '"canonicalCandidateId" IS NULL'];
+  const fragments = [
+    '"isDeleted" = false',
+    '"canonicalCandidateId" IS NULL',
+    'COALESCE("ingestPending", false) = false',
+  ];
   const binds = [];
 
   if (trimmedSearch) {
@@ -1360,33 +1447,9 @@ const buildCandidateListWhere = (trimmedSearch, advanced) => {
 
         // ── INDUSTRY dimension ────────────────────────────────────────────────
         if (cfIndustries.length) {
-          const indOrs = cfIndustries.map((indName) => {
-            const n = pushBind(binds, indName.trim());
-            return `(
-              candidates.industry ILIKE '%' || $${n} || '%'
-              OR candidates.field ILIKE '%' || $${n} || '%'
-              OR EXISTS (
-                SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
-                WHERE ce->>'industry' ILIKE '%' || $${n} || '%'
-                   OR ce->>'field' ILIKE '%' || $${n} || '%'
-              )
-              OR EXISTS (
-                SELECT 1 FROM picklist_category_values pcv
-                INNER JOIN picklist_categories pc ON pc.id = pcv."categoryId"
-                WHERE LOWER(TRIM(pc.name)) = LOWER(TRIM($${n}))
-                  AND pc."parentId" = '16c81e14-316d-403d-951a-263d02f57f4b'
-                  AND (
-                    candidates.industry ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
-                    OR candidates.field ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
-                    OR EXISTS (
-                      SELECT 1 FROM jsonb_array_elements(${ceArr}) AS ce
-                      WHERE ce->>'industry' ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
-                         OR ce->>'field' ILIKE '%' || COALESCE(pcv.display_name, pcv.label, pcv.value) || '%'
-                    )
-                  )
-              )
-            )`;
-          });
+          const indOrs = cfIndustries.map((indName) =>
+            buildCompanyIndustryFilterClause(indName, binds, ceArr),
+          );
           dimensionClauses.push(`(${indOrs.join(' OR ')})`);
         }
 
@@ -1701,6 +1764,7 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
 
   await runWithConcurrency(modelRows, LIST_SCORE_CONCURRENCY, async (inst) => {
     const cid = String(inst.id);
+    if (opts.scoreDeadline && Date.now() >= opts.scoreDeadline) return;
     let pkg = { matchScore: 0, scoreBreakdown: null, parameterMatches: {} };
 
     // Try Redis cache first
@@ -1714,13 +1778,16 @@ const scoreCandidatesAgainstJob = async (modelRows, jobId, opts = {}) => {
 
     try {
       const full = toPlainCandidateForMatchScore(inst);
-      if (!full.embedding?.length) {
-        try {
-          const rebuilt = await embedCandidateAndSave(cid);
-          const { normalizeEmbedding } = require('./vectorSearchService');
-          full.embedding = normalizeEmbedding(rebuilt);
-        } catch {
-          /* keep empty — same as simulate */
+      if (!full.embedding?.length && !opts.skipEmbedRebuild) {
+        const { embedCandidateAndSave, hasEmbeddableCandidateContent } = require('./vectorSearchService');
+        if (hasEmbeddableCandidateContent(full)) {
+          try {
+            const rebuilt = await embedCandidateAndSave(cid);
+            const { normalizeEmbedding } = require('./vectorSearchService');
+            full.embedding = normalizeEmbedding(rebuilt);
+          } catch {
+            /* keep empty — same as simulate */
+          }
         }
       }
       const linkedInfo = linkedMap.get(cid) || null;
@@ -1766,6 +1833,78 @@ const attachJobMatchScores = async (plainRows, jobId, opts = {}) => {
     if (pkg.parameterMatches) row.parameterMatches = pkg.parameterMatches;
   }
   return plainRows;
+};
+
+const BATCH_MATCH_SCORES_MAX_ITEMS = 100;
+
+/**
+ * Score many candidate↔job pairs for list hydration (grouped by jobId for efficiency).
+ * @param {{ candidateId: string, jobId: string }[]} items
+ * @returns {Promise<Record<string, { matchScore: number, scoreBreakdown?: object, parameterMatches?: object }>>}
+ */
+const scoreCandidateJobPairs = async (items, opts = {}) => {
+  if (!Array.isArray(items) || !items.length) return {};
+
+  const pairs = items
+    .map(({ candidateId, jobId }) => ({
+      candidateId: candidateId != null ? String(candidateId).trim() : '',
+      jobId: jobId != null ? String(jobId).trim() : '',
+    }))
+    .filter((p) => p.candidateId && p.jobId)
+    .slice(0, BATCH_MATCH_SCORES_MAX_ITEMS);
+
+  if (!pairs.length) return {};
+
+  const candidateIds = [...new Set(pairs.map((p) => p.candidateId))];
+  let heavyRows = [];
+  try {
+    heavyRows = await Candidate.findAll({
+      where: { id: { [Op.in]: candidateIds } },
+      include: includeCandidateTagsForList,
+      attributes: [...LIST_GRID_ATTRIBUTES, ...LIST_SCORING_EXTRA_ATTRIBUTES],
+    });
+  } catch (err) {
+    console.warn('[candidateService.scoreCandidateJobPairs] reload failed', err.message || err);
+    return {};
+  }
+
+  const heavyById = new Map(heavyRows.map((r) => [String(r.id), r]));
+  const byJob = new Map();
+  for (const p of pairs) {
+    if (!heavyById.has(p.candidateId)) continue;
+    if (!byJob.has(p.jobId)) byJob.set(p.jobId, new Set());
+    byJob.get(p.jobId).add(p.candidateId);
+  }
+
+  const out = {};
+  const scoreDeadline = Date.now() + (opts.scoreTimeBudgetMs ?? LIST_MATCH_SCORE_BUDGET_MS);
+  const overScoreBudget = () => Date.now() >= scoreDeadline;
+  const jobEntries = Array.from(byJob.entries());
+  await runWithConcurrency(jobEntries, 3, async ([jobKey, candIdSet]) => {
+    if (overScoreBudget()) return;
+    const instSubset = [...candIdSet].map((cid) => heavyById.get(cid)).filter(Boolean);
+    if (!instSubset.length) return;
+    try {
+      const sm = await scoreCandidatesAgainstJob(instSubset, jobKey, {
+        tenantClientId: opts.tenantClientId || null,
+        skipEmbedRebuild: true,
+        scoreDeadline,
+      });
+      for (const cid of candIdSet) {
+        const pkg = sm.get(String(cid));
+        if (!pkg || typeof pkg.matchScore !== 'number' || !Number.isFinite(pkg.matchScore)) continue;
+        out[String(cid)] = {
+          matchScore: pkg.matchScore,
+          scoreBreakdown: pkg.scoreBreakdown || null,
+          parameterMatches: pkg.parameterMatches || null,
+        };
+      }
+    } catch (err) {
+      console.warn('[candidateService.scoreCandidateJobPairs] batch failed', jobKey, err.message || err);
+    }
+  });
+
+  return out;
 };
 
 /**
@@ -1910,6 +2049,8 @@ const attachLastSubmissionEngineMatchScores = async (mappedRows, opts = {}) => {
     try {
       const sm = await scoreCandidatesAgainstJob(instSubset, jobKey, {
         tenantClientId: opts.tenantClientId || null,
+        skipEmbedRebuild: opts.skipEmbedRebuild === true,
+        scoreDeadline: overScoreBudget() ? scoreDeadline : undefined,
       });
       for (const [cid, pkg] of sm) {
         if (pkg && typeof pkg === 'object') scoresByCandidate.set(cid, pkg);
@@ -2250,6 +2391,7 @@ const getById = async (id, opts = {}) => {
   await attachLatestJobSubmissions(rows);
   await attachLastSubmissionEngineMatchScores(rows, {
     tenantClientId: opts.tenantClientId || null,
+    skipEmbedRebuild: true,
   });
   const row = rows[0];
   const lj = row.lastJobSubmission;
@@ -2404,8 +2546,26 @@ const repairPartialIdentityLink = async (candidateId) => {
 
   if (!Object.keys(patch).length) return { candidateId: cid, repaired: false };
 
+  const prevCanon =
+    plain.canonicalCandidateId != null ? String(plain.canonicalCandidateId).trim() : null;
+  const nextCanon =
+    patch.canonicalCandidateId != null ? String(patch.canonicalCandidateId).trim() : null;
+
   await Candidate.update(patch, { where: { id: cid } });
   await cacheDel(cid);
+
+  if (Object.prototype.hasOwnProperty.call(patch, 'canonicalCandidateId') && prevCanon !== nextCanon) {
+    try {
+      await recordCanonicalCandidateLinkChange(null, cid, {
+        previousCanonicalId: prevCanon,
+        nextCanonicalId: nextCanon,
+      });
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[candidateService] canonical link journal failed', err?.message || err);
+    }
+  }
+
   return { candidateId: cid, repaired: true, ...patch };
 };
 
@@ -2466,8 +2626,25 @@ const mergeIfDuplicateIdentity = async (candidateId, identity = {}) => {
   if (!plan.merged) return { candidateId: dupId, merged: false };
 
   if (plan.linked && plan.linkFields) {
+    const prevCanon =
+      dupPlain.canonicalCandidateId != null ? String(dupPlain.canonicalCandidateId).trim() : null;
+    const nextCanon =
+      plan.linkFields.canonicalCandidateId != null
+        ? String(plan.linkFields.canonicalCandidateId).trim()
+        : null;
     await Candidate.update(plan.linkFields, { where: { id: dupId } });
     await cacheDel(dupId);
+    if (prevCanon !== nextCanon) {
+      try {
+        await recordCanonicalCandidateLinkChange(null, dupId, {
+          previousCanonicalId: prevCanon,
+          nextCanonicalId: nextCanon,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[candidateService] canonical link journal failed', err?.message || err);
+      }
+    }
     return {
       candidateId: plan.candidateId,
       merged: true,
@@ -2482,6 +2659,15 @@ const mergeIfDuplicateIdentity = async (candidateId, identity = {}) => {
   }
   await Candidate.update({ isDeleted: true }, { where: { id: plan.removedDuplicateId } });
   await cacheDel(plan.removedDuplicateId);
+  try {
+    await recordCandidateIdentityMerge(null, {
+      primaryCandidateId: plan.candidateId,
+      duplicateCandidateId: plan.removedDuplicateId,
+    });
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[candidateService] identity merge journal failed', err?.message || err);
+  }
 
   return {
     candidateId: plan.candidateId,
@@ -2522,6 +2708,17 @@ const create = async (payload, options = {}) => {
         }
         await cacheSet(linked.toJSON ? linked.toJSON() : linked);
         const out = await getById(linked.id);
+        if (cleanPayload.canonicalCandidateId) {
+          try {
+            await recordCanonicalCandidateLinkChange(null, linked.id, {
+              previousCanonicalId: null,
+              nextCanonicalId: String(cleanPayload.canonicalCandidateId).trim(),
+            });
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn('[candidateService] canonical link journal failed', err?.message || err);
+          }
+        }
         out._identityLinked = true;
         out._linkedExistingId = existing.id;
         return out;
@@ -2536,6 +2733,15 @@ const create = async (payload, options = {}) => {
 
       await update(primaryId, attachPayload);
       await cacheDel(primaryId);
+      try {
+        await recordCandidateIdentityMerge(options.req || null, {
+          primaryCandidateId: primaryId,
+          sourceLabel: cleanPayload.fullName || cleanPayload.title,
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[candidateService] identity merge journal failed', err?.message || err);
+      }
       const attached = await getById(primaryId);
       attached._identityReused = true;
       attached._linkedExistingId = existing.id;
@@ -2607,9 +2813,20 @@ const sanitizeEmbedding = (emb) => {
   return undefined;
 };
 
-const update = async (id, payload) => {
+const update = async (id, payload, options = {}) => {
   const candidate = await fetchInstanceById(id);
   const cleanPayload = { ...payload };
+  let canonicalChange = null;
+  if (Object.prototype.hasOwnProperty.call(cleanPayload, 'canonicalCandidateId')) {
+    const prevCanon =
+      candidate.canonicalCandidateId != null ? String(candidate.canonicalCandidateId).trim() : null;
+    const nextRaw = cleanPayload.canonicalCandidateId;
+    const nextCanon =
+      nextRaw != null && String(nextRaw).trim() !== '' ? String(nextRaw).trim() : null;
+    if (prevCanon !== nextCanon) {
+      canonicalChange = { previousCanonicalId: prevCanon, nextCanonicalId: nextCanon };
+    }
+  }
   if ('embedding' in cleanPayload) {
     const parsed = sanitizeEmbedding(cleanPayload.embedding);
     if (parsed && parsed.length > 0) cleanPayload.embedding = parsed;
@@ -2733,6 +2950,14 @@ const update = async (id, payload) => {
   await enrichMappedRowsWithOrgData([updated]);
   await attachCandidatePipelineInfo([updated]);
   await cacheSet(updated);
+  if (canonicalChange) {
+    try {
+      await recordCanonicalCandidateLinkChange(options.req || null, id, canonicalChange);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn('[candidateService] canonical link journal failed', err?.message || err);
+    }
+  }
   // Profile changed → remove stale scores from every job:*:matches + wipe their opportunities
   invalidateCandidateOpportunities(id).catch(() => {});
   invalidateCandidateInAllJobMatches(id).catch(() => {});
@@ -2813,7 +3038,7 @@ const searchFree = async ({ query, limit = 50, pipelineId, stageIds, includeUnas
     ],
   };
 
-  const whereParts = [{ isDeleted: false, canonicalCandidateId: null }, textMatch];
+  const whereParts = [{ isDeleted: false, canonicalCandidateId: null, ingestPending: false }, textMatch];
 
   const normalizedStageIds = Array.isArray(stageIds)
     ? [...new Set(stageIds.map((id) => String(id || '').trim()).filter(Boolean))]
@@ -2935,6 +3160,7 @@ module.exports = {
   identityHasPortalAccount,
   attachLatestJobSubmissions,
   attachJobMatchScores,
+  scoreCandidateJobPairs,
   findByPkWithTagsForMatchScore,
   findManyWithTagsForMatchScore,
   toPlainCandidateForMatchScore,

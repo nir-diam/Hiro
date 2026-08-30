@@ -227,6 +227,11 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
         setShowDropdown(false);
     };
 
+    const handleCancel = () => {
+        onCancel();
+        navigate('/clients');
+    };
+
     const isExistingOrgSelected = Boolean(linkedOrganizationId);
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -567,7 +572,7 @@ const NewClientView: React.FC<NewClientViewProps> = ({ onCancel, onSave }) => {
                 
                 <div className="fixed bottom-0 left-0 right-0 bg-bg-card/90 backdrop-blur-md border-t border-border-default p-4 z-40 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
                     <div className="max-w-4xl mx-auto flex justify-end items-center gap-4 px-4 sm:px-6 lg:px-8">
-                        <button type="button" onClick={onCancel} className="text-text-muted font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-colors">{t('client_form.cancel')}</button>
+                        <button type="button" onClick={handleCancel} className="text-text-muted font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition-colors">{t('client_form.cancel')}</button>
                         <button
                             type="submit"
                             disabled={isSaving}

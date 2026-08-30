@@ -14,6 +14,7 @@ const { createS3Client } = require('../services/s3Service');
 const {
   putResumeFileInS3,
   fetchResumeText,
+  extractResumeTextFromUpload,
   buildParsedUpdates,
   fetchResumeBinaryForMail,
   buildCandidateModelSchemaJsonForPrompt,
@@ -21,6 +22,7 @@ const {
 } = require('./candidateController');
 const Candidate = require('../models/Candidate');
 const Job = require('../models/Job');
+const JobCandidate = require('../models/JobCandidate');
 const JobCandidateScreening = require('../models/JobCandidateScreening');
 const candidateTagService = require('../services/candidateTagService');
 const candidateCompletenessService = require('../services/candidateCompletenessService');
@@ -37,7 +39,7 @@ const { sequelize } = require('../config/db');
 const systemEventEmitter = require('../utils/systemEventEmitter');
 const SYSTEM_EVENTS = require('../utils/systemEventCatalog');
 const auditLogger = require('../utils/auditLogger');
-const { embedCandidateAndSave } = require('../services/vectorSearchService');
+const { embedCandidateAndSave, hasEmbeddableCandidateContent } = require('../services/vectorSearchService');
 const {
   hashResumeBuffer,
   findCandidateByResumeContentHash,
@@ -113,9 +115,9 @@ const resolveRecruitmentSourceFromEmail = async (fromEmail, clientId = null) => 
 
 /** Staff app origin for deep links — no trailing slash (`PUBLIC_APP_URL` / `FRONTEND_URL`). */
 const publicStaffAppOrigin = () =>
-  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://hiro.co.il').replace(/\/$/, '');
+  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://app.hiro.co.il').replace(/\/$/, '');
 
-/** Staff app URLs e.g. `https://hiro.co.il/candidates/{uuid}`. */
+/** Staff app URLs e.g. `https://app.hiro.co.il/candidates/{uuid}`. */
 const staffSpaUrl = (origin, routePath) => {
   const base = String(origin || '').replace(/\/$/, '');
   const path = String(routePath || '').startsWith('/') ? routePath : `/${routePath}`;
@@ -242,6 +244,42 @@ const extractPostingCodeFromEmailAddress = (email = '') => {
   const angle = raw.match(/<([^>]+@[^>]+)>/i);
   const addr = angle ? angle[1].trim() : raw;
   return postingCodeFromPlusAddressText(addr);
+};
+
+/** e.g. "Name - 603771.pdf" → 603771 */
+const extractPostingCodeFromFileKey = (fileKey = '') => {
+  const base = String(fileKey || '').split('/').pop() || '';
+  let name = base;
+  try {
+    name = decodeURIComponent(base);
+  } catch {
+    /* keep raw */
+  }
+  const dashMatch = name.match(/[-–—]\s*(\d{4,8})(?:\.[^.]+)?$/);
+  if (dashMatch) return dashMatch[1];
+  const tailMatch = name.match(/(\d{4,8})(?:\.[^.]+)?$/);
+  return tailMatch ? tailMatch[1] : null;
+};
+
+const extractPostingCodeFromSubject = (subject = '') => {
+  const text = String(subject || '').trim();
+  if (!text) return null;
+  const fromPlus = postingCodeFromPlusAddressText(text);
+  if (fromPlus) return fromPlus;
+  const codeMatch = text.match(/\b(\d{4,8})\b/);
+  return codeMatch ? codeMatch[1] : null;
+};
+
+const formatJobForEmailUpload = (job) => {
+  if (!job) return null;
+  const plain = job.get ? job.get({ plain: true }) : job;
+  if (!plain?.id) return null;
+  return {
+    id: String(plain.id),
+    title: String(plain.title || '').trim(),
+    client: String(plain.client || '').trim(),
+    postingCode: String(plain.postingCode || '').trim(),
+  };
 };
 
 const streamToBuffer = async (stream) => {
@@ -444,6 +482,28 @@ const processEmailUpload = async (record) => {
     fileKey: record.fileKey,
     jobId: record.jobId,
   });
+  /** Candidate rows hidden from list until this ingest finishes enrichment. */
+  const ingestPendingIds = new Set();
+  const markIngestPending = async (candidateId) => {
+    if (!candidateId) return;
+    const id = String(candidateId);
+    ingestPendingIds.add(id);
+    try {
+      await candidateService.update(id, { ingestPending: true });
+    } catch (err) {
+      console.warn('[email] mark ingestPending failed', id, err?.message || err);
+    }
+  };
+  const releaseAllIngestPending = async () => {
+    for (const id of ingestPendingIds) {
+      try {
+        await candidateService.update(id, { ingestPending: false });
+      } catch (err) {
+        console.warn('[email] clear ingestPending failed', id, err?.message || err);
+      }
+    }
+    ingestPendingIds.clear();
+  };
   try {
     const rawEmail = await downloadEmailFromS3(record.bucket, record.fileKey);
     if (!rawEmail) {
@@ -571,8 +631,10 @@ const processEmailUpload = async (record) => {
         /** Stable key when CV/AI later overwrites `email` to a different address. */
         inboundFromEmail: fromEmail,
         fullName: inferredName,
+        ingestPending: true,
         ...emailIngestSourcePatch,
       });
+      await markIngestPending(candidate.id);
       try {
         await candidateCompletenessService.refreshCandidateDataStatusForClient(candidate.id, null);
       } catch (cmpErr) {
@@ -656,7 +718,11 @@ const processEmailUpload = async (record) => {
       if (hashDedupedAttachmentIndices.has(i)) {
         console.log('[email] skipping text extract for hash-deduped attachment', { index: i });
       } else {
-        piece = (await fetchResumeText(put.publicUrl, candidate.id)) || '';
+        // Extract from attachment bytes first (direct .doc/.docx/.pdf path; no S3 round-trip).
+        piece =
+          (await extractResumeTextFromUpload(fileBase64, mimeType)) ||
+          (await fetchResumeText(put.publicUrl, candidate.id)) ||
+          '';
       }
       textChunks.push(piece);
     }
@@ -763,7 +829,21 @@ const processEmailUpload = async (record) => {
     }
     const combinedText = primaryTextParts.filter(Boolean).join('\n\n----\n\n');
 
-    if (!reusedExistingCandidateByHash) {
+    const profileIncomplete = !hasEmbeddableCandidateContent(latest, combinedText);
+    const hasCvText = combinedText.trim().length > 40;
+    // Hash-reuse skips AI by default — but re-run when profile is still empty AND we extracted CV text.
+    const profileNeedsEnrichment = profileIncomplete && hasCvText;
+    const shouldRunAiParse = !reusedExistingCandidateByHash || profileNeedsEnrichment;
+
+    if (reusedExistingCandidateByHash && profileIncomplete && !hasCvText) {
+      console.warn('[email] hash-reused candidate still incomplete — CV text extract failed', {
+        candidateId: candidate.id,
+        hint: 'Legacy .doc requires word-extractor — run npm install in backend',
+      });
+    }
+
+    if (shouldRunAiParse) {
+      await markIngestPending(candidate.id);
       const parsedUpdates = buildParsedUpdates(candidate, combinedText || '');
       if (Object.keys(parsedUpdates).length) {
         await candidateService.update(candidate.id, parsedUpdates);
@@ -829,6 +909,7 @@ const processEmailUpload = async (record) => {
       console.log('[email] skipping AI parse/embed — existing candidate reused from resume content hash', {
         candidateId: candidate.id,
         hashDedupedAttachmentIndices: [...hashDedupedAttachmentIndices],
+        profileNeedsEnrichment,
       });
     }
     await candidateService.update(candidate.id, emailIngestSourcePatch);
@@ -865,7 +946,7 @@ const processEmailUpload = async (record) => {
     const primarySynced = await candidateService.getById(candidate.id);
     await ensureOrganizationsFromExperience(primarySynced?.workExperience, candidate.id);
 
-    if (!reusedExistingCandidateByHash) {
+    if (shouldRunAiParse) {
       try {
         await embedCandidateAndSave(candidate.id, combinedText || '');
       } catch (embErr) {
@@ -884,7 +965,14 @@ const processEmailUpload = async (record) => {
       jobId: resolvedJob?.id || null,
       candidateId: candidate.id,
     });
-    await record.update({ candidateId: candidate.id, body: parsed.html?.trim() || parsed.text?.trim() || null });
+    await record.update({
+      candidateId: candidate.id,
+      body: parsed.html?.trim() || parsed.text?.trim() || null,
+      ...(resolvedJob?.id ? { jobId: String(resolvedJob.id) } : {}),
+    });
+    if (resolvedJob?.id) {
+      record.jobId = String(resolvedJob.id);
+    }
     await record.reload();
 
     // Audit + pipeline automations: run after job link so clientId and jobCandidateId resolve.
@@ -1014,19 +1102,23 @@ const processEmailUpload = async (record) => {
               email: norm,
               fullName: nameGuess,
               inboundFromEmail: fromEmail,
+              ingestPending: true,
               ...emailIngestSourcePatch,
             },
             { skipIdentityLink: true },
           );
           splitCandIsNew = true;
+          await markIngestPending(splitCand.id);
         } else {
           splitCand = await candidateService.create({
             email: norm,
             fullName: nameGuess,
             inboundFromEmail: fromEmail,
+            ingestPending: true,
             ...emailIngestSourcePatch,
           });
           splitCandIsNew = true;
+          await markIngestPending(splitCand.id);
           if (splitCand._identityReused || splitCand._identityLinked) {
             console.log('[email] split CV attached to existing candidate', {
               candidateId: splitCand.id,
@@ -1128,7 +1220,7 @@ const processEmailUpload = async (record) => {
         await EmailUpload.create({
           bucket: record.bucket,
           fileKey: record.fileKey,
-          jobId: record.jobId,
+          jobId: resolvedJob?.id ? String(resolvedJob.id) : record.jobId,
           to: record.to,
           from: record.from,
           subject: record.subject,
@@ -1183,8 +1275,144 @@ const processEmailUpload = async (record) => {
       recordId: record?.id,
       fileKey: record?.fileKey,
     });
+  } finally {
+    await releaseAllIngestPending();
   }
 };
+
+async function fetchEmailUploadsForCandidates(candidateIds) {
+  const ids = [...new Set(candidateIds.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!ids.length) return [];
+
+  const records = await EmailUpload.findAll({
+    where: { candidateId: { [Op.in]: ids } },
+    order: [['createdAt', 'DESC']],
+  });
+
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const isJobUuid = (value) => UUID_RE.test(String(value || '').trim());
+
+  const uuidJobIds = new Set();
+  const postingCodes = new Set();
+  const collectPostingCodesForRecord = (record) => {
+    const codes = new Set();
+    const key = String(record.jobId || '').trim();
+    if (key && !isJobUuid(key)) codes.add(key);
+    const fromFile = extractPostingCodeFromFileKey(record.fileKey);
+    if (fromFile) codes.add(fromFile);
+    const fromSubject = extractPostingCodeFromSubject(record.subject);
+    if (fromSubject) codes.add(fromSubject);
+    return [...codes];
+  };
+
+  for (const record of records) {
+    const key = String(record.jobId || '').trim();
+    if (!key) {
+      collectPostingCodesForRecord(record).forEach((code) => postingCodes.add(code));
+      continue;
+    }
+    if (isJobUuid(key)) uuidJobIds.add(key);
+    else postingCodes.add(key);
+    collectPostingCodesForRecord(record).forEach((code) => postingCodes.add(code));
+  }
+
+  const jobsById = new Map();
+  const jobsByPostingCode = new Map();
+  const registerJob = (job) => {
+    const plain = job.get ? job.get({ plain: true }) : job;
+    if (!plain?.id) return;
+    jobsById.set(String(plain.id), plain);
+    const code = String(plain.postingCode || '').trim();
+    if (code) jobsByPostingCode.set(code, plain);
+  };
+
+  try {
+    if (uuidJobIds.size) {
+      const jobs = await Job.findAll({
+        where: { id: { [Op.in]: [...uuidJobIds] } },
+        attributes: ['id', 'title', 'client', 'postingCode'],
+      });
+      jobs.forEach(registerJob);
+    }
+    const unresolvedPostingCodes = [...postingCodes].filter((code) => !jobsByPostingCode.has(code));
+    if (unresolvedPostingCodes.length) {
+      const jobs = await Job.findAll({
+        where: { postingCode: { [Op.in]: unresolvedPostingCodes } },
+        attributes: ['id', 'title', 'client', 'postingCode'],
+      });
+      jobs.forEach(registerJob);
+    }
+  } catch (jobErr) {
+    console.warn('[email][fetchEmailUploadsForCandidates] job lookup failed (non-fatal):', jobErr?.message || jobErr);
+  }
+
+  const jobsByCandidateId = new Map();
+  try {
+    const candidateIdsForLinks = [...new Set(records.map((r) => r.candidateId).filter(Boolean))];
+    if (candidateIdsForLinks.length) {
+      const links = await JobCandidate.findAll({
+        where: {
+          candidateId: { [Op.in]: candidateIdsForLinks },
+          jobId: { [Op.ne]: null },
+        },
+        attributes: ['candidateId', 'jobId', 'createdAt'],
+        order: [['createdAt', 'DESC']],
+      });
+      const missingLinkJobIds = [
+        ...new Set(
+          links
+            .map((link) => String(link.jobId || '').trim())
+            .filter((jobId) => jobId && !jobsById.has(jobId)),
+        ),
+      ];
+      if (missingLinkJobIds.length) {
+        const linkedJobs = await Job.findAll({
+          where: { id: { [Op.in]: missingLinkJobIds } },
+          attributes: ['id', 'title', 'client', 'postingCode'],
+        });
+        linkedJobs.forEach(registerJob);
+      }
+      for (const link of links) {
+        const cid = String(link.candidateId || '').trim();
+        const jid = String(link.jobId || '').trim();
+        if (!cid || !jid || jobsByCandidateId.has(cid)) continue;
+        const job = jobsById.get(jid);
+        if (job) jobsByCandidateId.set(cid, job);
+      }
+    }
+  } catch (linkErr) {
+    console.warn('[email][fetchEmailUploadsForCandidates] job-candidate lookup failed (non-fatal):', linkErr?.message || linkErr);
+  }
+
+  const resolveJobForRecord = (record) => {
+    const key = String(record.jobId || '').trim();
+    if (key) {
+      if (isJobUuid(key)) {
+        const byId = jobsById.get(key);
+        if (byId) return formatJobForEmailUpload(byId);
+      } else {
+        const byCode = jobsByPostingCode.get(key);
+        if (byCode) return formatJobForEmailUpload(byCode);
+      }
+    }
+    for (const code of collectPostingCodesForRecord(record)) {
+      const byHint = jobsByPostingCode.get(code);
+      if (byHint) return formatJobForEmailUpload(byHint);
+    }
+    const cid = record.candidateId ? String(record.candidateId) : '';
+    if (cid) {
+      const byCandidate = jobsByCandidateId.get(cid);
+      if (byCandidate) return formatJobForEmailUpload(byCandidate);
+    }
+    return null;
+  };
+
+  return records.map((record) => {
+    const plain = record.get({ plain: true });
+    plain.job = resolveJobForRecord(record);
+    return plain;
+  });
+}
 
 const getByCandidate = async (req, res) => {
   try {
@@ -1192,14 +1420,86 @@ const getByCandidate = async (req, res) => {
     if (!candidateId) {
       return res.status(400).json({ message: 'candidateId is required' });
     }
-    const records = await EmailUpload.findAll({
-      where: { candidateId },
-      order: [['createdAt', 'DESC']],
-    });
+    const records = await fetchEmailUploadsForCandidates([candidateId]);
     res.json(records);
   } catch (error) {
     console.error('[email][getByCandidate]', error);
     res.status(500).json({ message: 'Failed to load email uploads' });
+  }
+};
+
+const getByCandidates = async (req, res) => {
+  try {
+    const raw = req.query.candidateIds ?? req.query.candidateId ?? '';
+    const candidateIds = [...new Set(String(raw).split(/[,;\s]+/).map((id) => id.trim()).filter(Boolean))];
+    if (!candidateIds.length) {
+      return res.status(400).json({ message: 'candidateIds is required' });
+    }
+    const records = await fetchEmailUploadsForCandidates(candidateIds);
+    res.json(records);
+  } catch (error) {
+    console.error('[email][getByCandidates]', error);
+    res.status(500).json({ message: 'Failed to load email uploads' });
+  }
+};
+
+const patchEmailUploadNotes = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ message: 'id is required' });
+    }
+    const userNotes = req.body?.userNotes != null ? String(req.body.userNotes) : '';
+    const record = await EmailUpload.findByPk(id);
+    if (!record) {
+      return res.status(404).json({ message: 'Email upload not found' });
+    }
+    await record.update({ userNotes });
+    res.json(record);
+  } catch (error) {
+    console.error('[email][patchEmailUploadNotes]', error);
+    res.status(500).json({ message: 'Failed to update notes' });
+  }
+};
+
+const downloadEmailUploadResume = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ message: 'id is required' });
+    }
+    const record = await EmailUpload.findByPk(id);
+    if (!record) {
+      return res.status(404).json({ message: 'Email upload not found' });
+    }
+
+    const rawEmail = await downloadEmailFromS3(record.bucket, record.fileKey);
+    if (!rawEmail) {
+      return res.status(404).json({ message: 'Email file not found' });
+    }
+
+    const parsed = await simpleParser(rawEmail);
+    const resumeAttachments = (parsed.attachments || []).filter(
+      (a) => isResumeAttachment(a) && a.content,
+    );
+    if (!resumeAttachments.length) {
+      return res.status(404).json({ message: 'No resume attachment found in email' });
+    }
+
+    const attachment = resumeAttachments[0];
+    const filename = String(attachment.filename || 'resume.pdf').replace(/[/\\]/g, '_');
+    const contentType = attachment.contentType || 'application/octet-stream';
+    const asciiName = filename.replace(/[^\x20-\x7E]/g, '_') || 'resume.pdf';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(filename)}`,
+    );
+    return res.send(attachment.content);
+  } catch (error) {
+    console.error('[email][downloadEmailUploadResume]', error);
+    return res.status(500).json({ message: 'Failed to download resume' });
   }
 };
 
@@ -3107,6 +3407,9 @@ const getScreeningCvReferralById = async (req, res) => {
 module.exports = {
   upload,
   getByCandidate,
+  getByCandidates,
+  patchEmailUploadNotes,
+  downloadEmailUploadResume,
   send,
   sendScreeningCv,
   listScreeningCvReferrals,

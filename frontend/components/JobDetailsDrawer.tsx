@@ -327,9 +327,10 @@ interface JobDetailsDrawerProps {
   job: Job | null;
   isOpen: boolean;
   onClose: () => void;
+  overlayZIndexClass?: string;
 }
 
-const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClose }) => {
+const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClose, overlayZIndexClass = 'z-[60]' }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'events' | 'candidates'>('details');
   const titleId = useId();
   const navigate = useNavigate();
@@ -452,7 +453,7 @@ const JobDetailsDrawer: React.FC<JobDetailsDrawerProps> = ({ job, isOpen, onClos
 
   return (
     <div 
-      className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60] transition-opacity duration-300"
+      className={`fixed inset-0 bg-black/40 backdrop-blur-sm ${overlayZIndexClass} transition-opacity duration-300`}
       onClick={onClose}
       aria-hidden={!isOpen}
     >

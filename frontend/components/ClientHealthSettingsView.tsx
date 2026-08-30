@@ -39,6 +39,21 @@ const conditionOptions: { value: ConditionType; label: string; unit: string; ico
 
 type ScopeOption = { id: string; name: string };
 
+/** Sentinel for client-level default rules (organizationId = null in API). */
+const DEFAULT_SCOPE_ID = '__default__';
+
+function isPlatformAdminUser(user: { role?: string; clientId?: string | null } | null | undefined): boolean {
+    if (!user) return false;
+    if (user.role === 'super_admin') return true;
+    if (user.role === 'admin' && !user.clientId) return true;
+    return false;
+}
+
+function resolveOrganizationId(scopeId: string): string | null {
+    if (!scopeId || scopeId === DEFAULT_SCOPE_ID) return null;
+    return scopeId;
+}
+
 const RuleRow: React.FC<{
     rule: HealthRule;
     isDragging: boolean;
@@ -173,11 +188,11 @@ function mapLinkedOrgOption(raw: Record<string, unknown>): ScopeOption | null {
 const ClientHealthSettingsView: React.FC = () => {
     const { user, ready: authReady } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const isPlatformAdmin = isPlatformAdminUser(user);
     const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
 
     const [scopeOptions, setScopeOptions] = useState<ScopeOption[]>([]);
-    const [selectedScopeId, setSelectedScopeId] = useState<string>('');
+    const [selectedScopeId, setSelectedScopeId] = useState('');
     const [pipelines, setPipelines] = useState<PipelineDto[]>([]);
     const [selectedPipelineId, setSelectedPipelineId] = useState<string>('');
     const [rules, setRules] = useState<HealthRule[]>([]);
@@ -190,11 +205,14 @@ const ClientHealthSettingsView: React.FC = () => {
     const [saveMessage, setSaveMessage] = useState<string | null>(null);
     const [draggingId, setDraggingId] = useState<string | null>(null);
     const draggingIdRef = useRef<string | null>(null);
+    const [pipelineRuleCounts, setPipelineRuleCounts] = useState<Record<string, number>>({});
 
-    /** Admin: selected client id. Tenant: always their client id. */
+    /** Admin: selected client id. Tenant: organization or default sentinel. */
+    const effectiveScopeId = selectedScopeId || (!isPlatformAdmin ? DEFAULT_SCOPE_ID : '');
     const activeClientId = isPlatformAdmin ? selectedScopeId : tenantClientId;
-    /** Tenant: selected organization id. Admin: null (client-level rules). */
-    const activeOrganizationId = isPlatformAdmin ? null : (selectedScopeId || null);
+    /** Tenant: selected organization id, or null for client defaults. Admin: null (client-level). */
+    const activeOrganizationId = isPlatformAdmin ? null : resolveOrganizationId(effectiveScopeId);
+    const isDefaultScope = !isPlatformAdmin && effectiveScopeId === DEFAULT_SCOPE_ID;
     const activePipeline = pipelines.find((p) => p.id === selectedPipelineId) || null;
 
     useEffect(() => {
@@ -216,7 +234,10 @@ const ClientHealthSettingsView: React.FC = () => {
                         name: String(c.displayName || c.name || 'לקוח'),
                     })).filter((o: ScopeOption) => o.id);
                     setScopeOptions(opts);
-                    setSelectedScopeId((prev) => prev || opts[0]?.id || '');
+                    setSelectedScopeId((prev) => {
+                        if (prev && prev !== DEFAULT_SCOPE_ID && opts.some((o) => o.id === prev)) return prev;
+                        return opts[0]?.id || '';
+                    });
                 } else if (tenantClientId) {
                     const res = await fetch(
                         `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`,
@@ -230,7 +251,11 @@ const ClientHealthSettingsView: React.FC = () => {
                         .map((row: Record<string, unknown>) => mapLinkedOrgOption(row))
                         .filter((o: ScopeOption | null): o is ScopeOption => Boolean(o));
                     setScopeOptions(opts);
-                    setSelectedScopeId((prev) => prev || opts[0]?.id || '');
+                    setSelectedScopeId((prev) => {
+                        if (prev === DEFAULT_SCOPE_ID) return prev;
+                        if (prev && opts.some((o) => o.id === prev)) return prev;
+                        return DEFAULT_SCOPE_ID;
+                    });
                 } else {
                     setScopeOptions([]);
                     setSelectedScopeId('');
@@ -281,7 +306,7 @@ const ClientHealthSettingsView: React.FC = () => {
             setBaselineRules([]);
             return;
         }
-        if (!isPlatformAdmin && !activeOrganizationId) {
+        if (!isPlatformAdmin && !effectiveScopeId) {
             setRules([]);
             setBaselineRules([]);
             return;
@@ -304,11 +329,33 @@ const ClientHealthSettingsView: React.FC = () => {
         } finally {
             setLoadingRules(false);
         }
-    }, [activeClientId, activeOrganizationId, selectedPipelineId, isPlatformAdmin]);
+    }, [activeClientId, activeOrganizationId, selectedPipelineId, isPlatformAdmin, selectedScopeId]);
 
     useEffect(() => {
         void loadRules();
     }, [loadRules]);
+
+    useEffect(() => {
+        if (!activeClientId || !isDefaultScope || pipelines.length === 0) {
+            setPipelineRuleCounts({});
+            return;
+        }
+        let active = true;
+        void Promise.all(
+            pipelines.map(async (pipeline) => {
+                try {
+                    const rows = await fetchClientHealthRules(activeClientId, null, pipeline.id);
+                    return [pipeline.id, rows.length] as const;
+                } catch {
+                    return [pipeline.id, 0] as const;
+                }
+            }),
+        ).then((entries) => {
+            if (!active) return;
+            setPipelineRuleCounts(Object.fromEntries(entries));
+        });
+        return () => { active = false; };
+    }, [activeClientId, isDefaultScope, pipelines, baselineRules]);
 
     const handleAddRule = () => {
         const newRule: HealthRule = {
@@ -388,7 +435,7 @@ const ClientHealthSettingsView: React.FC = () => {
 
     const handleSave = async () => {
         if (!activeClientId || !selectedPipelineId) return;
-        if (!isPlatformAdmin && !activeOrganizationId) {
+        if (!isPlatformAdmin && !effectiveScopeId) {
             setError('יש לבחור ארגון');
             return;
         }
@@ -416,7 +463,7 @@ const ClientHealthSettingsView: React.FC = () => {
     const canEdit = Boolean(
         activeClientId
         && selectedPipelineId
-        && (isPlatformAdmin || activeOrganizationId),
+        && (isPlatformAdmin || effectiveScopeId),
     );
 
     return (
@@ -432,24 +479,36 @@ const ClientHealthSettingsView: React.FC = () => {
                         <div className="relative">
                             <BuildingOffice2Icon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                             <select
-                                value={selectedScopeId}
+                                value={selectedScopeId || (!isPlatformAdmin ? DEFAULT_SCOPE_ID : '')}
                                 onChange={(e) => setSelectedScopeId(e.target.value)}
-                                disabled={loadingScopes || scopeOptions.length === 0}
+                                disabled={loadingScopes || (isPlatformAdmin ? scopeOptions.length === 0 : !tenantClientId)}
                                 className="w-full appearance-none bg-bg-input border border-border-default rounded-xl py-2.5 pr-10 pl-3 text-sm font-bold text-text-default focus:ring-2 focus:ring-primary-500 outline-none disabled:opacity-60"
                             >
-                                {scopeOptions.length === 0 ? (
-                                    <option value="">
-                                        {loadingScopes
-                                            ? 'טוען…'
-                                            : (isPlatformAdmin ? 'אין לקוחות' : 'אין ארגונים מקושרים')}
-                                    </option>
+                                {loadingScopes ? (
+                                    <option value="">טוען…</option>
+                                ) : isPlatformAdmin ? (
+                                    scopeOptions.length === 0 ? (
+                                        <option value="">אין לקוחות</option>
+                                    ) : (
+                                        scopeOptions.map((o) => (
+                                            <option key={o.id} value={o.id}>{o.name}</option>
+                                        ))
+                                    )
                                 ) : (
-                                    scopeOptions.map((o) => (
-                                        <option key={o.id} value={o.id}>{o.name}</option>
-                                    ))
+                                    <>
+                                        <option value={DEFAULT_SCOPE_ID}>ברירת מחדל</option>
+                                        {scopeOptions.map((o) => (
+                                            <option key={o.id} value={o.id}>{o.name}</option>
+                                        ))}
+                                    </>
                                 )}
                             </select>
                         </div>
+                        {isDefaultScope ? (
+                            <p className="text-[11px] text-primary-700 mt-1.5 leading-snug">
+                                לכל טאב תהליך יש ברירת מחדל נפרדת (שמירה נפרדת לכל טאב). ארגונים חדשים יורשים מכאן.
+                            </p>
+                        ) : null}
                     </div>
                 </div>
                 <p className="text-sm text-text-muted max-w-2xl leading-relaxed">
@@ -495,6 +554,11 @@ const ClientHealthSettingsView: React.FC = () => {
                         >
                             <ChartBarIcon className="w-5 h-5" />
                             {pipeline.name}
+                            {isDefaultScope && pipelineRuleCounts[pipeline.id] != null ? (
+                                <span className="text-[10px] font-bold opacity-80">
+                                    ({pipelineRuleCounts[pipeline.id]} חוקים)
+                                </span>
+                            ) : null}
                         </button>
                     ))
                 )}
@@ -532,8 +596,8 @@ const ClientHealthSettingsView: React.FC = () => {
                     <div className="text-center py-12 bg-bg-subtle/30 border-2 border-dashed border-border-default rounded-xl">
                         <p className="text-text-muted font-medium">
                             {isPlatformAdmin
-                                ? 'בחר לקוח ותהליך כדי לערוך חוקי דופק.'
-                                : 'בחר ארגון מקושר ותהליך כדי לערוך חוקי דופק.'}
+                                ? 'בחר לקוח ותהליך כדי לערוך חוקי דופק ברירת המחדל.'
+                                : 'בחר ארגון (או ברירת מחדל) ותהליך כדי לערוך חוקי דופק.'}
                         </p>
                     </div>
                 ) : rules.length > 0 ? (
@@ -576,7 +640,7 @@ const ClientHealthSettingsView: React.FC = () => {
                     onClick={() => void handleSave()}
                 >
                     <CheckCircleIcon className="w-5 h-5" />
-                    {saving ? 'שומר…' : 'שמור הגדרות'}
+                    {saving ? 'שומר…' : activePipeline ? `שמור — ${activePipeline.name}` : 'שמור הגדרות'}
                 </button>
             </div>
         </div>

@@ -21,6 +21,7 @@ import {
     updateTagAiDecisionComments,
     type TagAiDecisionDto,
     type TagManualApprovalStatus,
+    type CandidateTagMatchDto,
 } from '../services/tagCorrectionsApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
 import DateRangeSelector, { type DateRange } from './DateRangeSelector';
@@ -31,6 +32,43 @@ function dateRangeQuery(range: DateRange | null): { dateFrom?: string; dateTo?: 
         ...(range.from ? { dateFrom: range.from } : {}),
         ...(range.to ? { dateTo: range.to } : {}),
     };
+}
+
+function formatCandidateTagsFromDbForExport(tags: CandidateTagMatchDto[] | undefined): string {
+    if (!Array.isArray(tags) || !tags.length) return '';
+    return tags
+        .map((t) => {
+            const name =
+                t.name
+                || (t as { displayNameHe?: string }).displayNameHe
+                || (t as { displayNameEn?: string }).displayNameEn
+                || '';
+            if (!name) return '';
+            const src =
+                t.source === 'vector'
+                    ? `vector${t.score != null ? ` ${Math.round(t.score * 100)}%` : ''}`
+                    : 'fuzzy';
+            return `${name} (${src})`;
+        })
+        .filter(Boolean)
+        .join('; ');
+}
+
+function formatTagAiDecisionForExport(r: TagAiDecisionDto, decisionLabel: Record<string, string>): string {
+    const decision = decisionLabel[r.aiDecision] || r.aiDecision;
+    const target = r.aiSuggestedTarget ? ` → ${r.aiSuggestedTarget}` : '';
+    const reasoning = r.aiReasoning ? `\n${r.aiReasoning}` : '';
+    return `${decision}${target}${reasoning}`.trim();
+}
+
+function formatTagHesitationForExport(r: TagAiDecisionDto): string {
+    if (r.hesitationLevel == null) return '';
+    const lvl = r.hesitationLevel;
+    const label =
+        lvl >= 61 ? `התלבטות קשה: ${lvl}%`
+        : lvl >= 31 ? `התלבטות בינונית: ${lvl}%`
+        : `ודאי / נמוך: ${lvl}%`;
+    return r.dilemmaReasoning ? `${label}\n${r.dilemmaReasoning}` : label;
 }
 import { downloadRowsAsXlsx } from '../utils/exportRowsToXlsx';
 import DebouncedCommentsTextarea from './DebouncedCommentsTextarea';
@@ -208,7 +246,8 @@ const getDecisionStatusBucket = (
     return 'agent';
 };
 
-const AdminTagCorrectionsView: React.FC = () => {
+const AdminTagCorrectionsView: React.FC<{ mode?: 'full' | 'blacklist-only' }> = ({ mode = 'full' }) => {
+    const isBlacklistOnly = mode === 'blacklist-only';
     const { t } = useLanguage();
     const navigate = useNavigate();
 
@@ -218,7 +257,7 @@ const AdminTagCorrectionsView: React.FC = () => {
         navigate(`/admin/tags/list?search=${encodeURIComponent(q)}`);
     }, [navigate]);
 
-    const [activeTab, setActiveTab] = useState<'manual' | 'ai' | 'blacklist'>('ai');
+    const [activeTab, setActiveTab] = useState<'manual' | 'ai' | 'blacklist'>(isBlacklistOnly ? 'blacklist' : 'ai');
     const [isAgentOn, setIsAgentOn] = useState(true);
     const [agentSettingsLoading, setAgentSettingsLoading] = useState(false);
     const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
@@ -427,13 +466,22 @@ const AdminTagCorrectionsView: React.FC = () => {
     const loadBlacklistDecisions = useCallback(async () => {
         setBlacklistLoading(true);
         try {
-            const payload = await fetchTagAiDecisions({
-                page: 1,
-                limit: 200,
-                reviewStatus: 'overridden',
-                reviewerAction: 'blacklist',
-            });
-            setBlacklistDecisions(payload.data);
+            const pageLimit = 500;
+            let page = 1;
+            let totalPages = 1;
+            const all: TagAiDecisionDto[] = [];
+            do {
+                const payload = await fetchTagAiDecisions({
+                    page,
+                    limit: pageLimit,
+                    reviewStatus: 'overridden',
+                    reviewerAction: 'blacklist',
+                });
+                all.push(...payload.data);
+                totalPages = Math.max(1, payload.totalPages || 1);
+                page += 1;
+            } while (page <= totalPages);
+            setBlacklistDecisions(all);
         } catch (err) {
             console.error('[AdminTagCorrectionsView] Blacklist load failed', err);
             setBlacklistDecisions([]);
@@ -445,9 +493,9 @@ const AdminTagCorrectionsView: React.FC = () => {
     useEffect(() => { void loadAgentSettings(); }, [loadAgentSettings]);
 
     useEffect(() => {
-        if (activeTab === 'ai') void loadAiDecisions();
-        if (activeTab === 'blacklist') void loadBlacklistDecisions();
-    }, [activeTab, loadAiDecisions, loadBlacklistDecisions]);
+        if (isBlacklistOnly || activeTab === 'blacklist') void loadBlacklistDecisions();
+        if (!isBlacklistOnly && activeTab === 'ai') void loadAiDecisions();
+    }, [activeTab, loadAiDecisions, loadBlacklistDecisions, isBlacklistOnly]);
 
     // Server-side pagination: data is already filtered and paged by the backend.
     const paginatedAiDecisions = aiDecisions;
@@ -500,9 +548,28 @@ const AdminTagCorrectionsView: React.FC = () => {
                 [
                     { key: 'originalTerm', label: 'מונח מקורי' },
                     { key: 'detectedType', label: 'סוג' },
-                    { key: 'aiDecision', label: 'החלטת AI', getValue: (r) => decisionLabel[r.aiDecision] || r.aiDecision },
-                    { key: 'aiSuggestedTarget', label: 'יעד מוצע', getValue: (r) => r.aiSuggestedTarget || '' },
-                    { key: 'hesitationLevel', label: 'התלבטות', getValue: (r) => r.hesitationLevel ?? '' },
+                    {
+                        key: 'actionDate',
+                        label: 'תאריך פעולה',
+                        getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : ''),
+                    },
+                    { key: 'contextSample', label: 'קונטקסט', getValue: (r) => r.contextSample || '' },
+                    {
+                        key: 'aiDecisionBlock',
+                        label: 'החלטת מודל והסבר',
+                        getValue: (r) => formatTagAiDecisionForExport(r, decisionLabel),
+                    },
+                    {
+                        key: 'hesitationBlock',
+                        label: 'מדד התלבטות AI',
+                        getValue: (r) => formatTagHesitationForExport(r),
+                    },
+                    {
+                        key: 'candidateTagsFromDB',
+                        label: 'הקשר רחב בבסיס הנתונים',
+                        getValue: (r) => formatCandidateTagsFromDbForExport(r.candidateTagsFromDB),
+                    },
+                    { key: 'comments', label: 'הערות', getValue: (r) => r.comments || '' },
                     { key: 'reviewStatus', label: 'סטטוס ביקורת' },
                     {
                         key: 'manualApprovalStatus',
@@ -513,11 +580,6 @@ const AdminTagCorrectionsView: React.FC = () => {
                             : 'ממתין לאישור'
                         ),
                     },
-                    { key: 'actionDate', label: 'תאריך', getValue: (r) => (r.actionDate ? new Date(r.actionDate).toLocaleString('he-IL') : '') },
-                    { key: 'aiReasoning', label: 'נימוק AI', getValue: (r) => r.aiReasoning || '' },
-                    { key: 'dilemmaReasoning', label: 'נימוק התלבטות', getValue: (r) => r.dilemmaReasoning || '' },
-                    { key: 'contextSample', label: 'הקשר', getValue: (r) => r.contextSample || '' },
-                    { key: 'comments', label: 'הערות', getValue: (r) => r.comments || '' },
                 ],
                 `tag_ai_decisions_${stamp}.xlsx`,
             );
@@ -975,6 +1037,7 @@ const AdminTagCorrectionsView: React.FC = () => {
         <div ref={topRef} className="space-y-6 h-full flex flex-col pb-6 relative">
 
             {/* Header */}
+            {!isBlacklistOnly && (
             <div className="flex flex-col gap-6 flex-shrink-0">
                 <div className="flex justify-between items-end border-b border-border-default pb-4">
                     <div>
@@ -1022,15 +1085,17 @@ const AdminTagCorrectionsView: React.FC = () => {
                     </div>
                 )}
 
-                {statusMessage && (
-                    <div className="px-4 py-2 rounded-2xl bg-green-50 border border-green-200 text-green-800 text-sm font-semibold shadow-sm">
-                        {statusMessage}
-                    </div>
-                )}
             </div>
+            )}
+
+            {statusMessage && (
+                <div className="px-4 py-2 rounded-2xl bg-green-50 border border-green-200 text-green-800 text-sm font-semibold shadow-sm">
+                    {statusMessage}
+                </div>
+            )}
 
             {/* Manual tab — split view */}
-            {activeTab === 'manual' && (
+            {!isBlacklistOnly && activeTab === 'manual' && (
             <div className="flex flex-col lg:flex-row gap-6 flex-1 min-h-0">
 
                 {/* LEFT COLUMN */}
@@ -1231,7 +1296,7 @@ const AdminTagCorrectionsView: React.FC = () => {
             )}
 
             {/* AI Review tab */}
-            {activeTab === 'ai' && (
+            {!isBlacklistOnly && activeTab === 'ai' && (
                 <div className="flex flex-col flex-1 min-h-0 bg-bg-card rounded-2xl border border-border-default shadow-sm overflow-hidden animate-fade-in">
                     <div className="p-4 border-b border-border-default space-y-3 relative z-20">
                         {/* Status tabs */}
@@ -1292,7 +1357,7 @@ const AdminTagCorrectionsView: React.FC = () => {
                                     </select>
                                     <FunnelIcon className="w-3 h-3 text-text-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
                                 </div>
-                                <div className="flex-shrink-0 min-w-[200px]">
+                                <div className="flex-shrink-0 min-w-[220px] sm:min-w-[240px]">
                                     <label className="block text-xs font-bold text-text-muted mb-1 uppercase tracking-wide">עודכן לאחרונה</label>
                                     <DateRangeSelector
                                         value={aiFilterDateRange}
@@ -1783,7 +1848,7 @@ const AdminTagCorrectionsView: React.FC = () => {
         </div>
 
         {/* ========== BLACKLIST TAB ========== */}
-        {activeTab === 'blacklist' && (
+        {(isBlacklistOnly || activeTab === 'blacklist') && (
             <div className="flex-1 min-h-0 overflow-hidden flex flex-col gap-4">
                 {/* Header bar */}
                 <div className="bg-bg-card rounded-2xl border border-border-default shadow-sm overflow-hidden">

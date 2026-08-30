@@ -65,6 +65,68 @@ import { type Job as JobDetailsJob } from './JobsView';
 
 const MATCH_POPUP_WIDTH = 288;
 
+type CandidatePipelineProcessRow = {
+    id: string;
+    pipelineId: string;
+    stageId: string;
+    targetOutcomeId?: string | null;
+    isActive?: boolean;
+};
+
+function candidateHasPipeline(
+    c: { candidatePipelineId?: string; candidatePipelineProcesses?: CandidatePipelineProcessRow[] },
+    pipelineId: string,
+): boolean {
+    if (!pipelineId) return true;
+    if (c.candidatePipelineId === pipelineId) return true;
+    return (c.candidatePipelineProcesses || []).some(
+        (p) => p.isActive !== false && p.pipelineId === pipelineId,
+    );
+}
+
+function candidateStageForPipeline(
+    c: { candidatePipelineId?: string; pipelineStageId?: string; candidatePipelineProcesses?: CandidatePipelineProcessRow[] },
+    pipelineId: string,
+): string | undefined {
+    if (c.candidatePipelineId === pipelineId) return c.pipelineStageId;
+    const proc = (c.candidatePipelineProcesses || []).find(
+        (p) => p.isActive !== false && p.pipelineId === pipelineId,
+    );
+    return proc?.stageId;
+}
+
+function patchCandidatePipelineLocalState<T extends {
+    candidatePipelineId?: string;
+    pipelineStageId?: string;
+    candidatePipelineProcesses?: CandidatePipelineProcessRow[];
+}>(
+    c: T,
+    pipelineId: string,
+    stageId: string,
+): T {
+    if (c.candidatePipelineId === pipelineId || !c.candidatePipelineId) {
+        return { ...c, candidatePipelineId: pipelineId, pipelineStageId: stageId };
+    }
+    const processes = Array.isArray(c.candidatePipelineProcesses) ? [...c.candidatePipelineProcesses] : [];
+    const idx = processes.findIndex((p) => p.isActive !== false && p.pipelineId === pipelineId);
+    if (idx >= 0) {
+        processes[idx] = { ...processes[idx], stageId };
+        return { ...c, candidatePipelineProcesses: processes };
+    }
+    return {
+        ...c,
+        candidatePipelineProcesses: [
+            {
+                id: `local-${Date.now()}`,
+                pipelineId,
+                stageId,
+                isActive: true,
+            },
+            ...processes,
+        ],
+    };
+}
+
 const JOB_DRAWER_STATUSES = new Set(['פתוחה', 'מוקפאת', 'מאוישת', 'טיוטה']);
 
 function buildFallbackJobForDrawer(jobId: string, jobTitle: string): JobDetailsJob {
@@ -236,6 +298,65 @@ const sameCompanyFilters = (a: CompanyFiltersState, b: CompanyFiltersState) =>
 const companyFiltersAreActive = (cf: CompanyFiltersState) =>
     !!(cf.industries?.length || cf.fields?.length || cf.roles?.length || cf.sizes?.length || cf.sectors?.length);
 
+const EMPTY_COMPANY_FILTERS: CompanyFiltersState = {
+    sizes: [],
+    sectors: [],
+    industries: [],
+    fields: [],
+    roles: [],
+};
+
+function normalizeCompanyFiltersState(raw: unknown): CompanyFiltersState {
+    if (!raw || typeof raw !== 'object') return { ...EMPTY_COMPANY_FILTERS };
+    const o = raw as Record<string, unknown>;
+    const pick = (key: keyof CompanyFiltersState) =>
+        Array.isArray(o[key]) ? o[key].map((v) => String(v).trim()).filter(Boolean) : [];
+    return {
+        sizes: pick('sizes'),
+        sectors: pick('sectors'),
+        industries: pick('industries'),
+        fields: pick('fields'),
+        roles: pick('roles'),
+    };
+}
+
+function loadCompanyFiltersFromUrl(search = ''): CompanyFiltersState {
+    if (typeof window === 'undefined') return { ...EMPTY_COMPANY_FILTERS };
+    const params = new URLSearchParams(search || window.location.search);
+    if (params.get('savedSearchId')) return { ...EMPTY_COMPANY_FILTERS };
+    const SEP = '|';
+    const splitParam = (p: string) =>
+        p ? (p.includes(SEP) ? p.split(SEP) : p.split(',')).map((s) => s.trim()).filter(Boolean) : [];
+    const next = {
+        industries: splitParam(params.get('industries') || params.get('industry') || ''),
+        fields: splitParam(params.get('fields') || params.get('field') || ''),
+        roles: splitParam(params.get('roles') || ''),
+        sizes: splitParam(params.get('sizes') || ''),
+        sectors: splitParam(params.get('sectors') || ''),
+    };
+    return { ...EMPTY_COMPANY_FILTERS, ...next };
+}
+
+function extractCompanyFiltersFromSnapshot(saved: Record<string, unknown>): CompanyFiltersState {
+    const direct = normalizeCompanyFiltersState(saved.companyFilters);
+    if (companyFiltersAreActive(direct)) return direct;
+    const applied = saved.appliedAdvancedFilters;
+    if (applied && typeof applied === 'object') {
+        const fromApplied = normalizeCompanyFiltersState((applied as Record<string, unknown>).companyFilters);
+        if (companyFiltersAreActive(fromApplied)) return fromApplied;
+    }
+    return { ...EMPTY_COMPANY_FILTERS };
+}
+
+function mergeCompanyFiltersIntoAdvancedPayload(
+    payload: AppliedAdvancedSearchPayload | null,
+    cf: CompanyFiltersState,
+): AppliedAdvancedSearchPayload | null {
+    if (!companyFiltersAreActive(cf)) return payload;
+    if (!payload) return { companyFilters: cf } as AppliedAdvancedSearchPayload;
+    return { ...payload, companyFilters: cf };
+}
+
 type CandidatePipelineStage = {
     id: string;
     name: string;
@@ -360,6 +481,7 @@ export interface Candidate {
   /** Tenant candidate pipeline assignment. */
   candidatePipelineId?: string;
   pipelineStageId?: string;
+  candidatePipelineProcesses?: CandidatePipelineProcessRow[];
   candidatePipelineName?: string;
   pipelineStageName?: string;
   pipelineStageColor?: string;
@@ -905,11 +1027,21 @@ const MatchScoreExplanation: React.FC<{
         candidate.lastJobSubmission?.jobTitle ||
         candidate.matchAnalysis?.jobTitle ||
         '';
-    // Always use live simulate API for breakdown layers — list bulk scores are opt-in
-    // (`engineScores=1`) and can carry stale/wrong tag % (e.g. 100% when job skills were empty).
-    const scoreBreakdown = fetched?.scoreBreakdown ?? null;
-    const parameterMatches = fetched?.parameterMatches ?? null;
-    const displayScore = fetched?.matchScore ?? candidate.matchScore;
+    // Prefer hydrated list scores; simulate only when breakdown is missing (e.g. legacy rows).
+    const scoreBreakdown =
+        fetched?.scoreBreakdown ??
+        candidate.scoreBreakdown ??
+        candidate.lastJobSubmission?.scoreBreakdown ??
+        null;
+    const parameterMatches =
+        fetched?.parameterMatches ??
+        candidate.parameterMatches ??
+        candidate.lastJobSubmission?.parameterMatches ??
+        null;
+    const displayScore =
+        fetched?.matchScore ??
+        (candidate.listMatchScoreFromApi || candidate.matchScoreHydrated ? candidate.matchScore : null) ??
+        candidate.matchScore;
     const sonarCandidate = useMemo(() => candidateToSonarRecord(candidate), [candidate]);
 
     const popupStyle = useMemo(() => {
@@ -950,6 +1082,13 @@ const MatchScoreExplanation: React.FC<{
     useEffect(() => {
         if (!jobId || !candidate.backendId) {
             setFetched(null);
+            return;
+        }
+        const hasHydratedBreakdown =
+            Boolean(candidate.scoreBreakdown) || Boolean(candidate.lastJobSubmission?.scoreBreakdown);
+        if (hasHydratedBreakdown) {
+            setFetched(null);
+            setLoading(false);
             return;
         }
         let cancelled = false;
@@ -996,7 +1135,17 @@ const MatchScoreExplanation: React.FC<{
         return () => {
             cancelled = true;
         };
-    }, [jobId, candidate.backendId, candidate.matchScore, apiBase]);
+    }, [
+        jobId,
+        candidate.backendId,
+        candidate.matchScore,
+        candidate.scoreBreakdown,
+        candidate.parameterMatches,
+        candidate.listMatchScoreFromApi,
+        candidate.matchScoreHydrated,
+        candidate.lastJobSubmission?.scoreBreakdown,
+        apiBase,
+    ]);
 
     return (
         <div
@@ -1245,6 +1394,8 @@ type ListViewSnapshotV1 = {
     listSearchParams: ListSearchParamsState;
     languageFilters: { language: string; level: string }[];
     complexRules: ComplexFilterRule[];
+    /** Occupational background / company filter chips (רקע תעסוקתי). */
+    companyFilters?: CompanyFiltersState;
     /** Smart / semantic search free-text (purple panel). */
     smartSearchQuery?: string;
     isSmartSearchOpen?: boolean;
@@ -1274,10 +1425,19 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
         const listSearchParams = mergeListSearchParams(saved.listSearchParams as Partial<ListSearchParamsState>);
         const languageFilters = Array.isArray(saved.languageFilters) ? saved.languageFilters : [];
         const complexRules = Array.isArray(saved.complexRules) ? (saved.complexRules as ComplexFilterRule[]) : [];
+        const companyFilters = extractCompanyFiltersFromSnapshot(saved as Record<string, unknown>);
 
         let applied: AppliedAdvancedSearchPayload | null = null;
         if (saved.appliedAdvancedFilters != null && typeof saved.appliedAdvancedFilters === 'object') {
-            applied = buildAdvancedPayloadFromPanel(listSearchParams, languageFilters, complexRules);
+            applied = mergeCompanyFiltersIntoAdvancedPayload(
+                saved.appliedAdvancedFilters as AppliedAdvancedSearchPayload,
+                companyFilters,
+            );
+        } else if (companyFiltersAreActive(companyFilters)) {
+            applied = mergeCompanyFiltersIntoAdvancedPayload(
+                buildAdvancedPayloadFromPanel(listSearchParams, languageFilters, complexRules),
+                companyFilters,
+            );
         } else if (!legacySemantic) {
             applied = null;
         }
@@ -1308,6 +1468,7 @@ function loadListViewSnapshotFromSession(): ListViewSnapshotV1 | null {
             listSearchParams,
             languageFilters,
             complexRules,
+            companyFilters,
             smartSearchQuery: typeof saved.smartSearchQuery === 'string' ? saved.smartSearchQuery : '',
             isSmartSearchOpen: !!saved.isSmartSearchOpen,
         };
@@ -1611,9 +1772,16 @@ function engineMatchPercentFromBreakdown(bd: unknown): number | null {
     return clampListMatchPercent(Math.max(0, Math.round(core) - salary - age - general));
 }
 
-const LIST_MATCH_HYDRATE_CONCURRENCY = 4;
 
-function rawListRowNeedsMatchHydration(raw: Record<string, unknown>): boolean {
+function rawListRowNeedsMatchHydration(
+    raw: Record<string, unknown>,
+    filterJobId?: string,
+): boolean {
+    const jobFilter = String(filterJobId || '').trim();
+    if (jobFilter) {
+        if (clampListMatchPercent(raw.matchScore) != null) return false;
+        return raw.id != null && String(raw.id).trim() !== '';
+    }
     if (clampListMatchPercent(raw.matchScore) != null) return false;
     const lj = raw.lastJobSubmission;
     if (!lj || typeof lj !== 'object') return false;
@@ -1625,66 +1793,84 @@ function rawListRowNeedsMatchHydration(raw: Record<string, unknown>): boolean {
     return raw.id != null && String(raw.id).trim() !== '';
 }
 
-async function fetchSimulateMatchScore(
+const BATCH_MATCH_SCORES_CHUNK_SIZE = 25;
+const BATCH_MATCH_SCORES_TIMEOUT_MS = 45_000;
+
+async function fetchBatchMatchScores(
     apiBase: string,
-    candidateId: string,
-    jobId: string,
-): Promise<{ matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null } | null> {
-    try {
-        const res = await fetch(`${apiBase}/api/admin/matching-engine/simulate`, {
-            method: 'POST',
-            headers: eventApiHeaders(true),
-            body: JSON.stringify({ candidateId, jobId }),
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        const fromTop =
-            typeof data.matchScore === 'number'
-                ? Math.round(data.matchScore)
-                : typeof data.finalScore === 'number'
-                  ? Math.round(data.finalScore)
-                  : null;
-        const bd = (data.scoreBreakdown ?? data.breakdown) as MatchScoreBreakdownData | undefined;
-        const matchScore = fromTop ?? engineMatchPercentFromBreakdown(bd);
-        if (matchScore == null) return null;
-        return {
-            matchScore,
-            scoreBreakdown: bd && typeof bd === 'object' ? bd : null,
-        };
-    } catch {
-        return null;
+    items: { candidateId: string; jobId: string }[],
+): Promise<Record<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>> {
+    if (!items.length) return {};
+    const out: Record<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }> = {};
+    for (let i = 0; i < items.length; i += BATCH_MATCH_SCORES_CHUNK_SIZE) {
+        const chunk = items.slice(i, i + BATCH_MATCH_SCORES_CHUNK_SIZE);
+        try {
+            const controller = new AbortController();
+            const timer = window.setTimeout(() => controller.abort(), BATCH_MATCH_SCORES_TIMEOUT_MS);
+            const res = await fetch(`${apiBase}/api/candidates/match-scores/batch`, {
+                method: 'POST',
+                headers: eventApiHeaders(true),
+                body: JSON.stringify({ items: chunk }),
+                signal: controller.signal,
+            });
+            window.clearTimeout(timer);
+            if (!res.ok) continue;
+            const data = await res.json();
+            const scores = (data?.scores && typeof data.scores === 'object' ? data.scores : {}) as Record<
+                string,
+                { matchScore?: unknown; scoreBreakdown?: MatchScoreBreakdownData }
+            >;
+            for (const [candidateId, pkg] of Object.entries(scores)) {
+                if (!pkg || typeof pkg !== 'object') continue;
+                const matchScore =
+                    clampListMatchPercent(pkg.matchScore) ?? engineMatchPercentFromBreakdown(pkg.scoreBreakdown);
+                if (matchScore == null) continue;
+                out[candidateId] = {
+                    matchScore,
+                    scoreBreakdown:
+                        pkg.scoreBreakdown && typeof pkg.scoreBreakdown === 'object' ? pkg.scoreBreakdown : null,
+                };
+            }
+        } catch {
+            // partial hydration is OK — next poll/page can retry missing rows
+        }
     }
+    return out;
 }
 
 async function hydrateMissingListMatchScores(
     apiBase: string,
     rawList: Record<string, unknown>[],
     inFlight: Set<string>,
+    filterJobId?: string,
 ): Promise<Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>> {
     const patches = new Map<string, { matchScore: number; scoreBreakdown: MatchScoreBreakdownData | null }>();
+    const jobFilter = String(filterJobId || '').trim();
     const tasks: { candidateId: string; jobId: string; key: string }[] = [];
     for (const raw of rawList) {
-        if (!rawListRowNeedsMatchHydration(raw)) continue;
+        if (!rawListRowNeedsMatchHydration(raw, jobFilter)) continue;
         const candidateId = String(raw.id).trim();
-        const lj = raw.lastJobSubmission as Record<string, unknown>;
-        const jobId = String(lj.jobId).trim();
+        let jobId = jobFilter;
+        if (!jobId) {
+            const lj = raw.lastJobSubmission as Record<string, unknown>;
+            jobId = String(lj.jobId).trim();
+        }
         const key = `${candidateId}\0${jobId}`;
         if (inFlight.has(key)) continue;
         inFlight.add(key);
         tasks.push({ candidateId, jobId, key });
     }
-    let cursor = 0;
-    const worker = async () => {
-        while (cursor < tasks.length) {
-            const task = tasks[cursor++];
-            const result = await fetchSimulateMatchScore(apiBase, task.candidateId, task.jobId);
-            inFlight.delete(task.key);
-            if (result) patches.set(task.candidateId, result);
-        }
-    };
-    await Promise.all(
-        Array.from({ length: Math.min(LIST_MATCH_HYDRATE_CONCURRENCY, tasks.length) }, () => worker()),
+    if (!tasks.length) return patches;
+
+    const batchScores = await fetchBatchMatchScores(
+        apiBase,
+        tasks.map(({ candidateId, jobId }) => ({ candidateId, jobId })),
     );
+    for (const task of tasks) {
+        inFlight.delete(task.key);
+        const result = batchScores[task.candidateId];
+        if (result) patches.set(task.candidateId, result);
+    }
     return patches;
 }
 
@@ -1891,13 +2077,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     });
     
     const [isCompanyFilterOpen, setIsCompanyFilterOpen] = useState(false);
-    const [companyFilters, setCompanyFilters] = useState<{
-        sizes: string[];
-        sectors: string[];
-        industries: string[];
-        fields: string[];
-        roles: string[];
-    }>({ sizes: [], sectors: [], industries: [], fields: [], roles: [] });
+    const [companyFilters, setCompanyFilters] = useState<CompanyFiltersState>(() => {
+        if (listViewSnapshot?.companyFilters && companyFiltersAreActive(listViewSnapshot.companyFilters)) {
+            return listViewSnapshot.companyFilters;
+        }
+        const fromApplied = listViewSnapshot?.appliedAdvancedFilters?.companyFilters;
+        if (fromApplied && companyFiltersAreActive(normalizeCompanyFiltersState(fromApplied))) {
+            return normalizeCompanyFiltersState(fromApplied);
+        }
+        return loadCompanyFiltersFromUrl();
+    });
     const companyFilterButtonRef = useRef<HTMLButtonElement>(null);
     
     const [isFilterTagModalOpen, setIsFilterTagModalOpen] = useState(false);
@@ -1975,6 +2164,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     const [showIncompleteOnly, setShowIncompleteOnly] = useState(false);
 
     const skipUrlHydrateOnceRef = useRef(listViewSnapshot !== null);
+    /** Prevent URL→input feedback loop: persist writes `q` on each keystroke. */
+    const searchTermUrlHydratedRef = useRef(false);
 
     const advDefaults = useMemo(() => createDefaultListSearchParams(), []);
     const advFieldModified = useMemo(() => {
@@ -2014,11 +2205,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     useEffect(() => {
         if (skipUrlHydrateOnceRef.current) {
             skipUrlHydrateOnceRef.current = false;
+            searchTermUrlHydratedRef.current = true;
             return;
         }
-        const q = searchParamsFromUrl.get('q') || '';
-        if (q && q !== searchTerm) {
-            setSearchTerm(q);
+        if (!searchTermUrlHydratedRef.current) {
+            searchTermUrlHydratedRef.current = true;
+            const q = searchParamsFromUrl.get('q') || '';
+            if (q && q !== searchTerm) {
+                setSearchTerm(q);
+            }
         }
         const needs = searchParamsFromUrl.get('needs');
         if (needs !== null) {
@@ -2072,8 +2267,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         setUrlSearchParams(
             (prev) => {
                 const params = new URLSearchParams(prev);
-                if (searchTerm.trim()) params.set('q', searchTerm.trim());
-                else params.delete('q');
+                const nextQ = searchTerm.trim();
+                const curQ = params.get('q') || '';
+                if (nextQ) {
+                    if (curQ !== nextQ) params.set('q', nextQ);
+                } else if (curQ) {
+                    params.delete('q');
+                }
                 if (showNeedsAttention) params.set('needs', '1');
                 else params.delete('needs');
                 if (showFavoritesOnly) params.set('fav', '1');
@@ -2234,6 +2434,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             c.distribution_whatsapp !== false,
         candidatePipelineId: c.candidatePipelineId != null ? String(c.candidatePipelineId) : undefined,
         pipelineStageId: c.pipelineStageId != null ? String(c.pipelineStageId) : undefined,
+        candidatePipelineProcesses: Array.isArray(c.candidatePipelineProcesses)
+            ? c.candidatePipelineProcesses.map((p) => ({
+                  id: String(p?.id || ''),
+                  pipelineId: String(p?.pipelineId || ''),
+                  stageId: String(p?.stageId || ''),
+                  targetOutcomeId: p?.targetOutcomeId != null ? String(p.targetOutcomeId) : null,
+                  isActive: p?.isActive !== false,
+              })).filter((p) => p.id && p.pipelineId && p.stageId)
+            : undefined,
         candidatePipelineName:
             c.candidatePipelineName != null && String(c.candidatePipelineName).trim()
                 ? String(c.candidatePipelineName).trim()
@@ -2332,13 +2541,15 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 setSemanticBaselineCandidates(null);
                 setCandidates(mapped);
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
-                // Hydrate match % client-side (fast list GET + background simulate per row).
+                // Hydrate match % client-side (fast list GET + one batch scoring request).
                 const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
-                if (rawRows.some(rawListRowNeedsMatchHydration)) {
+                const filterJobId = String(opts.jobId || '').trim();
+                if (rawRows.some((raw) => rawListRowNeedsMatchHydration(raw, filterJobId))) {
                     void hydrateMissingListMatchScores(
                         apiBase,
                         rawRows,
                         listMatchHydrationInFlightRef.current,
+                        filterJobId,
                     ).then((patches) => applyListMatchPatches(patches));
                 }
                 listFetchLastKeyRef.current = { key: fetchKey, at: Date.now() };
@@ -2767,6 +2978,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 const mapped = list.map(mapCandidate);
                 setCandidates((prev) => mergeCandidatesPreservingMatchScores(prev, mapped));
                 setTotalCandidates(Number(payload?.total || mapped.length || 0));
+                const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
+                const filterJobId = selectedJobId.trim();
+                if (rawRows.some((raw) => rawListRowNeedsMatchHydration(raw, filterJobId))) {
+                    void hydrateMissingListMatchScores(
+                        apiBase,
+                        rawRows,
+                        listMatchHydrationInFlightRef.current,
+                        filterJobId,
+                    ).then((patches) => applyListMatchPatches(patches));
+                }
             } finally {
                 inFlight = false;
             }
@@ -2784,6 +3005,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         apiBase,
         hasInitiallyLoaded,
         mapCandidate,
+        applyListMatchPatches,
         page,
         pageSize,
         suspendListPolling,
@@ -2804,13 +3026,12 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     }, []);
 
     useEffect(() => {
-        if (listViewSnapshot !== null) {
-            // If smart search panel was open in the restored session, pre-load jobs
-            if (listViewSnapshot.isSmartSearchOpen) loadJobs();
-            return;
-        }
+        if (listViewSnapshot?.isSmartSearchOpen) loadJobs();
         if (initialFetchFiredRef.current) return;
         initialFetchFiredRef.current = true;
+        // Session snapshot shows rows instantly; still fetch current page so match % batch hydration runs.
+        if (listViewSnapshot !== null) skipListFetchAfterHydrateRef.current = true;
+        if (suspendListPolling) return;
         void fetchCandidates();
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2865,6 +3086,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
     // Persist list + advanced payload so returning from a candidate profile keeps the same results and filters.
     useEffect(() => {
         if (!hasInitiallyLoaded) return;
+        const panelAdvanced = buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules);
+        const advancedToSave =
+            appliedAdvancedFilters != null
+                ? mergeCompanyFiltersIntoAdvancedPayload(
+                      { ...appliedAdvancedFilters, ...panelAdvanced },
+                      companyFilters,
+                  )
+                : companyFiltersAreActive(companyFilters)
+                  ? mergeCompanyFiltersIntoAdvancedPayload(null, companyFilters)
+                  : null;
         const stateToSave = {
             listSnapshotVersion: 3,
             candidates,
@@ -2873,10 +3104,8 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             page,
             pageSize,
             totalCandidates,
-            appliedAdvancedFilters:
-                appliedAdvancedFilters == null
-                    ? null
-                    : buildAdvancedPayloadFromPanel(searchParams, languageFilters, complexRules),
+            appliedAdvancedFilters: advancedToSave,
+            companyFilters,
             listSearchParams: searchParams,
             languageFilters,
             complexRules,
@@ -2910,6 +3139,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         semanticBaselineCandidates,
         smartSearchQuery,
         isSmartSearchOpen,
+        companyFilters,
     ]);
 
 
@@ -3662,6 +3892,16 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             const mapped = list.map(mapCandidate);
             setSemanticBaselineCandidates(mapped);
             setCandidates(mapped);
+            const rawRows = list.filter((r): r is Record<string, unknown> => r && typeof r === 'object');
+            const filterJobId = selectedJobId.trim();
+            if (rawRows.some((raw) => rawListRowNeedsMatchHydration(raw, filterJobId))) {
+                void hydrateMissingListMatchScores(
+                    apiBase,
+                    rawRows,
+                    listMatchHydrationInFlightRef.current,
+                    filterJobId,
+                ).then((patches) => applyListMatchPatches(patches));
+            }
             const label = job ? job.title : smartSearchQuery.trim();
             setFeedbackMessage(`מציג ${list.length} מועמדים דומים ל-${label}`);
         } catch (err: any) {
@@ -3823,11 +4063,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
 
     const boardCandidates = useMemo(() => {
         if (!activeCandidatePipelineId) return paginatedCandidates;
-        return paginatedCandidates.filter(
-            (c) =>
-                !c.candidatePipelineId ||
-                c.candidatePipelineId === activeCandidatePipelineId,
-        );
+        return paginatedCandidates.filter((c) => candidateHasPipeline(c, activeCandidatePipelineId));
     }, [paginatedCandidates, activeCandidatePipelineId]);
 
     const findCandidateByDragId = useCallback(
@@ -3875,7 +4111,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
         const prev = findCandidateByDragId(candidateBackendId);
         const prevPipelineId = prev?.candidatePipelineId;
         const prevStageId =
-            prev?.pipelineStageId ||
+            candidateStageForPipeline(prev || {}, pipelineId) ||
             ((!prevPipelineId || prevPipelineId === pipelineId) && kanbanFirstStageId
                 ? kanbanFirstStageId
                 : undefined);
@@ -3886,11 +4122,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
             setCandidates((prevList) =>
                 prevList.map((c) =>
                     matchesDragId(c)
-                        ? {
-                              ...c,
-                              candidatePipelineId: resolvedPipelineId,
-                              pipelineStageId: resolvedStageId,
-                          }
+                        ? patchCandidatePipelineLocalState(c, resolvedPipelineId, resolvedStageId)
                         : c,
                 ),
             );
@@ -3900,11 +4132,7 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                     const list = prevResults[key] ?? [];
                     nextResults[key] = list.map((c) =>
                         matchesDragId(c)
-                            ? {
-                                  ...c,
-                                  candidatePipelineId: resolvedPipelineId,
-                                  pipelineStageId: resolvedStageId,
-                              }
+                            ? patchCandidatePipelineLocalState(c, resolvedPipelineId, resolvedStageId)
                             : c,
                     );
                 }
@@ -3919,7 +4147,28 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                 result.candidatePipelineId != null ? String(result.candidatePipelineId) : pipelineId;
             const resolvedStageId =
                 result.pipelineStageId != null ? String(result.pipelineStageId) : stageId;
-            applyResolvedStage(resolvedPipelineId, resolvedStageId);
+            const applyFromApi = (row: Candidate) => {
+                let next = patchCandidatePipelineLocalState(row, resolvedPipelineId, resolvedStageId);
+                if (Array.isArray((result as { candidatePipelineProcesses?: CandidatePipelineProcessRow[] }).candidatePipelineProcesses)) {
+                    next = {
+                        ...next,
+                        candidatePipelineProcesses: (result as { candidatePipelineProcesses: CandidatePipelineProcessRow[] }).candidatePipelineProcesses,
+                    };
+                }
+                return next;
+            };
+            setCandidates((prevList) =>
+                prevList.map((c) => (matchesDragId(c) ? applyFromApi(c) : c)),
+            );
+            setKanbanColumnResults((prevResults) => {
+                const nextResults: Record<string, Candidate[]> = {};
+                for (const key of Object.keys(prevResults)) {
+                    nextResults[key] = (prevResults[key] ?? []).map((c) =>
+                        matchesDragId(c) ? applyFromApi(c) : c,
+                    );
+                }
+                return nextResults;
+            });
             if (result.pipelineMove?.viaOutcome) {
                 const outcomeLabel = result.pipelineMove.outcomeName || 'תוצאת pipeline';
                 if (result.pipelineMove.async) {
@@ -5280,9 +5529,13 @@ const CandidatesListView: React.FC<CandidatesListViewProps> = ({ openSummaryDraw
                                     const columnSearchActive = columnQuery.length >= KANBAN_COLUMN_SEARCH_MIN_LEN;
                                     const columnLoading = Boolean(kanbanColumnLoading[column.key]);
                                     const stageItems = boardCandidates.filter((c) => {
-                                        if (c.pipelineStageId && column.stageIds.has(c.pipelineStageId)) return true;
-                                        if (!c.pipelineStageId && firstStageId && column.stageIds.has(firstStageId)) {
-                                            return !c.candidatePipelineId || c.candidatePipelineId === activeCandidatePipelineId;
+                                        const stageIdForBoard = candidateStageForPipeline(
+                                            c,
+                                            activeCandidatePipelineId,
+                                        );
+                                        if (stageIdForBoard && column.stageIds.has(stageIdForBoard)) return true;
+                                        if (!stageIdForBoard && firstStageId && column.stageIds.has(firstStageId)) {
+                                            return candidateHasPipeline(c, activeCandidatePipelineId);
                                         }
                                         return false;
                                     });

@@ -23,7 +23,14 @@ function normalizeAutomations(raw) {
   return raw
     .map((a, i) => {
       if (!a || typeof a !== 'object') return null;
-      const actionType = ['send_email', 'send_sms', 'start_pipeline', 'close_event', 'change_status'].includes(a.actionType)
+      const actionType = [
+        'send_email',
+        'send_sms',
+        'start_pipeline',
+        'open_additional_process',
+        'close_event',
+        'change_status',
+      ].includes(a.actionType)
         ? a.actionType
         : 'send_email';
       const scheduleType = ['immediate', 'minutes', 'hours', 'days'].includes(a.scheduleType)
@@ -37,6 +44,8 @@ function normalizeAutomations(raw) {
       };
       if (a.templateId) item.templateId = String(a.templateId);
       if (a.pipelineId) item.pipelineId = String(a.pipelineId);
+      if (a.stageId) item.stageId = String(a.stageId);
+      if (a.targetOutcomeId) item.targetOutcomeId = String(a.targetOutcomeId);
       if (a.statusName) item.statusName = String(a.statusName).trim();
       if (a.scheduleValue != null && a.scheduleValue !== '') {
         item.scheduleValue = Math.max(0, parseInt(a.scheduleValue, 10) || 0);
@@ -54,6 +63,8 @@ function normalizeAutomations(raw) {
     .filter(Boolean);
 }
 
+const { normalizeSlaUnit } = require('../utils/slaDuration');
+
 function normalizeOutcomes(raw) {
   if (!Array.isArray(raw)) return [];
   return raw
@@ -67,6 +78,7 @@ function normalizeOutcomes(raw) {
         name,
         actionType,
         autoFollowupDays: Math.max(0, parseInt(o.autoFollowupDays, 10) || 0),
+        autoFollowupUnit: normalizeSlaUnit(o.autoFollowupUnit),
       };
       if (actionType === 'move' && o.targetStageId) {
         item.targetStageId = String(o.targetStageId);
@@ -112,6 +124,7 @@ function stageToDto(row) {
     color: plain.color,
     order: plain.sortIndex + 1,
     slaLimit: plain.slaLimit,
+    slaLimitUnit: normalizeSlaUnit(plain.slaLimitUnit),
     outcomes: normalizeOutcomes(plain.outcomes),
   };
 }
@@ -253,6 +266,7 @@ async function syncClientPipelines(clientId, incoming = []) {
         const color = String(st.color || 'bg-gray-100 text-gray-700').trim().slice(0, 120)
           || 'bg-gray-100 text-gray-700';
         const slaLimit = Math.max(0, parseInt(st.slaLimit, 10) || 0);
+        const slaLimitUnit = normalizeSlaUnit(st.slaLimitUnit);
         const orderRaw = st.order != null ? Number(st.order) : j + 1;
         const sortIndex = Number.isFinite(orderRaw) && orderRaw > 0 ? orderRaw - 1 : j;
         const outcomes = normalizeOutcomes(st.outcomes);
@@ -260,13 +274,13 @@ async function syncClientPipelines(clientId, incoming = []) {
         const sid = st.id;
         if (isUuid(sid) && stageById.has(String(sid))) {
           await ClientPipelineStage.update(
-            { name: stName, color, sortIndex, slaLimit, outcomes },
+            { name: stName, color, sortIndex, slaLimit, slaLimitUnit, outcomes },
             { where: { id: sid, pipelineId }, transaction },
           );
           keptStageIds.push(String(sid));
         } else {
           const created = await ClientPipelineStage.create(
-            { pipelineId, name: stName, color, sortIndex, slaLimit, outcomes },
+            { pipelineId, name: stName, color, sortIndex, slaLimit, slaLimitUnit, outcomes },
             { transaction },
           );
           keptStageIds.push(String(created.id));

@@ -931,6 +931,28 @@ const updateAiDecisionComments = async (req, res) => {
   }
 };
 
+const mergeTags = async (req, res) => {
+  try {
+    const merges = Array.isArray(req.body?.merges) ? req.body.merges : [];
+    const result = await tagService.mergeCatalogTags(merges);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.mergeTags]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to merge tags' });
+  }
+};
+
+const blacklistTags = async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const result = await tagCorrectionAgentService.blacklistCatalogTags(ids);
+    res.json(result);
+  } catch (err) {
+    console.error('[tagController.blacklistTags]', err);
+    res.status(err.status || 500).json({ message: err.message || 'Failed to blacklist tags' });
+  }
+};
+
 module.exports = {
   list,
   get,
@@ -955,5 +977,7 @@ module.exports = {
   backfillAutoMerge,
   approveAiDecision,
   updateAiDecisionComments,
+  mergeTags,
+  blacklistTags,
 };
 

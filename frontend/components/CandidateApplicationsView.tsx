@@ -14,9 +14,12 @@ type EmailUploadRow = {
     id: number | string;
     candidateId?: string | null;
     jobId?: string | null;
+    fileKey?: string | null;
     subject?: string | null;
     from?: string | null;
     createdAt?: string | null;
+    userNotes?: string | null;
+    job?: JobOption | null;
 };
 
 interface ApplicationRecord {
@@ -52,40 +55,85 @@ function normalizeDate(value?: string | null): string {
 }
 
 function mapManualApplication(app: ApplicationRecord): ApplicationRecord {
+    const job = app.job || undefined;
     return {
         ...app,
         source: 'manual',
         readOnly: false,
+        company: String(app.company || job?.client || '').trim() || '—',
+        role: String(app.role || job?.title || '').trim() || '—',
         date: app.applicationDate ? normalizeDate(app.applicationDate) : app.date || normalizeDate(null),
     };
 }
 
-function mapEmailUploadToApplication(
-    upload: EmailUploadRow,
-    jobsById: Map<string, JobOption>,
-): ApplicationRecord | null {
+function fileNameFromKey(fileKey?: string | null): string {
+    const key = String(fileKey || '').trim();
+    if (!key) return '';
+    const base = key.split('/').pop() || key;
+    try {
+        return decodeURIComponent(base);
+    } catch {
+        return base;
+    }
+}
+
+function filenameFromContentDisposition(header: string | null, fallback: string): string {
+    if (!header) return fallback;
+    const star = header.match(/filename\*=UTF-8''([^;]+)/i);
+    if (star?.[1]) {
+        try {
+            return decodeURIComponent(star[1]);
+        } catch {
+            // ignore
+        }
+    }
+    const plain = header.match(/filename="?([^";]+)"?/i);
+    return plain?.[1] || fallback;
+}
+
+function mapEmailUploadToApplication(upload: EmailUploadRow): ApplicationRecord | null {
     const candidateId = upload.candidateId ? String(upload.candidateId) : '';
     if (!candidateId) return null;
     const jobId = upload.jobId != null ? String(upload.jobId).trim() : '';
-    const job = jobId ? jobsById.get(jobId) : undefined;
+    const job = upload.job || undefined;
     const subject = String(upload.subject || '').trim();
-    const from = String(upload.from || '').trim();
+    const fileName = fileNameFromKey(upload.fileKey);
+    const jobIdLabel = String(upload.jobId || '').trim();
+    const cvLabel =
+        fileName && fileName !== jobIdLabel
+            ? fileName
+            : subject || 'קורות חיים ממייל';
+    const company = String(job?.client || '').trim() || '—';
+    const role = String(job?.title || '').trim() || '—';
     return {
         id: `email-${upload.id}`,
         candidateId,
-        jobId: jobId || null,
-        company: job?.client || '—',
-        role: job?.title || subject || 'הגשה ממייל',
+        jobId: job?.id ? String(job.id) : jobId || null,
+        company,
+        role,
         status: 'נקלט ממייל',
         applicationDate: upload.createdAt || null,
         date: normalizeDate(upload.createdAt),
         link: null,
-        cvFile: subject || 'קורות חיים ממייל',
-        notes: from ? `מ: ${from}` : null,
+        cvFile: cvLabel,
+        notes: String(upload.userNotes || '').trim(),
         job: job || null,
         source: 'email',
         readOnly: true,
     };
+}
+
+function dedupeEmailApplications(apps: ApplicationRecord[]): ApplicationRecord[] {
+    const seen = new Set<string>();
+    return apps.filter((app) => {
+        const dedupeKey =
+            app.source === 'email' && app.cvFile
+                ? `email-file::${app.cvFile}::${app.date || ''}`
+                : app.id;
+        if (seen.has(dedupeKey)) return false;
+        seen.add(dedupeKey);
+        return true;
+    });
 }
 
 const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
@@ -93,15 +141,17 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
     relatedProfileIds = [],
 }) => {
     const [applications, setApplications] = useState<ApplicationRecord[]>([]);
-    const [jobs, setJobs] = useState<JobOption[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingApp, setEditingApp] = useState<ApplicationFormValues | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
+    const [savingNotesId, setSavingNotesId] = useState<string | null>(null);
+    const [downloadingCvId, setDownloadingCvId] = useState<string | null>(null);
+    const [notesBaseline, setNotesBaseline] = useState<Record<string, string>>({});
     const [loadError, setLoadError] = useState<string | null>(null);
 
-    const profileIds = useMemo(() => {
+    const profileIdsKey = useMemo(() => {
         const ids = new Set<string>();
         const primary = candidateId != null ? String(candidateId).trim() : '';
         if (primary) ids.add(primary);
@@ -109,106 +159,50 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
             const s = String(id || '').trim();
             if (s) ids.add(s);
         }
-        return [...ids];
+        return [...ids].sort().join(',');
     }, [candidateId, relatedProfileIds]);
 
-    const loadJobs = useCallback(async (): Promise<Map<string, JobOption>> => {
-        const base = apiBase();
-        const map = new Map<string, JobOption>();
-        try {
-            const res = await fetch(`${base}/api/jobs`, {
-                headers: authHeaders(),
-                credentials: 'include',
-            });
-            if (!res.ok) throw new Error('Failed to load jobs');
-            const payload = await res.json();
-            if (!Array.isArray(payload)) return map;
-            for (const job of payload) {
-                if (!job?.id) continue;
-                map.set(String(job.id), {
-                    id: String(job.id),
-                    title: job.title || '',
-                    client: job.client || '',
-                });
-            }
-            setJobs([...map.values()]);
-        } catch (err) {
-            console.error('[CandidateApplicationsView] loadJobs', err);
-        }
-        return map;
-    }, []);
-
-    const loadManualApplications = useCallback(async (ids: string[]) => {
-        const base = apiBase();
-        const batches = await Promise.allSettled(
-            ids.map(async (id) => {
-                const res = await fetch(`${base}/api/applications?candidateId=${encodeURIComponent(id)}`, {
-                    headers: authHeaders(),
-                    credentials: 'include',
-                });
-                if (!res.ok) throw new Error('Failed to load applications');
-                const payload = await res.json();
-                if (!Array.isArray(payload)) return [] as ApplicationRecord[];
-                return payload.map((row) => mapManualApplication(row as ApplicationRecord));
-            }),
-        );
-        const merged: ApplicationRecord[] = [];
-        const seen = new Set<string>();
-        for (const batch of batches) {
-            if (batch.status !== 'fulfilled') continue;
-            for (const app of batch.value) {
-                const key = app.id;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                merged.push(app);
-            }
-        }
-        return merged;
-    }, []);
-
-    const loadEmailApplications = useCallback(async (ids: string[], jobsById: Map<string, JobOption>) => {
-        const base = apiBase();
-        const batches = await Promise.allSettled(
-            ids.map(async (id) => {
-                const res = await fetch(`${base}/api/email-uploads/candidate/${encodeURIComponent(id)}`, {
-                    headers: authHeaders(),
-                    credentials: 'include',
-                });
-                if (!res.ok) return [] as ApplicationRecord[];
-                const payload = await res.json();
-                if (!Array.isArray(payload)) return [] as ApplicationRecord[];
-                return payload
-                    .map((row) => mapEmailUploadToApplication(row as EmailUploadRow, jobsById))
-                    .filter((row): row is ApplicationRecord => Boolean(row));
-            }),
-        );
-        const merged: ApplicationRecord[] = [];
-        const seen = new Set<string>();
-        for (const batch of batches) {
-            if (batch.status !== 'fulfilled') continue;
-            for (const app of batch.value) {
-                const key = app.id;
-                if (seen.has(key)) continue;
-                seen.add(key);
-                merged.push(app);
-            }
-        }
-        return merged;
-    }, []);
-
     const loadApplications = useCallback(async () => {
-        if (!profileIds.length) {
+        if (!profileIdsKey) {
             setApplications([]);
             return;
         }
         setIsLoading(true);
         setLoadError(null);
         try {
-            const jobsById = await loadJobs();
-            const [manualApps, emailApps] = await Promise.all([
-                loadManualApplications(profileIds),
-                loadEmailApplications(profileIds, jobsById),
+            const base = apiBase();
+            const qs = encodeURIComponent(profileIdsKey);
+            const headers = authHeaders();
+            const [manualRes, emailRes] = await Promise.all([
+                fetch(`${base}/api/applications?candidateIds=${qs}`, {
+                    headers,
+                    credentials: 'include',
+                }),
+                fetch(`${base}/api/email-uploads/by-candidates?candidateIds=${qs}`, {
+                    headers,
+                    credentials: 'include',
+                }),
             ]);
+            if (!manualRes.ok) throw new Error('Failed to load applications');
+            const manualPayload = await manualRes.json();
+            const manualApps = Array.isArray(manualPayload)
+                ? manualPayload.map((row) => mapManualApplication(row as ApplicationRecord))
+                : [];
+
+            let emailApps: ApplicationRecord[] = [];
+            if (emailRes.ok) {
+                const emailPayload = await emailRes.json();
+                if (Array.isArray(emailPayload)) {
+                    emailApps = dedupeEmailApplications(
+                        emailPayload
+                            .map((row) => mapEmailUploadToApplication(row as EmailUploadRow))
+                            .filter((row): row is ApplicationRecord => Boolean(row)),
+                    );
+                }
+            } else {
+                console.warn('[CandidateApplicationsView] email uploads batch failed', emailRes.status);
+            }
+
             const manualJobKeys = new Set(
                 manualApps.map((a) => `${a.candidateId}::${a.jobId || ''}::${a.date || ''}`),
             );
@@ -223,13 +217,18 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                 return bTime - aTime;
             });
             setApplications(combined);
+            const baseline: Record<string, string> = {};
+            for (const app of combined) {
+                baseline[app.id] = app.notes || '';
+            }
+            setNotesBaseline(baseline);
         } catch (err) {
             console.error('[CandidateApplicationsView] loadApplications', err);
             setLoadError(err instanceof Error ? err.message : 'טעינת הגשות נכשלה');
         } finally {
             setIsLoading(false);
         }
-    }, [profileIds, loadJobs, loadManualApplications, loadEmailApplications]);
+    }, [profileIdsKey]);
 
     useEffect(() => {
         void loadApplications();
@@ -283,6 +282,103 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
             setLoadError(err instanceof Error ? err.message : 'שמירת הגשה נכשלה');
         } finally {
             setIsSaving(false);
+        }
+    };
+
+    const handleNotesChange = (appId: string, notes: string) => {
+        setApplications((prev) => prev.map((app) => (app.id === appId ? { ...app, notes } : app)));
+    };
+
+    const saveNotes = async (app: ApplicationRecord, notes: string) => {
+        const baseline = notesBaseline[app.id] ?? '';
+        if (notes === baseline) return;
+
+        setSavingNotesId(app.id);
+        setLoadError(null);
+        try {
+            const base = apiBase();
+            if (app.source === 'email') {
+                const uploadId = app.id.replace(/^email-/, '');
+                const res = await fetch(`${base}/api/email-uploads/${encodeURIComponent(uploadId)}/notes`, {
+                    method: 'PATCH',
+                    headers: authHeaders(true),
+                    credentials: 'include',
+                    body: JSON.stringify({ userNotes: notes }),
+                });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body.message || 'Failed to save notes');
+                }
+            } else {
+                const res = await fetch(`${base}/api/applications/${encodeURIComponent(app.id)}`, {
+                    method: 'PUT',
+                    headers: authHeaders(true),
+                    credentials: 'include',
+                    body: JSON.stringify({
+                        candidateId: app.candidateId,
+                        jobId: app.jobId || null,
+                        company: app.company,
+                        role: app.role,
+                        link: app.link,
+                        cvFile: app.cvFile,
+                        notes,
+                        status: app.status,
+                        applicationDate: app.date,
+                    }),
+                });
+                if (!res.ok) {
+                    const body = await res.json().catch(() => ({}));
+                    throw new Error(body.message || 'Failed to save notes');
+                }
+            }
+            setNotesBaseline((prev) => ({ ...prev, [app.id]: notes }));
+            setApplications((prev) => prev.map((row) => (row.id === app.id ? { ...row, notes } : row)));
+        } catch (err) {
+            console.error('[CandidateApplicationsView] saveNotes', err);
+            setLoadError(err instanceof Error ? err.message : 'שמירת הערות נכשלה');
+            setApplications((prev) =>
+                prev.map((row) => (row.id === app.id ? { ...row, notes: baseline } : row)),
+            );
+        } finally {
+            setSavingNotesId(null);
+        }
+    };
+
+    const handleDownloadCv = async (app: ApplicationRecord) => {
+        if (app.source !== 'email') return;
+        const uploadId = app.id.replace(/^email-/, '');
+        if (!uploadId) return;
+
+        setDownloadingCvId(app.id);
+        setLoadError(null);
+        try {
+            const base = apiBase();
+            const res = await fetch(`${base}/api/email-uploads/${encodeURIComponent(uploadId)}/resume`, {
+                headers: authHeaders(),
+                credentials: 'include',
+            });
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.message || 'Failed to download resume');
+            }
+            const blob = await res.blob();
+            const filename = filenameFromContentDisposition(
+                res.headers.get('Content-Disposition'),
+                app.cvFile || 'resume.pdf',
+            );
+            const objectUrl = URL.createObjectURL(blob);
+            const anchor = document.createElement('a');
+            anchor.href = objectUrl;
+            anchor.download = filename;
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+            URL.revokeObjectURL(objectUrl);
+        } catch (err) {
+            console.error('[CandidateApplicationsView] handleDownloadCv', err);
+            setLoadError(err instanceof Error ? err.message : 'הורדת קובץ נכשלה');
+        } finally {
+            setDownloadingCvId(null);
         }
     };
 
@@ -446,12 +542,40 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                                                 <span className="text-text-subtle">-</span>
                                             )}
                                         </td>
-                                        <td className="px-6 py-4 text-text-muted flex items-center gap-2">
-                                            {app.cvFile && <DocumentTextIcon className="w-4 h-4 text-text-subtle" />}
-                                            {app.cvFile || '-'}
+                                        <td className="px-6 py-4 text-text-muted">
+                                            {app.cvFile ? (
+                                                app.source === 'email' ? (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => void handleDownloadCv(app)}
+                                                        disabled={downloadingCvId === app.id}
+                                                        className="flex items-center gap-2 text-primary-600 hover:text-primary-800 hover:underline disabled:opacity-60 max-w-xs truncate"
+                                                        title="הורד קובץ"
+                                                    >
+                                                        <DocumentTextIcon className="w-4 h-4 shrink-0 text-text-subtle" />
+                                                        <span className="truncate">
+                                                            {downloadingCvId === app.id ? 'מוריד...' : app.cvFile}
+                                                        </span>
+                                                    </button>
+                                                ) : (
+                                                    <div className="flex items-center gap-2 max-w-xs truncate">
+                                                        <DocumentTextIcon className="w-4 h-4 shrink-0 text-text-subtle" />
+                                                        <span className="truncate">{app.cvFile}</span>
+                                                    </div>
+                                                )
+                                            ) : (
+                                                '-'
+                                            )}
                                         </td>
-                                        <td className="px-6 py-4 text-text-muted max-w-xs truncate" title={app.notes || ''}>
-                                            {app.notes || '-'}
+                                        <td className="px-6 py-4">
+                                            <textarea
+                                                rows={2}
+                                                value={app.notes || ''}
+                                                onChange={(e) => handleNotesChange(app.id, e.target.value)}
+                                                onBlur={(e) => void saveNotes(app, e.target.value)}
+                                                disabled={savingNotesId === app.id}
+                                                className="w-full min-w-[180px] max-w-xs bg-bg-input border border-border-default rounded-lg px-3 py-2 text-sm text-text-default focus:ring-2 focus:ring-primary-500 outline-none resize-y disabled:opacity-60"
+                                            />
                                         </td>
                                         <td className="px-6 py-4">
                                             {app.readOnly ? (
@@ -498,7 +622,6 @@ const CandidateApplicationsView: React.FC<CandidateApplicationsViewProps> = ({
                 }}
                 onSave={saveApplication}
                 initialData={editingApp}
-                jobs={jobs}
                 isSaving={isSaving}
             />
         </div>

@@ -1,8 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { XMarkIcon } from './Icons';
+import SlaDurationInput from './SlaDurationInput';
 import { fetchPipelines, type PipelineDto } from '../services/pipelinesApi';
 import { fetchCandidatePipelines } from '../services/candidatePipelinesApi';
 import { authHeaders } from '../utils/authHeaders';
+import { normalizeSlaUnit, slaFieldLabel, type SlaUnit } from '../utils/slaDuration';
+
+type PipelineWithKind = PipelineDto & { kind: 'client' | 'candidate' };
 
 export type ProcessEventSavePayload = {
   title: string;
@@ -15,7 +19,10 @@ export type ProcessEventSavePayload = {
   clientName: string;
   assignee: string;
   priority: 'high' | 'medium' | 'low';
-  slaDays: number;
+  slaValue: number;
+  slaUnit: SlaUnit;
+  /** @deprecated use slaValue */
+  slaDays?: number;
   description: string;
 };
 
@@ -26,6 +33,10 @@ interface ProcessEventModalProps {
   onClose: () => void;
   onSave: (eventData: ProcessEventSavePayload) => void | Promise<void>;
   clientId: string;
+  /** Linked organization under a tenant client — scopes contact list */
+  organizationId?: string | null;
+  /** Display label for organization/client (preferred over clientName when org-scoped) */
+  organizationName?: string;
   clientName?: string;
   /** Pre-select contact when opened from contact profile */
   contactId?: string | null;
@@ -33,6 +44,11 @@ interface ProcessEventModalProps {
   initialData?: Partial<ProcessEventSavePayload> | null;
   /** Client work pipelines (default) vs candidate recruitment pipelines */
   pipelineKind?: 'client' | 'candidate';
+  /** Tenant client id for pipeline catalog (defaults to clientId) */
+  pipelineClientId?: string;
+  /** Pre-loaded pipelines from settings (same source as PipelineSettingsView) */
+  clientPipelines?: PipelineDto[];
+  candidatePipelines?: PipelineDto[];
   /** Read-only linked entity shown instead of contact picker (e.g. candidate name) */
   linkedEntityName?: string;
   linkedEntityLabel?: string;
@@ -43,20 +59,70 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
   onClose,
   onSave,
   clientId,
+  organizationId = null,
+  organizationName = '',
   clientName = '',
   contactId = null,
   contactName = '',
   initialData = null,
   pipelineKind = 'client',
+  pipelineClientId,
+  clientPipelines: clientPipelinesProp,
+  candidatePipelines: candidatePipelinesProp,
   linkedEntityName = '',
   linkedEntityLabel = 'מועמד',
 }) => {
   const apiBase = import.meta.env.VITE_API_BASE || '';
-  const [pipelines, setPipelines] = useState<PipelineDto[]>([]);
+  const [clientPipelines, setClientPipelines] = useState<PipelineDto[]>([]);
+  const [candidatePipelines, setCandidatePipelines] = useState<PipelineDto[]>([]);
   const [contacts, setContacts] = useState<ContactOption[]>([]);
   const [loadingMeta, setLoadingMeta] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [fetchedOrganizationName, setFetchedOrganizationName] = useState('');
+
+  const displayClientName = useMemo(() => {
+    const fromOrgProp = String(organizationName || '').trim();
+    if (fromOrgProp) return fromOrgProp;
+    const fromFetch = String(fetchedOrganizationName || '').trim();
+    if (fromFetch) return fromFetch;
+    if (organizationId) return '';
+    const plainClient = String(clientName || '').trim();
+    return plainClient;
+  }, [organizationName, fetchedOrganizationName, clientName, organizationId]);
+
+  const isOrganizationScoped = Boolean(
+    String(organizationId || '').trim() || String(organizationName || '').trim(),
+  );
+
+  useEffect(() => {
+    if (!isOpen || !organizationId || !apiBase) {
+      setFetchedOrganizationName('');
+      return;
+    }
+    if (organizationName) {
+      setFetchedOrganizationName('');
+      return;
+    }
+    let cancelled = false;
+    void fetch(`${apiBase}/api/organizations/${encodeURIComponent(String(organizationId))}`, {
+      credentials: 'include',
+      headers: authHeaders(),
+      cache: 'no-store',
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        const name = String(data.name || data.displayName || '').trim();
+        if (name) setFetchedOrganizationName(name);
+      })
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, organizationId, organizationName, apiBase]);
 
   const [formData, setFormData] = useState({
     title: '',
@@ -67,7 +133,8 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     clientName: clientName || '',
     assignee: 'אני',
     priority: 'medium' as 'high' | 'medium' | 'low',
-    slaDays: 3,
+    slaValue: 3,
+    slaUnit: 'days' as SlaUnit,
     description: '',
   });
 
@@ -79,29 +146,95 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
       stageId: initialData?.stageId || '',
       contactId: initialData?.contactId || contactId || '',
       contactName: initialData?.contactName || contactName || '',
-      clientName: initialData?.clientName || clientName || '',
+      clientName: isOrganizationScoped
+        ? displayClientName
+        : displayClientName || '',
       assignee: initialData?.assignee || 'אני',
       priority: initialData?.priority || 'medium',
-      slaDays: initialData?.slaDays ?? 3,
+      slaValue: initialData?.slaValue ?? initialData?.slaDays ?? 3,
+      slaUnit: normalizeSlaUnit(initialData?.slaUnit),
       description: initialData?.description || '',
     });
     setError(null);
-  }, [isOpen, initialData, clientName, contactId, contactName]);
+  }, [isOpen, initialData, displayClientName, contactId, contactName, isOrganizationScoped]);
 
   useEffect(() => {
-    if (!isOpen || !clientId || !apiBase) return;
-    let cancelled = false;
-    setLoadingMeta(true);
-    setError(null);
+    if (!isOpen) return;
+    setFormData((prev) => {
+      const nextClientName = isOrganizationScoped ? displayClientName : displayClientName || prev.clientName;
+      if (prev.clientName === nextClientName) return prev;
+      return { ...prev, clientName: nextClientName };
+    });
+  }, [isOpen, displayClientName, isOrganizationScoped]);
 
-    const pipelinesPromise =
-      pipelineKind === 'candidate'
-        ? fetchCandidatePipelines(clientId).catch(() => [] as PipelineDto[])
-        : fetchPipelines(clientId).catch(() => [] as PipelineDto[]);
-    const contactsPromise =
+  const applyPipelineDefaults = useCallback(
+    (client: PipelineDto[], candidate: PipelineDto[], cts: ContactOption[]) => {
+      const allFlat: PipelineWithKind[] = [
+        ...candidate.map((p) => ({ ...p, kind: 'candidate' as const })),
+        ...client.map((p) => ({ ...p, kind: 'client' as const })),
+      ];
+      const defaultPool =
+        pipelineKind === 'candidate' && candidate.length
+          ? candidate
+          : client.length
+            ? client
+            : candidate;
+      setFormData((prev) => {
+        const processId =
+          (prev.processId && allFlat.some((p) => p.id === prev.processId) ? prev.processId : '') ||
+          defaultPool[0]?.id ||
+          allFlat[0]?.id ||
+          '';
+        const pipeline = allFlat.find((p) => p.id === processId) || allFlat[0];
+        const stageId =
+          prev.stageId && pipeline?.stages?.some((s) => s.id === prev.stageId)
+            ? prev.stageId
+            : pipeline?.stages?.[0]?.id || '';
+        let nextContactId = prev.contactId;
+        let nextContactName = prev.contactName;
+        if (pipelineKind === 'candidate') {
+          nextContactId = '';
+          nextContactName = linkedEntityName || prev.contactName || contactName || '';
+        } else if (nextContactId) {
+          const match = cts.find((c) => c.id === nextContactId);
+          if (match) nextContactName = match.name;
+        } else if (nextContactName) {
+          const match = cts.find((c) => c.name === nextContactName);
+          if (match) nextContactId = match.id;
+        }
+        return {
+          ...prev,
+          processId,
+          stageId,
+          contactId: nextContactId,
+          contactName: nextContactName,
+          clientName: isOrganizationScoped ? displayClientName : displayClientName || prev.clientName,
+        };
+      });
+    },
+    [pipelineKind, linkedEntityName, contactName, displayClientName, isOrganizationScoped],
+  );
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const settingsClientId = pipelineClientId || clientId;
+    if (!settingsClientId || !apiBase) return;
+
+    const hasPreloaded =
+      clientPipelinesProp !== undefined && candidatePipelinesProp !== undefined;
+
+    let cancelled = false;
+
+    const loadContacts = (): Promise<ContactOption[]> =>
       pipelineKind === 'candidate'
         ? Promise.resolve([] as ContactOption[])
-        : fetch(`${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts`, {
+        : fetch(
+            `${apiBase}/api/clients/${encodeURIComponent(clientId)}/contacts${
+              organizationId
+                ? `?organizationId=${encodeURIComponent(String(organizationId))}`
+                : ''
+            }`,
+            {
             credentials: 'include',
             headers: authHeaders(),
           })
@@ -117,36 +250,36 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
             })
             .catch(() => [] as ContactOption[]);
 
-    Promise.all([pipelinesPromise, contactsPromise])
-      .then(([pls, cts]) => {
+    if (hasPreloaded) {
+      setClientPipelines(clientPipelinesProp);
+      setCandidatePipelines(candidatePipelinesProp);
+      void loadContacts().then((cts) => {
         if (cancelled) return;
-        setPipelines(pls);
         setContacts(cts);
-        setFormData((prev) => {
-          const processId = prev.processId || pls[0]?.id || '';
-          const pipeline = pls.find((p) => p.id === processId) || pls[0];
-          const stageId = prev.stageId || pipeline?.stages?.[0]?.id || '';
-          let nextContactId = prev.contactId;
-          let nextContactName = prev.contactName;
-          if (pipelineKind === 'candidate') {
-            nextContactId = '';
-            nextContactName = linkedEntityName || prev.contactName || contactName || '';
-          } else if (nextContactId) {
-            const match = cts.find((c) => c.id === nextContactId);
-            if (match) nextContactName = match.name;
-          } else if (nextContactName) {
-            const match = cts.find((c) => c.name === nextContactName);
-            if (match) nextContactId = match.id;
-          }
-          return {
-            ...prev,
-            processId,
-            stageId,
-            contactId: nextContactId,
-            contactName: nextContactName,
-            clientName: prev.clientName || clientName,
-          };
-        });
+        applyPipelineDefaults(clientPipelinesProp, candidatePipelinesProp, cts);
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setLoadingMeta(true);
+    setError(null);
+
+    const pipelinesPromise = Promise.all([
+      fetchPipelines(settingsClientId).catch(() => [] as PipelineDto[]),
+      fetchCandidatePipelines(settingsClientId).catch(() => [] as PipelineDto[]),
+    ]).then(([client, candidate]) => ({ client, candidate }));
+
+    Promise.all([pipelinesPromise, loadContacts()])
+      .then(([pipelineGroups, cts]) => {
+        if (cancelled) return;
+        const client = pipelineGroups.client;
+        const candidate = pipelineGroups.candidate;
+        setClientPipelines(client);
+        setCandidatePipelines(candidate);
+        setContacts(cts);
+        applyPipelineDefaults(client, candidate, cts);
       })
       .finally(() => {
         if (!cancelled) setLoadingMeta(false);
@@ -155,17 +288,47 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, clientId, apiBase, clientName, pipelineKind, linkedEntityName, contactName]);
+  }, [
+    isOpen,
+    clientId,
+    organizationId,
+    apiBase,
+    pipelineKind,
+    pipelineClientId,
+    clientPipelinesProp,
+    candidatePipelinesProp,
+    applyPipelineDefaults,
+  ]);
+
+  const allPipelines = useMemo<PipelineWithKind[]>(
+    () => [
+      ...candidatePipelines.map((p) => ({ ...p, kind: 'candidate' as const })),
+      ...clientPipelines.map((p) => ({ ...p, kind: 'client' as const })),
+    ],
+    [clientPipelines, candidatePipelines],
+  );
 
   if (!isOpen) return null;
 
-  const activePipeline = pipelines.find((p) => p.id === formData.processId) || pipelines[0];
+  const activePipeline =
+    allPipelines.find((p) => p.id === formData.processId) || allPipelines[0];
   const stages = activePipeline?.stages || [];
+
+  const applyStageSlaDefaults = (stageId: string) => {
+    const stage = stages.find((s) => s.id === stageId);
+    if (!stage) return {};
+    return {
+      slaValue: stage.slaLimit ?? 0,
+      slaUnit: normalizeSlaUnit(stage.slaLimitUnit),
+    };
+  };
+
+  const slaUnit = normalizeSlaUnit(formData.slaUnit);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formData.title.trim()) return;
-    const pipeline = pipelines.find((p) => p.id === formData.processId);
+    const pipeline = allPipelines.find((p) => p.id === formData.processId);
     const stage = stages.find((s) => s.id === formData.stageId) || stages[0];
     setSaving(true);
     setError(null);
@@ -178,10 +341,11 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
         stageName: stage?.name || '',
         contactId: formData.contactId || null,
         contactName: formData.contactName,
-        clientName: formData.clientName || clientName,
+        clientName: formData.clientName || displayClientName,
         assignee: formData.assignee || 'אני',
         priority: formData.priority,
-        slaDays: formData.slaDays,
+        slaValue: formData.slaValue,
+        slaUnit,
         description: formData.description,
       });
       onClose();
@@ -245,20 +409,25 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                       value={formData.processId}
                       onChange={(e) => {
                         const newProcess = e.target.value;
-                        const newPipeline = pipelines.find((p) => p.id === newProcess);
+                        const newPipeline = allPipelines.find((p) => p.id === newProcess);
+                        const nextStageId = newPipeline?.stages?.[0]?.id || '';
+                        const nextStages = newPipeline?.stages || [];
+                        const stage = nextStages.find((s) => s.id === nextStageId);
                         setFormData({
                           ...formData,
                           processId: newProcess,
-                          stageId: newPipeline?.stages?.[0]?.id || '',
+                          stageId: nextStageId,
+                          slaValue: stage?.slaLimit ?? formData.slaValue,
+                          slaUnit: normalizeSlaUnit(stage?.slaLimitUnit ?? formData.slaUnit),
                         });
                       }}
                       className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
-                      disabled={!pipelines.length}
+                      disabled={!allPipelines.length}
                     >
-                      {pipelines.length === 0 ? (
+                      {allPipelines.length === 0 ? (
                         <option value="">אין תהליכים מוגדרים</option>
                       ) : (
-                        pipelines.map((p) => (
+                        allPipelines.map((p) => (
                           <option key={p.id} value={p.id}>
                             {p.name}
                           </option>
@@ -270,7 +439,14 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                     <label className="block text-sm font-bold text-text-default mb-2">סטטוס (שלב)</label>
                     <select
                       value={formData.stageId}
-                      onChange={(e) => setFormData({ ...formData, stageId: e.target.value })}
+                      onChange={(e) => {
+                        const nextStageId = e.target.value;
+                        setFormData({
+                          ...formData,
+                          stageId: nextStageId,
+                          ...applyStageSlaDefaults(nextStageId),
+                        });
+                      }}
                       className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
                       disabled={!stages.length}
                     >
@@ -361,15 +537,16 @@ const ProcessEventModal: React.FC<ProcessEventModalProps> = ({
                     </select>
                   </div>
                   <div>
-                    <label className="block text-sm font-bold text-text-default mb-2">התראת SLA (ימים)</label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={formData.slaDays}
-                      onChange={(e) =>
-                        setFormData({ ...formData, slaDays: parseInt(e.target.value, 10) || 0 })
-                      }
-                      className="w-full bg-bg-input border border-border-default rounded-xl p-3.5 text-sm focus:ring-2 focus:ring-primary-500 transition-all shadow-sm"
+                    <label className="block text-sm font-bold text-text-default mb-2">
+                      {slaFieldLabel(slaUnit)}
+                    </label>
+                    <SlaDurationInput
+                      value={formData.slaValue}
+                      unit={slaUnit}
+                      onValueChange={(slaValue) => setFormData({ ...formData, slaValue })}
+                      onUnitChange={(nextUnit) => setFormData({ ...formData, slaUnit: nextUnit })}
+                      className="bg-bg-input border-border-default rounded-xl p-3.5 shadow-sm"
+                      inputClassName="text-start px-2"
                     />
                   </div>
                 </div>

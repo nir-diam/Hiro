@@ -153,6 +153,41 @@ async function seedDefaults(clientId, organizationId, pipelineId, transaction) {
   return created;
 }
 
+/** Copy client-level defaults (organizationId NULL) onto a specific organization scope. */
+async function copyFromClientDefaults(clientId, organizationId, pipelineId, transaction) {
+  if (!organizationId) return null;
+  const sources = await ClientHealthRule.findAll({
+    where: scopeWhere(clientId, null, pipelineId),
+    order: [
+      ['sortIndex', 'ASC'],
+      ['createdAt', 'ASC'],
+    ],
+    transaction,
+  });
+  if (!sources.length) return null;
+
+  const created = [];
+  for (let i = 0; i < sources.length; i += 1) {
+    const plain = sources[i].toJSON ? sources[i].toJSON() : sources[i];
+    const row = await ClientHealthRule.create(
+      {
+        clientId,
+        organizationId,
+        pipelineId,
+        color: plain.color,
+        condition: plain.condition,
+        operator: plain.operator,
+        value: plain.value,
+        enabled: plain.enabled,
+        sortIndex: i,
+      },
+      { transaction },
+    );
+    created.push(ruleToDto(row));
+  }
+  return created;
+}
+
 /**
  * List rules for client + org + pipeline. Seeds defaults when empty.
  * Legacy rows (pipeline_id NULL) are migrated onto the requested pipeline once.
@@ -209,6 +244,10 @@ async function listOrSeedByScope(clientId, organizationIdRaw = null, pipelineIdR
       return migrated.map(ruleToDto);
     }
 
+    if (organizationId) {
+      const copied = await copyFromClientDefaults(clientId, organizationId, pipelineId, transaction);
+      if (copied?.length) return copied;
+    }
     return seedDefaults(clientId, organizationId, pipelineId, transaction);
   });
 }

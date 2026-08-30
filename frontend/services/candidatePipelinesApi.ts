@@ -51,6 +51,7 @@ export async function syncCandidatePipelines(clientId: string, pipelines: Pipeli
                     color: s.color,
                     order: s.order,
                     slaLimit: s.slaLimit,
+                    slaLimitUnit: s.slaLimitUnit || 'days',
                     outcomes: Array.isArray(s.outcomes) ? s.outcomes : [],
                 })),
             })),
@@ -103,6 +104,13 @@ export type PatchCandidatePipelineStageResult = {
     id?: string;
     candidatePipelineId?: string | null;
     pipelineStageId?: string | null;
+    candidatePipelineProcesses?: Array<{
+        id: string;
+        pipelineId: string;
+        stageId: string;
+        targetOutcomeId?: string | null;
+        isActive?: boolean;
+    }>;
     pipelineMove?: {
         viaOutcome?: boolean;
         async?: boolean;

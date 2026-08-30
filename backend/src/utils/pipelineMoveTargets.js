@@ -1,3 +1,11 @@
+const {
+  normalizeSlaUnit,
+  dueDateTimeAfterSla,
+  readStageSla,
+  readOutcomeSla,
+  pickSla,
+} = require('./slaDuration');
+
 const OUTCOME_TARGET_PREFIX = 'outcome:';
 
 function encodeOutcomeTarget(outcomeId) {
@@ -39,25 +47,40 @@ function resolveMoveTarget(targetStageId, stages = []) {
   };
 }
 
-function resolveOutcomeSlaDays(outcome, stages = []) {
+function resolveOutcomeSla(outcome, stages = []) {
   if (outcome.actionType === 'move' && outcome.targetStageId) {
     const resolved = resolveMoveTarget(outcome.targetStageId, stages);
     const target = resolved
       ? stages.find((s) => s.id === resolved.stageId)
       : stages.find((s) => s.id === outcome.targetStageId);
-    const fromStage = Math.max(0, Number(target?.slaLimit) || 0);
-    const fromOutcome = Math.max(0, Number(outcome.autoFollowupDays) || 0);
+    const fromStage = readStageSla(target);
+    const fromOutcome = readOutcomeSla(outcome);
     if (resolved?.outcomeId && target) {
       const targetOutcome = (target.outcomes || []).find((o) => o.id === resolved.outcomeId);
-      const fromTargetOutcome = Math.max(0, Number(targetOutcome?.autoFollowupDays) || 0);
-      return fromTargetOutcome || fromStage || fromOutcome;
+      const fromTargetOutcome = readOutcomeSla(targetOutcome);
+      return pickSla(fromTargetOutcome, fromStage, fromOutcome);
     }
-    return fromStage || fromOutcome;
+    return pickSla(fromStage, fromOutcome);
   }
   if (outcome.actionType === 'stay') {
-    return Math.max(0, Number(outcome.autoFollowupDays) || 0);
+    return readOutcomeSla(outcome);
   }
-  return 0;
+  return { value: 0, unit: 'days' };
+}
+
+/** @deprecated Use resolveOutcomeSla + dueDateTimeAfterSla for hour/minute precision. */
+function resolveOutcomeSlaDays(outcome, stages = []) {
+  const sla = resolveOutcomeSla(outcome, stages);
+  if (sla.value <= 0) return 0;
+  if (sla.unit === 'days') return sla.value;
+  if (sla.unit === 'hours') return Math.max(1, Math.ceil(sla.value / 24));
+  return Math.max(1, Math.ceil(sla.value / (24 * 60)));
+}
+
+function applyOutcomeSlaDueDateTime(outcome, stages = []) {
+  const sla = resolveOutcomeSla(outcome, stages);
+  if (sla.value <= 0) return { dueDate: null, dueTime: null };
+  return dueDateTimeAfterSla(sla.value, sla.unit);
 }
 
 function dueDateAfterDaysFromToday(days) {
@@ -73,6 +96,8 @@ module.exports = {
   isOutcomeTarget,
   decodeOutcomeTarget,
   resolveMoveTarget,
+  resolveOutcomeSla,
   resolveOutcomeSlaDays,
+  applyOutcomeSlaDueDateTime,
   dueDateAfterDaysFromToday,
 };

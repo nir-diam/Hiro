@@ -71,6 +71,21 @@ const emptyProfiles = (): JobHealthProfilesDto => ({
 
 type ScopeOption = { id: string; name: string };
 
+/** Sentinel for client-level default rules (organizationId = null in API). */
+const DEFAULT_SCOPE_ID = '__default__';
+
+function isPlatformAdminUser(user: { role?: string; clientId?: string | null } | null | undefined): boolean {
+    if (!user) return false;
+    if (user.role === 'super_admin') return true;
+    if (user.role === 'admin' && !user.clientId) return true;
+    return false;
+}
+
+function resolveOrganizationId(scopeId: string): string | null {
+    if (!scopeId || scopeId === DEFAULT_SCOPE_ID) return null;
+    return scopeId;
+}
+
 function mapLinkedOrgOption(raw: Record<string, unknown>): ScopeOption | null {
     const organizationId = raw.organizationId ? String(raw.organizationId) : '';
     if (!organizationId) return null;
@@ -218,7 +233,7 @@ const RuleRow: React.FC<{
 const JobHealthSettingsView: React.FC = () => {
     const { user, ready: authReady } = useAuth();
     const apiBase = import.meta.env.VITE_API_BASE || '';
-    const isPlatformAdmin = user?.role === 'admin' || user?.role === 'super_admin';
+    const isPlatformAdmin = isPlatformAdminUser(user);
     const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
 
     const [scopeOptions, setScopeOptions] = useState<ScopeOption[]>([]);
@@ -236,8 +251,10 @@ const JobHealthSettingsView: React.FC = () => {
     const [draggingId, setDraggingId] = useState<string | null>(null);
     const draggingIdRef = useRef<string | null>(null);
 
+    const effectiveScopeId = selectedScopeId || (!isPlatformAdmin ? DEFAULT_SCOPE_ID : '');
     const activeClientId = isPlatformAdmin ? selectedScopeId : tenantClientId;
-    const activeOrganizationId = isPlatformAdmin ? null : (selectedScopeId || null);
+    const activeOrganizationId = isPlatformAdmin ? null : resolveOrganizationId(effectiveScopeId);
+    const isDefaultScope = !isPlatformAdmin && effectiveScopeId === DEFAULT_SCOPE_ID;
 
     useEffect(() => {
         if (!authReady || !apiBase) return;
@@ -260,7 +277,10 @@ const JobHealthSettingsView: React.FC = () => {
                         }))
                         .filter((o: ScopeOption) => o.id);
                     setScopeOptions(opts);
-                    setSelectedScopeId((prev) => prev || opts[0]?.id || '');
+                    setSelectedScopeId((prev) => {
+                        if (prev && prev !== DEFAULT_SCOPE_ID && opts.some((o) => o.id === prev)) return prev;
+                        return opts[0]?.id || '';
+                    });
                 } else if (tenantClientId) {
                     const res = await fetch(
                         `${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`,
@@ -274,7 +294,11 @@ const JobHealthSettingsView: React.FC = () => {
                         .map((row: Record<string, unknown>) => mapLinkedOrgOption(row))
                         .filter((o: ScopeOption | null): o is ScopeOption => Boolean(o));
                     setScopeOptions(opts);
-                    setSelectedScopeId((prev) => prev || opts[0]?.id || '');
+                    setSelectedScopeId((prev) => {
+                        if (prev === DEFAULT_SCOPE_ID) return prev;
+                        if (prev && opts.some((o) => o.id === prev)) return prev;
+                        return DEFAULT_SCOPE_ID;
+                    });
                 } else {
                     setScopeOptions([]);
                     setSelectedScopeId('');
@@ -295,7 +319,7 @@ const JobHealthSettingsView: React.FC = () => {
             setBaseline(null);
             return;
         }
-        if (!isPlatformAdmin && !activeOrganizationId) {
+        if (!isPlatformAdmin && !effectiveScopeId) {
             setProfileRules(emptyProfiles());
             setBaseline(null);
             return;
@@ -316,13 +340,13 @@ const JobHealthSettingsView: React.FC = () => {
         } finally {
             setLoadingRules(false);
         }
-    }, [activeClientId, activeOrganizationId, isPlatformAdmin]);
+    }, [activeClientId, activeOrganizationId, isPlatformAdmin, selectedScopeId]);
 
     useEffect(() => {
         void loadRules();
     }, [loadRules]);
 
-    const canEdit = Boolean(activeClientId && (isPlatformAdmin || activeOrganizationId));
+    const canEdit = Boolean(activeClientId && (isPlatformAdmin || effectiveScopeId));
     const scopeLabel = isPlatformAdmin ? 'לקוח' : 'ארגון';
 
     const handleAddRule = () => {
@@ -413,7 +437,7 @@ const JobHealthSettingsView: React.FC = () => {
 
     const handleSave = async () => {
         if (!activeClientId) return;
-        if (!isPlatformAdmin && !activeOrganizationId) {
+        if (!isPlatformAdmin && !effectiveScopeId) {
             setError('יש לבחור ארגון');
             return;
         }
@@ -451,18 +475,34 @@ const JobHealthSettingsView: React.FC = () => {
                             <div className="relative">
                                 <BuildingOffice2Icon className="w-4 h-4 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
                                 <select
-                                    value={selectedScopeId}
+                                    value={selectedScopeId || (!isPlatformAdmin ? DEFAULT_SCOPE_ID : '')}
                                     onChange={(e) => setSelectedScopeId(e.target.value)}
-                                    disabled={loadingScopes || scopeOptions.length === 0}
+                                    disabled={loadingScopes || (isPlatformAdmin ? scopeOptions.length === 0 : !tenantClientId)}
                                     className="w-full appearance-none bg-bg-input border border-border-default rounded-xl py-2.5 pr-10 pl-3 text-sm font-bold text-text-default focus:ring-2 focus:ring-primary-500 outline-none disabled:opacity-60"
                                 >
-                                    {scopeOptions.length === 0 ? (
-                                        <option value="">{loadingScopes ? 'טוען…' : (isPlatformAdmin ? 'אין לקוחות' : 'אין ארגונים מקושרים')}</option>
+                                    {loadingScopes ? (
+                                        <option value="">טוען…</option>
+                                    ) : isPlatformAdmin ? (
+                                        scopeOptions.length === 0 ? (
+                                            <option value="">אין לקוחות</option>
+                                        ) : (
+                                            scopeOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)
+                                        )
                                     ) : (
-                                        scopeOptions.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)
+                                        <>
+                                            <option value={DEFAULT_SCOPE_ID}>ברירת מחדל</option>
+                                            {scopeOptions.map((o) => (
+                                                <option key={o.id} value={o.id}>{o.name}</option>
+                                            ))}
+                                        </>
                                     )}
                                 </select>
                             </div>
+                            {isDefaultScope ? (
+                                <p className="text-[11px] text-primary-700 mt-1.5 leading-snug">
+                                    לכל פרופיל (רגיל / מסת גיוס / בכירים) יש ברירת מחדל נפרדת. שמירה אחת שומרת את כל הפרופילים.
+                                </p>
+                            ) : null}
                         </div>
                     </div>
                     <p className="text-sm text-text-muted max-w-2xl leading-relaxed">
@@ -516,6 +556,11 @@ const JobHealthSettingsView: React.FC = () => {
                             >
                                 {profileMetadata[profileId].icon}
                                 {profileMetadata[profileId].label}
+                                {profileRules[profileId]?.length > 0 ? (
+                                    <span className="text-[10px] font-bold opacity-80">
+                                        ({profileRules[profileId].length} חוקים)
+                                    </span>
+                                ) : null}
                             </button>
                         ))}
                     </div>
@@ -544,7 +589,7 @@ const JobHealthSettingsView: React.FC = () => {
                         ) : !canEdit ? (
                             <div className="text-center py-12 bg-bg-subtle/30 border-2 border-dashed border-border-default rounded-xl">
                                 <p className="text-text-muted font-medium">
-                                    {isPlatformAdmin ? 'בחר לקוח כדי לערוך פרופילי בריאות.' : 'בחר ארגון מקושר כדי לערוך פרופילי בריאות.'}
+                                    {isPlatformAdmin ? 'בחר לקוח כדי לערוך פרופילי בריאות.' : 'בחר ארגון (או ברירת מחדל) כדי לערוך פרופילי בריאות.'}
                                 </p>
                             </div>
                         ) : profileRules[selectedProfile].length > 0 ? (

@@ -128,6 +128,32 @@ const jobIdsFromRuleValue = (value) => {
   return one ? [one] : [];
 };
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const recruitmentSourceMatchSql = (vals, binds) => {
+  const parts = [];
+  const uuidVals = vals.filter((v) => UUID_RE.test(v));
+  const nameVals = vals.filter((v) => !UUID_RE.test(v));
+
+  if (uuidVals.length) {
+    const n = pushBind(binds, uuidVals);
+    parts.push(`candidates."recruitmentSourceId" = ANY($${n}::uuid[])`);
+  }
+  for (const src of nameVals) {
+    const n = pushBind(binds, `%${src}%`);
+    parts.push(`(
+      candidates.source ILIKE $${n}
+      OR EXISTS (
+        SELECT 1 FROM recruitment_sources rs
+        WHERE rs.id = candidates."recruitmentSourceId"
+          AND rs.name ILIKE $${n}
+      )
+    )`);
+  }
+  if (!parts.length) return null;
+  return parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
+};
+
 const interestFieldMatchSql = (interestValues, binds, negate = false) => {
   const vals = Array.isArray(interestValues)
     ? interestValues
@@ -272,14 +298,13 @@ const compileOneComplexRule = (rule, binds) => {
     case 'recruitment_source': {
       const vals = Array.isArray(rule.value) ? rule.value.map(String).filter(Boolean) : [];
       if (!vals.length) return null;
-      const parts = [];
-      for (const src of vals) {
-        const n = pushBind(binds, `%${src}%`);
-        parts.push(`source ILIKE $${n}`);
-      }
-      const srcMatch = parts.length === 1 ? parts[0] : `(${parts.join(' OR ')})`;
+      const srcMatch = recruitmentSourceMatchSql(vals, binds);
+      if (!srcMatch) return null;
       if (String(rule.sourceMode || '') === 'ראשוני') {
-        return `(${srcMatch} OR COALESCE("recruitmentSourceCreatedAt"::text, '') <> '')`;
+        return `(${srcMatch} AND candidates."recruitmentSourceCreatedAt" IS NOT NULL AND (
+          candidates."recruitmentSourceUpdatedAt" IS NULL
+          OR candidates."recruitmentSourceUpdatedAt" = candidates."recruitmentSourceCreatedAt"
+        ))`;
       }
       return srcMatch;
     }

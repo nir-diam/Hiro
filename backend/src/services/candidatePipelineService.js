@@ -1,6 +1,7 @@
 const CandidatePipeline = require('../models/CandidatePipeline');
 const CandidatePipelineStage = require('../models/CandidatePipelineStage');
 const { isUuid, normalizeOutcomes } = require('./clientPipelineService');
+const { normalizeSlaUnit } = require('../utils/slaDuration');
 
 /** Default candidate lifecycle pipelines (seeded when tenant has none). */
 const DEFAULT_CANDIDATE_PIPELINES = [
@@ -36,6 +37,7 @@ function stageToDto(row) {
     color: plain.color,
     order: plain.sortIndex + 1,
     slaLimit: plain.slaLimit,
+    slaLimitUnit: normalizeSlaUnit(plain.slaLimitUnit),
     outcomes: normalizeOutcomes(plain.outcomes),
   };
 }
@@ -157,6 +159,7 @@ async function syncClientCandidatePipelines(clientId, incoming = []) {
         const color = String(st.color || 'bg-gray-100 text-gray-700').trim().slice(0, 120)
           || 'bg-gray-100 text-gray-700';
         const slaLimit = Math.max(0, parseInt(st.slaLimit, 10) || 0);
+        const slaLimitUnit = normalizeSlaUnit(st.slaLimitUnit);
         const orderRaw = st.order != null ? Number(st.order) : j + 1;
         const sortIndex = Number.isFinite(orderRaw) && orderRaw > 0 ? orderRaw - 1 : j;
         const outcomes = normalizeOutcomes(st.outcomes);
@@ -164,13 +167,13 @@ async function syncClientCandidatePipelines(clientId, incoming = []) {
         const sid = st.id;
         if (isUuid(sid) && stageById.has(String(sid))) {
           await CandidatePipelineStage.update(
-            { name: stName, color, sortIndex, slaLimit, outcomes },
+            { name: stName, color, sortIndex, slaLimit, slaLimitUnit, outcomes },
             { where: { id: sid, pipelineId }, transaction },
           );
           keptStageIds.push(String(sid));
         } else {
           const created = await CandidatePipelineStage.create(
-            { pipelineId, name: stName, color, sortIndex, slaLimit, outcomes },
+            { pipelineId, name: stName, color, sortIndex, slaLimit, slaLimitUnit, outcomes },
             { transaction },
           );
           keptStageIds.push(String(created.id));

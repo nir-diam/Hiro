@@ -90,6 +90,8 @@ const Candidate = sequelize.define(
     /** Historical parsed CV versions: [{ text, savedAt }]; current text lives in searchText. */
     originalText: { type: DataTypes.JSONB, defaultValue: [] },
     isArchived: { type: DataTypes.BOOLEAN, defaultValue: false },
+    /** True while CV/email/AI ingest is running; excluded from default candidate list. */
+    ingestPending: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     isDeleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     documents: { type: DataTypes.JSONB, defaultValue: [] },
     events: { type: DataTypes.JSONB, defaultValue: [] },
@@ -110,6 +112,8 @@ const Candidate = sequelize.define(
     candidatePipelineId: { type: DataTypes.UUID, allowNull: true },
     /** Current stage within candidatePipelineId. */
     pipelineStageId: { type: DataTypes.UUID, allowNull: true },
+    /** Additional active pipeline processes running in parallel with candidatePipelineId. */
+    candidatePipelineProcesses: { type: DataTypes.JSONB, allowNull: false, defaultValue: [] },
   },
   {
     tableName: 'candidates',

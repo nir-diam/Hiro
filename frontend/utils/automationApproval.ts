@@ -4,7 +4,9 @@ export type PendingAutomationRow = AutomationResultRow & {
   automationId: string;
   actionType?: string | null;
   templateId?: string | null;
+  templateName?: string | null;
   statusName?: string | null;
+  recipientLabels?: string[] | null;
 };
 
 export function automationActionLabel(actionType?: string | null): string {
@@ -15,6 +17,8 @@ export function automationActionLabel(actionType?: string | null): string {
       return 'שליחת SMS מתוך תבנית';
     case 'start_pipeline':
       return 'העבר לתהליך אחר';
+    case 'open_additional_process':
+      return 'פתח תהליך נוסף';
     case 'close_event':
       return 'סגירת אירוע';
     case 'change_status':

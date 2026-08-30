@@ -162,7 +162,7 @@ export const getLinkHeroImage = (link: Pick<PublishingLinkRow, 'heroImage' | 'he
   link.heroImage?.trim() || link.heroImageUrl?.trim() || null;
 
 export const getLinkPublicUrl = (link: Pick<PublishingLinkRow, 'url' | 'jobId' | 'postingCode' | 'client'>) =>
-  link.url?.trim() || buildPublicJobUrl(link.jobId, undefined, link.postingCode, link.client);
+  link.url?.trim() || buildPublicJobAppUrl(link.jobId, undefined, link.postingCode, link.client);
 
 export type PublishingCandidateRow = {
   id: string;
@@ -398,7 +398,7 @@ export async function recordLandingVisit(slug: string, src?: string | null): Pro
 export async function submitLandingApplication(
   slug: string,
   payload: Record<string, unknown>,
-): Promise<{ ok: boolean; companyName?: string }> {
+): Promise<{ ok: boolean; companyName?: string; enriched?: boolean; enrichmentPending?: boolean; enrichError?: string }> {
   const res = await fetch(`${apiBase()}/api/public/jobs/${encodeURIComponent(slug)}/apply`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -551,11 +551,19 @@ export function buildPublicJobHashPath(
   return `/jobs/public/${encodeURIComponent(slug)}`;
 }
 
-/** Origin for share-preview HTML (API). Uses VITE_API_BASE when set. */
-function shareApiOrigin(): string {
+/** Staff/public SPA origin for share and landing URLs — not the API host. */
+export function publicAppOrigin(): string {
+  const fromEnv = import.meta.env.VITE_PUBLIC_APP_URL || import.meta.env.VITE_APP_URL;
+  if (fromEnv) return String(fromEnv).replace(/\/$/, '');
   const api = apiBase()?.replace(/\/$/, '');
-  if (api) return api;
-  return typeof window !== 'undefined' ? window.location.origin : '';
+  if (api) {
+    const appFromApi = api.replace(/:\/\/api\./i, '://app.');
+    if (appFromApi !== api) return appFromApi;
+  }
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    return window.location.origin.replace(/\/$/, '');
+  }
+  return '';
 }
 
 /** In-app landing URL (after share page redirect). */
@@ -565,14 +573,14 @@ export function buildPublicJobAppUrl(
   postingCode?: string | null,
   clientName?: string | null,
 ) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const origin = publicAppOrigin();
   const path = buildPublicJobHashPath(jobId, postingCode, clientName);
   const query = src ? `?src=${encodeURIComponent(src)}` : '';
   return `${origin}${path}${query}`;
 }
 
 /**
- * Share link for WhatsApp / LinkedIn / copy — hits backend HTML with Open Graph tags,
+ * Share link for WhatsApp / LinkedIn — backend HTML with Open Graph tags,
  * then redirects humans to the app landing URL.
  */
 export function buildPublicJobUrl(
@@ -584,7 +592,7 @@ export function buildPublicJobUrl(
   const slug = getPublicJobSlug(jobId, postingCode);
   const client = String(clientName || '').trim();
   const query = src ? `?src=${encodeURIComponent(src)}` : '';
-  const base = shareApiOrigin();
+  const base = publicAppOrigin();
   if (client) {
     return `${base}/api/public/jobs/share/${encodeURIComponent(client)}/${encodeURIComponent(slug)}${query}`;
   }
@@ -602,17 +610,17 @@ export function buildPublicJobBoardHashPath(clientDomainOrId?: string | null): s
 
 /** In-app job board URL (opens the SPA directly). */
 export function buildPublicJobBoardAppUrl(clientDomainOrId?: string | null) {
-  const origin = typeof window !== 'undefined' ? window.location.origin : '';
+  const origin = publicAppOrigin();
   return `${origin}${buildPublicJobBoardHashPath(clientDomainOrId)}`;
 }
 
 /**
- * Share link for WhatsApp / LinkedIn / copy — backend HTML with Open Graph tags,
+ * Share link for WhatsApp / LinkedIn — backend HTML with Open Graph tags,
  * then redirects humans to the job board SPA URL.
  */
 export function buildPublicJobBoardUrl(clientDomainOrId?: string | null) {
   const client = String(clientDomainOrId || '').trim();
-  const base = shareApiOrigin();
+  const base = publicAppOrigin();
   if (client) {
     return `${base}/api/public/jobs/share/${encodeURIComponent(client)}/board`;
   }
@@ -663,7 +671,7 @@ export function mapTrackingLinkFromApi(
     id: link.id ?? srcKey,
     source: link.source || 'קישור',
     srcKey,
-    url: buildPublicJobUrl(jobId, srcKey, postingCode, clientName),
+    url: buildPublicJobAppUrl(jobId, srcKey, postingCode, clientName),
     views: Number(link.visits ?? link.views ?? 0) || 0,
     applicants: Number(link.submissions ?? link.applicants ?? 0) || 0,
   };

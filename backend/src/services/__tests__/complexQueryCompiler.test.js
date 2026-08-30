@@ -71,4 +71,25 @@ describe('complexQueryCompiler', () => {
     expect(sql).toMatch(/jsonb_array_elements/i);
     expect(sql).not.toMatch(/professionalSummary/i);
   });
+
+  test('recruitment_source matches by source text and recruitmentSourceId join', () => {
+    const binds = [];
+    const sql = compileComplexRulesWhere(
+      [{ operator: 'AND', field: 'recruitment_source', value: ['Ethosia'], sourceMode: 'נוכחי' }],
+      binds,
+    );
+    expect(sql).toMatch(/recruitment_sources/i);
+    expect(sql).toMatch(/candidates\.source ILIKE/i);
+    expect(binds).toEqual(['%Ethosia%']);
+  });
+
+  test('recruitment_source initial mode requires unchanged source timestamps', () => {
+    const binds = [];
+    const sql = compileComplexRulesWhere(
+      [{ operator: 'AND', field: 'recruitment_source', value: ['AllJobs'], sourceMode: 'ראשוני' }],
+      binds,
+    );
+    expect(sql).toMatch(/recruitmentSourceCreatedAt/i);
+    expect(sql).toMatch(/recruitmentSourceUpdatedAt/i);
+  });
 });

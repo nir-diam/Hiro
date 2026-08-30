@@ -23,7 +23,13 @@ export type OutcomeTrigger = {
     systemEventId?: string;
 };
 
-export type AutomationActionType = 'send_email' | 'send_sms' | 'start_pipeline' | 'close_event' | 'change_status';
+export type AutomationActionType =
+    | 'send_email'
+    | 'send_sms'
+    | 'start_pipeline'
+    | 'open_additional_process'
+    | 'close_event'
+    | 'change_status';
 export type AutomationScheduleType = 'immediate' | 'minutes' | 'hours' | 'days';
 
 export type OutcomeAutomationRecipients = {
@@ -38,6 +44,9 @@ export type OutcomeAutomation = {
     actionType: AutomationActionType;
     templateId?: string;
     pipelineId?: string;
+    stageId?: string;
+    /** Target stage outcome when action moves/opens another process. */
+    targetOutcomeId?: string;
     statusName?: string;
     scheduleType: AutomationScheduleType;
     scheduleValue?: number;
@@ -51,6 +60,7 @@ export type StageOutcomeDto = {
     actionType: 'stay' | 'move' | 'freeze' | 'close';
     targetStageId?: string;
     autoFollowupDays?: number;
+    autoFollowupUnit?: 'days' | 'hours' | 'minutes';
     trigger?: OutcomeTrigger;
     automations?: OutcomeAutomation[];
 };
@@ -61,6 +71,7 @@ export type PipelineStageDto = {
     color: string;
     order: number;
     slaLimit: number;
+    slaLimitUnit?: 'days' | 'hours' | 'minutes';
     outcomes?: StageOutcomeDto[];
 };
 
@@ -98,6 +109,7 @@ export async function syncPipelines(clientId: string, pipelines: PipelineDto[]):
                     color: s.color,
                     order: s.order,
                     slaLimit: s.slaLimit,
+                    slaLimitUnit: s.slaLimitUnit || 'days',
                     outcomes: Array.isArray(s.outcomes) ? s.outcomes : [],
                 })),
             })),

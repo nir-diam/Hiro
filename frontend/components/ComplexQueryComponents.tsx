@@ -4,6 +4,7 @@ import TagSelectorModal from './TagSelectorModal';
 import DateRangeSelector, { DateRange } from './DateRangeSelector';
 import JobFieldSelector from './JobFieldSelector';
 import { fetchJobsForCompose, type JobComposeRow } from '../services/jobsApi';
+import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
 import {
     type ComplexFilterRule,
     type ComplexQueryOperator,
@@ -175,7 +176,6 @@ const STATUSES = ['פעיל', 'חסר פרטים', 'חסום'];
 const SPECIFIC_JOB_STATUSES = ['הוגש למשרה', 'נשלחו קורות חיים', 'בתהליך הערכה', 'ראיון טלפוני', 'ראיון פרונטלי', 'הצעת שכר', 'מועמד סירב', 'נדחה', 'התקבל'];
 const MOBILITY = ['בעל רכב פרטי', 'לא נייד', 'תחבורה ציבורית', 'לא צוין'];
 const LICENSES = ['אין', 'B', 'B1', 'C1', 'C', 'A1', 'A', 'לא צוין'];
-const SOURCES = ['אולג\'ובס', 'דרושים IL', 'ג\'ובמאסטר', 'לינקדאין', 'פייסבוק', 'חבר מביא חבר', 'אתר חברה'];
 const CHANNELS = ['דוא"ל', 'סמס', 'ווטסאפ'];
 const DISQUALIFICATION_REASONS = ['שכר גבוה מידי', 'חוסר ניסיון', 'לא זמין', 'לא עבר ראיון טכני', 'פער תרבותי'];
 const EVENT_TYPES = ['ראיון טלפוני', 'ראיון פרונטלי', 'ראיון זום', 'מבחן בית', 'הצעת שכר'];
@@ -467,6 +467,8 @@ export const ComplexRuleRow = ({
     onPatch,
     onRemove,
     isFirstRule = false,
+    recruitmentSourceOptions = [],
+    recruitmentSourcesLoading = false,
 }: {
     rule: ComplexFilterRule;
     onChange: (id: string, field: keyof ComplexFilterRule, value: unknown) => void;
@@ -475,6 +477,8 @@ export const ComplexRuleRow = ({
     onRemove: (id: string) => void;
     /** First row OR merges panel filters (גיל, שכר…) with this rule via OR, not only between complex rows. */
     isFirstRule?: boolean;
+    recruitmentSourceOptions?: string[];
+    recruitmentSourcesLoading?: boolean;
 }) => {
     const [isJobModalOpen, setJobModalOpen] = useState(false);
     const [isSpecificJobModalOpen, setSpecificJobModalOpen] = useState(false);
@@ -493,6 +497,7 @@ export const ComplexRuleRow = ({
             recruiters: undefined,
             clientValue: undefined,
             updaterTypes: undefined,
+            ...(val === 'recruitment_source' ? { sourceMode: 'נוכחי' } : {}),
         });
     };
 
@@ -687,7 +692,18 @@ export const ComplexRuleRow = ({
                             <option value="נוכחי">נוכחי</option>
                             <option value="ראשוני">ראשוני</option>
                         </select>
-                        <MultiSelect options={SOURCES} value={rule.value} onChange={(v: string[]) => onChange(rule.id, 'value', v)} />
+                        <MultiSelect
+                            options={recruitmentSourceOptions}
+                            value={rule.value}
+                            onChange={(v: string[]) => onChange(rule.id, 'value', v)}
+                            placeholder={
+                                recruitmentSourcesLoading
+                                    ? 'טוען מקורות גיוס...'
+                                    : recruitmentSourceOptions.length
+                                      ? 'בחר מהרשימה...'
+                                      : 'אין מקורות גיוס מוגדרים'
+                            }
+                        />
                     </div>
                 );
             case 'distribution_channels':
@@ -876,6 +892,31 @@ export const ComplexQueryBuilder: React.FC<ComplexQueryBuilderProps> = ({
     className = '',
     title = 'שאילתות מורכבות (שכבת סינון נוספת)',
 }) => {
+    const [recruitmentSourceOptions, setRecruitmentSourceOptions] = useState<string[]>([]);
+    const [recruitmentSourcesLoading, setRecruitmentSourcesLoading] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        setRecruitmentSourcesLoading(true);
+        void fetchRecruitmentSourceOptions()
+            .then((rows) => {
+                if (cancelled) return;
+                const names = [...new Set(rows.map((r) => String(r.name || '').trim()).filter(Boolean))].sort(
+                    (a, b) => a.localeCompare(b, 'he'),
+                );
+                setRecruitmentSourceOptions(names);
+            })
+            .catch(() => {
+                if (!cancelled) setRecruitmentSourceOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setRecruitmentSourcesLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
     const handleAddRule = useCallback(
         (operator: ComplexQueryOperator) => {
             onChange([...rules, createEmptyComplexRule(operator)]);
@@ -923,6 +964,8 @@ export const ComplexQueryBuilder: React.FC<ComplexQueryBuilderProps> = ({
                             onChange={handleRuleChange}
                             onPatch={handleRulePatch}
                             onRemove={handleRemoveRule}
+                            recruitmentSourceOptions={recruitmentSourceOptions}
+                            recruitmentSourcesLoading={recruitmentSourcesLoading}
                         />
                     ))}
                 </div>

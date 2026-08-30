@@ -675,6 +675,156 @@ const remove = async (id, options = {}) => {
   await tag.destroy({ transaction });
 };
 
+const normalizeCatalogTerm = (value) => String(value || '').trim();
+
+const collectCatalogTagLabels = (tag) => {
+  const terms = new Set();
+  const add = (value) => {
+    const term = normalizeCatalogTerm(value);
+    if (term) terms.add(term);
+  };
+  add(tag.tagKey);
+  add(tag.displayNameHe);
+  add(tag.displayNameEn);
+  (Array.isArray(tag.aliases) ? tag.aliases : []).forEach(add);
+  (Array.isArray(tag.synonyms) ? tag.synonyms : []).forEach((syn) => {
+    if (typeof syn === 'string') add(syn);
+    else {
+      add(syn?.phrase);
+      add(syn?.name);
+    }
+  });
+  return [...terms];
+};
+
+const targetPrimaryLabelSet = (tag) => {
+  const primary = new Set();
+  [tag.tagKey, tag.displayNameHe, tag.displayNameEn].forEach((value) => {
+    const term = normalizeCatalogTerm(value);
+    if (term) primary.add(term.toLowerCase());
+  });
+  return primary;
+};
+
+const mergeCatalogTagIntoTarget = async (
+  sourceTagId,
+  targetTagId,
+  { aliasPriority = 4 } = {},
+) => {
+  const sourceId = String(sourceTagId || '').trim();
+  const targetId = String(targetTagId || '').trim();
+  if (!sourceId || !targetId) {
+    const err = new Error('sourceTagId and targetTagId are required');
+    err.status = 400;
+    throw err;
+  }
+  if (sourceId === targetId) {
+    const err = new Error('Cannot merge a tag into itself');
+    err.status = 400;
+    throw err;
+  }
+
+  const sourceTag = await Tag.findByPk(sourceId);
+  const targetTag = await Tag.findByPk(targetId);
+  if (!sourceTag) {
+    const err = new Error('Source tag not found');
+    err.status = 404;
+    throw err;
+  }
+  if (!targetTag) {
+    const err = new Error('Target tag not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const primaryLabels = targetPrimaryLabelSet(targetTag);
+  const mergeTerms = collectCatalogTagLabels(sourceTag).filter(
+    (term) => !primaryLabels.has(term.toLowerCase()),
+  );
+
+  const existingAliases = Array.isArray(targetTag.aliases) ? [...targetTag.aliases] : [];
+  for (const term of mergeTerms) {
+    const exists = existingAliases.some(
+      (alias) => normalizeCatalogTerm(alias).toLowerCase() === term.toLowerCase(),
+    );
+    if (!exists) existingAliases.push(term);
+  }
+  targetTag.aliases = existingAliases;
+
+  const existingSynonyms = Array.isArray(targetTag.synonyms) ? [...targetTag.synonyms] : [];
+  for (const term of mergeTerms) {
+    const exists = existingSynonyms.some((syn) => {
+      const phrase =
+        typeof syn === 'string' ? syn : normalizeCatalogTerm(syn?.phrase || syn?.name);
+      return phrase.toLowerCase() === term.toLowerCase();
+    });
+    if (!exists) {
+      existingSynonyms.push({
+        phrase: term,
+        language: /[\u0590-\u05FF]/.test(term) ? 'he' : 'en',
+        type: 'alias',
+        priority: aliasPriority,
+        source: 'merge',
+      });
+    }
+  }
+  targetTag.synonyms = existingSynonyms;
+  if (sourceTag.usageCount) {
+    targetTag.usageCount = (targetTag.usageCount || 0) + (sourceTag.usageCount || 0);
+  }
+  if (sourceTag.lastUsedAt) {
+    const srcUsed = new Date(sourceTag.lastUsedAt);
+    const tgtUsed = targetTag.lastUsedAt ? new Date(targetTag.lastUsedAt) : null;
+    if (!tgtUsed || srcUsed > tgtUsed) {
+      targetTag.lastUsedAt = sourceTag.lastUsedAt;
+    }
+  }
+  await targetTag.save({ fields: ['aliases', 'synonyms', 'usageCount', 'lastUsedAt'] });
+
+  const candidateTagService = require('./candidateTagService');
+  const candidateRows = await SystemTag.findAll({
+    where: { tag_id: sourceId, type: SYSTEM_TAG_TYPE_CANDIDATE },
+  });
+  for (const row of candidateRows) {
+    await candidateTagService.reassignCandidateTag(row.id, targetId);
+  }
+
+  const jobRows = await SystemTag.findAll({
+    where: { tag_id: sourceId, type: SYSTEM_TAG_TYPE_JOB },
+  });
+  for (const row of jobRows) {
+    await candidateTagService.reassignJobTag(row.id, targetId);
+  }
+
+  await TagHistory.destroy({ where: { tag_id: sourceId } });
+  await sourceTag.destroy();
+
+  fireAndForget(tagEmbeddingService.scheduleTagEmbedding({ id: targetId }));
+
+  return {
+    sourceTagId: sourceId,
+    targetTagId: targetId,
+    mergedTerms: mergeTerms,
+  };
+};
+
+const mergeCatalogTags = async (merges = []) => {
+  if (!Array.isArray(merges) || !merges.length) {
+    const err = new Error('No merges provided');
+    err.status = 400;
+    throw err;
+  }
+  const results = [];
+  for (const entry of merges) {
+    results.push(
+      await mergeCatalogTagIntoTarget(entry.sourceTagId, entry.targetTagId, {
+        aliasPriority: Number(entry.aliasPriority) || 4,
+      }),
+    );
+  }
+  return { success: true, results };
+};
+
 let tagPromptTemplate = null;
 
 const loadTagPromptTemplate = async () => {
@@ -786,6 +936,8 @@ module.exports = {
   create,
   update,
   remove,
+  mergeCatalogTags,
+  mergeCatalogTagIntoTarget,
   enrichSuggestions,
   recordTagDeletionResolution,
 };

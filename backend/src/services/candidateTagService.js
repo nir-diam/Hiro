@@ -205,6 +205,7 @@ const reassignCandidateTag = async (id, targetTagId) => {
   if (candidateTag.tag_id === targetTagId) return candidateTag;
   const targetTag = await Tag.findByPk(targetTagId);
   if (!targetTag) return null;
+  const targetActive = isCatalogTagStatusActive(targetTag.status);
 
   const existing = await SystemTag.findOne({
     where: candidateTagTypeWhere({
@@ -215,11 +216,18 @@ const reassignCandidateTag = async (id, targetTagId) => {
 
   if (existing) {
     await candidateTag.destroy();
+    if (targetActive && !existing.is_active) {
+      await existing.update({ is_active: true });
+    }
     await recordTagUsage(targetTag);
     return existing;
   }
 
-  await candidateTag.update({ tag_id: targetTagId });
+  await candidateTag.update({
+    tag_id: targetTagId,
+    is_active: targetActive,
+    raw_type: targetTag.type || candidateTag.raw_type,
+  });
   await recordTagUsage(targetTag);
   return candidateTag;
 };
@@ -249,6 +257,7 @@ const reassignJobTag = async (id, targetTagId) => {
   if (jobTag.tag_id === targetTagId) return jobTag;
   const targetTag = await Tag.findByPk(targetTagId);
   if (!targetTag) return null;
+  const targetActive = isCatalogTagStatusActive(targetTag.status);
 
   const jobId = jobTag.entity_id;
   const existing = await SystemTag.findOne({
@@ -260,12 +269,19 @@ const reassignJobTag = async (id, targetTagId) => {
 
   if (existing) {
     await jobTag.destroy();
+    if (targetActive && !existing.is_active) {
+      await existing.update({ is_active: true });
+    }
     await recordTagUsage(targetTag);
     await refreshJobSkillsFromSystemTags(jobId);
     return existing;
   }
 
-  await jobTag.update({ tag_id: targetTagId });
+  await jobTag.update({
+    tag_id: targetTagId,
+    raw_type: targetTag.type || jobTag.raw_type,
+    is_active: targetActive,
+  });
   await recordTagUsage(targetTag);
   await refreshJobSkillsFromSystemTags(jobId);
   return jobTag;

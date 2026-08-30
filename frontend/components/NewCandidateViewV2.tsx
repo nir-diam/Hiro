@@ -79,6 +79,31 @@ const loadingMessages = [
     'בונה את הפרופיל הסופי...'
 ];
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Wait until background CV enrichment clears ingestPending (AI upload returns 202). */
+async function waitForCandidateEnrichment(
+    apiBase: string,
+    candidateId: string,
+    authHeaders: () => Record<string, string>,
+    maxAttempts = 150,
+): Promise<Record<string, unknown>> {
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        const res = await fetch(`${apiBase}/api/candidates/${candidateId}`, {
+            headers: { ...authHeaders() },
+        });
+        const row = await res.json();
+        if (!res.ok) {
+            throw new Error(row?.message || 'שגיאה בטעינת פרופיל מועמד.');
+        }
+        if (!row?.ingestPending) {
+            return row;
+        }
+        await sleep(2000);
+    }
+    throw new Error('עיבוד קורות החיים נמשך זמן רב מדי. נסה לרענן את העמוד.');
+}
+
 /** Fields returned by GET / candidates / createFromAi that must sync into the form without refresh. */
 const CANDIDATE_API_PASSTHROUGH_KEYS = [
     'status',
@@ -361,7 +386,7 @@ const NewCandidateViewV2: React.FC = () => {
     const goToChoice = () => {
         resetAiFlow();
         if (typeof window !== 'undefined') {
-            window.location.href = 'https://hiro.co.il/candidates';
+            window.location.href = 'https://app.hiro.co.il/candidates';
             return;
         }
         setCreationMode('choice');
@@ -519,11 +544,20 @@ const NewCandidateViewV2: React.FC = () => {
             });
             const json = await response.json();
 
-            if (!response.ok) {
+            if (!response.ok && response.status !== 202) {
                 throw new Error(json.message || 'שגיאה בשרת במהלך ניתוח AI.');
             }
 
-            const candidate = json.candidate || {};
+            let candidate = json.candidate || {};
+            if ((response.status === 202 || json.processing || json.ingestPending || candidate.ingestPending) && candidate.id) {
+                candidate = await waitForCandidateEnrichment(
+                    apiBase,
+                    String(candidate.id),
+                    getAuthHeaders,
+                );
+            } else if (!response.ok) {
+                throw new Error(json.message || 'שגיאה בשרת במהלך ניתוח AI.');
+            }
             const summaryItems: string[] = [];
             if (candidate.fullName) summaryItems.push('שם מלא');
             if (candidate.phone) summaryItems.push('טלפון');

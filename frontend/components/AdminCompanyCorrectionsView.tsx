@@ -784,6 +784,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
     const [mergeTarget, setMergeTarget] = useState('');
     const [mergeTargetId, setMergeTargetId] = useState('');
     const [mergeOrgSearch, setMergeOrgSearch] = useState('');
+    const [mergeOrgDebouncedSearch, setMergeOrgDebouncedSearch] = useState('');
+    const [mergeOrgSearchResults, setMergeOrgSearchResults] = useState<OrgPick[]>([]);
     const [isMerging, setIsMerging] = useState(false);
     const [aiCheckedIds, setAiCheckedIds] = useState<Set<string>>(new Set());
     const [openDropdownId, setOpenDropdownId] = useState<string | null>(null);
@@ -854,6 +856,14 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         }, 350);
         return () => clearTimeout(t);
     }, [aiSearchTerm]);
+
+    useEffect(() => {
+        const t = setTimeout(() => {
+            const q = mergeOrgSearch.trim();
+            setMergeOrgDebouncedSearch(q.length > 2 ? q : '');
+        }, 350);
+        return () => clearTimeout(t);
+    }, [mergeOrgSearch]);
 
     useEffect(() => {
         setAiPage(1);
@@ -1222,6 +1232,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
             setMergeTarget('');
             setMergeTargetId('');
             setMergeOrgSearch('');
+            setMergeOrgDebouncedSearch('');
+            setMergeOrgSearchResults([]);
             return;
         }
         try {
@@ -1276,36 +1288,49 @@ const AdminCompanyCorrectionsView: React.FC = () => {
         // dashboard tab manages its own data via AdminCompanyAgentDashboard
     }, [activeTab, loadDecisions, loadUnmatched, loadHistory, loadOrganizationsData, loadBlacklist]);
 
-    // Load org list when the modal first opens (one-time per open)
+    // Generic-bucket orgs load once when that modal opens; merge_company searches on demand.
     useEffect(() => {
         if (!mergeModal) return;
         if (mergeModal.mode === 'map_generic') {
             void loadGenericBucketOrgs();
-        } else {
-            // Initial load for merge_company with no search term
-            void (async () => {
-                setMergeOrgsLoading(true);
-                try {
-                    const list = await fetchOrganizationsPage(apiBase, { limit: 200 });
-                    setOrganizations(list.filter((o) => !isGenericBucketOrgName(o.name)));
-                } catch { /* swallow */ }
-                finally { setMergeOrgsLoading(false); }
-            })();
         }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [mergeModal?.id, mergeModal?.mode]);
+    }, [mergeModal?.id, mergeModal?.mode, loadGenericBucketOrgs]);
+
+    useEffect(() => {
+        if (!mergeModal || mergeModal.mode !== 'merge_company') {
+            setMergeOrgSearchResults([]);
+            return;
+        }
+        if (!mergeOrgDebouncedSearch) {
+            setMergeOrgSearchResults([]);
+            return;
+        }
+        let cancelled = false;
+        setMergeOrgsLoading(true);
+        void (async () => {
+            try {
+                const list = await fetchOrganizationsPage(apiBase, {
+                    search: mergeOrgDebouncedSearch,
+                    limit: 20,
+                });
+                if (cancelled) return;
+                setMergeOrgSearchResults(list.filter((o) => !isGenericBucketOrgName(o.name)));
+            } catch {
+                if (!cancelled) setMergeOrgSearchResults([]);
+            } finally {
+                if (!cancelled) setMergeOrgsLoading(false);
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [mergeModal?.id, mergeModal?.mode, mergeOrgDebouncedSearch, apiBase]);
 
     const mergeModalOrgs = useMemo(() => {
         if (!mergeModal) return [];
         if (mergeModal.mode === 'map_generic') {
             return organizations.filter((o) => isGenericBucketOrgName(o.name));
         }
-        const q = mergeOrgSearch.trim().toLowerCase();
-        return organizations
-            .filter((o) => !isGenericBucketOrgName(o.name))
-            .filter((o) => !q || o.name.toLowerCase().includes(q))
-            .sort((a, b) => a.name.localeCompare(b.name, 'he'));
-    }, [mergeModal, mergeOrgSearch, organizations]);
+        return [...mergeOrgSearchResults].sort((a, b) => a.name.localeCompare(b.name, 'he'));
+    }, [mergeModal, mergeOrgSearchResults, organizations]);
 
     // ─── Render helpers (AI tab) ───────────────────────────────────────────────
 
@@ -2353,6 +2378,8 @@ const AdminCompanyCorrectionsView: React.FC = () => {
                                 <div className="w-full border border-slate-300 rounded-xl bg-slate-50 mb-5 max-h-48 overflow-y-auto">
                                     {mergeOrgsLoading ? (
                                         <p className="text-center text-xs text-text-muted py-4">טוען חברות...</p>
+                                    ) : mergeOrgSearch.trim().length <= 2 ? (
+                                        <p className="text-center text-xs text-text-muted py-4">הקלד לפחות 3 תווים לחיפוש חברה</p>
                                     ) : mergeModalOrgs.length === 0 ? (
                                         <p className="text-center text-xs text-text-muted py-4">לא נמצאו תוצאות</p>
                                     ) : (

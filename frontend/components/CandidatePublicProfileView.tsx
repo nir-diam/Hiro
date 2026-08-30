@@ -14,7 +14,7 @@ import AccordionSection from './AccordionSection';
 import { useSavedSearches } from '../context/SavedSearchesContext';
 import { JobAlertModalConfig } from './CreateJobAlertModal';
 import JobFieldSelector, { SelectedJobField } from './JobFieldSelector';
-import { useLocation, useNavigate } from 'react-router-dom'; 
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'; 
 import ShareProfileModal from './ShareProfileModal';
 import HiroAIChat from './HiroAIChat'; 
 import { GoogleGenAI, Type, FunctionDeclaration, Chat } from '@google/genai'; 
@@ -47,6 +47,7 @@ import {
     scrollToProfileCompletenessTarget,
     type ProfileCompletenessFieldId,
 } from '../utils/candidateProfileCompleteness';
+import { isStaffDuplicateProfile } from '../utils/candidateProfileDuplicate';
 
 // --- AI TOOLS DEFINITIONS ---
 const updateCandidateFieldFunctionDeclaration: FunctionDeclaration = {
@@ -1452,8 +1453,13 @@ const ResumePreviewModal: React.FC<{ isOpen: boolean; onClose: () => void; data:
 const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAlertModalConfig) => void }> = ({ openJobAlertModal }) => {
     const locationState = useLocation();
     const navigate = useNavigate();
+    const [searchParams] = useSearchParams();
     const apiBase = import.meta.env.VITE_API_BASE || '';
     const { t } = useLanguage();
+    const staffPreviewCandidateId = String(
+        searchParams.get('previewCandidateId') || searchParams.get('candidateId') || '',
+    ).trim();
+    const isStaffPreview = searchParams.get('staff') === '1' && !!staffPreviewCandidateId;
     
     // State
     const [profiles, setProfiles] = useState<any[]>([]);
@@ -1493,6 +1499,12 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         if (!anchorUserId) return profiles;
         return profiles.filter((p) => String(p.userId) === String(anchorUserId));
     }, [profiles, activeProfile?.userId]);
+
+    /** Portal switcher list — hide staff duplicate copies only. */
+    const portalSwitcherProfiles = useMemo(
+        () => userProfiles.filter((p) => !isStaffDuplicateProfile(p)),
+        [userProfiles],
+    );
 
     const navigableProfiles = useMemo(
         () => filterVisibleProfiles(userProfiles),
@@ -1893,6 +1905,9 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
         return { id: decoded.sub, email: decoded.email, role: decoded.role };
     };
 
+    const isPlatformAdminUser = (user: { role?: string } | null | undefined) =>
+        user?.role === 'admin' || user?.role === 'super_admin';
+
     const loadCandidate = async () => {
         setLoadError(null);
         let user = getUser();
@@ -1920,6 +1935,62 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
             setLoadError(hasToken ? 'לא הצלחנו לזהות משתמש מחובר. נסה להתחבר מחדש.' : 'לא מחובר/ת. התחבר/י כדי לראות את הפרופיל.');
             return;
         }
+
+        if (isStaffPreview) {
+            if (!isPlatformAdminUser(user)) {
+                setLoadError('אין הרשאה לצפות בפרופיל מועמד.');
+                return;
+            }
+            setIsSwitching(true);
+            try {
+                const previewRes = await fetch(`${base}/api/candidates/${encodeURIComponent(staffPreviewCandidateId)}`, {
+                    headers: { ...authHeaders() },
+                });
+                if (!previewRes.ok) {
+                    setLoadError('לא ניתן לטעון את פרופיל המועמד.');
+                    return;
+                }
+                const primary = normalizeCandidateData(await previewRes.json());
+                if (primary.isDeleted) {
+                    setLoadError('פרופיל המועמד לא נמצא.');
+                    return;
+                }
+
+                let sorted = [primary];
+                const linkedUserId = primary.userId;
+                if (linkedUserId) {
+                    const byUserRes = await fetch(`${base}/api/candidates/by-user/${encodeURIComponent(String(linkedUserId))}`, {
+                        headers: { ...authHeaders() },
+                    });
+                    if (byUserRes.ok) {
+                        const byUserPayload = await byUserRes.json();
+                        if (Array.isArray(byUserPayload) && byUserPayload.length > 0) {
+                            sorted = byUserPayload.map(normalizeCandidateData).slice().sort((a, b) => {
+                                const aTime = new Date(a.createdAt || a.updatedAt || 0).getTime();
+                                const bTime = new Date(b.createdAt || b.updatedAt || 0).getTime();
+                                return aTime - bTime;
+                            });
+                        }
+                    }
+                }
+
+                const visible = filterVisibleProfiles(sorted);
+                const display = visible.find((p) => String(p.id) === staffPreviewCandidateId)
+                    || visible[0]
+                    || primary;
+                setProfiles(sorted);
+                setCandidateId(display?.id || null);
+                setActiveProfileId(display?.id ?? null);
+                setFormData(display || cloneEmptyCandidateForm());
+            } catch (err) {
+                console.error('Failed to load staff preview candidate', err);
+                setLoadError('טעינת פרופיל המועמד נכשלה.');
+            } finally {
+                setIsSwitching(false);
+            }
+            return;
+        }
+
         const idFromUser = user.userId || user.id;
         setIsSwitching(true);
         try {
@@ -3264,6 +3335,21 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
     );
 
     return (
+        <>
+            {isStaffPreview ? (
+                <div className="border-b border-amber-200 bg-amber-50">
+                    <div className="max-w-5xl mx-auto px-4 sm:px-6 py-2 flex items-center justify-between gap-3">
+                        <p className="text-xs sm:text-sm font-semibold text-amber-900">תצוגת מועמד — פורטל מועמדים</p>
+                        <Link
+                            to={`/candidates/${staffPreviewCandidateId}`}
+                            className="inline-flex items-center gap-1.5 text-xs sm:text-sm font-bold text-primary-700 hover:text-primary-800"
+                        >
+                            <ArrowLeftIcon className="w-4 h-4" />
+                            חזרה לפרופיל צוות
+                        </Link>
+                    </div>
+                </div>
+            ) : null}
         <div className="flex min-h-screen bg-bg-default font-sans text-text-default">
             <style>{`
                 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -3277,7 +3363,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 onViewChange={handleViewChange}
                 activeProfile={activeProfile ?? formData}
                 activeProfileId={activeProfileId}
-                profiles={userProfiles}
+                profiles={portalSwitcherProfiles}
                 onSwitchProfile={handleSwitchProfile}
                 onAddProfile={handleAddProfile}
                 isOpenMobile={isSidebarOpenMobile}
@@ -3415,6 +3501,7 @@ const CandidatePublicProfileView: React.FC<{ openJobAlertModal: (config: JobAler
                 />
             )}
         </div>
+        </>
     );
 };
 

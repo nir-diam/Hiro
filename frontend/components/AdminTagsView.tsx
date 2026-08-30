@@ -18,6 +18,7 @@ import {
     TAG_DOMAIN_PICKLIST_CATEGORY_ID,
 } from '../services/picklistValuesApi';
 import { HorizontalScrollArea } from './HorizontalScrollArea';
+import { blacklistTags } from '../services/tagCorrectionsApi';
 
 const normalizePicklistOptions = (rows: { label?: string; value?: string }[]) =>
     rows
@@ -415,6 +416,263 @@ const getTagDisplayName = (
     const typeLabel = opts.typeOptions?.find((o) => o.value === tag.type)?.label || tag.type;
     return `${name} (${typeLabel})`;
 };
+
+const MergeTargetTagPicker: React.FC<{
+    apiBase: string;
+    excludeTagIds: string[];
+    value: Tag | null;
+    onChange: (tag: Tag | null) => void;
+    typeOptions: PicklistOption[];
+    placeholder?: string;
+}> = ({ apiBase, excludeTagIds, value, onChange, typeOptions, placeholder = 'חפש תגית יעד...' }) => {
+    const [open, setOpen] = useState(false);
+    const [search, setSearch] = useState('');
+    const [debouncedSearch, setDebouncedSearch] = useState('');
+    const [options, setOptions] = useState<Tag[]>([]);
+    const [loading, setLoading] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+    const excludeSet = useMemo(() => new Set(excludeTagIds), [excludeTagIds]);
+
+    useEffect(() => {
+        const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+        return () => clearTimeout(timer);
+    }, [search]);
+
+    useEffect(() => {
+        if (!open || !apiBase) {
+            setOptions([]);
+            return;
+        }
+        let cancelled = false;
+        setLoading(true);
+        const params = new URLSearchParams();
+        params.set('page', '1');
+        params.set('limit', '20');
+        params.set('statuses', 'active');
+        if (debouncedSearch) params.set('search', debouncedSearch);
+        void fetch(`${apiBase}/api/tags?${params.toString()}`, {
+            cache: 'no-store',
+            headers: authHeaders(),
+        })
+            .then((res) => (res.ok ? res.json() : Promise.reject(new Error('search failed'))))
+            .then((payload) => {
+                if (cancelled) return;
+                const rows = Array.isArray(payload?.data)
+                    ? payload.data
+                    : Array.isArray(payload)
+                        ? payload
+                        : [];
+                setOptions(
+                    rows.filter((tag: Tag) => tag?.id && !excludeSet.has(String(tag.id))),
+                );
+            })
+            .catch(() => {
+                if (!cancelled) setOptions([]);
+            })
+            .finally(() => {
+                if (!cancelled) setLoading(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [apiBase, debouncedSearch, open, excludeSet]);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, []);
+
+    return (
+        <div className="relative" ref={dropdownRef}>
+            <button
+                type="button"
+                onClick={() => setOpen((prev) => !prev)}
+                className="w-full bg-bg-input border border-border-default rounded-xl py-2 px-3 text-sm flex items-center justify-between text-right"
+            >
+                <span className="truncate">
+                    {value
+                        ? getTagDisplayName(value, { includeType: true, typeOptions })
+                        : placeholder}
+                </span>
+                <ChevronDownIcon className={`w-4 h-4 shrink-0 transition ${open ? 'rotate-180' : ''}`} />
+            </button>
+            {open && (
+                <div className="absolute z-40 mt-1 w-full min-w-[260px] bg-white border border-border-default rounded-xl shadow-lg">
+                    <div className="p-3 border-b border-border-default">
+                        <input
+                            type="text"
+                            value={search}
+                            onChange={(e) => setSearch(e.target.value)}
+                            placeholder="חפש לפי שם תגית..."
+                            className="w-full bg-bg-input border border-border-default rounded-xl px-3 py-2 text-xs focus:outline-none focus:border-primary-500 transition"
+                            autoFocus
+                        />
+                    </div>
+                    <div className="max-h-52 overflow-y-auto">
+                        {loading ? (
+                            <div className="px-3 py-3 text-xs text-text-muted">טוען...</div>
+                        ) : options.length ? (
+                            options.map((tag) => (
+                                <button
+                                    key={tag.id}
+                                    type="button"
+                                    onClick={() => {
+                                        onChange(tag);
+                                        setOpen(false);
+                                        setSearch('');
+                                        setDebouncedSearch('');
+                                    }}
+                                    className={`w-full text-right px-3 py-2 text-xs hover:bg-bg-subtle ${
+                                        value?.id === tag.id ? 'bg-primary-50 text-primary-800 font-semibold' : ''
+                                    }`}
+                                >
+                                    {getTagDisplayName(tag, { includeType: true, typeOptions })}
+                                </button>
+                            ))
+                        ) : (
+                            <div className="px-3 py-3 text-xs text-text-muted">
+                                {debouncedSearch ? 'לא נמצאו תגיות' : 'הקלד לחיפוש תגית יעד'}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
+interface TagMergeModalProps {
+    isOpen: boolean;
+    onClose: () => void;
+    sourceTags: Tag[];
+    apiBase: string;
+    typeOptions: PicklistOption[];
+    onConfirm: (merges: Array<{ sourceTagId: string; targetTagId: string; targetTag: Tag }>) => Promise<void>;
+    isSubmitting: boolean;
+    error: string | null;
+}
+
+const TagMergeModal: React.FC<TagMergeModalProps> = ({
+    isOpen,
+    onClose,
+    sourceTags,
+    apiBase,
+    typeOptions,
+    onConfirm,
+    isSubmitting,
+    error,
+}) => {
+    const [targetsBySourceId, setTargetsBySourceId] = useState<Record<string, Tag | null>>({});
+
+    useEffect(() => {
+        if (!isOpen) return;
+        const initial: Record<string, Tag | null> = {};
+        for (const tag of sourceTags) initial[tag.id] = null;
+        setTargetsBySourceId(initial);
+    }, [isOpen, sourceTags]);
+
+    if (!isOpen) return null;
+
+    const allSelected = sourceTags.length > 0 && sourceTags.every((tag) => targetsBySourceId[tag.id]?.id);
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="bg-bg-card border border-border-default rounded-2xl shadow-2xl w-full max-w-3xl max-h-[85vh] flex flex-col">
+                <div className="flex items-center justify-between px-5 py-4 border-b border-border-default">
+                    <div>
+                        <h3 className="text-lg font-bold text-text-default">מיזוג לתגית אחרת</h3>
+                        <p className="text-xs text-text-muted mt-1">
+                            כל תגית שנבחרה תימחק ותתווסף ככינוי/מילה נרדפת לתגית היעד שתבחר עבורה.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => !isSubmitting && onClose()}
+                        disabled={isSubmitting}
+                        className="p-2 rounded-full hover:bg-bg-hover text-text-muted disabled:opacity-50"
+                    >
+                        <XMarkIcon className="w-5 h-5" />
+                    </button>
+                </div>
+                <div className="p-5 space-y-3 overflow-y-auto flex-1">
+                    {sourceTags.map((sourceTag) => (
+                        <div
+                            key={sourceTag.id}
+                            className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-3 items-center bg-bg-subtle/40 border border-border-default rounded-xl p-3"
+                        >
+                            <div>
+                                <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1">תגית למיזוג</div>
+                                <div className="font-semibold text-sm text-text-default">
+                                    {getTagDisplayName(sourceTag, { includeType: true, typeOptions })}
+                                </div>
+                            </div>
+                            <div className="hidden md:block text-text-muted text-lg px-1" aria-hidden>←</div>
+                            <div>
+                                <div className="text-[10px] uppercase tracking-wider text-text-muted mb-1">תגית יעד</div>
+                                <MergeTargetTagPicker
+                                    apiBase={apiBase}
+                                    excludeTagIds={sourceTags.map((tag) => tag.id)}
+                                    value={targetsBySourceId[sourceTag.id] || null}
+                                    onChange={(tag) =>
+                                        setTargetsBySourceId((prev) => ({ ...prev, [sourceTag.id]: tag }))
+                                    }
+                                    typeOptions={typeOptions}
+                                />
+                            </div>
+                        </div>
+                    ))}
+                    {error ? (
+                        <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-xl px-3 py-2">
+                            {error}
+                        </div>
+                    ) : null}
+                </div>
+                <div className="px-5 py-4 border-t border-border-default flex items-center justify-end gap-2">
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        disabled={isSubmitting}
+                        className="px-4 py-2 rounded-xl text-sm font-semibold border border-border-default hover:bg-bg-hover disabled:opacity-50"
+                    >
+                        ביטול
+                    </button>
+                    <button
+                        type="button"
+                        disabled={!allSelected || isSubmitting}
+                        onClick={() => {
+                            void onConfirm(
+                                sourceTags
+                                    .map((tag) => {
+                                        const targetTag = targetsBySourceId[tag.id];
+                                        if (!targetTag?.id) return null;
+                                        return {
+                                            sourceTagId: tag.id,
+                                            targetTagId: targetTag.id,
+                                            targetTag,
+                                        };
+                                    })
+                                    .filter(Boolean) as Array<{
+                                    sourceTagId: string;
+                                    targetTagId: string;
+                                    targetTag: Tag;
+                                }>,
+                            );
+                        }}
+                        className="px-5 py-2 rounded-xl text-sm font-bold bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
+                    >
+                        {isSubmitting ? 'ממזג...' : 'מיזוג תגיות'}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 interface BlockingCandidate {
     candidate_tag_id: string;
     candidateTagId?: string;
@@ -1158,6 +1416,10 @@ const AdminTagsView: React.FC = () => {
     const [selectedTagIds, setSelectedTagIds] = useState<Set<string>>(() => new Set<string>());
     const [isEnriching, setIsEnriching] = useState(false);
     const [isBulkDeleting, setIsBulkDeleting] = useState(false);
+    const [isBulkBlacklisting, setIsBulkBlacklisting] = useState(false);
+    const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+    const [isMergingTags, setIsMergingTags] = useState(false);
+    const [mergeError, setMergeError] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -2449,6 +2711,48 @@ const AdminTagsView: React.FC = () => {
         }
     };
 
+    const handleBulkBlacklist = async () => {
+        if (selectedTagIds.size === 0) return;
+        if (!window.confirm(`האם להעביר ${selectedTagIds.size} תגיות לרשימה שחורה?`)) return;
+
+        setIsBulkBlacklisting(true);
+        const idsToBlacklist = Array.from(selectedTagIds) as string[];
+        const preserved = [...tags];
+
+        try {
+            const result = await blacklistTags(idsToBlacklist);
+            const blacklistedSet = new Set(result.blacklisted || []);
+            const showDeprecated =
+                selectedStatuses.length === 0 || selectedStatuses.includes('deprecated');
+
+            setTags((prev) => {
+                if (showDeprecated) {
+                    return prev.map((t) =>
+                        blacklistedSet.has(t.id) ? { ...t, status: 'deprecated' as TagStatus } : t,
+                    );
+                }
+                return prev.filter((t) => !blacklistedSet.has(t.id));
+            });
+            setSelectedTagIds(new Set<string>());
+
+            const skippedCount = result.skipped?.length || 0;
+            if (result.count > 0) {
+                alert(
+                    skippedCount > 0
+                        ? `${result.count} תגיות הועברו לרשימה שחורה. ${skippedCount} דולגו (כבר ברשימה או לא נמצאו).`
+                        : `${result.count} תגיות הועברו לרשימה שחורה.`,
+                );
+            } else {
+                alert('לא הועברו תגיות — ייתכן שכבר נמצאות ברשימה השחורה.');
+            }
+        } catch (err: unknown) {
+            setTags(preserved);
+            alert(err instanceof Error ? err.message : 'העברה לרשימה שחורה נכשלה');
+        } finally {
+            setIsBulkBlacklisting(false);
+        }
+    };
+
     // --- AI Enrichment Logic ---
 
     const handleBulkEnrich = async () => {
@@ -2489,6 +2793,49 @@ const AdminTagsView: React.FC = () => {
 
     const handleOpenChat = () => {
         setIsChatOpen(true);
+    };
+
+    const selectedTagsForMerge = useMemo(
+        () => tags.filter((tag) => selectedTagIds.has(tag.id)),
+        [tags, selectedTagIds],
+    );
+
+    const handleOpenMergeModal = () => {
+        setMergeError(null);
+        setIsMergeModalOpen(true);
+    };
+
+    const handleConfirmTagMerge = async (
+        merges: Array<{ sourceTagId: string; targetTagId: string; targetTag: Tag }>,
+    ) => {
+        if (!merges.length) return;
+        setIsMergingTags(true);
+        setMergeError(null);
+        try {
+            const res = await fetch(`${apiBase}/api/tags/merge`, {
+                method: 'POST',
+                headers: authHeaders(true),
+                body: JSON.stringify({
+                    merges: merges.map((entry) => ({
+                        sourceTagId: entry.sourceTagId,
+                        targetTagId: entry.targetTagId,
+                    })),
+                }),
+            });
+            if (!res.ok) {
+                const payload = await res.json().catch(() => ({}));
+                throw new Error(payload.message || 'Merge failed');
+            }
+            const mergedSourceIds = new Set(merges.map((entry) => entry.sourceTagId));
+            setTags((prev) => prev.filter((tag) => !mergedSourceIds.has(tag.id)));
+            setSelectedTagIds(new Set<string>());
+            setIsMergeModalOpen(false);
+            await loadTags();
+        } catch (err: any) {
+            setMergeError(err?.message || 'מיזוג התגיות נכשל');
+        } finally {
+            setIsMergingTags(false);
+        }
     };
 
     return (
@@ -2732,6 +3079,15 @@ const AdminTagsView: React.FC = () => {
                     <div className="flex items-center gap-4">
                         <span className="font-bold text-primary-900 text-sm px-2">{selectedTagIds.size} נבחרו</span>
                         <div className="h-6 w-px bg-primary-200"></div>
+                        <button
+                            type="button"
+                            onClick={() => void handleBulkBlacklist()}
+                            disabled={isBulkBlacklisting}
+                            className="flex items-center gap-2 bg-white text-red-700 font-bold py-1.5 px-4 rounded-lg shadow-sm border border-red-200 hover:bg-red-50 transition disabled:opacity-50"
+                        >
+                            <NoSymbolIcon className="w-4 h-4" />
+                            {isBulkBlacklisting ? 'מעביר...' : 'העבר לרשימה שחורה'}
+                        </button>
                         <button 
                             onClick={handleBulkEnrich} 
                             disabled={isEnriching}
@@ -2759,6 +3115,13 @@ const AdminTagsView: React.FC = () => {
                         >
                             <ArrowDownTrayIcon className="w-4 h-4" />
                             <span>הורד XLSX</span>
+                        </button>
+                        <button
+                            onClick={handleOpenMergeModal}
+                            className="flex items-center gap-2 bg-white text-primary-700 font-bold py-1.5 px-4 rounded-lg shadow-sm border border-primary-200 hover:bg-primary-50 transition"
+                        >
+                            <TagIcon className="w-4 h-4" />
+                            <span>מיזוג לתגית אחרת</span>
                         </button>
                     </div>
                     <button onClick={() => setSelectedTagIds(new Set<string>())} className="text-text-muted hover:text-primary-600 text-sm font-medium">ביטול בחירה</button>
@@ -2939,6 +3302,17 @@ const AdminTagsView: React.FC = () => {
                 typePicklistOptions={typePicklistOptions}
                 domainPicklistOptions={domainPicklistOptions}
                 domainPicklistLoading={domainPicklistLoading}
+            />
+
+            <TagMergeModal
+                isOpen={isMergeModalOpen}
+                onClose={() => !isMergingTags && setIsMergeModalOpen(false)}
+                sourceTags={selectedTagsForMerge}
+                apiBase={apiBase}
+                typeOptions={typePicklistOptions}
+                onConfirm={handleConfirmTagMerge}
+                isSubmitting={isMergingTags}
+                error={mergeError}
             />
 
             <HiroAIChat

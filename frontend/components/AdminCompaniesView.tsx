@@ -1072,7 +1072,7 @@ const CompanyContactsTab: React.FC<{ organizationId?: CompanyId | null }> = ({ o
     const handleSave = async () => {
         if (!canPersist || !apiBase) return;
         if (!form.firstName.trim() && !form.lastName.trim()) {
-            setError('נא למלא שם או שם משפחה');
+            setError('נא למלא שם');
             return;
         }
         setSaving(true);
@@ -1170,7 +1170,7 @@ const CompanyContactsTab: React.FC<{ organizationId?: CompanyId | null }> = ({ o
                     </h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <div>
-                            <label className="block text-xs font-semibold text-text-muted mb-1">שם</label>
+                            <label className="block text-xs font-semibold text-text-muted mb-1">שם*</label>
                             <input
                                 type="text"
                                 value={form.firstName}

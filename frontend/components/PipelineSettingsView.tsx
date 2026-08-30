@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
     PlusIcon, XMarkIcon, CheckCircleIcon,
-    Bars3Icon, ClockIcon, BriefcaseIcon, UserGroupIcon, TrashIcon,
+    Bars3Icon, BriefcaseIcon, UserGroupIcon, TrashIcon,
     ChevronUpIcon, ChevronDownIcon,
 } from './Icons';
 import { useAuth } from '../context/AuthContext';
@@ -20,6 +20,8 @@ import {
     createCandidatePipeline,
 } from '../services/candidatePipelinesApi';
 import { buildMoveTargetOptions } from '../utils/pipelineMoveTargets';
+import SlaDurationInput from './SlaDurationInput';
+import { slaFieldLabel, normalizeSlaUnit, type SlaUnit } from '../utils/slaDuration';
 import {
     fetchClientMessageTemplates,
     type MessageTemplateDto,
@@ -41,6 +43,7 @@ interface Stage {
     color: string;
     order: number;
     slaLimit: number;
+    slaLimitUnit?: SlaUnit;
     outcomes?: StageOutcome[];
 }
 
@@ -164,6 +167,10 @@ const OutcomeAutomationRow: React.FC<{
 }> = ({ automation, pipelines, emailTemplates, smsTemplates, recruitmentStatuses, onChange, onDelete }) => {
     const showManualApproval = automation.actionType === 'send_email' || automation.actionType === 'send_sms';
     const recipients = automation.recipients || { candidate: true, hiringManager: false, coordinator: false, extra: '' };
+    const selectedPipeline = pipelines.find((p) => p.id === automation.pipelineId) || null;
+    const stageOptions = [...(selectedPipeline?.stages || [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const selectedStage = stageOptions.find((s) => s.id === automation.stageId) || null;
+    const outcomeOptions = selectedStage?.outcomes || [];
 
     const patch = (partial: Partial<OutcomeAutomation>) => onChange({ ...automation, ...partial });
 
@@ -190,6 +197,8 @@ const OutcomeAutomationRow: React.FC<{
                         actionType,
                         templateId: undefined,
                         pipelineId: undefined,
+                        stageId: undefined,
+                        targetOutcomeId: undefined,
                         statusName: undefined,
                     });
                 }}
@@ -198,6 +207,7 @@ const OutcomeAutomationRow: React.FC<{
                 <option value="send_email">שליחת מייל מתוך תבנית</option>
                 <option value="send_sms">שליחת SMS מתוך תבנית</option>
                 <option value="start_pipeline">העבר לתהליך אחר</option>
+                <option value="open_additional_process">פתח תהליך נוסף</option>
                 <option value="close_event">סגירת אירוע</option>
                 <option value="change_status">שנה סטטוס</option>
             </select>
@@ -280,10 +290,22 @@ const OutcomeAutomationRow: React.FC<{
             ) : null}
 
             {automation.actionType === 'start_pipeline' ? (
-                <div className="flex flex-col gap-2 flex-1 min-w-[200px]">
+                <div className="flex flex-col gap-2 flex-1 min-w-[220px]">
                     <select
                         value={automation.pipelineId || ''}
-                        onChange={(e) => patch({ pipelineId: e.target.value })}
+                        onChange={(e) => {
+                            const pipelineId = e.target.value;
+                            const pipeline = pipelines.find((p) => p.id === pipelineId);
+                            const firstStage = [...(pipeline?.stages || [])].sort(
+                                (a, b) => (a.order ?? 0) - (b.order ?? 0),
+                            )[0];
+                            const firstOutcome = firstStage?.outcomes?.[0];
+                            patch({
+                                pipelineId,
+                                stageId: firstStage?.id || undefined,
+                                targetOutcomeId: firstOutcome?.id || undefined,
+                            });
+                        }}
                         className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full"
                     >
                         <option value="" disabled>
@@ -295,6 +317,124 @@ const OutcomeAutomationRow: React.FC<{
                             </option>
                         ))}
                     </select>
+                    <select
+                        value={automation.stageId || ''}
+                        onChange={(e) => {
+                            const stageId = e.target.value;
+                            const stage = stageOptions.find((s) => s.id === stageId);
+                            patch({
+                                stageId,
+                                targetOutcomeId: stage?.outcomes?.[0]?.id || undefined,
+                            });
+                        }}
+                        disabled={!automation.pipelineId || stageOptions.length === 0}
+                        className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full disabled:opacity-50"
+                    >
+                        <option value="" disabled>
+                            {automation.pipelineId ? '-- בחר שלב --' : 'בחר תהליך תחילה'}
+                        </option>
+                        {stageOptions.map((stage) => (
+                            <option key={stage.id} value={stage.id}>
+                                {stage.name}
+                            </option>
+                        ))}
+                    </select>
+                    <select
+                        value={automation.targetOutcomeId || ''}
+                        onChange={(e) => patch({ targetOutcomeId: e.target.value || undefined })}
+                        disabled={!automation.stageId || outcomeOptions.length === 0}
+                        className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full disabled:opacity-50"
+                    >
+                        <option value="" disabled>
+                            {!automation.stageId
+                                ? 'בחר שלב תחילה'
+                                : outcomeOptions.length === 0
+                                  ? 'אין תוצאות לשלב זה'
+                                  : '-- בחר תוצאה --'}
+                        </option>
+                        {outcomeOptions.map((outcome) => (
+                            <option key={outcome.id} value={outcome.id}>
+                                {outcome.name}
+                            </option>
+                        ))}
+                    </select>
+                    <p className="text-[10px] text-text-muted leading-snug">
+                        האירוע/מועמד יועבר לתהליך, לשלב ולתוצאה שנבחרו
+                    </p>
+                </div>
+            ) : null}
+
+            {automation.actionType === 'open_additional_process' ? (
+                <div className="flex flex-col gap-2 flex-1 min-w-[220px]">
+                    <select
+                        value={automation.pipelineId || ''}
+                        onChange={(e) => {
+                            const pipelineId = e.target.value;
+                            const pipeline = pipelines.find((p) => p.id === pipelineId);
+                            const firstStage = [...(pipeline?.stages || [])].sort(
+                                (a, b) => (a.order ?? 0) - (b.order ?? 0),
+                            )[0];
+                            patch({
+                                pipelineId,
+                                stageId: firstStage?.id || undefined,
+                                targetOutcomeId: firstStage?.outcomes?.[0]?.id || undefined,
+                            });
+                        }}
+                        className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full"
+                    >
+                        <option value="" disabled>
+                            -- בחר תהליך --
+                        </option>
+                        {pipelines.map((p) => (
+                            <option key={p.id} value={p.id}>
+                                {p.name}
+                            </option>
+                        ))}
+                    </select>
+                    <select
+                        value={automation.stageId || ''}
+                        onChange={(e) => {
+                            const stageId = e.target.value;
+                            const stage = stageOptions.find((s) => s.id === stageId);
+                            patch({
+                                stageId,
+                                targetOutcomeId: stage?.outcomes?.[0]?.id || undefined,
+                            });
+                        }}
+                        disabled={!automation.pipelineId || stageOptions.length === 0}
+                        className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full disabled:opacity-50"
+                    >
+                        <option value="" disabled>
+                            {automation.pipelineId ? '-- בחר שלב --' : 'בחר תהליך תחילה'}
+                        </option>
+                        {stageOptions.map((stage) => (
+                            <option key={stage.id} value={stage.id}>
+                                {stage.name}
+                            </option>
+                        ))}
+                    </select>
+                    <select
+                        value={automation.targetOutcomeId || ''}
+                        onChange={(e) => patch({ targetOutcomeId: e.target.value || undefined })}
+                        disabled={!automation.stageId || outcomeOptions.length === 0}
+                        className="text-sm border border-border-default rounded-md bg-white px-2 py-1 outline-none focus:border-primary-500 w-full disabled:opacity-50"
+                    >
+                        <option value="" disabled>
+                            {!automation.stageId
+                                ? 'בחר שלב תחילה'
+                                : outcomeOptions.length === 0
+                                  ? 'אין תוצאות לשלב זה'
+                                  : '-- בחר תוצאה --'}
+                        </option>
+                        {outcomeOptions.map((outcome) => (
+                            <option key={outcome.id} value={outcome.id}>
+                                {outcome.name}
+                            </option>
+                        ))}
+                    </select>
+                    <p className="text-[10px] text-text-muted leading-snug">
+                        התהליך הנוכחי יישאר פתוח · ייפתח תהליך נוסף במקביל לתהליך, לשלב ולתוצאה שנבחרו
+                    </p>
                 </div>
             ) : null}
 
@@ -386,6 +526,7 @@ function dtoToPipeline(d: PipelineDto): Pipeline {
             color: s.color,
             order: s.order,
             slaLimit: s.slaLimit,
+            slaLimitUnit: normalizeSlaUnit(s.slaLimitUnit),
             outcomes: Array.isArray(s.outcomes) ? s.outcomes : [],
         })),
     };
@@ -781,6 +922,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
             color: 'bg-gray-100 text-gray-700',
             order: activePipeline.stages.length + 1,
             slaLimit: 3,
+            slaLimitUnit: 'days',
             outcomes: [],
         };
         const updatedPipeline = {
@@ -824,6 +966,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
             name: 'תוצאה חדשה',
             actionType: 'stay',
             autoFollowupDays: 7,
+            autoFollowupUnit: 'days',
             trigger: { type: 'none' },
             automations: [],
         };
@@ -1140,7 +1283,7 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                  <div></div>
                                  <div>שם השלב (תצוגה)</div>
                                  <div>צבע תווית</div>
-                                 <div>התראת SLA (ימים)</div>
+                                 <div>התראת SLA</div>
                                  <div></div>
                                  <div></div>
                              </div>
@@ -1197,17 +1340,14 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                             })}
                                         </div>
 
-                                        <div className="flex items-center gap-2 bg-bg-subtle/50 px-2 py-1 rounded-lg border border-border-default max-w-[100px]">
-                                            <ClockIcon className="w-4 h-4 text-text-subtle" />
-                                            <input
-                                                type="number"
-                                                min="0"
-                                                value={stage.slaLimit}
-                                                onChange={(e) => handleUpdateStage(stage.id, 'slaLimit', parseInt(e.target.value, 10) || 0)}
-                                                className="w-full bg-transparent text-sm font-semibold text-center outline-none"
-                                                title="התראה לאחר X ימים ללא שינוי"
-                                            />
-                                        </div>
+                                        <SlaDurationInput
+                                            value={stage.slaLimit}
+                                            unit={stage.slaLimitUnit}
+                                            onValueChange={(value) => handleUpdateStage(stage.id, 'slaLimit', value)}
+                                            onUnitChange={(unit) => handleUpdateStage(stage.id, 'slaLimitUnit', unit)}
+                                            className="max-w-[140px]"
+                                            title="התראה לאחר X זמן ללא שינוי"
+                                        />
 
                                         <div className="flex items-center justify-center">
                                             <button
@@ -1310,24 +1450,28 @@ const PipelineSettingsView: React.FC<{ kind?: 'client' | 'candidate' }> = ({ kin
                                                                 יסגור / יפתח מחדש את האירוע (פעיל ↔ לא פעיל)
                                                             </div>
                                                         ) : (
-                                                            <div className="flex items-center gap-2 border border-border-default rounded-md bg-bg-input px-2 py-1">
-                                                                <ClockIcon className="w-3.5 h-3.5 text-text-muted" />
-                                                                <input
-                                                                    type="number"
-                                                                    value={outcome.autoFollowupDays || 0}
-                                                                    onChange={(e) =>
-                                                                        handleUpdateOutcome(
-                                                                            stage.id,
-                                                                            outcome.id,
-                                                                            'autoFollowupDays',
-                                                                            parseInt(e.target.value, 10) || 0,
-                                                                        )
-                                                                    }
-                                                                    className="w-full text-sm bg-transparent outline-none"
-                                                                    placeholder="ימים לפולואפ"
-                                                                />
-                                                                <span className="text-xs text-text-muted">ימים</span>
-                                                            </div>
+                                                            <SlaDurationInput
+                                                                value={outcome.autoFollowupDays || 0}
+                                                                unit={outcome.autoFollowupUnit}
+                                                                onValueChange={(value) =>
+                                                                    handleUpdateOutcome(
+                                                                        stage.id,
+                                                                        outcome.id,
+                                                                        'autoFollowupDays',
+                                                                        value,
+                                                                    )
+                                                                }
+                                                                onUnitChange={(unit) =>
+                                                                    handleUpdateOutcome(
+                                                                        stage.id,
+                                                                        outcome.id,
+                                                                        'autoFollowupUnit',
+                                                                        unit,
+                                                                    )
+                                                                }
+                                                                className="border-none bg-transparent px-0 py-0"
+                                                                title="זמן לפולואפ"
+                                                            />
                                                         )}
 
                                                         <button

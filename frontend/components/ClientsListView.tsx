@@ -130,6 +130,13 @@ const formatWebsiteHost = (url: string) =>
         .replace(/^https?:\/\/(www\.)?/i, '')
         .replace(/\/$/, '') || '—';
 
+const namesMatchLoosely = (left: string, right: string) => {
+    const a = String(left || '').trim().toLowerCase();
+    const b = String(right || '').trim().toLowerCase();
+    if (!a || !b) return false;
+    return a === b || a.includes(b) || b.includes(a);
+};
+
 // --- PIPELINE DEFINITIONS ---
 interface PipelineStage {
     id: string;
@@ -1487,6 +1494,62 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
     // Contact Filter Options
     const contactRoles = useMemo(() => Array.from(new Set(contacts.map(c => c.role))), [contacts]);
     const contactClients = useMemo(() => Array.from(new Set(contacts.map(c => c.clientName))), [contacts]);
+
+    const eventClientOptions = useMemo(() => {
+        if (isPlatformAdmin) {
+            return clients.map((c) => ({ id: c.id, name: c.name }));
+        }
+        if (tenantClientId) {
+            const orgOptions = linkedOrganizations
+                .filter((o) => o.organizationId && !o.isPending)
+                .map((o) => ({
+                    id: tenantClientId,
+                    name: o.name,
+                    organizationId: o.organizationId,
+                }));
+            return orgOptions.length
+                ? orgOptions
+                : [{ id: tenantClientId, name: 'הלקוח שלי' }];
+        }
+        return [];
+    }, [isPlatformAdmin, clients, tenantClientId, linkedOrganizations]);
+
+    const eventScopeOrganization = useMemo(() => {
+        if (filterContactClient === 'all') return null;
+
+        if (isTenantUser) {
+            const org = linkedOrganizations.find((o) => namesMatchLoosely(o.name, filterContactClient));
+            if (org?.organizationId) {
+                return { organizationId: org.organizationId, name: org.name, clientId: tenantClientId || undefined };
+            }
+        }
+
+        const contactMatch = contacts.find((c) => namesMatchLoosely(c.clientName, filterContactClient));
+        if (contactMatch) {
+            if (isTenantUser && contactMatch.organizationId && tenantClientId) {
+                return {
+                    organizationId: contactMatch.organizationId,
+                    name: contactMatch.clientName,
+                    clientId: contactMatch.clientId || tenantClientId,
+                };
+            }
+            if (isPlatformAdmin && contactMatch.clientId) {
+                return {
+                    organizationId: contactMatch.organizationId || null,
+                    name: contactMatch.clientName,
+                    clientId: contactMatch.clientId,
+                };
+            }
+        }
+
+        if (isPlatformAdmin) {
+            const client = clients.find((c) => namesMatchLoosely(c.name, filterContactClient));
+            if (client) {
+                return { organizationId: null as string | null, name: client.name, clientId: client.id };
+            }
+        }
+        return null;
+    }, [filterContactClient, isTenantUser, isPlatformAdmin, linkedOrganizations, clients, contacts, tenantClientId]);
     
     // Available stages based on selected pipeline
     const availableStages = useMemo(() => {
@@ -4004,14 +4067,19 @@ const ClientsListView: React.FC<{ openMessageModal: (config: MessageModalConfig)
                      )
                  ) : activeTab === 'events' ? (
                     <ClientsEventsJournalTab
-                        clientOptions={
+                        clientOptions={eventClientOptions}
+                        defaultClientId={
                             isPlatformAdmin
-                                ? clients.map((c) => ({ id: c.id, name: c.name }))
+                                ? eventScopeOrganization?.clientId || clients[0]?.id || null
                                 : tenantClientId
-                                  ? [{ id: tenantClientId, name: 'הלקוח שלי' }]
-                                  : []
                         }
-                        defaultClientId={isPlatformAdmin ? clients[0]?.id || null : tenantClientId}
+                        defaultOrganizationId={eventScopeOrganization?.organizationId || null}
+                        defaultOrganizationName={eventScopeOrganization?.name || null}
+                        scopeOrganizationId={eventScopeOrganization?.organizationId || null}
+                        scopeOrganizationName={eventScopeOrganization?.name || null}
+                        preferredOrganizationLabel={
+                            filterContactClient !== 'all' ? filterContactClient : null
+                        }
                     />
                  ) : (
                     // --- TASKS VIEW: admin → all clients; tenant → orgs under tenant client ---

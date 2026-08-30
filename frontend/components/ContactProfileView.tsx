@@ -160,6 +160,15 @@ const ContactProfileView: React.FC<ContactProfileViewProps> = ({ openMessageModa
           <ContactEventsTab
             clientId={clientId!}
             clientName={clientName}
+            organizationId={contact.organizationId ? String(contact.organizationId) : null}
+            organizationName={
+              String(
+                contact.organizationName
+                  || contact.organization?.name
+                  || contact.organization?.displayName
+                  || '',
+              ).trim() || null
+            }
             contactId={contactId}
             contactName={contact.name}
           />

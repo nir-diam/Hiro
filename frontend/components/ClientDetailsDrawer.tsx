@@ -195,9 +195,15 @@ interface ClientDetailsDrawerProps {
   client: Client | null;
   isOpen: boolean;
   onClose: () => void;
+  overlayZIndexClass?: string;
 }
 
-const ClientDetailsDrawer: React.FC<ClientDetailsDrawerProps> = ({ client, isOpen, onClose }) => {
+const ClientDetailsDrawer: React.FC<ClientDetailsDrawerProps> = ({
+  client,
+  isOpen,
+  onClose,
+  overlayZIndexClass = 'z-[60]',
+}) => {
   const [activeTab, setActiveTab] = useState<'details' | 'tasks' | 'contacts'>('details');
   const titleId = useId();
   const navigate = useNavigate();
@@ -226,7 +232,7 @@ const ClientDetailsDrawer: React.FC<ClientDetailsDrawerProps> = ({ client, isOpe
 
   return (
     <div 
-      className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60] transition-opacity duration-300"
+      className={`fixed inset-0 bg-black/40 backdrop-blur-sm ${overlayZIndexClass} transition-opacity duration-300`}
       onClick={onClose}
       aria-hidden={!isOpen}
     >

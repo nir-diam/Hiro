@@ -290,6 +290,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
 
     useEffect(() => { if (editingContact) { setFormData(editingContact); } }, [editingContact]);
     const handleAdd = () => {
+        setError(null);
         setEditingContact({
             id: 'tmp-new',
             name: '',
@@ -307,7 +308,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
         });
         setIsDrawerOpen(true);
     };
-    const handleEdit = (contact: Contact) => { setEditingContact(contact); setIsDrawerOpen(true); };
+    const handleEdit = (contact: Contact) => { setError(null); setEditingContact(contact); setIsDrawerOpen(true); };
 
     const navigateToContactProfile = (contact: Contact) => {
         if (!clientId || !contact.id || String(contact.id).startsWith('tmp-')) return;
@@ -316,9 +317,14 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
     const handleSave = async () => {
         if (!formData) return;
         if (!apiBase || !clientId) return;
+        if (!formData.name.trim()) {
+            setError('נא למלא שם');
+            return;
+        }
+        setError(null);
 
         const payload: Record<string, unknown> = {
-            name: formData.name,
+            name: formData.name.trim(),
             phone: formData.phone,
             mobilePhone: formData.mobilePhone,
             email: formData.email,
@@ -359,7 +365,7 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
         }
         closeDrawer();
     };
-    const closeDrawer = () => { setIsDrawerOpen(false); setEditingContact(null); setFormData(null); };
+    const closeDrawer = () => { setIsDrawerOpen(false); setEditingContact(null); setFormData(null); setError(null); };
     const handleDelete = (contact: Contact) => { setContactToDelete(contact); };
     const confirmDelete = async () => {
         if (!contactToDelete) return;
@@ -721,11 +727,14 @@ const ClientContactsTab: React.FC<ClientContactsTabProps> = ({ clientId, organiz
                 <Drawer isOpen={isDrawerOpen} onClose={closeDrawer} title={editingContact.id === 0 ? 'איש קשר חדש' : 'עריכת איש קשר'}
                     footer={<><button onClick={closeDrawer} className="text-text-muted font-semibold py-2 px-4 rounded-lg hover:bg-bg-hover">ביטול</button><button onClick={handleSave} className="bg-primary-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-primary-700">שמור</button></>}>
                     <div className="space-y-4">
+                        {error && (
+                            <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg px-3 py-2">{error}</div>
+                        )}
                         <FormInput label="שם*" name="name" value={formData.name} onChange={(e) => setFormData({...formData, name: e.target.value})} />
                         <FormInput label="תפקיד" name="role" value={formData.role} onChange={(e) => setFormData({...formData, role: e.target.value})} />
-                        <FormInput label="טלפון*" name="phone" value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} />
+                        <FormInput label="טלפון" name="phone" value={formData.phone} onChange={(e) => setFormData({...formData, phone: e.target.value})} />
                         <FormInput label="טלפון נייד" name="mobilePhone" value={formData.mobilePhone} onChange={(e) => setFormData({...formData, mobilePhone: e.target.value})} />
-                        <FormInput label="דוא״ל*" name="email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} />
+                        <FormInput label="דוא״ל" name="email" value={formData.email} onChange={(e) => setFormData({...formData, email: e.target.value})} />
                         <FormInput label="לינקדאין" name="linkedin" value={formData.linkedin} onChange={(e) => setFormData({...formData, linkedin: e.target.value})} />
                         <FormInput label="שם משתמש" name="username" value={formData.username} onChange={(e) => setFormData({...formData, username: e.target.value})} />
                         <FormTextArea label="הערה פנימית" name="notes" value={formData.notes} onChange={(e) => setFormData({...formData, notes: e.target.value})} />

@@ -15,6 +15,7 @@ import {
     resolveProfileDisplayAge,
 } from '../utils/candidateProfileDisplayCompleteness';
 import { fetchRecruitmentSourceOptions } from '../services/recruitmentSourcesApi';
+import { isStaffDuplicateProfile } from '../utils/candidateProfileDuplicate';
 import { createPortal } from 'react-dom';
 
 const SocialButton: React.FC<{ children: React.ReactNode, onClick?: () => void, title?: string, className?: string }> = ({ children, onClick, title, className }) => (
@@ -378,6 +379,8 @@ interface CandidateProfileProps {
     activeProfileId?: string | number;
     onSwitchProfile?: (id: string | number) => void;
     onAddProfile?: () => void;
+    onDuplicateProfile?: () => void;
+    isDuplicatingProfile?: boolean;
     candidateList?: CandidateListItem[];
     onNavigateCandidate?: (candidateId: string) => void;
     onGenerateExperienceSummary?: () => void;
@@ -650,6 +653,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   activeProfileId,
   onSwitchProfile,
   onAddProfile,
+  onDuplicateProfile,
+  isDuplicatingProfile = false,
   candidateList = [],
   onNavigateCandidate,
   onGenerateExperienceSummary,
@@ -689,6 +694,13 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   }, [profiles, fetchedProfiles]);
   const activeProfileOption = profileList.find((p) => p.id === currentProfileId) || profileList[0];
   const showProfileSwitcher = profileList.length > 0;
+  const showDuplicateProfileButton = Boolean(onDuplicateProfile);
+  const duplicateProfileBusy = isSaving || isDuplicatingProfile;
+  const [duplicateSaveConfirmOpen, setDuplicateSaveConfirmOpen] = useState(false);
+  const isEditingDuplicateProfile = useMemo(
+    () => isStaffDuplicateProfile(candidateData as Record<string, unknown>),
+    [candidateData],
+  );
   const [isSwitcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
   const handleProfileChange = (event: React.ChangeEvent<HTMLSelectElement>) => {
@@ -1238,8 +1250,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   };
 
   const profileVersionCount = profileList.length;
-  const getProfileYear = (profile: MultiProfileOption) => {
-    const createdAt = (profile as any).createdAt || (profile as any).updatedAt;
+  const getProfileYear = (profile?: MultiProfileOption | null) => {
+    const createdAt = (profile as any)?.createdAt || (profile as any)?.updatedAt;
     if (createdAt) {
       const resolved = new Date(createdAt);
       if (!Number.isNaN(resolved.getTime())) return resolved.getFullYear();
@@ -1268,19 +1280,52 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
     onSwitchProfile?.(profile.id);
   };
 
+  const renderDuplicateProfileButton = (compact = false) => {
+    if (!showDuplicateProfileButton) return null;
+    return (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          onDuplicateProfile?.();
+        }}
+        disabled={duplicateProfileBusy}
+        title="צור עותק צל לעריכה פנימית"
+        className={
+          compact
+            ? `p-2 text-text-subtle hover:text-primary-600 transition-colors bg-white/80 backdrop-blur-sm rounded-full shadow-sm hover:shadow-md border border-border-default disabled:opacity-60 disabled:cursor-not-allowed`
+            : `shrink-0 bg-white border border-border-default text-text-default font-bold py-2.5 px-6 rounded-xl hover:bg-bg-hover transition shadow-sm disabled:opacity-60 disabled:cursor-not-allowed`
+        }
+      >
+        {compact ? (
+          <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-4 h-4">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 01-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75v9.75a1.125 1.125 0 001.125 1.125h9.75M9 10.5h6M9 13.5h4.5M9 7.5h6M15.75 3.75h-9A1.125 1.125 0 005.625 4.875v9.75c0 .621.504 1.125 1.125 1.125h9.75a1.125 1.125 0 001.125-1.125v-9.75A1.125 1.125 0 0015.75 3.75z" />
+          </svg>
+        ) : (
+          isDuplicatingProfile ? 'יוצר/ת העתק...' : 'צור העתק'
+        )}
+      </button>
+    );
+  };
+
     const renderProfileSwitcher = () => {
-    if (!showProfileSwitcher) return null;
-    const yearLabel = getProfileYear(activeProfileOption || profileList[0]);
+    if (!showProfileSwitcher && !showDuplicateProfileButton) return null;
+    const yearLabel = showProfileSwitcher
+      ? getProfileYear(activeProfileOption || profileList[0])
+      : null;
         const normalizedProfileList = profileList.map((profile) => ({
             ...profile,
             isDeleted: Boolean(profile.isDeleted),
         }));
     return (
       <div ref={switcherRef} className="absolute top-4 left-4 z-30 flex items-center gap-3">
+        {showProfileSwitcher ? (
         <button
           type="button"
           onClick={() => setSwitcherOpen((prev) => !prev)}
-          className="group flex items-center gap-2 px-3 py-1.5 rounded-full transition-all text-xs font-semibold border backdrop-blur-sm shadow-sm bg-white/80 text-text-subtle border-border-default hover:text-primary-600 hover:border-primary-200"
+          className={`group flex items-center gap-2 px-3 py-1.5 rounded-full transition-all text-xs font-semibold border backdrop-blur-sm shadow-sm bg-white/80 text-text-subtle border-border-default hover:text-primary-600 hover:border-primary-200 ${
+            isStaffDuplicateProfile(activeProfileOption as Record<string, unknown>) ? 'opacity-60' : ''
+          }`}
         >
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor" className="w-3.5 h-3.5 text-primary-500">
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -1292,6 +1337,8 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
           </svg>
         </button>
+        ) : null}
+        {onAddProfile ? (
         <button
           onClick={onAddProfile}
           className="p-2 text-text-subtle hover:text-primary-600 transition-colors bg-white/80 backdrop-blur-sm rounded-full shadow-sm hover:shadow-md border border-border-default"
@@ -1299,8 +1346,10 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
         >
           <PlusIcon className="w-4 h-4" />
         </button>
+        ) : null}
+        {renderDuplicateProfileButton(true)}
 
-        {isSwitcherOpen && (
+        {showProfileSwitcher && isSwitcherOpen && (
           <div className="absolute top-full right-0 mt-2 w-72 bg-white rounded-xl shadow-xl border border-border-default z-50 overflow-hidden animate-fade-in origin-top-right">
             <div className="p-2.5 bg-bg-subtle/50 border-b border-border-default flex justify-between items-center">
               <p className="text-[10px] font-bold text-text-muted uppercase tracking-wider">היסטוריית גרסאות</p>
@@ -1309,12 +1358,14 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
             <div className="max-h-60 overflow-y-auto">
               {normalizedProfileList.map((profile, index) => {
                 const isActive = profile.id === activeProfileOption?.id;
+                const isDuplicate = isStaffDuplicateProfile(profile as Record<string, unknown>);
                 const profileYear = getProfileYear(profile);
                 const sourceLabel = (profile as any).source || (profile as any).sourceClientName || '';
                 const baseRowClasses = [
-                    'px-3 py-2.5 border-b border-border-subtle last:border-0 hover:bg-primary-50 transition-colors cursor-pointer group flex items-start gap-3',
+                    'px-3 py-2.5 border-b border-border-subtle last:border-0 hover:bg-primary-50 transition-all cursor-pointer group flex items-start gap-3',
                     isActive ? 'bg-primary-50/60' : '',
                     profile.isDeleted ? 'bg-red-50/60 border-red-100' : '',
+                    isDuplicate ? 'opacity-55 hover:opacity-80' : '',
                 ]
                   .filter(Boolean)
                   .join(' ');
@@ -1330,10 +1381,15 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                     </div>
                       <div className="flex-1 min-w-0">
                       <div className="flex justify-between items-start gap-2">
-                        <p className={`text-xs font-bold truncate ${profile.isDeleted ? 'text-red-600' : isActive ? 'text-primary-900' : 'text-text-default'}`}>
+                        <p className={`text-xs font-bold truncate ${profile.isDeleted ? 'text-red-600' : isActive ? 'text-primary-900' : isDuplicate ? 'text-text-muted' : 'text-text-default'}`}>
                           {profile.profileName}
                           {profile.isDeleted && ' (נמחק)'}
                         </p>
+                        {isDuplicate && !profile.isDeleted && (
+                          <span className="text-[10px] font-semibold text-text-muted bg-bg-subtle px-2 py-0.5 rounded-full border border-border-subtle shrink-0">
+                            עותק
+                          </span>
+                        )}
                         {profile.isDeleted && (
                           <span className="text-[10px] font-semibold text-red-600 bg-red-50 px-2 py-0.5 rounded-full border border-red-100">מחוק</span>
                         )}
@@ -1376,6 +1432,20 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
   const missingDetailsBannerLine = `פרטים חסרים: ${missingProfileLabels.join(', ')}`;
 
   const showSaveFooter = Boolean(!hideActions && onSaveCandidate);
+
+  const handleSaveCandidateClick = useCallback(() => {
+    if (!onSaveCandidate || isSaving) return;
+    if (isEditingDuplicateProfile) {
+      setDuplicateSaveConfirmOpen(true);
+      return;
+    }
+    onSaveCandidate();
+  }, [onSaveCandidate, isEditingDuplicateProfile, isSaving]);
+
+  const handleConfirmDuplicateSave = useCallback(() => {
+    setDuplicateSaveConfirmOpen(false);
+    onSaveCandidate?.();
+  }, [onSaveCandidate]);
 
   const renderProfileVideo = (className = '') =>
       profileVideoUrl ? (
@@ -1819,7 +1889,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                           {t('profile.recruitment_source_created')}
                                       </div>
                                       <div className="text-sm font-semibold tabular-nums text-text-default">
-                                          {formatRecruitmentSourceDisplayDate(candidateData.recruitmentSourceCreatedAt)}
+                                          {formatRecruitmentSourceDisplayDate(
+                                              candidateData.recruitmentSourceCreatedAt ?? candidateData.createdAt,
+                                          )}
                                       </div>
                                   </div>
                                   <div className="min-w-[6.5rem] text-right">
@@ -1827,7 +1899,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                           {t('profile.recruitment_source_updated')}
                                       </div>
                                       <div className="text-sm font-semibold tabular-nums text-text-default">
-                                          {formatRecruitmentSourceDisplayDate(candidateData.recruitmentSourceUpdatedAt)}
+                                          {formatRecruitmentSourceDisplayDate(
+                                              candidateData.recruitmentSourceUpdatedAt ?? candidateData.updatedAt,
+                                          )}
                                       </div>
                                   </div>
                               </div>
@@ -1843,21 +1917,9 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                                   description="Calculates relevance score based on candidate skills vs job requirements."
                                   logic={["Vectors Embedding for skills", "Industry overlap analysis"]}
                               >
-                                  <button
-                                      onClick={(e) => { e.stopPropagation(); onMatchJobsClick(); }}
-                                      className="flex items-center justify-center gap-2 bg-primary-600 text-white font-bold py-2 px-4 rounded-xl hover:bg-primary-700 transition-all shadow-md shadow-primary-500/20"
-                                  >
-                                      <MatchIcon className="w-5 h-5" />
-                                      <span>{t('profile.matches')} ({jobMatchesCount})</span>
-                                  </button>
+                               
                               </DevAnnotation>
-                              <button
-                                  onClick={(e) => { e.stopPropagation(); onScreenCandidateClick(); }}
-                                  className="flex items-center justify-center gap-2 bg-white border border-border-default text-text-default font-bold py-2 px-4 rounded-xl hover:bg-bg-hover transition-all shadow-sm"
-                              >
-                                  <ClipboardDocumentListIcon className="w-5 h-5 text-text-muted" />
-                                  <span>{t('profile.screen_candidate')}</span>
-                              </button>
+                            
                               </div>
                               {saveStatusMessage && !onSaveCandidate && (
                                   <p className="text-xs text-text-muted mt-2 w-full">{saveStatusMessage}</p>
@@ -1987,22 +2049,76 @@ const CandidateProfile: React.FC<CandidateProfileProps> = ({
                     <div className="min-w-0 space-y-1 text-xs text-text-muted">
                         {saveStatusMessage ? <p>{saveStatusMessage}</p> : null}
                     </div>
-                    <button
-                        type="button"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onSaveCandidate();
-                        }}
-                        disabled={isSaving}
-                        className={`shrink-0 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
-                            isSaving ? 'opacity-60 cursor-not-allowed' : ''
-                        }`}
-                    >
-                        {isSaving ? 'שומר/ת...' : 'שמירת פרטים'}
-                    </button>
+                    <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+                        {renderDuplicateProfileButton()}
+                        <button
+                            type="button"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                handleSaveCandidateClick();
+                            }}
+                            disabled={isSaving}
+                            className={`shrink-0 bg-primary-600 text-white font-bold py-2.5 px-6 rounded-xl hover:bg-primary-700 transition shadow-md ${
+                                isSaving ? 'opacity-60 cursor-not-allowed' : ''
+                            }`}
+                        >
+                            {isSaving ? 'שומר/ת...' : 'שמירת פרטים'}
+                        </button>
+                    </div>
                 </div>
             </div>
         ) : null}
+
+        {duplicateSaveConfirmOpen
+          ? createPortal(
+              <div
+                className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[240] flex items-center justify-center p-4"
+                onClick={() => setDuplicateSaveConfirmOpen(false)}
+                dir="rtl"
+                role="presentation"
+              >
+                <div
+                  className="bg-bg-card rounded-2xl shadow-xl border border-border-default max-w-md w-full overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="duplicate-save-confirm-title"
+                >
+                  <div className="flex items-start gap-3 p-4 border-b border-border-default bg-bg-subtle/40">
+                    <div className="w-10 h-10 rounded-full bg-amber-100 flex items-center justify-center shrink-0">
+                      <ExclamationTriangleIcon className="w-6 h-6 text-amber-700" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <h3 id="duplicate-save-confirm-title" className="font-bold text-text-default text-lg">
+                        שמירה על עותק
+                      </h3>
+                      <p className="text-sm text-text-muted mt-1 leading-relaxed">
+                        האם ברצונך לשמור על עותק חי של המועמד?
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 p-4 border-t border-border-default bg-bg-subtle/20">
+                    <button
+                      type="button"
+                      onClick={() => setDuplicateSaveConfirmOpen(false)}
+                      className="flex-1 py-2.5 rounded-xl border border-border-default font-semibold text-text-default hover:bg-bg-hover"
+                    >
+                      ביטול
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleConfirmDuplicateSave}
+                      disabled={isSaving}
+                      className="flex-1 py-2.5 rounded-xl bg-primary-600 text-white font-bold hover:bg-primary-700 disabled:opacity-60"
+                    >
+                      {isSaving ? 'שומר/ת...' : 'שמירה'}
+                    </button>
+                  </div>
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
     </div>
   );
 };

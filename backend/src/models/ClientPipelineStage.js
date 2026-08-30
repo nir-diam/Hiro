@@ -35,6 +35,11 @@ const ClientPipelineStage = sequelize.define(
       allowNull: false,
       defaultValue: 0,
     },
+    slaLimitUnit: {
+      type: DataTypes.STRING(16),
+      allowNull: false,
+      defaultValue: 'days',
+    },
     outcomes: {
       type: DataTypes.JSONB,
       allowNull: false,

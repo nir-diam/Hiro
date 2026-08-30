@@ -6,7 +6,7 @@ const User = require('../models/User');
 const PORTAL_TOKEN_TTL_MS = Number(process.env.CANDIDATE_PORTAL_MAGIC_TTL_MS) || 7 * 24 * 60 * 60 * 1000;
 
 const publicAppOrigin = () =>
-  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://hiro.co.il').replace(/\/$/, '');
+  String(process.env.PUBLIC_APP_URL || process.env.FRONTEND_URL || 'https://app.hiro.co.il').replace(/\/$/, '');
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 

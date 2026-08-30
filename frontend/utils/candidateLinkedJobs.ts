@@ -36,6 +36,7 @@ export type CandidateJobLink = {
   dueTime: string;
   inviteCandidate: boolean;
   inviteClient: boolean;
+  clientId?: string;
 };
 
 function stripHtml(html: string): string {
@@ -69,6 +70,12 @@ export function mapLinkedJobRow(row: LinkedJobApiRow): CandidateJobLink {
     dueTime: wm.dueTime != null ? String(wm.dueTime) : '',
     inviteCandidate: Boolean(wm.inviteCandidate),
     inviteClient: Boolean(wm.inviteClient),
+    clientId:
+      job.clientId != null
+        ? String(job.clientId)
+        : job.client_id != null
+          ? String(job.client_id)
+          : undefined,
   };
 }
 
@@ -190,6 +197,7 @@ export type ProcessJournalResponse = {
   jobCandidateId: string;
   candidateId: string;
   jobId: string;
+  clientId?: string | null;
   currentStatus: string;
   workflowMeta: {
     internalNote: string;

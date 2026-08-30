@@ -20,6 +20,7 @@ router.get('/by-user/:userId', candidateController.getByUser);
 router.get('/rebuild-embeddings', candidateController.rebuildAllEmbeddings);
 router.post('/search/free', candidateController.freeSearch);
 router.post('/search/list', optionalAuth, candidateController.listPost);
+router.post('/match-scores/batch', optionalAuth, candidateController.batchMatchScores);
 router.post('/ai', candidateController.createFromAi);
 
 router.post('/:id/generate-experience-summary', candidateController.generateExperienceSummary);

@@ -133,32 +133,105 @@ async function listProfilesOnly(clientId, organizationId = null) {
   return hasAny ? profiles : null;
 }
 
+async function seedProfileDefaults(clientId, organizationId, profileId, transaction) {
+  const defs = DEFAULT_PROFILES[profileId] || [];
+  const created = [];
+  for (let i = 0; i < defs.length; i += 1) {
+    const def = defs[i];
+    const row = await JobHealthRule.create(
+      {
+        clientId,
+        organizationId: organizationId || null,
+        profileId,
+        color: def.color,
+        condition: def.condition,
+        operator: def.operator,
+        value: def.value,
+        maxValue: def.maxValue ?? null,
+        stage: def.stage || null,
+        enabled: def.enabled !== false,
+        sortIndex: i,
+      },
+      { transaction },
+    );
+    created.push(ruleToDto(row));
+  }
+  return created;
+}
+
 async function seedDefaults(clientId, organizationId, transaction) {
   const profiles = emptyProfiles();
   for (const profileId of PROFILE_IDS) {
-    const defs = DEFAULT_PROFILES[profileId] || [];
-    for (let i = 0; i < defs.length; i += 1) {
-      const def = defs[i];
-      const row = await JobHealthRule.create(
-        {
-          clientId,
-          organizationId: organizationId || null,
-          profileId,
-          color: def.color,
-          condition: def.condition,
-          operator: def.operator,
-          value: def.value,
-          maxValue: def.maxValue ?? null,
-          stage: def.stage || null,
-          enabled: def.enabled !== false,
-          sortIndex: i,
-        },
-        { transaction },
-      );
-      profiles[profileId].push(ruleToDto(row));
-    }
+    profiles[profileId] = await seedProfileDefaults(clientId, organizationId, profileId, transaction);
   }
   await setIsActive(clientId, organizationId, true, transaction);
+  return profiles;
+}
+
+/** Copy one profile's client-level defaults onto an organization scope. */
+async function copyProfileFromClientDefaults(clientId, organizationId, profileId, transaction) {
+  if (!organizationId) return null;
+  const sources = await JobHealthRule.findAll({
+    where: { ...scopeWhere(clientId, null), profileId },
+    order: [
+      ['sortIndex', 'ASC'],
+      ['createdAt', 'ASC'],
+    ],
+    transaction,
+  });
+  if (!sources.length) return null;
+
+  const created = [];
+  for (let i = 0; i < sources.length; i += 1) {
+    const plain = sources[i].toJSON ? sources[i].toJSON() : sources[i];
+    const row = await JobHealthRule.create(
+      {
+        clientId,
+        organizationId,
+        profileId,
+        color: plain.color,
+        condition: plain.condition,
+        operator: plain.operator,
+        value: plain.value,
+        maxValue: plain.maxValue ?? null,
+        stage: plain.stage || null,
+        enabled: plain.enabled,
+        sortIndex: i,
+      },
+      { transaction },
+    );
+    created.push(ruleToDto(row));
+  }
+  return created;
+}
+
+/** Ensure each profile tab has its own rule set (seed or copy per profile). */
+async function ensureProfilesComplete(clientId, organizationId, transaction) {
+  const profiles = await listProfiles(clientId, organizationId);
+  for (const profileId of PROFILE_IDS) {
+    if ((profiles[profileId] || []).length > 0) continue;
+    if (organizationId) {
+      const copied = await copyProfileFromClientDefaults(
+        clientId,
+        organizationId,
+        profileId,
+        transaction,
+      );
+      if (copied?.length) {
+        profiles[profileId] = copied;
+        continue;
+      }
+    }
+    profiles[profileId] = await seedProfileDefaults(clientId, organizationId, profileId, transaction);
+  }
+  const settingRow = await JobHealthSetting.findOne({
+    where: scopeWhere(clientId, organizationId),
+    transaction,
+  });
+  if (!settingRow) {
+    const activeDefault = organizationId ? await getIsActive(clientId, null) : true;
+    await setIsActive(clientId, organizationId, activeDefault, transaction);
+  }
   return profiles;
 }
 
@@ -166,25 +239,18 @@ async function listOrSeedByScope(clientId, organizationIdRaw = null) {
   const organizationId = normalizeOrganizationId(organizationIdRaw);
   await assertOrgLinkedToClient(clientId, organizationId);
 
-  const existing = await listProfiles(clientId, organizationId);
-  const hasAny = PROFILE_IDS.some((p) => (existing[p] || []).length > 0);
-  if (hasAny) {
-    const isSystemActive = await getIsActive(clientId, organizationId);
-    return { isSystemActive, profiles: existing };
-  }
-
   const { sequelize } = require('../config/db');
   const profiles = await sequelize.transaction(async (transaction) => {
-    const again = await JobHealthRule.findAll({
+    await JobHealthRule.findAll({
       where: scopeWhere(clientId, organizationId),
       attributes: ['id'],
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
-    if (again.length > 0) return listProfiles(clientId, organizationId);
-    return seedDefaults(clientId, organizationId, transaction);
+    return ensureProfilesComplete(clientId, organizationId, transaction);
   });
-  return { isSystemActive: true, profiles };
+  const isSystemActive = await getIsActive(clientId, organizationId);
+  return { isSystemActive, profiles };
 }
 
 function sanitizeRule(raw, profileId, sortIndex) {

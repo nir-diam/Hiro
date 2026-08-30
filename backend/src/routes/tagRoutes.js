@@ -19,6 +19,8 @@ router.patch('/ai-decisions/:id/approve', tagController.approveAiDecision);
 router.patch('/ai-decisions/:id/comments', tagController.updateAiDecisionComments);
 router.post('/ai-decisions/backfill', tagController.backfillAiDecisions);
 router.post('/ai-decisions/backfill-auto-merge', tagController.backfillAutoMerge);
+router.post('/merge', ...tagWrite, tagController.mergeTags);
+router.post('/blacklist', ...tagWrite, tagController.blacklistTags);
 router.get('/rebuild-embeddings', tagController.rebuildEmbeddings);
 router.get('/:id', tagController.get);
 router.post('/:id/rebuild-embedding', tagController.rebuildEmbedding);

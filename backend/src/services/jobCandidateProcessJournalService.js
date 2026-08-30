@@ -102,9 +102,27 @@ function appendJournalEntryActivity(entry, { summary, actor, isActive } = {}) {
 
 async function resolveClientIdForJobCandidate(jc) {
   if (!jc?.jobId) return null;
-  const job = await Job.findByPk(jc.jobId, { attributes: ['id', 'client'] });
+  const job = await Job.findByPk(jc.jobId, { attributes: ['id', 'client', 'clientId'] });
+  if (job?.clientId) return String(job.clientId);
   if (!job?.client) return null;
-  return clientUsageSettingService.getClientIdForJobClientLabel(job.client);
+
+  const label = String(job.client).trim();
+  const direct = await clientUsageSettingService.getClientIdForJobClientLabel(label);
+  if (direct) return direct;
+
+  const beforeParen = label.split('(')[0].trim();
+  if (beforeParen && beforeParen !== label) {
+    const fromPrefix = await clientUsageSettingService.getClientIdForJobClientLabel(beforeParen);
+    if (fromPrefix) return fromPrefix;
+  }
+
+  const parenMatch = label.match(/\(([^)]+)\)/);
+  if (parenMatch?.[1]) {
+    const fromInner = await clientUsageSettingService.getClientIdForJobClientLabel(parenMatch[1].trim());
+    if (fromInner) return fromInner;
+  }
+
+  return null;
 }
 
 async function loadStatusTagsByName(clientId) {
@@ -256,6 +274,7 @@ async function getProcessJournal(jobCandidateId) {
     jobCandidateId: jc.id,
     candidateId: jc.candidateId,
     jobId: jc.jobId,
+    clientId,
     currentStatus: String(jc.status || '').trim(),
     workflowMeta: {
       internalNote: wm.internalNote != null ? String(wm.internalNote) : '',

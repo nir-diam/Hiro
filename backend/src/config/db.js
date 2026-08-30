@@ -161,6 +161,11 @@ const connectDb = async () => {
       ADD COLUMN IF NOT EXISTS "canonicalCandidateId" UUID NULL;
   `).catch(() => {});
 
+  await sequelize.query(`
+    ALTER TABLE email_uploads
+      ADD COLUMN IF NOT EXISTS user_notes TEXT NULL;
+  `).catch(() => {});
+
   // Safe additive columns for job_publications (sync does not alter existing tables).
   await sequelize.query(`
     ALTER TABLE job_publications
@@ -253,6 +258,11 @@ const connectDb = async () => {
   `).catch(() => {});
 
   await sequelize.query(`
+    ALTER TABLE client_pipeline_stages
+      ADD COLUMN IF NOT EXISTS sla_limit_unit VARCHAR(16) NOT NULL DEFAULT 'days';
+  `).catch(() => {});
+
+  await sequelize.query(`
     CREATE INDEX IF NOT EXISTS idx_client_pipeline_stages_pipeline
       ON client_pipeline_stages (pipeline_id, sort_index);
   `).catch(() => {});
@@ -286,6 +296,11 @@ const connectDb = async () => {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `).catch(() => {});
+
+  await sequelize.query(`
+    ALTER TABLE candidate_pipeline_stages
+      ADD COLUMN IF NOT EXISTS sla_limit_unit VARCHAR(16) NOT NULL DEFAULT 'days';
   `).catch(() => {});
 
   await sequelize.query(`

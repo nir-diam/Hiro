@@ -1,5 +1,6 @@
 const CandidateApplication = require('../models/CandidateApplication');
 const Job = require('../models/Job');
+const { Op } = require('sequelize');
 const redis = require('./redisService');
 
 const APP_LIST_KEY = (candidateId) => `applications:candidate:${candidateId}`;
@@ -42,6 +43,24 @@ const listByCandidate = async (candidateId) => {
   return records;
 };
 
+const listByCandidates = async (candidateIds) => {
+  const ids = [...new Set(candidateIds.map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!ids.length) return [];
+  if (ids.length === 1) return listByCandidate(ids[0]);
+
+  return CandidateApplication.findAll({
+    where: { candidateId: { [Op.in]: ids } },
+    order: [['applicationDate', 'DESC']],
+    include: [
+      {
+        model: Job,
+        as: 'job',
+        attributes: ['id', 'title', 'client'],
+      },
+    ],
+  });
+};
+
 const create = async (payload) => {
   const record = await CandidateApplication.create(payload);
   await appCacheInvalidate(payload.candidateId);
@@ -74,6 +93,7 @@ const remove = async (id) => {
 
 module.exports = {
   listByCandidate,
+  listByCandidates,
   create,
   update,
   remove,

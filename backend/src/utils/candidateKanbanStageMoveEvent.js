@@ -3,12 +3,44 @@ const candidateService = require('../services/candidateService');
 const clientService = require('../services/clientService');
 const candidatePipelineService = require('../services/candidatePipelineService');
 const JobCandidate = require('../models/JobCandidate');
+const Job = require('../models/Job');
 const ClientContact = require('../models/ClientContact');
 const jobCandidateProcessJournalService = require('../services/jobCandidateProcessJournalService');
 const jobCandidateStatusService = require('../services/jobCandidateStatusService');
-const { resolveOutcomeSlaDays, dueDateAfterDaysFromToday } = require('./pipelineMoveTargets');
+const { applyOutcomeSlaDueDateTime } = require('./pipelineMoveTargets');
 
 const trim = (v) => (v != null && v !== undefined ? String(v).trim() : '');
+
+async function resolveCandidateJobEventMeta(candidateId, preferredJobCandidateId = null) {
+  const cid = trim(candidateId);
+  if (!cid) return {};
+
+  let link = null;
+  const preferredId = trim(preferredJobCandidateId);
+  if (preferredId) {
+    link = await JobCandidate.findByPk(preferredId, { attributes: ['id', 'jobId', 'candidateId'] });
+    if (link && String(link.candidateId) !== cid) link = null;
+  }
+  if (!link) {
+    link = await JobCandidate.findOne({
+      where: { candidateId: cid },
+      order: [['updatedAt', 'DESC']],
+      attributes: ['id', 'jobId', 'candidateId'],
+    });
+  }
+  if (!link?.jobId) return link?.id ? { jobCandidateId: link.id, candidateId: cid } : { candidateId: cid };
+
+  const job = await Job.findByPk(link.jobId, {
+    attributes: ['id', 'title', 'publicJobTitle', 'client'],
+  });
+  return {
+    candidateId: cid,
+    jobCandidateId: link.id,
+    jobId: link.jobId,
+    jobTitle: trim(job?.title || job?.publicJobTitle) || null,
+    jobCompany: trim(job?.client) || null,
+  };
+}
 
 const normalizePhone = (value) => String(value || '').replace(/\D/g, '');
 
@@ -114,7 +146,7 @@ const eventMatchesPipeline = (event, pipeline) => {
   return false;
 };
 
-async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDate) {
+async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDate, dueTime = null) {
   const cid = String(candidateId || '').trim();
   if (!cid || !toStageName) return { recorded: 0 };
 
@@ -135,6 +167,7 @@ async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDat
 
     let prevMeta = await jobCandidateProcessJournalService.materializeStatusJournalForPatch(jc);
     if (dueDate) prevMeta.dueDate = dueDate;
+    if (dueTime !== undefined && dueTime !== null) prevMeta.dueTime = dueTime;
     if (note) prevMeta.internalNote = note;
     prevMeta.workflowUpdatedAt = new Date().toISOString();
 
@@ -163,9 +196,11 @@ async function recordJobLinkJournals(req, candidateId, toStageName, note, dueDat
   return { recorded };
 }
 
-async function recordClientJournal(req, candidateId, pipeline, fromStage, toStage, outcome, dueDate) {
+async function recordClientJournal(req, candidateId, pipeline, fromStage, toStage, outcome, dueDate, dueTime = null, jobCandidateId = null) {
   const cid = String(candidateId || '').trim();
   if (!cid || !pipeline || !toStage) return { recorded: 0 };
+
+  const jobMeta = await resolveCandidateJobEventMeta(cid, jobCandidateId);
 
   const { resolveClientIdsForCandidateJournal } = require('../services/pipelineOutcomeService');
   const clientIds = await resolveClientIdsForCandidateJournal(cid, req);
@@ -225,6 +260,7 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
                 ? event.status
                 : event.status || 'עתידי',
           dueDate: dueDate || event.dueDate || null,
+          dueTime: dueTime ?? event.dueTime ?? null,
           updates: [newUpdate, ...(Array.isArray(event.updates) ? event.updates : [])],
           history: [
             { user: actor, timestamp: now, summary },
@@ -232,6 +268,7 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
           ],
           metadata: {
             ...(event.metadata && typeof event.metadata === 'object' ? event.metadata : {}),
+            ...jobMeta,
             candidateId: cid,
             lastKanbanStageId: toStage.id || null,
             lastKanbanStageName: toStageName || null,
@@ -264,9 +301,10 @@ async function recordClientJournal(req, candidateId, pipeline, fromStage, toStag
       description: note,
       updates: [newUpdate],
       history: [{ user: actor, timestamp: now, summary }],
-      metadata: { candidateId: cid, kanbanStageMove: true },
+      metadata: { ...jobMeta, candidateId: cid, kanbanStageMove: true },
       isActive: true,
       dueDate: dueDate || null,
+      dueTime: dueTime || null,
     };
 
     await clientService.update(clientId, { events: [event, ...prevEvents] });
@@ -288,6 +326,7 @@ async function recordCandidateKanbanStageMove(
     fromStageId,
     toStageId,
     outcome = null,
+    jobCandidateId = null,
   } = {},
 ) {
   const cid = String(candidateId || '').trim();
@@ -305,9 +344,13 @@ async function recordCandidateKanbanStageMove(
   if (!toStage) return { recorded: false, reason: 'stage_not_found' };
 
   let dueDate = null;
+  let dueTime = null;
   if (outcome) {
-    const slaDays = resolveOutcomeSlaDays(outcome, stages);
-    if (slaDays > 0) dueDate = dueDateAfterDaysFromToday(slaDays);
+    const slaDue = applyOutcomeSlaDueDateTime(outcome, stages);
+    if (slaDue.dueDate) {
+      dueDate = slaDue.dueDate;
+      dueTime = slaDue.dueTime;
+    }
   }
 
   const note =
@@ -318,7 +361,7 @@ async function recordCandidateKanbanStageMove(
         : toStage.name || '';
 
   const toStageName = String(toStage.name || toStage.id).trim();
-  const jobLinks = await recordJobLinkJournals(req, cid, toStageName, note, dueDate);
+  const jobLinks = await recordJobLinkJournals(req, cid, toStageName, note, dueDate, dueTime);
   const clientJournal = await recordClientJournal(
     req,
     cid,
@@ -327,6 +370,8 @@ async function recordCandidateKanbanStageMove(
     toStage,
     outcome,
     dueDate,
+    dueTime,
+    jobCandidateId,
   );
 
   return {
@@ -338,4 +383,5 @@ async function recordCandidateKanbanStageMove(
 
 module.exports = {
   recordCandidateKanbanStageMove,
+  resolveCandidateJobEventMeta,
 };

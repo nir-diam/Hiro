@@ -112,11 +112,23 @@ const AutomationApprovalModal: React.FC<AutomationApprovalModalProps> = ({
                   <span className="block text-sm font-bold text-text-default">
                     {automationActionLabel(row.actionType)}
                   </span>
-                  {row.templateId ? (
-                    <span className="block text-xs text-text-muted mt-0.5">תבנית: {row.templateId}</span>
+                  {row.recipientLabels?.length ? (
+                    <span className="block text-sm text-text-default mt-1">
+                      <span className="font-semibold text-text-muted">נמענים: </span>
+                      {row.recipientLabels.join(' · ')}
+                    </span>
+                  ) : null}
+                  {row.templateName || row.templateId ? (
+                    <span className="block text-sm text-text-default mt-0.5">
+                      <span className="font-semibold text-text-muted">תבנית: </span>
+                      {row.templateName || row.templateId}
+                    </span>
                   ) : null}
                   {row.statusName ? (
-                    <span className="block text-xs text-text-muted mt-0.5">סטטוס: {row.statusName}</span>
+                    <span className="block text-sm text-text-default mt-0.5">
+                      <span className="font-semibold text-text-muted">סטטוס: </span>
+                      {row.statusName}
+                    </span>
                   ) : null}
                 </span>
               </label>

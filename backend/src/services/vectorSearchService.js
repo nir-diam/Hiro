@@ -81,24 +81,141 @@ const cosineSimilarity = (a = [], b = []) => {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 };
 
+const EMBED_COOLDOWN_SEC = 5 * 60;
+const embedCooldownUntil = new Map();
+/** Prevent duplicate concurrent Gemini embed calls for the same candidate (per process). */
+const embedInFlight = new Map();
+
+function hasEmbeddableCandidateContent(candidate, extraText = '') {
+  if (String(extraText || '').replace(/\s/g, '').length > 40) return true;
+  if (!candidate) return false;
+  if (String(candidate.searchText || '').trim().length > 40) return true;
+  if (String(candidate.professionalSummary || '').trim().length > 10) return true;
+  if (String(candidate.title || '').trim().length > 2) return true;
+  if (Array.isArray(candidate.workExperience) && candidate.workExperience.length > 0) return true;
+  const skills = candidate.skills;
+  if (Array.isArray(skills?.technical) && skills.technical.length > 0) return true;
+  if (Array.isArray(skills?.soft) && skills.soft.length > 0) return true;
+  if (Array.isArray(candidate.tags) && candidate.tags.length > 0) return true;
+  return false;
+}
+
+async function isEmbedOnCooldown(candidateId) {
+  const key = String(candidateId);
+  const until = embedCooldownUntil.get(key);
+  if (until && until > Date.now()) return true;
+  try {
+    const { isRedisAvailable } = require('../config/redis');
+    if (isRedisAvailable()) {
+      const redisService = require('./redisService');
+      if (await redisService.exists(`embed:cooldown:${key}`)) return true;
+    }
+  } catch (_) { /* ignore */ }
+  return false;
+}
+
+async function markEmbedCooldown(candidateId, ttlSeconds = EMBED_COOLDOWN_SEC) {
+  const key = String(candidateId);
+  embedCooldownUntil.set(key, Date.now() + ttlSeconds * 1000);
+  try {
+    const { isRedisAvailable } = require('../config/redis');
+    if (isRedisAvailable()) {
+      const redisService = require('./redisService');
+      await redisService.set(`embed:cooldown:${key}`, '1', { ttlSeconds });
+    }
+  } catch (_) { /* ignore */ }
+}
+
+async function clearEmbedCooldown(candidateId) {
+  const key = String(candidateId);
+  embedCooldownUntil.delete(key);
+  try {
+    const { isRedisAvailable } = require('../config/redis');
+    if (isRedisAvailable()) {
+      const redisService = require('./redisService');
+      await redisService.del(`embed:cooldown:${key}`);
+    }
+  } catch (_) { /* ignore */ }
+}
+
+async function acquireEmbedLock(candidateId, ttlSeconds = 120) {
+  const lockKey = `embed:lock:${candidateId}`;
+  try {
+    const { isRedisAvailable, getRedisClient } = require('../config/redis');
+    if (isRedisAvailable()) {
+      const result = await getRedisClient().set(lockKey, '1', 'EX', ttlSeconds, 'NX');
+      return result === 'OK';
+    }
+  } catch (_) { /* ignore */ }
+  return !embedInFlight.has(String(candidateId));
+}
+
+async function releaseEmbedLock(candidateId) {
+  const lockKey = `embed:lock:${candidateId}`;
+  try {
+    const { isRedisAvailable, getRedisClient } = require('../config/redis');
+    if (isRedisAvailable()) {
+      await getRedisClient().del(lockKey);
+    }
+  } catch (_) { /* ignore */ }
+}
+
 const embedCandidateAndSave = async (candidateId, extraText = '') => {
-  const candidate = await candidateService.getById(candidateId);
-  const doc = buildSearchDocument(candidate, extraText);
-  console.log('[embed] candidate', candidateId, 'docSnippet:', doc.slice(0, 400));
-  const embedding = await embedText(doc);
-  if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
-    console.warn('[embed] skip update due to empty embedding', candidateId);
-    return [];
+  const key = String(candidateId || '');
+  if (!key) return [];
+
+  if (await isEmbedOnCooldown(key)) return [];
+
+  const pending = embedInFlight.get(key);
+  if (pending) return pending;
+
+  const task = (async () => {
+    let hasLock = false;
+    try {
+      if (!(await acquireEmbedLock(key))) return [];
+
+      hasLock = true;
+      const row = await candidateService.findByPkWithTagsForMatchScore(candidateId);
+      if (!row) {
+        await markEmbedCooldown(key);
+        console.warn('[embed] candidate not found', candidateId);
+        return [];
+      }
+      const candidate = candidateService.toPlainCandidateForMatchScore(row);
+      if (!hasEmbeddableCandidateContent(candidate, extraText)) {
+        await markEmbedCooldown(key);
+        console.log('[embed] skip — profile not ready for embedding', candidateId);
+        return [];
+      }
+
+      const doc = buildSearchDocument(candidate, extraText);
+      console.log('[embed] candidate', candidateId, 'docSnippet:', doc.slice(0, 400));
+      const embedding = await embedText(doc);
+      if (!embedding || !Array.isArray(embedding) || embedding.length === 0) {
+        await markEmbedCooldown(key, 120);
+        console.warn('[embed] skip update due to empty embedding', candidateId);
+        return [];
+      }
+      const updatePayload = { embedding };
+      if (extraText && extraText.trim()) {
+        updatePayload.searchText = normalizeResumeSearchText(extraText).slice(0, 50000);
+        updatePayload.searchTextSavedAt = new Date();
+      }
+      await candidateService.update(candidateId, updatePayload);
+      await clearEmbedCooldown(key);
+      _candListCache = null;
+      return embedding;
+    } finally {
+      if (hasLock) await releaseEmbedLock(key);
+    }
+  })();
+
+  embedInFlight.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (embedInFlight.get(key) === task) embedInFlight.delete(key);
   }
-  const updatePayload = { embedding };
-  if (extraText && extraText.trim()) {
-    updatePayload.searchText = normalizeResumeSearchText(extraText).slice(0, 50000);
-    updatePayload.searchTextSavedAt = new Date();
-  }
-  await candidateService.update(candidateId, updatePayload);
-  // Bust the candidate list cache so the new embedding is picked up
-  _candListCache = null;
-  return embedding;
 };
 
 const collectTerms = (candidate) => {
@@ -141,8 +258,18 @@ const normalizeEmbedding = (emb) => {
  * @param {object}  [opts.filters]
  * @param {number}  [opts.limit]
  * @param {number}  [opts.maxLimitCap]
+ * @param {number}  [opts.maxInlineEmbedRebuild=0] - max on-the-fly Gemini embeds during search (keep 0 for Sonar)
+ * @param {boolean} [opts.requireKeywordMatch=true] - when false, rank by vector similarity only
  */
-const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, limit = 20, maxLimitCap = 20 }) => {
+const searchCandidates = async ({
+  query,
+  precomputedEmbedding,
+  filters = {},
+  limit = 20,
+  maxLimitCap = 20,
+  maxInlineEmbedRebuild = 0,
+  requireKeywordMatch = true,
+}) => {
   let qEmbedding;
   if (precomputedEmbedding && Array.isArray(precomputedEmbedding) && precomputedEmbedding.length > 0) {
     qEmbedding = precomputedEmbedding;
@@ -163,7 +290,11 @@ const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, lim
     return true;
   });
 
-  console.log('[vectorSearch] filtered count', filtered.length);
+  const rebuildBudget = Math.max(0, Number(maxInlineEmbedRebuild) || 0);
+  let rebuildCount = 0;
+  let skippedMissingEmbedding = 0;
+
+  console.log('[vectorSearch] filtered count', filtered.length, 'rebuild budget', rebuildBudget);
 
   // Cap max returned for sanity (Sonar may request a higher cap than default grid search)
   const cap = Number.isFinite(maxLimitCap) && maxLimitCap > 0 ? maxLimitCap : 20;
@@ -174,14 +305,35 @@ const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, lim
     .filter(Boolean);
 
   const scored = [];
-  for (const candidate of filtered) {
+  const loopT0 = Date.now();
+  for (let i = 0; i < filtered.length; i += 1) {
+    const candidate = filtered[i];
+    if (i > 0 && i % 250 === 0) {
+      console.log(
+        '[vectorSearch] progress',
+        `${i}/${filtered.length}`,
+        'scored',
+        scored.length,
+        'skippedMissingEmbedding',
+        skippedMissingEmbedding,
+        'inlineRebuilds',
+        rebuildCount,
+        `${Date.now() - loopT0}ms`,
+      );
+    }
     let emb = normalizeEmbedding(candidate.embedding);
     if (!emb.length || emb.length !== qEmbedding.length) {
-      try {
-        const rebuilt = await embedCandidateAndSave(candidate.id);
-        emb = normalizeEmbedding(rebuilt);
-      } catch (err) {
-        console.error('[vectorSearch] rebuild candidate embedding failed', candidate.id, err.message || err);
+      if (rebuildCount < rebuildBudget) {
+        rebuildCount += 1;
+        try {
+          const rebuilt = await embedCandidateAndSave(candidate.id);
+          emb = normalizeEmbedding(rebuilt);
+        } catch (err) {
+          console.error('[vectorSearch] rebuild candidate embedding failed', candidate.id, err.message || err);
+          continue;
+        }
+      } else {
+        skippedMissingEmbedding += 1;
         continue;
       }
     }
@@ -189,7 +341,7 @@ const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, lim
     if (!emb.length || emb.length !== qEmbedding.length) continue;
 
     const terms = collectTerms(candidate);
-    if (!hasKeywordMatch(queryWords, terms)) continue;
+    if (requireKeywordMatch && !hasKeywordMatch(queryWords, terms)) continue;
 
     const score = cosineSimilarity(qEmbedding, emb);
     if (score < 0.30) continue;
@@ -203,7 +355,18 @@ const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, lim
   }
 
   scored.sort((a, b) => b.score - a.score);
-  console.log('[vectorSearch] scored count', scored.length, 'top1 score', scored[0]?.score);
+  console.log(
+    '[vectorSearch] scored count',
+    scored.length,
+    'top1 score',
+    scored[0]?.score,
+    'skippedMissingEmbedding',
+    skippedMissingEmbedding,
+    'inlineRebuilds',
+    rebuildCount,
+    'loopMs',
+    Date.now() - loopT0,
+  );
 
   return scored.slice(0, maxLimit).map((s) => ({
     ...s.candidate.toJSON ? s.candidate.toJSON() : s.candidate,
@@ -214,6 +377,7 @@ const searchCandidates = async ({ query, precomputedEmbedding, filters = {}, lim
 module.exports = {
   buildSearchDocument,
   embedCandidateAndSave,
+  hasEmbeddableCandidateContent,
   searchCandidates,
   cosineSimilarity,
   normalizeEmbedding,

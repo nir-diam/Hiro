@@ -13,9 +13,15 @@ import {
   CheckIcon,
   UserIcon,
   ArrowPathIcon,
+  BriefcaseIcon,
 } from './Icons';
 import ProcessEventModal, { type ProcessEventSavePayload } from './ProcessEventModal';
 import ProcessManagementCatalogPanel from './ProcessManagementCatalogPanel';
+import CandidateSummaryDrawer from './CandidateSummaryDrawer';
+import JobDetailsDrawer from './JobDetailsDrawer';
+import ClientDetailsDrawer from './ClientDetailsDrawer';
+import type { Client } from './ClientsListView';
+import type { Candidate } from './CandidatesListView';
 import { authHeaders } from '../utils/authHeaders';
 import { fetchPipelines, type PipelineDto, type PipelineStageDto } from '../services/pipelinesApi';
 import { fetchCandidatePipelines } from '../services/candidatePipelinesApi';
@@ -27,7 +33,9 @@ import {
   type EnrichedPipeline,
 } from '../utils/processManagementCatalog';
 import { applyOutcomeDueDate, outcomeActionSubtitle, summarizeAutomationResults } from '../utils/processOutcomeSla';
+import { dueDateTimeAfterSla, normalizeSlaUnit } from '../utils/slaDuration';
 import { approvePipelineAutomations, executePipelineOutcome } from '../services/pipelineOutcomesApi';
+import { fetchCandidateLinkedJobs, fetchJobLinkProcessJournal, patchJobLinkProcessJournalEntry, type CandidateJobLink, type ProcessJournalResponse } from '../utils/candidateLinkedJobs';
 import {
   automationErrors,
   pendingAutomationRows,
@@ -39,6 +47,16 @@ import {
   resolveStageIdFromMoveTargetLabel,
 } from '../utils/pipelineMoveTargets';
 import { useAuth } from '../context/AuthContext';
+import {
+  buildCandidateDrawerStub,
+  buildClientDrawerStub,
+  buildJobDrawerStub,
+  hydrateClientForDrawer,
+  hydrateJobForDrawer,
+  type JobDrawerJob,
+} from '../utils/processEntityDrawers';
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type JournalEvent = {
   id: string;
@@ -136,6 +154,43 @@ const resolveCandidateIdFromEvent = (event: JournalEvent): string | null => {
   if (meta?.missingDetailsCompletedCandidate) return String(meta.missingDetailsCompletedCandidate);
   if (meta?.profileApprovedByCandidate) return String(meta.profileApprovedByCandidate);
   return null;
+};
+
+const resolveCandidateIdForDrawer = (
+  event: JournalEvent,
+  scopeCandidateId?: string | null,
+): string | null => {
+  const fromMeta = resolveCandidateIdFromEvent(event);
+  if (fromMeta) return fromMeta;
+  if (scopeCandidateId) return scopeCandidateId;
+  const contactId = event.contactId ? String(event.contactId) : null;
+  if (contactId && UUID_RE.test(contactId)) return contactId;
+  return null;
+};
+
+const normalizeJobTitle = (title: string | null | undefined): string | null => {
+  const t = String(title || '').trim();
+  if (!t || t === '—') return null;
+  return t;
+};
+
+const pickJobLinkForEvent = (
+  links: CandidateJobLink[],
+  event: JournalEvent,
+): CandidateJobLink | null => {
+  if (!links.length) return null;
+  const meta = event.metadata || {};
+  if (meta.jobCandidateId) {
+    const byLink = links.find((link) => link.linkId === String(meta.jobCandidateId));
+    if (byLink) return byLink;
+  }
+  if (event.clientId) {
+    const byClient = links.filter((link) => link.clientId === event.clientId);
+    if (byClient.length === 1) return byClient[0];
+    if (byClient.length > 1) return byClient[0];
+  }
+  if (links.length === 1) return links[0];
+  return links[0];
 };
 
 const resolveActionPipelineContext = (
@@ -353,6 +408,42 @@ const normalizeRow = (raw: Record<string, unknown>): JournalEvent => {
   };
 };
 
+const mapProcessJournalToEvents = (
+  journal: ProcessJournalResponse,
+  scopeCandidateId: string | null | undefined,
+  scopeContactName: string | null | undefined,
+  scopeJobCompany: string | null | undefined,
+  fallbackClientId: string,
+): JournalEvent[] => {
+  const clientName = scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : 'לקוח';
+  const cid = journal.clientId ? String(journal.clientId) : fallbackClientId;
+  return (journal.entries || []).map((entry) =>
+    normalizeRow({
+      id: entry.id,
+      clientId: cid,
+      clientName,
+      title: entry.title || entry.status,
+      description: entry.description,
+      date: entry.date,
+      creator: entry.creator,
+      dueDate: entry.dueDate,
+      status: entry.status,
+      isActive: entry.isActive !== false,
+      contactId: scopeCandidateId || journal.candidateId || null,
+      contactName: scopeContactName || null,
+      process: Array.isArray(entry.tags) && entry.tags[0] ? entry.tags[0] : 'גיוס',
+      stage: entry.status,
+      type: entry.tags,
+      metadata: {
+        jobId: journal.jobId,
+        jobCandidateId: journal.jobCandidateId,
+        candidateId: journal.candidateId,
+      },
+      updates: entry.updates,
+    }),
+  );
+};
+
 const eventMatchesContact = (
   event: JournalEvent,
   contactId?: string | null,
@@ -435,9 +526,18 @@ function resolveStagesForEvent(
   }));
 }
 
+type ClientOption = { id: string; name: string; organizationId?: string | null };
+
 type Props = {
-  clientOptions?: Array<{ id: string; name: string }>;
+  clientOptions?: ClientOption[];
   defaultClientId?: string | null;
+  /** Linked org scope for tenant users (e.g. filtered company on clients page). */
+  defaultOrganizationId?: string | null;
+  defaultOrganizationName?: string | null;
+  scopeOrganizationId?: string | null;
+  scopeOrganizationName?: string | null;
+  /** e.g. contacts-tab company filter label to scope new events */
+  preferredOrganizationLabel?: string | null;
   /** When set, only events for this contact are shown (contact profile tab). */
   scopeContactId?: string | null;
   scopeContactName?: string | null;
@@ -461,6 +561,11 @@ type Props = {
 const ClientsEventsJournalTab: React.FC<Props> = ({
   clientOptions = [],
   defaultClientId = null,
+  defaultOrganizationId = null,
+  defaultOrganizationName = null,
+  scopeOrganizationId = null,
+  scopeOrganizationName = null,
+  preferredOrganizationLabel = null,
   scopeContactId = null,
   scopeContactName = null,
   scopeCandidateId = null,
@@ -482,7 +587,125 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const [error, setError] = useState<string | null>(null);
   const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
+  const [eventModalScope, setEventModalScope] = useState<{
+    clientId: string;
+    organizationId: string;
+    organizationName: string;
+  } | null>(null);
   const [createClientId, setCreateClientId] = useState<string>(defaultClientId || clientOptions[0]?.id || '');
+  const [createOrganizationId, setCreateOrganizationId] = useState<string>(
+    defaultOrganizationId || scopeOrganizationId || clientOptions[0]?.organizationId || '',
+  );
+
+  useEffect(() => {
+    if (defaultClientId) setCreateClientId(String(defaultClientId));
+  }, [defaultClientId]);
+
+  const tenantClientId = user?.clientId ? String(user.clientId) : '';
+  const organizationOptions = useMemo(
+    () => clientOptions.filter((opt) => opt.organizationId),
+    [clientOptions],
+  );
+
+  const matchOrganizationOption = useCallback(
+    (label: string | null | undefined) => {
+      const needle = String(label || '').trim().toLowerCase();
+      if (!needle) return null;
+      return (
+        organizationOptions.find((opt) => {
+          const name = String(opt.name || '').trim().toLowerCase();
+          return name === needle || name.includes(needle) || needle.includes(name);
+        }) || null
+      );
+    },
+    [organizationOptions],
+  );
+
+  const preferredOrganizationOption = useMemo(
+    () => matchOrganizationOption(preferredOrganizationLabel),
+    [matchOrganizationOption, preferredOrganizationLabel],
+  );
+
+  useEffect(() => {
+    const nextOrg = String(
+      preferredOrganizationOption?.organizationId || defaultOrganizationId || scopeOrganizationId || '',
+    ).trim();
+    if (nextOrg) setCreateOrganizationId(nextOrg);
+  }, [preferredOrganizationOption, defaultOrganizationId, scopeOrganizationId]);
+
+  useEffect(() => {
+    if (
+      createOrganizationId
+      || preferredOrganizationOption?.organizationId
+      || defaultOrganizationId
+      || scopeOrganizationId
+    ) {
+      return;
+    }
+    const firstOrgOption = organizationOptions[0];
+    if (firstOrgOption?.organizationId) {
+      setCreateOrganizationId(String(firstOrgOption.organizationId));
+      if (firstOrgOption.id) setCreateClientId(String(firstOrgOption.id));
+    }
+  }, [
+    organizationOptions,
+    createOrganizationId,
+    preferredOrganizationOption,
+    defaultOrganizationId,
+    scopeOrganizationId,
+  ]);
+
+  const settingsClientId = useMemo(() => {
+    if (user?.clientId) return String(user.clientId);
+    return defaultClientId || createClientId || clientOptions[0]?.id || '';
+  }, [user?.clientId, defaultClientId, createClientId, clientOptions]);
+
+  const effectiveCreateClientId = useMemo(() => {
+    const fromState = String(createClientId || '').trim();
+    if (fromState) return fromState;
+    const fromDefault = String(defaultClientId || '').trim();
+    if (fromDefault) return fromDefault;
+    const fromOptions = String(clientOptions[0]?.id || '').trim();
+    if (fromOptions) return fromOptions;
+    const fromEvent = String(events.find((event) => event.clientId)?.clientId || '').trim();
+    if (fromEvent) return fromEvent;
+    return '';
+  }, [createClientId, defaultClientId, clientOptions, events]);
+
+  const effectiveCreateOrganizationId = useMemo(() => {
+    const fromState = String(createOrganizationId || '').trim();
+    if (fromState) return fromState;
+    const fromPreferred = String(preferredOrganizationOption?.organizationId || '').trim();
+    if (fromPreferred) return fromPreferred;
+    const fromScope = String(scopeOrganizationId || defaultOrganizationId || '').trim();
+    if (fromScope) return fromScope;
+
+    const scopeLabel =
+      (preferredOrganizationLabel && preferredOrganizationLabel !== 'all'
+        ? preferredOrganizationLabel
+        : '') ||
+      (scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : '') ||
+      (scopeOrganizationName && scopeOrganizationName !== '—' ? scopeOrganizationName : '') ||
+      (defaultOrganizationName && defaultOrganizationName !== '—' ? defaultOrganizationName : '') ||
+      '';
+    const byName = matchOrganizationOption(scopeLabel);
+    if (byName?.organizationId) return String(byName.organizationId);
+
+    const matchedOption = organizationOptions.find((opt) => opt.id === effectiveCreateClientId);
+    return matchedOption?.organizationId ? String(matchedOption.organizationId) : '';
+  }, [
+    createOrganizationId,
+    preferredOrganizationOption,
+    scopeOrganizationId,
+    defaultOrganizationId,
+    preferredOrganizationLabel,
+    scopeJobCompany,
+    scopeOrganizationName,
+    defaultOrganizationName,
+    matchOrganizationOption,
+    organizationOptions,
+    effectiveCreateClientId,
+  ]);
 
   const [selectedPipelineIds, setSelectedPipelineIds] = useState<Set<string>>(new Set());
   const [selectedSystemEventIds, setSelectedSystemEventIds] = useState<Set<string>>(new Set());
@@ -529,6 +752,126 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     pending: PendingAutomationRow[];
   } | null>(null);
 
+  const [candidateDrawer, setCandidateDrawer] = useState<Candidate | null>(null);
+  const [clientDrawer, setClientDrawer] = useState<Client | null>(null);
+  const [jobDrawer, setJobDrawer] = useState<JobDrawerJob | null>(null);
+  const [isCandidateDrawerOpen, setIsCandidateDrawerOpen] = useState(false);
+  const [isClientDrawerOpen, setIsClientDrawerOpen] = useState(false);
+  const [isJobDrawerOpen, setIsJobDrawerOpen] = useState(false);
+  const [candidateJobLinksById, setCandidateJobLinksById] = useState<Record<string, CandidateJobLink[]>>({});
+
+  const drawerOverlayZ = embeddedInModal ? 'z-[80]' : 'z-[60]';
+
+  const openCandidateDrawer = useCallback((candidateId: string, name: string) => {
+    setCandidateDrawer(buildCandidateDrawerStub(candidateId, name));
+    setIsCandidateDrawerOpen(true);
+  }, []);
+
+  const openClientDrawer = useCallback(
+    async (clientId: string, name: string) => {
+      if (!clientId) return;
+      setClientDrawer(buildClientDrawerStub(clientId, name));
+      setIsClientDrawerOpen(true);
+      const hydrated = await hydrateClientForDrawer(apiBase, clientId);
+      if (hydrated) setClientDrawer(hydrated);
+    },
+    [apiBase],
+  );
+
+  const openJobDrawer = useCallback(
+    async (jobId: string, title: string, client = '') => {
+      if (!jobId) return;
+      setJobDrawer(buildJobDrawerStub(jobId, title, client));
+      setIsJobDrawerOpen(true);
+      const hydrated = await hydrateJobForDrawer(apiBase, jobId, title, client);
+      setJobDrawer(hydrated);
+    },
+    [apiBase],
+  );
+
+  const resolveEventJobMeta = useCallback(
+    (event: JournalEvent) => {
+      const meta = event.metadata || {};
+      let jobId = meta.jobId ? String(meta.jobId) : null;
+      let jobTitle = normalizeJobTitle(meta.jobTitle as string | undefined);
+      let jobCompany =
+        meta.jobCompany && String(meta.jobCompany).trim() && String(meta.jobCompany) !== '—'
+          ? String(meta.jobCompany)
+          : '';
+
+      const candidateId = resolveCandidateIdForDrawer(event, scopeCandidateId);
+      const candidateLinks = candidateId ? candidateJobLinksById[candidateId] || [] : [];
+      const linkFromMeta = meta.jobCandidateId
+        ? candidateLinks.find((link) => link.linkId === String(meta.jobCandidateId))
+        : null;
+      const linkFromCandidate = linkFromMeta || pickJobLinkForEvent(candidateLinks, event);
+
+      if (linkFromCandidate) {
+        if (!jobId && linkFromCandidate.jobId) jobId = linkFromCandidate.jobId;
+        if (!jobTitle) jobTitle = normalizeJobTitle(linkFromCandidate.jobTitle);
+        if (!jobCompany && linkFromCandidate.company && linkFromCandidate.company !== '—') {
+          jobCompany = linkFromCandidate.company;
+        }
+      }
+
+      if (embeddedInModal && scopeJobId) {
+        if (!jobId) jobId = scopeJobId;
+        if (!jobTitle) jobTitle = normalizeJobTitle(scopeJobTitle);
+        if (!jobCompany && scopeJobCompany && scopeJobCompany !== '—') {
+          jobCompany = scopeJobCompany;
+        } else if (!jobCompany) {
+          jobCompany = event.clientName || '';
+        }
+      }
+
+      return { jobId, jobTitle, jobCompany };
+    },
+    [
+      embeddedInModal,
+      scopeJobId,
+      scopeJobTitle,
+      scopeJobCompany,
+      scopeCandidateId,
+      candidateJobLinksById,
+    ],
+  );
+
+  const eventCandidateIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (scopeCandidateId) ids.add(scopeCandidateId);
+    for (const event of events) {
+      const candidateId = resolveCandidateIdForDrawer(event, scopeCandidateId);
+      if (candidateId) ids.add(candidateId);
+    }
+    return [...ids];
+  }, [events, scopeCandidateId]);
+
+  const eventCandidateIdsKey = useMemo(() => eventCandidateIds.slice().sort().join('|'), [eventCandidateIds]);
+
+  useEffect(() => {
+    if (!eventCandidateIds.length) {
+      setCandidateJobLinksById({});
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      eventCandidateIds.map(async (candidateId) => {
+        try {
+          const links = await fetchCandidateLinkedJobs(candidateId);
+          return [candidateId, links] as const;
+        } catch {
+          return [candidateId, [] as CandidateJobLink[]] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setCandidateJobLinksById(Object.fromEntries(entries));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [eventCandidateIdsKey, eventCandidateIds]);
+
   const statusDropdownRef = useRef<HTMLDivElement>(null);
   const activeDropdownRef = useRef<HTMLDivElement>(null);
   const companyDropdownRef = useRef<HTMLDivElement>(null);
@@ -538,6 +881,23 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     setLoading(true);
     setError(null);
     try {
+      if (embeddedInModal && scopeJobLinkId) {
+        const journal = await fetchJobLinkProcessJournal(scopeJobLinkId);
+        const scopedClientId = defaultClientId || clientOptions[0]?.id || journal.clientId || '';
+        setEvents(
+          mapProcessJournalToEvents(
+            journal,
+            scopeCandidateId,
+            scopeContactName,
+            scopeJobCompany,
+            scopedClientId ? String(scopedClientId) : '',
+          ),
+        );
+        const resolvedCreateClientId = String(journal.clientId || scopedClientId || '').trim();
+        if (resolvedCreateClientId) setCreateClientId(resolvedCreateClientId);
+        return;
+      }
+
       const scopedClientId = defaultClientId || clientOptions[0]?.id || '';
       if (scopedClientId && (scopeContactId || scopeContactName || scopeCandidateId)) {
         const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(scopedClientId)}/events`, {
@@ -577,7 +937,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     } finally {
       setLoading(false);
     }
-  }, [apiBase, defaultClientId, clientOptions, scopeContactId, scopeContactName, scopeCandidateId]);
+  }, [apiBase, defaultClientId, clientOptions, scopeContactId, scopeContactName, scopeCandidateId, embeddedInModal, scopeJobLinkId, scopeJobCompany]);
 
   useEffect(() => {
     void load();
@@ -602,6 +962,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
 
   const catalogClientIds = useMemo(() => {
     const ids = new Set<string>();
+    if (settingsClientId) ids.add(settingsClientId);
     if (defaultClientId) ids.add(defaultClientId);
     if (createClientId) ids.add(createClientId);
     for (const opt of clientOptions.slice(0, 12)) {
@@ -611,7 +972,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       if (ev.clientId) ids.add(ev.clientId);
     }
     return [...ids];
-  }, [defaultClientId, createClientId, clientOptions, events]);
+  }, [settingsClientId, defaultClientId, createClientId, clientOptions, events]);
 
   useEffect(() => {
     if (!catalogClientIds.length) return;
@@ -757,25 +1118,33 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     }
     const clientP = pipelinesByClient[selectedEvent.clientId] || [];
     const candP = candidatePipelinesByClient[selectedEvent.clientId] || [];
+
+    const applyActionPipeline = (pipelineId: string) => {
+      setActionPipelineId(pipelineId);
+      if (!embeddedInModal) {
+        setSelectedPipelineIds(new Set([pipelineId]));
+      }
+    };
+
+    if (selectedEvent.processId) {
+      if (
+        candP.some((p) => p.id === selectedEvent.processId) ||
+        clientP.some((p) => p.id === selectedEvent.processId)
+      ) {
+        applyActionPipeline(selectedEvent.processId);
+        return;
+      }
+    }
     if (
       defaultActionPipelineId &&
       candP.some((p) => p.id === defaultActionPipelineId)
     ) {
-      setActionPipelineId(defaultActionPipelineId);
-      setSelectedPipelineIds(new Set([defaultActionPipelineId]));
+      applyActionPipeline(defaultActionPipelineId);
       return;
-    }
-    if (selectedEvent.processId) {
-      if (candP.some((p) => p.id === selectedEvent.processId) || clientP.some((p) => p.id === selectedEvent.processId)) {
-        setActionPipelineId(selectedEvent.processId);
-        setSelectedPipelineIds(new Set([selectedEvent.processId]));
-        return;
-      }
     }
     const ctx = resolveActionPipelineContext(selectedEvent, null, clientP, candP);
     if (ctx) {
-      setActionPipelineId(ctx.pipeline.id);
-      setSelectedPipelineIds(new Set([ctx.pipeline.id]));
+      applyActionPipeline(ctx.pipeline.id);
     }
   }, [
     selectedEvent?.id,
@@ -784,6 +1153,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     pipelinesByClient,
     candidatePipelinesByClient,
     defaultActionPipelineId,
+    embeddedInModal,
   ]);
 
   const actionPipelineContext = useMemo((): ActionPipelineContext | null => {
@@ -826,27 +1196,29 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   const filteredEvents = useMemo(() => {
     const scoped = events.filter((event) => {
       if (!eventMatchesContact(event, scopeContactId, scopeContactName, scopeCandidateId)) return false;
-      if (
-        !eventMatchesPipelineFilters(
-          event,
-          selectedPipelineIds,
-          allPipelinesCatalog,
-          selectedStageOutcomeKeys,
-        )
-      ) {
-        return false;
+      if (!embeddedInModal) {
+        if (
+          !eventMatchesPipelineFilters(
+            event,
+            selectedPipelineIds,
+            allPipelinesCatalog,
+            selectedStageOutcomeKeys,
+          )
+        ) {
+          return false;
+        }
+        if (selectedStatuses.size > 0) {
+          const dynamicStatus = getDynamicStatus(event.status, event.dueDate).label;
+          if (!selectedStatuses.has(dynamicStatus)) return false;
+        }
+        if (selectedActiveStates.size > 0) {
+          const activeLabel = event.isActive !== false ? 'פעיל' : 'לא פעיל';
+          if (!selectedActiveStates.has(activeLabel)) return false;
+        }
+        if (selectedCompanies.size > 0 && !selectedCompanies.has(event.clientName)) return false;
+        if (dateFrom && new Date(event.date) < new Date(dateFrom)) return false;
+        if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
       }
-      if (selectedStatuses.size > 0) {
-        const dynamicStatus = getDynamicStatus(event.status, event.dueDate).label;
-        if (!selectedStatuses.has(dynamicStatus)) return false;
-      }
-      if (selectedActiveStates.size > 0) {
-        const activeLabel = event.isActive !== false ? 'פעיל' : 'לא פעיל';
-        if (!selectedActiveStates.has(activeLabel)) return false;
-      }
-      if (selectedCompanies.size > 0 && !selectedCompanies.has(event.clientName)) return false;
-      if (dateFrom && new Date(event.date) < new Date(dateFrom)) return false;
-      if (dateTo && new Date(event.date) > new Date(`${dateTo}T23:59:59`)) return false;
       return true;
     });
     if (!scopeJobId && !scopeJobLinkId && !scopeJobTitle && !scopeJobCompany) return scoped;
@@ -871,6 +1243,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     selectedCompanies,
     dateFrom,
     dateTo,
+    embeddedInModal,
   ]);
 
   useEffect(() => {
@@ -892,6 +1265,30 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     event: JournalEvent,
     patch: Record<string, unknown>,
   ): Promise<{ ok: true; row: JournalEvent } | { ok: false }> => {
+    if (embeddedInModal && scopeJobLinkId) {
+      try {
+        const refreshed = await patchJobLinkProcessJournalEntry(scopeJobLinkId, event.id, {
+          description: patch.description != null ? String(patch.description) : undefined,
+          dueDate: patch.dueDate != null ? String(patch.dueDate).slice(0, 10) : undefined,
+          dueTime: patch.dueTime != null ? String(patch.dueTime) : undefined,
+          nextStageTitle: patch.stage != null ? String(patch.stage) : undefined,
+          creator: patch.creator != null ? String(patch.creator) : undefined,
+          isActive: typeof patch.isActive === 'boolean' ? patch.isActive : undefined,
+        });
+        const mapped = mapProcessJournalToEvents(
+          refreshed,
+          scopeCandidateId,
+          scopeContactName,
+          scopeJobCompany,
+          event.clientId || defaultClientId || refreshed.clientId || '',
+        );
+        const row = mapped.find((item) => item.id === event.id);
+        if (!row) return { ok: false };
+        return { ok: true, row };
+      } catch {
+        return { ok: false };
+      }
+    }
     if (!apiBase || !event.clientId) return { ok: false };
     const res = await fetch(
       `${apiBase}/api/clients/${encodeURIComponent(event.clientId)}/events/${encodeURIComponent(event.id)}`,
@@ -942,6 +1339,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         context: {
           clientEventId: selectedEvent.id,
           ...(pipelineKind === 'candidate' && candidateId ? { candidateId } : {}),
+          ...(scopeJobLinkId ? { jobCandidateId: scopeJobLinkId } : {}),
         },
         source: 'manual',
       });
@@ -1164,8 +1562,15 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
   };
 
   const handleCreateProcessEvent = async (data: ProcessEventSavePayload) => {
-    if (!apiBase || !createClientId) throw new Error('יש לבחור לקוח');
+    const targetClientId = eventModalScope?.clientId || effectiveCreateClientId;
+    const targetOrganizationId =
+      eventModalScope?.organizationId || effectiveCreateOrganizationId || '';
+    if (!apiBase || !targetClientId) throw new Error('יש לבחור לקוח');
     const typeParts = [data.processName, data.stageName].filter(Boolean);
+    const slaDue = dueDateTimeAfterSla(
+      data.slaValue ?? (data as { slaDays?: number }).slaDays ?? 0,
+      normalizeSlaUnit(data.slaUnit),
+    );
     const payload = {
       title: data.title,
       type: typeParts.length ? typeParts : ['תהליך'],
@@ -1175,11 +1580,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       creator: data.assignee || user?.name || 'אני',
       status: 'עתידי',
       isActive: true,
+      ...(targetOrganizationId ? { organizationId: targetOrganizationId } : {}),
       process: data.processName,
       processId: data.processId,
       stage: data.stageName,
       stageId: data.stageId,
-      dueDate: new Date(Date.now() + (data.slaDays || 0) * 86400000).toISOString().slice(0, 10),
+      dueDate: slaDue.dueDate || null,
+      dueTime: slaDue.dueTime,
       linkedTo: data.contactId || scopeContactId || scopeCandidateId
         ? {
             type: scopeCandidateId ? 'מועמד' : 'איש קשר',
@@ -1202,7 +1609,7 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         },
       ],
     };
-    const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(createClientId)}/events`, {
+    const res = await fetch(`${apiBase}/api/clients/${encodeURIComponent(targetClientId)}/events`, {
       method: 'POST',
       credentials: 'include',
       headers: authHeaders(true),
@@ -1216,10 +1623,144 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
     onEventsChanged?.();
   };
 
-  const createClientName =
-    clientOptions.find((c) => c.id === createClientId)?.name ||
-    events.find((e) => e.clientId === createClientId)?.clientName ||
+  const selectedCreateOption = useMemo(() => {
+    if (effectiveCreateOrganizationId) {
+      return clientOptions.find(
+        (opt) => String(opt.organizationId || '') === effectiveCreateOrganizationId,
+      );
+    }
+    if (organizationOptions.length) {
+      return (
+        organizationOptions.find((opt) => opt.id === effectiveCreateClientId)
+        || organizationOptions[0]
+      );
+    }
+    return (
+      clientOptions.find((opt) => opt.id === effectiveCreateClientId && !opt.organizationId)
+      || clientOptions.find((opt) => opt.id === effectiveCreateClientId)
+    );
+  }, [clientOptions, organizationOptions, effectiveCreateClientId, effectiveCreateOrganizationId]);
+
+  const createOrganizationName =
+    (scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : '') ||
+    (preferredOrganizationOption?.name && preferredOrganizationOption.name !== '—'
+      ? preferredOrganizationOption.name
+      : '') ||
+    (scopeOrganizationName && scopeOrganizationName !== '—' ? scopeOrganizationName : '') ||
+    (defaultOrganizationName && defaultOrganizationName !== '—' ? defaultOrganizationName : '') ||
+    selectedCreateOption?.name ||
     '';
+
+  const createClientName = useMemo(() => {
+    const orgLabel = createOrganizationName.trim();
+    if (orgLabel) return orgLabel;
+    if (
+      tenantClientId
+      && effectiveCreateClientId === tenantClientId
+      && organizationOptions.length > 0
+    ) {
+      return '';
+    }
+    return createOrganizationName;
+  }, [
+    createOrganizationName,
+    tenantClientId,
+    effectiveCreateClientId,
+    organizationOptions.length,
+  ]);
+
+  const openCreateEventModal = useCallback(() => {
+    const preferredOption = matchOrganizationOption(preferredOrganizationLabel);
+    const scopeLabel =
+      (scopeJobCompany && scopeJobCompany !== '—' ? scopeJobCompany : '') ||
+      (preferredOption?.name && preferredOption.name !== '—' ? preferredOption.name : '') ||
+      (preferredOrganizationLabel && preferredOrganizationLabel !== 'all'
+        ? preferredOrganizationLabel
+        : '') ||
+      (scopeOrganizationName && scopeOrganizationName !== '—' ? scopeOrganizationName : '') ||
+      (defaultOrganizationName && defaultOrganizationName !== '—' ? defaultOrganizationName : '') ||
+      selectedCreateOption?.name ||
+      '';
+
+    let resolvedOrgId = String(
+      createOrganizationId
+        || preferredOption?.organizationId
+        || scopeOrganizationId
+        || defaultOrganizationId
+        || '',
+    ).trim();
+
+    if (!resolvedOrgId && scopeLabel) {
+      const match = matchOrganizationOption(scopeLabel);
+      if (match?.organizationId) resolvedOrgId = String(match.organizationId);
+    }
+
+    if (!resolvedOrgId) {
+      resolvedOrgId = String(effectiveCreateOrganizationId || '').trim();
+    }
+
+    if (
+      !resolvedOrgId
+      && tenantClientId
+      && organizationOptions.length === 1
+      && organizationOptions[0]?.organizationId
+    ) {
+      resolvedOrgId = String(organizationOptions[0].organizationId);
+    }
+
+    const matchedOption =
+      organizationOptions.find((opt) => String(opt.organizationId || '') === resolvedOrgId) ||
+      preferredOption ||
+      matchOrganizationOption(scopeLabel) ||
+      selectedCreateOption;
+
+    const resolvedClientId = String(
+      matchedOption?.id || effectiveCreateClientId || tenantClientId || '',
+    ).trim();
+    const resolvedOrgName = String(
+      (matchedOption?.organizationId ? matchedOption.name : '') || scopeLabel || '',
+    ).trim();
+
+    if (resolvedOrgId) setCreateOrganizationId(resolvedOrgId);
+    if (resolvedClientId) setCreateClientId(resolvedClientId);
+
+    setEventModalScope({
+      clientId: resolvedClientId,
+      organizationId: resolvedOrgId,
+      organizationName: resolvedOrgName,
+    });
+    setIsEventModalOpen(true);
+  }, [
+    matchOrganizationOption,
+    preferredOrganizationLabel,
+    scopeJobCompany,
+    scopeOrganizationName,
+    defaultOrganizationName,
+    selectedCreateOption,
+    createOrganizationId,
+    scopeOrganizationId,
+    defaultOrganizationId,
+    effectiveCreateOrganizationId,
+    effectiveCreateClientId,
+    tenantClientId,
+    organizationOptions,
+  ]);
+
+  const closeCreateEventModal = useCallback(() => {
+    setIsEventModalOpen(false);
+    setEventModalScope(null);
+  }, []);
+
+  const createEventInitialData = useMemo(
+    () =>
+      defaultActionPipelineId && scopeCandidateId
+        ? { processId: defaultActionPipelineId }
+        : null,
+    [defaultActionPipelineId, scopeCandidateId],
+  );
+
+  const modalClientPipelines = pipelinesByClient[settingsClientId] || [];
+  const modalCandidatePipelines = candidatePipelinesByClient[settingsClientId] || [];
 
   const hasFilters =
     selectedPipelineIds.size > 0 ||
@@ -1237,14 +1778,14 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
       className={
         embeddedInModal
           ? 'flex flex-col flex-1 min-h-0 overflow-hidden'
-          : 'bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col overflow-hidden min-h-[560px]'
+          : 'bg-bg-subtle/30 rounded-2xl border border-border-default flex flex-col overflow-hidden min-h-[560px] md:overflow-visible'
       }
     >
       <div
         className={
           embeddedInModal
             ? 'flex flex-col flex-1 min-h-0 overflow-hidden'
-            : 'flex flex-col h-full bg-bg-default rounded-2xl border border-border-default overflow-hidden'
+            : 'flex flex-col h-full bg-bg-default rounded-2xl border border-border-default overflow-hidden md:overflow-visible'
         }
       >
         {/* Filters */}
@@ -1411,7 +1952,11 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         </div>
         ) : null}
 
-        <div className={`flex flex-col md:flex-row gap-6 p-4 flex-1 overflow-hidden bg-bg-subtle ${embeddedInModal ? 'min-h-0' : ''}`}>
+        <div
+          className={`flex flex-col md:flex-row md:items-start gap-6 p-4 flex-1 bg-bg-subtle ${
+            embeddedInModal ? 'min-h-0 overflow-hidden' : 'min-h-0 md:overflow-visible overflow-hidden'
+          }`}
+        >
           {/* Events list */}
           <div className="flex-1 bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden">
             <div className="p-4 border-b border-border-default flex flex-wrap justify-between items-center gap-3 bg-gray-50/50">
@@ -1425,12 +1970,34 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
               <div className="flex items-center gap-2 flex-wrap">
                 {clientOptions.length > 1 ? (
                   <select
-                    value={createClientId}
-                    onChange={(e) => setCreateClientId(e.target.value)}
+                    value={
+                      effectiveCreateOrganizationId
+                        ? `org:${effectiveCreateOrganizationId}`
+                        : effectiveCreateClientId
+                    }
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      if (raw.startsWith('org:')) {
+                        const orgId = raw.slice(4);
+                        const opt = clientOptions.find(
+                          (c) => String(c.organizationId || '') === orgId,
+                        );
+                        setCreateOrganizationId(orgId);
+                        if (opt?.id) setCreateClientId(opt.id);
+                      } else {
+                        setCreateClientId(raw);
+                        const opt = clientOptions.find((c) => c.id === raw && !c.organizationId)
+                          || clientOptions.find((c) => c.id === raw);
+                        setCreateOrganizationId(String(opt?.organizationId || ''));
+                      }
+                    }}
                     className="bg-bg-input border border-border-default rounded-lg py-2 px-3 text-sm"
                   >
                     {clientOptions.map((c) => (
-                      <option key={c.id} value={c.id}>
+                      <option
+                        key={c.organizationId ? `org-${c.organizationId}` : c.id}
+                        value={c.organizationId ? `org:${c.organizationId}` : c.id}
+                      >
                         {c.name}
                       </option>
                     ))}
@@ -1438,8 +2005,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                 ) : null}
                 <button
                   type="button"
-                  onClick={() => setIsEventModalOpen(true)}
-                  disabled={!createClientId}
+                  onClick={openCreateEventModal}
+                  disabled={!effectiveCreateClientId}
                   className="flex items-center gap-2 bg-primary-600 text-white px-4 py-2 rounded-xl text-sm font-bold hover:bg-primary-700 transition shadow-sm hover:shadow disabled:opacity-50"
                 >
                   <PlusIcon className="w-4 h-4" />
@@ -1465,6 +2032,8 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                   const isSelected = expandedEventId === event.id;
                   const isExpanded = alwaysShowDetails || isSelected;
                   const isInactive = event.isActive === false;
+                  const candidateIdForDrawer = resolveCandidateIdForDrawer(event, scopeCandidateId);
+                  const { jobId, jobTitle, jobCompany } = resolveEventJobMeta(event);
                   return (
                     <div
                       key={`${event.clientId}-${event.id}`}
@@ -1511,21 +2080,60 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
                             </h4>
                             <div className="flex flex-wrap items-center gap-2 mt-2">
                               {!scopeContactId && event.clientName ? (
-                                <span className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
-                                  <BuildingOffice2Icon className="w-3 h-3" />
-                                  {event.clientName}
-                                </span>
+                                event.clientId ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      void openClientDrawer(event.clientId, event.clientName);
+                                    }}
+                                    className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-indigo-100 hover:underline transition-colors"
+                                    title="פתח דראוור לקוח"
+                                  >
+                                    <BuildingOffice2Icon className="w-3 h-3" />
+                                    {event.clientName}
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] bg-indigo-50 border border-indigo-100 text-indigo-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
+                                    <BuildingOffice2Icon className="w-3 h-3" />
+                                    {event.clientName}
+                                  </span>
+                                )
                               ) : null}
                               {event.contactName ? (
-                                <span className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
-                                  <UserIcon className="w-3 h-3" />
-                                  {event.contactName}
-                                </span>
+                                candidateIdForDrawer ? (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      openCandidateDrawer(candidateIdForDrawer, event.contactName || '');
+                                    }}
+                                    className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-teal-100 hover:underline transition-colors"
+                                    title="פתח דראוור מועמד"
+                                  >
+                                    <UserIcon className="w-3 h-3" />
+                                    {event.contactName}
+                                  </button>
+                                ) : (
+                                  <span className="text-[11px] bg-teal-50 border border-teal-100 text-teal-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold">
+                                    <UserIcon className="w-3 h-3" />
+                                    {event.contactName}
+                                  </span>
+                                )
                               ) : null}
-                              {event.process ? (
-                                <span className="text-[11px] bg-purple-50 border border-purple-100 text-purple-700 px-2 py-0.5 rounded font-bold">
-                                  {processLabel(event.process)}
-                                </span>
+                              {jobId ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    void openJobDrawer(jobId, jobTitle || 'משרה', jobCompany);
+                                  }}
+                                  className="text-[11px] bg-purple-50 border border-purple-100 text-purple-700 px-2 py-0.5 rounded flex items-center gap-1 font-bold hover:bg-purple-100 hover:underline transition-colors"
+                                  title="פתח דראוור משרה"
+                                >
+                                  <BriefcaseIcon className="w-3 h-3" />
+                                  {jobTitle || 'משרה'}
+                                </button>
                               ) : null}
                               {event.stage ? (
                                 <span className="text-[11px] bg-amber-50 border border-amber-100 text-amber-800 px-2 py-0.5 rounded font-bold">
@@ -1777,7 +2385,13 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
           </div>
 
           {/* Outcomes panel — from PipelineSettings stage.outcomes */}
-          <div className="w-full md:w-72 shrink-0 bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden">
+          <div
+            className={`w-full md:w-72 shrink-0 self-start bg-white rounded-2xl shadow-sm border border-border-default flex flex-col overflow-hidden ${
+              embeddedInModal
+                ? 'md:sticky md:top-0 md:max-h-[calc(85vh-6.5rem)]'
+                : 'md:sticky md:top-4 md:max-h-[calc(100vh-5rem)] z-10'
+            }`}
+          >
             <div className="p-4 border-b border-border-default bg-primary-600 text-white">
               <h3 className="font-bold text-lg flex items-center gap-2">
                 <CheckCircleIcon className="w-5 h-5 opacity-90" />
@@ -1872,15 +2486,24 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         </div>
       </div>
 
-      {createClientId ? (
+      {effectiveCreateClientId ? (
         <ProcessEventModal
+          key={`${eventModalScope?.clientId || effectiveCreateClientId}:${eventModalScope?.organizationId || effectiveCreateOrganizationId}:${eventModalScope?.organizationName || createOrganizationName}`}
           isOpen={isEventModalOpen}
-          onClose={() => setIsEventModalOpen(false)}
+          onClose={closeCreateEventModal}
           onSave={handleCreateProcessEvent}
-          clientId={createClientId}
-          clientName={createClientName}
+          clientId={eventModalScope?.clientId || effectiveCreateClientId}
+          organizationId={eventModalScope?.organizationId || effectiveCreateOrganizationId || null}
+          organizationName={eventModalScope?.organizationName || createOrganizationName || undefined}
+          clientName={eventModalScope?.organizationName || createOrganizationName}
           contactId={scopeContactId || scopeCandidateId || undefined}
           contactName={scopeContactName || undefined}
+          pipelineKind={scopeCandidateId ? 'candidate' : 'client'}
+          pipelineClientId={settingsClientId}
+          clientPipelines={modalClientPipelines}
+          candidatePipelines={modalCandidatePipelines}
+          linkedEntityName={scopeCandidateId ? scopeContactName || undefined : undefined}
+          initialData={createEventInitialData}
         />
       ) : null}
 
@@ -1890,6 +2513,27 @@ const ClientsEventsJournalTab: React.FC<Props> = ({
         pending={automationApproval?.pending || []}
         onClose={() => setAutomationApproval(null)}
         onApprove={handleApproveAutomations}
+      />
+
+      <CandidateSummaryDrawer
+        candidate={candidateDrawer}
+        isOpen={isCandidateDrawerOpen && Boolean(candidateDrawer)}
+        onClose={() => setIsCandidateDrawerOpen(false)}
+        isFavorite={false}
+        onToggleFavorite={() => {}}
+        overlayZIndexClass={drawerOverlayZ}
+      />
+      <ClientDetailsDrawer
+        client={clientDrawer}
+        isOpen={isClientDrawerOpen && Boolean(clientDrawer)}
+        onClose={() => setIsClientDrawerOpen(false)}
+        overlayZIndexClass={drawerOverlayZ}
+      />
+      <JobDetailsDrawer
+        job={jobDrawer}
+        isOpen={isJobDrawerOpen && Boolean(jobDrawer)}
+        onClose={() => setIsJobDrawerOpen(false)}
+        overlayZIndexClass={drawerOverlayZ}
       />
     </div>
   );

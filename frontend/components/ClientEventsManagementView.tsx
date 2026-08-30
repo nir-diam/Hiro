@@ -3,7 +3,13 @@ import ClientsEventsJournalTab from './ClientsEventsJournalTab';
 import { useAuth } from '../context/AuthContext';
 import { authHeaders } from '../utils/authHeaders';
 
-type ClientOption = { id: string; name: string };
+type ClientOption = { id: string; name: string; organizationId?: string | null };
+
+type LinkedOrganizationRow = {
+  organizationId?: string | null;
+  organization?: { name?: string | null; displayName?: string | null } | null;
+  name?: string | null;
+};
 
 const ClientEventsManagementView: React.FC = () => {
   const { user, ready: authReady } = useAuth();
@@ -12,6 +18,7 @@ const ClientEventsManagementView: React.FC = () => {
   const tenantClientId = !isPlatformAdmin && user?.clientId ? String(user.clientId) : null;
 
   const [clients, setClients] = useState<ClientOption[]>([]);
+  const [linkedOrganizations, setLinkedOrganizations] = useState<ClientOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -53,13 +60,69 @@ const ClientEventsManagementView: React.FC = () => {
     };
   }, [authReady, apiBase, tenantClientId]);
 
+  useEffect(() => {
+    if (!authReady || !apiBase || !tenantClientId) {
+      setLinkedOrganizations([]);
+      return;
+    }
+    let active = true;
+    setLoading(true);
+    setError(null);
+    fetch(`${apiBase}/api/clients/${encodeURIComponent(tenantClientId)}/linked-organizations`, {
+      credentials: 'include',
+      headers: authHeaders(),
+      cache: 'no-store',
+    })
+      .then((r) => {
+        if (!r.ok) throw new Error('טעינת ארגונים נכשלה');
+        return r.json();
+      })
+      .then((data) => {
+        if (!active) return;
+        const list = Array.isArray(data) ? data : data?.data ?? [];
+        setLinkedOrganizations(
+          list
+            .map((raw: LinkedOrganizationRow) => {
+              const orgId = raw.organizationId ? String(raw.organizationId) : '';
+              if (!orgId) return null;
+              const org = raw.organization;
+              const name =
+                String(org?.name || org?.displayName || raw.name || '').trim() || 'ארגון';
+              return {
+                id: tenantClientId,
+                name,
+                organizationId: orgId,
+              } satisfies ClientOption;
+            })
+            .filter((row): row is ClientOption => Boolean(row)),
+        );
+      })
+      .catch((e: Error) => {
+        if (!active) return;
+        setError(e?.message || 'שגיאה בטעינת ארגונים');
+        setLinkedOrganizations([]);
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [authReady, apiBase, tenantClientId]);
+
   const clientOptions = useMemo<ClientOption[]>(() => {
     if (isPlatformAdmin) return clients;
-    if (tenantClientId) return [{ id: tenantClientId, name: 'הלקוח שלי' }];
+    if (tenantClientId) {
+      return linkedOrganizations.length
+        ? linkedOrganizations
+        : [{ id: tenantClientId, name: 'הלקוח שלי' }];
+    }
     return [];
-  }, [isPlatformAdmin, clients, tenantClientId]);
+  }, [isPlatformAdmin, clients, tenantClientId, linkedOrganizations]);
 
   const defaultClientId = isPlatformAdmin ? clients[0]?.id || null : tenantClientId;
+  const defaultOrganizationId = tenantClientId ? linkedOrganizations[0]?.organizationId || null : null;
+  const defaultOrganizationName = tenantClientId ? linkedOrganizations[0]?.name || null : null;
 
   if (!authReady) {
     return <div className="text-center py-16 text-text-muted">טוען...</div>;
@@ -78,6 +141,10 @@ const ClientEventsManagementView: React.FC = () => {
         <ClientsEventsJournalTab
           clientOptions={clientOptions}
           defaultClientId={defaultClientId}
+          defaultOrganizationId={defaultOrganizationId}
+          defaultOrganizationName={defaultOrganizationName}
+          scopeOrganizationId={defaultOrganizationId}
+          scopeOrganizationName={defaultOrganizationName}
         />
       )}
     </div>

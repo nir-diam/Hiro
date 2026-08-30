@@ -2,6 +2,7 @@ const jobPublicationService = require('../services/jobPublicationService');
 const authService = require('../services/authService');
 const clientService = require('../services/clientService');
 const Client = require('../models/Client');
+const { isSocialCrawler } = require('../utils/socialCrawler');
 
 /**
  * @returns {Promise<{ client: import('../models/Client') | null, scope: 'admin_all' | 'admin_client' | 'tenant' | 'tenant_empty' | 'none' }>}
@@ -63,7 +64,10 @@ const getPublicLanding = async (req, res) => {
 const getBoardSharePreview = async (req, res) => {
   try {
     const clientHint = req.params.clientHint || req.query.client || null;
-    const html = await jobPublicationService.renderBoardSharePreviewPage({ clientHint });
+    const html = await jobPublicationService.renderBoardSharePreviewPage({
+      clientHint,
+      crawlerOnly: isSocialCrawler(req.headers['user-agent']),
+    });
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.set('Cache-Control', 'public, max-age=300');
     res.send(html);
@@ -81,10 +85,12 @@ const getSharePreview = async (req, res) => {
     const src = req.query.src || req.query.source || null;
     const slug = req.params.slug;
     const clientHint = req.params.clientHint || req.query.client || null;
+    const crawlerOnly = isSocialCrawler(req.headers['user-agent']);
     const html = await jobPublicationService.renderSharePreviewPage({
       clientHint,
       slug,
       srcKey: src,
+      crawlerOnly,
     });
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.set('Cache-Control', 'public, max-age=300');
@@ -109,8 +115,16 @@ const recordVisit = async (req, res) => {
 
 const submitApplication = async (req, res) => {
   try {
-    const data = await jobPublicationService.submitApplication(req.params.slug, req.body || {});
-    res.status(201).json(data);
+    const { response, runEnrichmentAfterResponse } = await jobPublicationService.submitApplication(
+      req.params.slug,
+      req.body || {},
+    );
+    res.status(201).json(response);
+    if (typeof runEnrichmentAfterResponse === 'function') {
+      res.on('finish', () => {
+        void runEnrichmentAfterResponse();
+      });
+    }
   } catch (err) {
     res.status(err.status || 400).json({ message: err.message || 'Application failed' });
   }

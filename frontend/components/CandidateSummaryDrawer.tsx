@@ -464,6 +464,7 @@ interface CandidateSummaryDrawerProps {
   onToggleFavorite: (id: number) => void;
   initialTab?: SummaryDrawerTab;
   initialManageLinkId?: string;
+  overlayZIndexClass?: string;
 }
 
 const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
@@ -478,6 +479,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
   onToggleFavorite,
   initialTab,
   initialManageLinkId,
+  overlayZIndexClass = 'z-[60]',
 }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'events' | 'jobs' | 'documents'>('details');
   const titleId = useId();
@@ -883,7 +885,7 @@ const CandidateSummaryDrawer: React.FC<CandidateSummaryDrawerProps> = ({
 
   return (
     <div 
-      className="fixed inset-0 bg-black bg-opacity-30 z-[60] transition-opacity"
+      className={`fixed inset-0 bg-black bg-opacity-30 ${overlayZIndexClass} transition-opacity`}
       onClick={onClose}
     >
       <div 

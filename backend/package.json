@@ -36,7 +36,8 @@
     "pg-hstore": "^2.3.4",
     "resend": "^4.8.0",
     "sequelize": "^6.37.3",
-    "tesseract.js": "^7.0.0"
+    "tesseract.js": "^7.0.0",
+    "word-extractor": "^1.0.4"
   },
   "devDependencies": {
     "@types/jest": "^30.0.0",

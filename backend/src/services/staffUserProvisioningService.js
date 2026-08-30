@@ -8,7 +8,7 @@ const emailService = require('./emailService');
 const STAFF_ROLES = ['manager', 'recruiter'];
 
 const publicAppOrigin = () =>
-  String(process.env.PUBLIC_APP_URL || 'https://hiro.co.il').replace(/\/$/, '');
+  String(process.env.PUBLIC_APP_URL || 'https://app.hiro.co.il').replace(/\/$/, '');
 
 /**
  * Adds a `client_contacts` row for staff tied to a tenant. Skips if that email already exists for the client.

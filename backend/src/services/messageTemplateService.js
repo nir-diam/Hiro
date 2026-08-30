@@ -4,6 +4,7 @@ const Client = require('../models/Client');
 const Job = require('../models/Job');
 const emailService = require('./emailService');
 const jobCandidateService = require('./jobCandidateService');
+const { buildLandingUrl } = require('./jobPublicationService');
 const clientUsageSettingService = require('./clientUsageSettingService');
 const candidatePortalAccessService = require('./candidatePortalAccessService');
 const { findExistingByIdentity } = require('./candidateIdentityService');
@@ -328,6 +329,7 @@ const MESSAGE_TEMPLATE_NAMED_KEYS = [
   'send_date',
   'privacy_policy_link',
   'thank_you_page_link',
+  'job_public_page_link',
 ];
 
 const escapeRegExp = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -372,6 +374,7 @@ const LINK_PLACEHOLDER_KEYS = new Set([
   'candidate_portal_link',
   'privacy_policy_link',
   'thank_you_page_link',
+  'job_public_page_link',
 ]);
 
 const LINK_LABEL_HE = {
@@ -379,6 +382,7 @@ const LINK_LABEL_HE = {
   candidate_portal_link: 'כניסה לאזור האישי',
   privacy_policy_link: 'מדיניות פרטיות',
   thank_you_page_link: 'דף תודה',
+  job_public_page_link: 'דף משרה ציבורי',
 };
 
 const applyNumberedPlaceholdersHtml = (template, values) => {
@@ -548,6 +552,21 @@ async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
   const clientLabel = primaryJob ? String(primaryJob.client || '').trim() : '';
   const contact = primaryJob ? firstContactFromJob(primaryJob) : null;
 
+  let jobPublicPageLink = '';
+  if (primaryJob && primaryJob.id) {
+    try {
+      let clientRow = null;
+      const clientId = primaryJob.clientId != null ? String(primaryJob.clientId).trim() : '';
+      if (clientId) {
+        const row = await Client.findByPk(clientId, { attributes: ['id', 'name', 'displayName', 'domain'] });
+        clientRow = row ? row.get({ plain: true }) : null;
+      }
+      jobPublicPageLink = buildLandingUrl(primaryJob, null, clientRow) || '';
+    } catch (e) {
+      console.warn('[message-templates] public job page link failed:', e?.message || e);
+    }
+  }
+
   const base = {
     candidate_first_name: firstFromDb || splitDb.first,
     candidate_last_name: lastFromDb || splitDb.last,
@@ -573,6 +592,7 @@ async function buildNamedPlaceholdersFromCandidate(cand, ctx = {}) {
     send_date: sendDate,
     privacy_policy_link: privacy,
     thank_you_page_link: thankYou,
+    job_public_page_link: jobPublicPageLink,
   };
 
   const rec = ctx && ctx.recruiter && typeof ctx.recruiter === 'object' ? ctx.recruiter : null;

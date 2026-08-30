@@ -18,6 +18,16 @@ const ORGANIZATION_INCLUDE = {
   attributes: ['id', 'name', 'nameEn', 'logo', 'website'],
 };
 
+const str = (v) => (v == null ? '' : String(v).trim());
+
+const assertContactName = (payload = {}) => {
+  if (!str(payload.name)) {
+    const err = new Error('Name is required');
+    err.status = 400;
+    throw err;
+  }
+};
+
 const buildClientContactWhere = (clientId, { organizationId = null } = {}) => {
   const where = { clientId };
   if (organizationId) where.organizationId = String(organizationId);
@@ -63,6 +73,7 @@ const listByClientIdWithClient = async (clientId, opts = {}) => {
 };
 
 const createForClient = async (clientId, payload = {}) => {
+  assertContactName(payload);
   const data = { ...payload, clientId };
   if (data.organizationId != null && String(data.organizationId).trim() === '') {
     data.organizationId = null;
@@ -78,6 +89,9 @@ const update = async (id, payload = {}) => {
     throw err;
   }
   const data = { ...payload };
+  if (Object.prototype.hasOwnProperty.call(data, 'name')) {
+    assertContactName(data);
+  }
   if (Object.prototype.hasOwnProperty.call(data, 'organizationId')
       && data.organizationId != null
       && String(data.organizationId).trim() === '') {

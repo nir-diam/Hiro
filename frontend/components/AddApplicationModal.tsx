@@ -2,12 +2,6 @@
 import React, { useState, useEffect } from 'react';
 import { XMarkIcon, BriefcaseIcon, BuildingOffice2Icon, LinkIcon, CalendarDaysIcon, DocumentTextIcon } from './Icons';
 
-interface JobOption {
-    id: string;
-    title: string;
-    client?: string;
-}
-
 interface ApplicationFormValues {
     id?: string;
     jobId?: string;
@@ -25,7 +19,6 @@ interface AddApplicationModalProps {
     onClose: () => void;
     onSave: (app: ApplicationFormValues) => void;
     initialData?: ApplicationFormValues | null;
-    jobs?: JobOption[];
     isSaving?: boolean;
 }
 
@@ -34,7 +27,6 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
     onClose,
     onSave,
     initialData,
-    jobs = [],
     isSaving = false,
 }) => {
     const [formData, setFormData] = useState<ApplicationFormValues>({
@@ -77,19 +69,6 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
         }
     }, [initialData, isOpen]);
 
-    const handleJobChange = (jobId: string) => {
-        const job = jobs.find((j) => j.id === jobId);
-        setFormData((prev) => {
-            const shouldUpdateRole = !prev.role || prev.jobId !== jobId;
-            return {
-                ...prev,
-                jobId,
-                company: job?.client || prev.company,
-                role: shouldUpdateRole && job?.title ? job.title : prev.role,
-            };
-        });
-    };
-
     if (!isOpen) return null;
 
     const handleSubmit = (e: React.FormEvent) => {
@@ -112,25 +91,6 @@ const AddApplicationModal: React.FC<AddApplicationModalProps> = ({
 
                 <form onSubmit={handleSubmit} className="p-8 space-y-6">
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                        <div className="space-y-2">
-                            <label className="text-sm font-bold text-text-muted">בחר משרה קיימת</label>
-                            <div className="relative">
-                                <BuildingOffice2Icon className="w-5 h-5 text-text-subtle absolute right-3 top-1/2 -translate-y-1/2" />
-                                <select
-                                    value={formData.jobId || ''}
-                                    onChange={(e) => handleJobChange(e.target.value)}
-                                    className="w-full bg-bg-input border border-border-default rounded-xl py-3 pl-3 pr-10 text-sm focus:ring-2 focus:ring-primary-500 outline-none transition-shadow"
-                                >
-                                    <option value="">אין בחירה / הזן ידנית</option>
-                                    {jobs.map((job) => (
-                                        <option key={job.id} value={job.id}>
-                                            {(job.client ? `${job.client} – ` : '') + job.title}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                        </div>
-
                         <div className="space-y-2">
                             <label className="text-sm font-bold text-text-muted">שם חברה</label>
                             <div className="relative">

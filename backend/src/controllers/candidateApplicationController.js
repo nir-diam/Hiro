@@ -1,5 +1,13 @@
 const candidateApplicationService = require('../services/candidateApplicationService');
 
+const parseCandidateIds = (query = {}) => {
+  const raw = query.candidateIds ?? query.candidateId ?? '';
+  if (Array.isArray(raw)) {
+    return [...new Set(raw.map((id) => String(id || '').trim()).filter(Boolean))];
+  }
+  return [...new Set(String(raw).split(/[,;\s]+/).map((id) => id.trim()).filter(Boolean))];
+};
+
 const normalizePayload = (body) => ({
   candidateId: body.candidateId,
   jobId: body.jobId || null,
@@ -13,11 +21,13 @@ const normalizePayload = (body) => ({
 });
 
 const list = async (req, res) => {
-  const { candidateId } = req.query;
-  if (!candidateId) {
+  const candidateIds = parseCandidateIds(req.query);
+  if (!candidateIds.length) {
     return res.status(400).json({ message: 'candidateId is required' });
   }
-  const data = await candidateApplicationService.listByCandidate(candidateId);
+  const data = candidateIds.length === 1
+    ? await candidateApplicationService.listByCandidate(candidateIds[0])
+    : await candidateApplicationService.listByCandidates(candidateIds);
   res.json(data);
 };
 

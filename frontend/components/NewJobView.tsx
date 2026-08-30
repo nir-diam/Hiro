@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { 
     BriefcaseIcon, UserGroupIcon, Cog6ToothIcon, PlusIcon, ChevronDownIcon, 
@@ -2303,6 +2303,69 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         return match.id;
     }, [selectedOrg.clientId, isTenantUser, user?.clientId, formData.clientName, activeClients]);
 
+    const resolvedOrganizationId = useMemo(() => {
+        if (selectedOrg.orgId) return selectedOrg.orgId;
+        const label = formData.clientName.trim();
+        if (!label) return null;
+        const match = orgOptions.find((o) => o.label === label);
+        return match?.id ?? null;
+    }, [selectedOrg.orgId, formData.clientName, orgOptions]);
+
+    const applyOrgSelectionFromLabel = useCallback(
+        (orgLabel: string) => {
+            const trimmed = orgLabel.trim();
+            if (!trimmed) {
+                setSelectedOrg({ orgId: null, clientId: null });
+                return;
+            }
+
+            const match = orgOptions.find((o) => o.label === trimmed);
+            if (!match) {
+                setSelectedOrg({ orgId: null, clientId: null });
+                return;
+            }
+
+            if (isTenantUser && user?.clientId) {
+                setSelectedOrg({ orgId: match.id, clientId: user.clientId });
+                return;
+            }
+
+            setSelectedOrg({ orgId: match.id, clientId: match.clientId });
+
+            if (apiBase && !match.clientId) {
+                const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+                fetch(`${apiBase}/api/organizations/${encodeURIComponent(match.id)}/primary-client`, {
+                    credentials: 'include',
+                    headers: {
+                        Accept: 'application/json',
+                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+                    },
+                })
+                    .then((r) => (r.ok ? r.json() : null))
+                    .then((data: { clientId: string | null; clientName: string | null } | null) => {
+                        if (data?.clientId) {
+                            setSelectedOrg({ orgId: match.id, clientId: data.clientId });
+                        }
+                    })
+                    .catch(() => { /* silent */ });
+            }
+        },
+        [orgOptions, isTenantUser, user?.clientId, apiBase],
+    );
+
+    useEffect(() => {
+        if (!resolvedOrganizationId || selectedOrg.orgId === resolvedOrganizationId) return;
+        const match = orgOptions.find((o) => o.id === resolvedOrganizationId);
+        if (!match) return;
+        setSelectedOrg((prev) => ({
+            orgId: resolvedOrganizationId,
+            clientId:
+                prev.clientId ||
+                (isTenantUser && user?.clientId ? user.clientId : match.clientId) ||
+                null,
+        }));
+    }, [resolvedOrganizationId, selectedOrg.orgId, orgOptions, isTenantUser, user?.clientId]);
+
     useEffect(() => {
         if (!resolvedClientId) {
             setOrgScreeningDefaults(null);
@@ -2410,8 +2473,14 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         };
         void (async () => {
             try {
+                const contactsUrl = new URL(
+                    `${apiBase}/api/clients/${encodeURIComponent(resolvedClientId)}/contacts`,
+                );
+                if (resolvedOrganizationId) {
+                    contactsUrl.searchParams.set('organizationId', resolvedOrganizationId);
+                }
                 const [cRes, uRes] = await Promise.all([
-                    fetch(`${apiBase}/api/clients/${encodeURIComponent(resolvedClientId)}/contacts`, {
+                    fetch(contactsUrl.toString(), {
                         credentials: 'include',
                         headers,
                     }),
@@ -2518,7 +2587,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         return () => {
             cancelled = true;
         };
-    }, [apiBase, resolvedClientId]);
+    }, [apiBase, resolvedClientId, resolvedOrganizationId]);
 
     useEffect(() => {
         const scrollContainer = document.getElementById('main-scroll-container');
@@ -2925,44 +2994,7 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
     const handleOrgChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const orgLabel = e.target.value;
         setFormData(prev => ({ ...prev, clientName: orgLabel }));
-
-        if (!orgLabel) {
-            setSelectedOrg({ orgId: null, clientId: null });
-            return;
-        }
-
-        const match = orgOptions.find((o) => o.label === orgLabel);
-        if (match) {
-            // Tenant users always belong to their own client — no lookup needed.
-            if (isTenantUser && user?.clientId) {
-                setSelectedOrg({ orgId: match.id, clientId: user.clientId });
-                return;
-            }
-
-            setSelectedOrg({ orgId: match.id, clientId: match.clientId });
-
-            // For admin users, fetch the primary linked client for the org.
-            if (apiBase) {
-                const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-                fetch(`${apiBase}/api/organizations/${encodeURIComponent(match.id)}/primary-client`, {
-                    credentials: 'include',
-                    headers: {
-                        Accept: 'application/json',
-                        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-                    },
-                })
-                    .then((r) => r.ok ? r.json() : null)
-                    .then((data: { clientId: string | null; clientName: string | null } | null) => {
-                        if (data?.clientId) {
-                            setSelectedOrg({ orgId: match.id, clientId: data.clientId });
-                        }
-                    })
-                    .catch(() => { /* silent — clientId stays null */ });
-            }
-        } else {
-            // Free-text / legacy value not in the options list
-            setSelectedOrg({ orgId: null, clientId: null });
-        }
+        applyOrgSelectionFromLabel(orgLabel);
     };
 
     const handleSliderChange = (name: string, value: number) => {
@@ -3260,8 +3292,8 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
         const data = formDataRef.current;
         const field = data.jobField;
         const cityValues = (data.locations || []).filter((loc: LocationItem) => loc.type === 'city').map((loc: LocationItem) => loc.value.trim()).filter(Boolean);
-        const firstCity = cityValues[0] || 'תל אביב';
-        const locationString = cityValues.length ? cityValues.join(LOCATION_SEP) : firstCity;
+        const firstCity = cityValues[0] || '';
+        const locationString = cityValues.length ? cityValues.join(LOCATION_SEP) : '';
         const genderValue = (() => {
             const includesMale = data.gender.includes('male');
             const includesFemale = data.gender.includes('female');
@@ -3692,7 +3724,10 @@ const NewJobView: React.FC<NewJobViewProps> = ({ onCancel, onSave, isEditing = f
                                     </div>
                                     <button
                                         type="button"
-                                        onClick={() => setIsClientConfirmed(true)}
+                                        onClick={() => {
+                                            applyOrgSelectionFromLabel(formData.clientName);
+                                            setIsClientConfirmed(true);
+                                        }}
                                         disabled={!formData.clientName}
                                         className="bg-primary-600 text-white font-bold p-2.5 rounded-lg hover:bg-primary-700 disabled:opacity-50"
                                     >
